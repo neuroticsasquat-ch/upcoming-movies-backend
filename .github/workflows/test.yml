@@ -1,0 +1,62 @@
+name: Test
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U root"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://root:root@localhost:5432/upmovies
+      TEST_DATABASE_URL: postgresql+asyncpg://root:root@localhost:5432/upmovies_test
+      ADMIN_TOKEN: test-admin-token
+      CORS_ALLOWED_ORIGINS: https://app.upmovies.localhost
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        run: pip install uv
+      - name: Install deps
+        run: uv pip install --system ".[dev]"
+      - name: Create databases + schemas
+        env:
+          PGPASSWORD: root
+        run: |
+          psql -h localhost -U root -d postgres -c "CREATE DATABASE upmovies;"
+          psql -h localhost -U root -d postgres -c "CREATE DATABASE upmovies_test;"
+          for db in upmovies upmovies_test; do
+            psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS app;"
+            psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS catalog;"
+            psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS news;"
+            psql -h localhost -U root -d "$db" -c "CREATE EXTENSION IF NOT EXISTS citext;"
+            psql -h localhost -U root -d "$db" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          done
+      - name: Migrate
+        run: alembic upgrade head
+      - name: Lint
+        run: ruff check src tests
+      - name: Format check
+        run: ruff format --check src tests
+      - name: Typecheck
+        run: pyright src tests
+      - name: Test
+        run: pytest
