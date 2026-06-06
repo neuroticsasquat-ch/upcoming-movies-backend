@@ -11,6 +11,7 @@ from upmovies.db import Base
 
 import upmovies.app.models      # noqa: F401  -- register models with Base.metadata
 import upmovies.catalog.models  # noqa: F401
+import upmovies.ingest.models   # noqa: F401
 import upmovies.news.models     # noqa: F401
 
 config = context.config
@@ -24,7 +25,7 @@ target_metadata = Base.metadata
 
 def include_name(name, type_, parent_names):
     if type_ == "schema":
-        return name in ("app", "catalog", "news")
+        return name in ("app", "catalog", "news", "ingest")
     return True
 
 
@@ -47,7 +48,7 @@ def _ensure_schemas(connection: Connection) -> None:
     # extensions our models rely on) must exist before Alembic touches the DB. Doing
     # this here keeps prod's `alembic upgrade head` self-contained against a bare
     # database — no external schema bootstrap step required.
-    for schema in ("app", "catalog", "news"):
+    for schema in ("app", "catalog", "news", "ingest"):
         connection.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
     connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS citext")
     connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS pgcrypto")

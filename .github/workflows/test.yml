@@ -47,6 +47,7 @@ jobs:
             psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS app;"
             psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS catalog;"
             psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS news;"
+            psql -h localhost -U root -d "$db" -c "CREATE SCHEMA IF NOT EXISTS ingest;"
             psql -h localhost -U root -d "$db" -c "CREATE EXTENSION IF NOT EXISTS citext;"
             psql -h localhost -U root -d "$db" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
           done
