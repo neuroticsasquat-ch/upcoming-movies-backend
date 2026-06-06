@@ -1,0 +1,177 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+
+# Packaging / build
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+pip-log.txt
+pip-delete-this-directory.txt
+.installed.cfg
+MANIFEST
+
+# Test / lint / type-check caches and reports
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.pyright/
+.dmypy.json
+dmypy.json
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.cache/
+.hypothesis/
+htmlcov/
+nosetests.xml
+
+# Virtual environments (Docker-only dev, but guard against strays)
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# =============================================================================
+# Secrets / local env — commit .env.example, never .env
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+secrets.yaml
+secrets.yml
+
+# =============================================================================
+# Databases, dumps, large binaries
+# =============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.dump
+*.sql.gz
+
+# =============================================================================
+# Logs
+# =============================================================================
+*.log
+logs/
+log/
+
+# =============================================================================
+# JetBrains (PyCharm, IntelliJ, etc.)
+# =============================================================================
+.idea/
+.idea_modules/
+*.iml
+*.ipr
+*.iws
+out/
+cmake-build-*/
+atlassian-ide-plugin.xml
+
+# =============================================================================
+# VS Code
+# =============================================================================
+.vscode/
+*.code-workspace
+.history/
+
+# =============================================================================
+# Editor backups and swap files
+# =============================================================================
+*~
+*.bak
+*.tmp
+*.orig
+*.rej
+.#*
+\#*\#
+*.swp
+*.swo
+*.swn
+Session.vim
+.netrwhist
+
+# =============================================================================
+# macOS
+# =============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# =============================================================================
+# Windows
+# =============================================================================
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.stackdump
+
+# =============================================================================
+# Linux
+# =============================================================================
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
