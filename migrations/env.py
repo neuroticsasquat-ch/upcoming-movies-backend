@@ -42,6 +42,17 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _ensure_schemas(connection: Connection) -> None:
+    # The Alembic version table lives in the `app` schema, so the schemas (and the
+    # extensions our models rely on) must exist before Alembic touches the DB. Doing
+    # this here keeps prod's `alembic upgrade head` self-contained against a bare
+    # database — no external schema bootstrap step required.
+    for schema in ("app", "catalog", "news"):
+        connection.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS citext")
+    connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(
         connection=connection,
@@ -50,7 +61,10 @@ def do_run_migrations(connection: Connection) -> None:
         include_name=include_name,
         version_table_schema="app",
     )
+    # Create the schemas inside Alembic's transaction so Alembic owns (and commits)
+    # it; the `app` schema must exist before Alembic creates its version table.
     with context.begin_transaction():
+        _ensure_schemas(connection)
         context.run_migrations()
 
 
