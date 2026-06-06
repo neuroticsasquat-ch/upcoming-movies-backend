@@ -1,0 +1,32 @@
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: docker compose exec -T upmovies-backend ruff check src tests
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: ruff-format
+        name: ruff format --check
+        entry: docker compose exec -T upmovies-backend ruff format --check src tests
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: pyright
+        name: pyright
+        entry: docker compose exec -T upmovies-backend pyright src tests
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: pytest
+        name: pytest
+        entry: docker compose exec -T upmovies-backend pytest
+        language: system
+        pass_filenames: false
+        files: \.py$
