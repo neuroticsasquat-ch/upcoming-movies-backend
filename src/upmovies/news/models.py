@@ -1,0 +1,38 @@
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import DateTime, ForeignKey, Index, Text, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from upmovies.db import Base
+
+
+class Story(Base):
+    """Raw ingested news item. `film_id` is the entity-linking attach point that
+    Entity-Linking & Clustering populates later (nullable until linked)."""
+
+    __tablename__ = "story"
+    __table_args__ = (
+        Index("ix_story_film_id", "film_id"),
+        {"schema": "news"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    film_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="SET NULL"), nullable=True
+    )
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
