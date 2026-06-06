@@ -12,7 +12,6 @@ from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 from upmovies.config import get_settings
 from upmovies.routers import auth, health, invites_admin, me
 
-
 if dsn := os.environ.get("SENTRY_DSN"):
     sentry_sdk.init(
         dsn=dsn,

@@ -17,8 +17,8 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 
 from upmovies.app import models as _app_models  # noqa: F401, E402
 from upmovies.catalog import models as _catalog_models  # noqa: F401, E402
-from upmovies.news import models as _news_models  # noqa: F401, E402
 from upmovies.db import Base  # noqa: E402
+from upmovies.news import models as _news_models  # noqa: F401, E402
 
 _SCHEMAS = ("app", "catalog", "news")
 
