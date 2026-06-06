@@ -18,9 +18,10 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from upmovies.app import models as _app_models  # noqa: F401, E402
 from upmovies.catalog import models as _catalog_models  # noqa: F401, E402
 from upmovies.db import Base  # noqa: E402
+from upmovies.ingest import models as _ingest_models  # noqa: F401, E402
 from upmovies.news import models as _news_models  # noqa: F401, E402
 
-_SCHEMAS = ("app", "catalog", "news")
+_SCHEMAS = ("app", "catalog", "news", "ingest")
 
 
 @pytest.fixture(scope="session")
@@ -33,6 +34,7 @@ async def test_engine():
         await conn.execute(text("CREATE SCHEMA app"))
         await conn.execute(text("CREATE SCHEMA catalog"))
         await conn.execute(text("CREATE SCHEMA news"))
+        await conn.execute(text("CREATE SCHEMA ingest"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
         await conn.run_sync(Base.metadata.create_all)
@@ -53,7 +55,7 @@ async def session(test_engine) -> AsyncIterator[AsyncSession]:
         result = await conn.execute(
             text(
                 "SELECT schemaname || '.' || tablename FROM pg_tables "
-                "WHERE schemaname IN ('app', 'catalog', 'news')"
+                "WHERE schemaname IN ('app', 'catalog', 'news', 'ingest')"
             )
         )
         tables = [r[0] for r in result]
