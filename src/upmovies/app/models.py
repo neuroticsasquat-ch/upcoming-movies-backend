@@ -3,6 +3,7 @@ from uuid import UUID
 
 from sqlalchemy import (  # noqa: I001
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -26,6 +27,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

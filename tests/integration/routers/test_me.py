@@ -40,6 +40,20 @@ async def test_me_returns_current_user(authed_client):
 
 
 @pytest.mark.asyncio
+async def test_me_includes_is_admin_false_for_regular_user(authed_client):
+    r = await authed_client.get("/me")
+    assert r.status_code == 200
+    assert r.json()["is_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_me_includes_is_admin_true_for_admin_user(admin_authed_client):
+    r = await admin_authed_client.get("/me")
+    assert r.status_code == 200
+    assert r.json()["is_admin"] is True
+
+
+@pytest.mark.asyncio
 async def test_me_returns_401_when_no_session():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as c:
         r = await c.get("/me")
