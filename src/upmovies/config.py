@@ -17,6 +17,19 @@ class Settings(BaseSettings):
     tmdb_rate_limit_window_seconds: int = Field(default=10, alias="TMDB_RATE_LIMIT_WINDOW_SECONDS")
     tmdb_retry_max_attempts: int = Field(default=5, alias="TMDB_RETRY_MAX_ATTEMPTS")
 
+    # Rolling release-date window + filters for the TMDB discover ingestion.
+    tmdb_release_window_past_days: int = Field(default=30, alias="TMDB_RELEASE_WINDOW_PAST_DAYS")
+    tmdb_release_window_future_days: int = Field(
+        default=1095, alias="TMDB_RELEASE_WINDOW_FUTURE_DAYS"
+    )
+    tmdb_min_popularity: float = Field(default=10.0, alias="TMDB_MIN_POPULARITY")
+    tmdb_region: str = Field(default="US", alias="TMDB_REGION")
+    tmdb_original_language: str = Field(default="en", alias="TMDB_ORIGINAL_LANGUAGE")
+
+    ingest_consecutive_failure_threshold: int = Field(
+        default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
+    )
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     cors_allowed_origins_raw: str = Field(
