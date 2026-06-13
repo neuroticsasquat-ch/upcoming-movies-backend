@@ -8,9 +8,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.config import get_settings
-from upmovies.routers import auth, health, invites_admin, me
+from upmovies.db import SessionLocal
+from upmovies.ingest.runs import mark_stale_runs_cancelled
+from upmovies.routers import auth, health, ingest_admin, invites_admin, me
 
 if dsn := os.environ.get("SENTRY_DSN"):
     sentry_sdk.init(
@@ -31,8 +34,17 @@ def _configure_logging(level: str) -> None:
     )
 
 
+async def run_startup_cleanup(session: AsyncSession, stale_after_minutes: int) -> int:
+    """Cancel runs left `running` by a crash/restart so they don't block forever."""
+    return await mark_stale_runs_cancelled(session, stale_after_minutes=stale_after_minutes)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    async with SessionLocal() as session:
+        await run_startup_cleanup(session, stale_after_minutes=settings.ingest_stale_run_minutes)
+        await session.commit()
     yield
 
 
@@ -48,6 +60,7 @@ def create_app() -> FastAPI:
         allow_headers=["Content-Type", "X-CSRF-Token"],
     )
     app.include_router(health.router)
+    app.include_router(ingest_admin.router)
     app.include_router(invites_admin.router)
     app.include_router(auth.router)
     app.include_router(me.router)

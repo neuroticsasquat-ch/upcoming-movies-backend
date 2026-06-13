@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
     )
+    ingest_stale_run_minutes: int = Field(default=15, alias="INGEST_STALE_RUN_MINUTES")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
