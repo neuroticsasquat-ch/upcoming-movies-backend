@@ -1,0 +1,90 @@
+name: Daily ingestion
+
+# Triggers the TMDB + feeds ingestion pipelines against the prod API once a day and
+# waits for each run to reach a terminal state, failing the job on failed/cancelled or
+# timeout.
+#
+# Required configuration (repo Settings → Secrets and variables → Actions):
+#   secret    UPMOVIES_ADMIN_TOKEN     — must match the API's ADMIN_TOKEN
+#   variable  UPMOVIES_API_BASE_URL    — prod API base URL, e.g. https://api.upmovies.example.com
+#                                        (no trailing slash)
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # 09:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      ADMIN_TOKEN: ${{ secrets.UPMOVIES_ADMIN_TOKEN }}
+      API_BASE_URL: ${{ vars.UPMOVIES_API_BASE_URL }}
+    steps:
+      - name: Trigger and await ingestion pipelines
+        run: |
+          set -uo pipefail
+          : "${ADMIN_TOKEN:?UPMOVIES_ADMIN_TOKEN secret is required}"
+          : "${API_BASE_URL:?UPMOVIES_API_BASE_URL variable is required}"
+
+          # trigger_and_wait <pipeline>: POST /admin/ingest/<pipeline>, then poll
+          # GET /admin/ingest/<run_id> every 30s until terminal. Returns non-zero on
+          # failed/cancelled, a missing run_id, or timeout (~60 min).
+          trigger_and_wait() {
+            local pipeline="$1"
+            local response run_id body status i
+
+            echo "::group::Trigger ${pipeline}"
+            response=$(curl -fsS -X POST \
+              -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+              "${API_BASE_URL}/admin/ingest/${pipeline}") || {
+                echo "::endgroup::"
+                echo "failed to trigger ${pipeline} ingestion"
+                return 1
+              }
+            run_id=$(echo "${response}" | jq -r '.run_id')
+            echo "run_id=${run_id}"
+            echo "::endgroup::"
+
+            if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
+              echo "no run_id returned for ${pipeline}"
+              return 1
+            fi
+
+            echo "::group::Await ${pipeline} run ${run_id}"
+            for i in $(seq 1 120); do
+              body=$(curl -fsS \
+                -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+                "${API_BASE_URL}/admin/ingest/${run_id}") || {
+                  echo "[${i}] ${pipeline} poll request failed; retrying"
+                  sleep 30
+                  continue
+                }
+              status=$(echo "${body}" | jq -r '.status')
+              echo "[${i}] ${pipeline} status=${status}"
+              case "${status}" in
+                succeeded)
+                  echo "${body}" | jq .
+                  echo "::endgroup::"
+                  return 0
+                  ;;
+                failed | cancelled)
+                  echo "${body}" | jq .
+                  echo "::endgroup::"
+                  echo "${pipeline} run ${run_id} ended: ${status}"
+                  return 1
+                  ;;
+              esac
+              sleep 30
+            done
+            echo "::endgroup::"
+            echo "timed out waiting for ${pipeline} run ${run_id}"
+            return 1
+          }
+
+          # Run both pipelines independently; fail the job if either did not succeed.
+          rc=0
+          trigger_and_wait tmdb || rc=1
+          trigger_and_wait feeds || rc=1
+          exit "${rc}"
