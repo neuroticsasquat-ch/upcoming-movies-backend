@@ -26,6 +26,7 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://root:root@localhost:5432/upmovies
       TEST_DATABASE_URL: postgresql+asyncpg://root:root@localhost:5432/upmovies_test
       ADMIN_TOKEN: test-admin-token
+      TMDB_API_KEY: test-tmdb-key
       CORS_ALLOWED_ORIGINS: https://app.upmovies.localhost
 
     steps:
