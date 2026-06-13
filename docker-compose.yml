@@ -15,6 +15,7 @@ services:
       DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies"
       TEST_DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies_test"
       ADMIN_TOKEN: "${ADMIN_TOKEN:-dev-secret-change-me}"
+      TMDB_API_KEY: "${TMDB_API_KEY:-dev-tmdb-key}"
       LOG_LEVEL: "INFO"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-https://app.upmovies.localhost}"
       COOKIE_DOMAIN: "${COOKIE_DOMAIN:-.upmovies.localhost}"

@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     test_database_url: str | None = Field(default=None, alias="TEST_DATABASE_URL")
     admin_token: str = Field(..., alias="ADMIN_TOKEN")
 
+    tmdb_api_key: str = Field(..., alias="TMDB_API_KEY")
+    tmdb_base_url: str = Field(default="https://api.themoviedb.org/3", alias="TMDB_BASE_URL")
+    tmdb_rate_limit_requests: int = Field(default=40, alias="TMDB_RATE_LIMIT_REQUESTS")
+    tmdb_rate_limit_window_seconds: int = Field(default=10, alias="TMDB_RATE_LIMIT_WINDOW_SECONDS")
+    tmdb_retry_max_attempts: int = Field(default=5, alias="TMDB_RETRY_MAX_ATTEMPTS")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     cors_allowed_origins_raw: str = Field(
