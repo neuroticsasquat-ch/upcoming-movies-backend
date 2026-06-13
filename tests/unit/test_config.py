@@ -46,6 +46,7 @@ def test_settings_has_sensible_ingestion_defaults(monkeypatch):
         "TMDB_REGION",
         "TMDB_ORIGINAL_LANGUAGE",
         "INGEST_CONSECUTIVE_FAILURE_THRESHOLD",
+        "INGEST_STALE_RUN_MINUTES",
     ):
         monkeypatch.delenv(key, raising=False)
     s = Settings()  # type: ignore[call-arg]
@@ -55,6 +56,7 @@ def test_settings_has_sensible_ingestion_defaults(monkeypatch):
     assert s.tmdb_region == "US"
     assert s.tmdb_original_language == "en"
     assert s.ingest_consecutive_failure_threshold == 10
+    assert s.ingest_stale_run_minutes == 15
 
 
 def test_settings_ingestion_overrides_from_env(monkeypatch):
