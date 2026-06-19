@@ -154,3 +154,18 @@ async def test_status_reflects_terminal_state_after_background_run(client, sessi
 async def test_status_unknown_run_returns_404(client):
     r = await client.get(f"/admin/ingest/{uuid.uuid4()}", headers=_admin_header())
     assert r.status_code == 404
+
+
+async def test_background_tmdb_passes_excluded_statuses(session, monkeypatch):
+    captured: dict = {}
+
+    async def fake(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("upmovies.routers.ingest_admin.run_tmdb_ingest", fake)
+    run_id = await create_run(session, kind="tmdb")
+    await session.commit()
+
+    await ingest_admin._background_tmdb(run_id, get_settings())
+
+    assert captured["excluded_statuses"] == frozenset({"Released", "Canceled"})

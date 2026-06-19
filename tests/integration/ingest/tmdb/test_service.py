@@ -35,7 +35,13 @@ def _details(tmdb_id):
     return respx.get(f"{BASE}/movie/{tmdb_id}")
 
 
-async def _run(session, *, min_popularity: float = 10.0, failure_threshold: int = 10):
+async def _run(
+    session,
+    *,
+    min_popularity: float = 10.0,
+    failure_threshold: int = 10,
+    excluded_statuses: frozenset[str] = frozenset(),
+):
     run_id = await create_run(session, kind="tmdb")
     await session.commit()
     async with _client() as c:
@@ -49,6 +55,7 @@ async def _run(session, *, min_popularity: float = 10.0, failure_threshold: int 
             region="US",
             original_language="en",
             failure_threshold=failure_threshold,
+            excluded_statuses=excluded_statuses,
         )
     return run_id, result
 
@@ -255,3 +262,51 @@ async def test_ingest_aborts_after_consecutive_failures(session):
     ).scalar_one()
     assert row.status == "failed"
     assert row.error is not None and "consecutive failures" in row.error
+
+
+@respx.mock
+async def test_ingest_skips_excluded_statuses(session):
+    _discover(page="1").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_discover_page(
+                page=1,
+                total_pages=1,
+                results=[make_summary(1), make_summary(2), make_summary(3)],
+            ),
+        )
+    )
+    _details(1).mock(return_value=httpx.Response(200, json=make_details(1, status="Released")))
+    _details(2).mock(return_value=httpx.Response(200, json=make_details(2, status="Planned")))
+    _details(3).mock(return_value=httpx.Response(200, json=make_details(3, status="Canceled")))
+
+    _, result = await _run(session, excluded_statuses=frozenset({"Released", "Canceled"}))
+
+    assert result.films_processed == 1
+    assert result.films_skipped == 2
+    assert {f.tmdb_id for f in await _films(session)} == {2}
+
+
+@respx.mock
+async def test_ingest_skip_resets_consecutive_failure_counter(session):
+    # threshold=2: fail (cf=1), skip (cf reset to 0), fail (cf=1), process.
+    # If a skip did NOT reset the counter, the second failure would abort before film 4.
+    _discover(page="1").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_discover_page(
+                page=1,
+                total_pages=1,
+                results=[make_summary(1), make_summary(2), make_summary(3), make_summary(4)],
+            ),
+        )
+    )
+    _details(1).mock(return_value=httpx.Response(404))
+    _details(2).mock(return_value=httpx.Response(200, json=make_details(2, status="Released")))
+    _details(3).mock(return_value=httpx.Response(404))
+    _details(4).mock(return_value=httpx.Response(200, json=make_details(4, status="Planned")))
+
+    _, result = await _run(session, failure_threshold=2, excluded_statuses=frozenset({"Released"}))
+
+    assert (result.films_processed, result.films_failed, result.films_skipped) == (1, 2, 1)
+    assert {f.tmdb_id for f in await _films(session)} == {4}

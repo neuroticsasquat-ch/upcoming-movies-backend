@@ -45,18 +45,27 @@ def test_settings_has_sensible_ingestion_defaults(monkeypatch):
         "TMDB_MIN_POPULARITY",
         "TMDB_REGION",
         "TMDB_ORIGINAL_LANGUAGE",
+        "TMDB_EXCLUDED_STATUSES",
         "INGEST_CONSECUTIVE_FAILURE_THRESHOLD",
         "INGEST_STALE_RUN_MINUTES",
     ):
         monkeypatch.delenv(key, raising=False)
     s = Settings()  # type: ignore[call-arg]
-    assert s.tmdb_release_window_past_days == 30
+    assert s.tmdb_release_window_past_days == 0
     assert s.tmdb_release_window_future_days == 1095
-    assert s.tmdb_min_popularity == 10.0
+    assert s.tmdb_min_popularity == 1.0
     assert s.tmdb_region == "US"
     assert s.tmdb_original_language == "en"
+    assert s.tmdb_excluded_statuses == frozenset({"Released", "Canceled"})
     assert s.ingest_consecutive_failure_threshold == 10
     assert s.ingest_stale_run_minutes == 15
+
+
+def test_settings_excluded_statuses_parsed_and_overridable(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("TMDB_EXCLUDED_STATUSES", "Released, Canceled , Rumored")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.tmdb_excluded_statuses == frozenset({"Released", "Canceled", "Rumored"})
 
 
 def test_settings_ingestion_overrides_from_env(monkeypatch):
