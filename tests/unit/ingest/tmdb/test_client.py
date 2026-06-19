@@ -139,3 +139,21 @@ async def test_client_does_not_retry_on_404():
         with pytest.raises(httpx.HTTPStatusError):
             await c.movie_details(9999)
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_movie_details_captures_raw_payload_including_unmodeled_keys():
+    payload = {
+        "id": 27205,
+        "title": "Inception",
+        "status": "Released",
+        "imdb_id": "tt1375666",
+        "genres": [{"id": 28, "name": "Action"}],
+        "production_code": "ABC-123",  # a key our DTO does not model
+    }
+    respx.get(f"{BASE_URL}/movie/27205").mock(return_value=httpx.Response(200, json=payload))
+    async with _client() as c:
+        details = await c.movie_details(27205)
+    assert details.tmdb_raw == payload
+    assert details.tmdb_raw["production_code"] == "ABC-123"
+    assert [g.id for g in details.genres] == [28]

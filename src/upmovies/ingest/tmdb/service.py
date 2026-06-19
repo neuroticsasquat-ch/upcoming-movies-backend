@@ -47,8 +47,6 @@ async def _discover_candidate_ids(
     release_date_gte: date,
     release_date_lte: date,
     min_popularity: float,
-    region: str,
-    original_language: str,
 ) -> list[int]:
     """Page through discover (popularity-desc) collecting tmdb_ids until a film falls
     below the popularity floor — since results are sorted, everything after it does too."""
@@ -58,8 +56,6 @@ async def _discover_candidate_ids(
         resp = await client.discover_movies(
             page=page,
             sort_by="popularity.desc",
-            with_original_language=original_language,
-            region=region,
             **{
                 "primary_release_date.gte": release_date_gte.isoformat(),
                 "primary_release_date.lte": release_date_lte.isoformat(),
@@ -85,8 +81,6 @@ async def run_tmdb_ingest(
     release_date_gte: date,
     release_date_lte: date,
     min_popularity: float,
-    region: str,
-    original_language: str,
     failure_threshold: int = 10,
     excluded_statuses: frozenset[str] = frozenset(),
 ) -> IngestResult:
@@ -95,8 +89,6 @@ async def run_tmdb_ingest(
         release_date_gte=release_date_gte,
         release_date_lte=release_date_lte,
         min_popularity=min_popularity,
-        region=region,
-        original_language=original_language,
     )
 
     processed = 0

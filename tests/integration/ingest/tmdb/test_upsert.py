@@ -1,9 +1,9 @@
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from tests.fixtures.tmdb import make_details
-from upmovies.catalog.models import Film
+from upmovies.catalog.models import Collection, Film, FilmGenre, FilmProductionCountry
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
 
@@ -69,3 +69,86 @@ async def test_upsert_is_idempotent(session):
     films = await _films(session)
     assert len(films) == 1
     assert films[0].tmdb_id == 42
+
+
+async def _genre_ids(session, film_id) -> set[int]:
+    rows = await session.execute(select(FilmGenre.genre_id).where(FilmGenre.film_id == film_id))
+    return set(rows.scalars().all())
+
+
+async def test_upsert_persists_scalars_and_raw(session):
+    details = TMDBMovieDetails.model_validate(make_details(11, title="Star Wars"))
+    details.tmdb_raw = {"id": 11, "unmodeled": "kept"}
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    assert film.budget == 1_000_000
+    assert film.runtime == 120
+    assert film.origin_country == ["US"]
+    assert film.vote_count == 100
+    assert film.tmdb_raw == {"id": 11, "unmodeled": "kept"}
+
+
+async def test_upsert_creates_reference_and_join_rows(session):
+    details = TMDBMovieDetails.model_validate(make_details(11))
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    assert await _genre_ids(session, film.id) == {28, 12}
+    countries = await session.execute(
+        select(FilmProductionCountry.iso_3166_1).where(FilmProductionCountry.film_id == film.id)
+    )
+    assert set(countries.scalars().all()) == {"US"}
+
+
+async def test_upsert_sets_collection_fk_and_upserts_collection(session):
+    details = TMDBMovieDetails.model_validate(
+        make_details(
+            11,
+            belongs_to_collection={
+                "id": 10,
+                "name": "Star Wars Collection",
+                "poster_path": "/p.jpg",
+                "backdrop_path": "/b.jpg",
+            },
+        )
+    )
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    assert film.collection_id == 10
+    coll = (await session.execute(select(Collection).where(Collection.id == 10))).scalar_one()
+    assert coll.name == "Star Wars Collection"
+
+
+async def test_upsert_leaves_collection_null_when_absent(session):
+    details = TMDBMovieDetails.model_validate(make_details(11, belongs_to_collection=None))
+    await upsert_film(session, details)
+    await session.commit()
+
+    assert (await _films(session))[0].collection_id is None
+    count = (await session.execute(select(func.count()).select_from(Collection))).scalar_one()
+    assert count == 0
+
+
+async def test_upsert_rebuilds_joins_on_change(session):
+    await upsert_film(
+        session,
+        TMDBMovieDetails.model_validate(make_details(11, genres=[{"id": 28, "name": "Action"}])),
+    )
+    await session.commit()
+    film = (await _films(session))[0]
+    assert await _genre_ids(session, film.id) == {28}
+
+    # Re-ingest with a different genre set: the stale join must be removed.
+    await upsert_film(
+        session,
+        TMDBMovieDetails.model_validate(
+            make_details(11, genres=[{"id": 878, "name": "Science Fiction"}])
+        ),
+    )
+    await session.commit()
+    assert await _genre_ids(session, film.id) == {878}

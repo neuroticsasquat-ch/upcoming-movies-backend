@@ -102,7 +102,11 @@ class TMDBClient:
         return TMDBDiscoverResponse.model_validate(resp.json())
 
     async def movie_details(self, tmdb_id: int) -> TMDBMovieDetails:
-        """Fetch full details for a single movie from `/movie/{id}`."""
+        """Fetch full details for a single movie from `/movie/{id}`. Attaches the verbatim
+        JSON as `tmdb_raw` so the caller can persist fields we don't model."""
         url = f"{self._base_url}/movie/{tmdb_id}"
         resp = await self._request("GET", url)
-        return TMDBMovieDetails.model_validate(resp.json())
+        data = resp.json()
+        details = TMDBMovieDetails.model_validate(data)
+        details.tmdb_raw = data
+        return details

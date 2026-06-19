@@ -17,6 +17,46 @@ def _empty_to_none(v: Any) -> Any:
 OptionalDate = Annotated[date | None, BeforeValidator(_empty_to_none)]
 
 
+class TMDBGenre(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+
+
+class TMDBProductionCompany(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    logo_path: str | None = None
+    origin_country: str | None = None
+
+
+class TMDBProductionCountry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    iso_3166_1: str
+    name: str
+
+
+class TMDBSpokenLanguage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    iso_639_1: str
+    english_name: str
+    name: str
+
+
+class TMDBCollection(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    poster_path: str | None = None
+    backdrop_path: str | None = None
+
+
 class TMDBMovieSummary(BaseModel):
     """A movie as it appears in a `/discover/movie` results list."""
 
@@ -37,6 +77,25 @@ class TMDBMovieDetails(TMDBMovieSummary):
 
     status: str | None = None
     imdb_id: str | None = None
+    adult: bool | None = None
+    backdrop_path: str | None = None
+    budget: int | None = None
+    homepage: str | None = None
+    revenue: int | None = None
+    runtime: int | None = None
+    tagline: str | None = None
+    video: bool | None = None
+    vote_average: float | None = None
+    vote_count: int | None = None
+    origin_country: list[str] = Field(default_factory=list)
+    genres: list[TMDBGenre] = Field(default_factory=list)
+    production_companies: list[TMDBProductionCompany] = Field(default_factory=list)
+    production_countries: list[TMDBProductionCountry] = Field(default_factory=list)
+    spoken_languages: list[TMDBSpokenLanguage] = Field(default_factory=list)
+    belongs_to_collection: TMDBCollection | None = None
+    # Populated by the client post-validation with the verbatim /movie/{id} payload, so
+    # we can persist fields we don't model and backfill later without re-ingesting.
+    tmdb_raw: dict[str, Any] = Field(default_factory=dict)
 
 
 class TMDBDiscoverResponse(BaseModel):

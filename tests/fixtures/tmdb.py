@@ -16,6 +16,24 @@ def make_details(tmdb_id: int, **overrides: Any) -> dict[str, Any]:
         "imdb_id": f"tt{tmdb_id:07d}",
         "popularity": 50.0,
         "original_language": "en",
+        "adult": False,
+        "backdrop_path": f"/backdrop{tmdb_id}.jpg",
+        "budget": 1_000_000,
+        "homepage": f"https://example.com/{tmdb_id}",
+        "revenue": 5_000_000,
+        "runtime": 120,
+        "tagline": f"Tagline {tmdb_id}",
+        "video": False,
+        "vote_average": 7.5,
+        "vote_count": 100,
+        "origin_country": ["US"],
+        "genres": [{"id": 28, "name": "Action"}, {"id": 12, "name": "Adventure"}],
+        "production_companies": [
+            {"id": 1, "name": "Lucasfilm Ltd.", "logo_path": "/logo.png", "origin_country": "US"}
+        ],
+        "production_countries": [{"iso_3166_1": "US", "name": "United States of America"}],
+        "spoken_languages": [{"english_name": "English", "iso_639_1": "en", "name": "English"}],
+        "belongs_to_collection": None,
     }
     payload.update(overrides)
     return payload
