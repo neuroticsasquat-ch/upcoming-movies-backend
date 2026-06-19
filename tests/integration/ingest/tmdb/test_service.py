@@ -52,8 +52,6 @@ async def _run(
             release_date_gte=GTE,
             release_date_lte=LTE,
             min_popularity=min_popularity,
-            region="US",
-            original_language="en",
             failure_threshold=failure_threshold,
             excluded_statuses=excluded_statuses,
         )
@@ -89,7 +87,7 @@ async def test_ingest_inserts_new_films(session):
 
 
 @respx.mock
-async def test_ingest_sends_window_and_locale_filters(session):
+async def test_ingest_sends_window_filter_without_locale(session):
     route = _discover(page="1").mock(
         return_value=httpx.Response(
             200, json=make_discover_page(page=1, total_pages=1, results=[make_summary(1)])
@@ -103,8 +101,8 @@ async def test_ingest_sends_window_and_locale_filters(session):
     assert params["sort_by"] == "popularity.desc"
     assert params["primary_release_date.gte"] == "2026-05-14"
     assert params["primary_release_date.lte"] == "2029-06-13"
-    assert params["with_original_language"] == "en"
-    assert params["region"] == "US"
+    assert "with_original_language" not in params
+    assert "region" not in params
 
 
 @respx.mock

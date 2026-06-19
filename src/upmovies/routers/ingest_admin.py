@@ -52,8 +52,6 @@ async def _background_tmdb(run_id: UUID, settings: Settings) -> None:
                 release_date_gte=today - timedelta(days=settings.tmdb_release_window_past_days),
                 release_date_lte=today + timedelta(days=settings.tmdb_release_window_future_days),
                 min_popularity=settings.tmdb_min_popularity,
-                region=settings.tmdb_region,
-                original_language=settings.tmdb_original_language,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
                 excluded_statuses=settings.tmdb_excluded_statuses,
             )

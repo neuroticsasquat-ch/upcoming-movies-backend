@@ -23,8 +23,6 @@ class Settings(BaseSettings):
         default=1095, alias="TMDB_RELEASE_WINDOW_FUTURE_DAYS"
     )
     tmdb_min_popularity: float = Field(default=1.0, alias="TMDB_MIN_POPULARITY")
-    tmdb_region: str = Field(default="US", alias="TMDB_REGION")
-    tmdb_original_language: str = Field(default="en", alias="TMDB_ORIGINAL_LANGUAGE")
     tmdb_excluded_statuses_raw: str = Field(
         default="Released,Canceled", alias="TMDB_EXCLUDED_STATUSES"
     )
