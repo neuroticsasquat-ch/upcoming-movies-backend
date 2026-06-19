@@ -2,8 +2,8 @@ version: '3'
 
 includes:
   infra:
-    taskfile: ../../../tbc-localdev-infra/Taskfile.yml
-    dir: ../../../tbc-localdev-infra
+    taskfile: ../../tbc-localdev-infra/Taskfile.yml
+    dir: ../../tbc-localdev-infra
 
 vars:
   COMPOSE: docker compose

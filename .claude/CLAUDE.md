@@ -53,4 +53,8 @@ DB is split into Postgres **schemas**: `app`, `catalog`, `news`, `ingest`. Tests
 
 ## Commits / PRs
 
-Conventional commits with the Linear ID as a trailing parenthetical: `feat: add X (NEU-123)`. Keep the `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`. The GitHub↔Linear connector moves ticket status automatically — don't touch it. Branch per ticket (Linear gives the branch name).
+Use `/commit-msg` for commit messages and `/pr-desc` for PR descriptions, post-processed to Conventional Commits.
+
+- **Commits:** Conventional Commits subject (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, …). **No** Linear ID in the subject (optional `Refs NEU-123.` in the body); **no** `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`.
+- **PR title:** Conventional Commits + trailing Linear ID parenthetical: `feat: add X (NEU-123)`. The `🤖 Generated with Claude Code` footer is fine in the PR **body** only.
+- The GitHub↔Linear connector moves ticket status automatically — don't touch it. Branch per ticket (Linear gives the branch name).

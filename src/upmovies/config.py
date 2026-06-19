@@ -18,13 +18,16 @@ class Settings(BaseSettings):
     tmdb_retry_max_attempts: int = Field(default=5, alias="TMDB_RETRY_MAX_ATTEMPTS")
 
     # Rolling release-date window + filters for the TMDB discover ingestion.
-    tmdb_release_window_past_days: int = Field(default=30, alias="TMDB_RELEASE_WINDOW_PAST_DAYS")
+    tmdb_release_window_past_days: int = Field(default=0, alias="TMDB_RELEASE_WINDOW_PAST_DAYS")
     tmdb_release_window_future_days: int = Field(
         default=1095, alias="TMDB_RELEASE_WINDOW_FUTURE_DAYS"
     )
-    tmdb_min_popularity: float = Field(default=10.0, alias="TMDB_MIN_POPULARITY")
+    tmdb_min_popularity: float = Field(default=1.0, alias="TMDB_MIN_POPULARITY")
     tmdb_region: str = Field(default="US", alias="TMDB_REGION")
     tmdb_original_language: str = Field(default="en", alias="TMDB_ORIGINAL_LANGUAGE")
+    tmdb_excluded_statuses_raw: str = Field(
+        default="Released,Canceled", alias="TMDB_EXCLUDED_STATUSES"
+    )
 
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
@@ -50,6 +53,10 @@ class Settings(BaseSettings):
     @property
     def cors_allowed_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins_raw.split(",") if o.strip()]
+
+    @property
+    def tmdb_excluded_statuses(self) -> frozenset[str]:
+        return frozenset(s.strip() for s in self.tmdb_excluded_statuses_raw.split(",") if s.strip())
 
 
 @lru_cache

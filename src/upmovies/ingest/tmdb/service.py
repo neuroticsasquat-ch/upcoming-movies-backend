@@ -32,6 +32,7 @@ SessionFactory = Callable[[], AsyncSession]
 class IngestResult:
     films_processed: int
     films_failed: int
+    films_skipped: int = 0
 
 
 @asynccontextmanager
@@ -87,6 +88,7 @@ async def run_tmdb_ingest(
     region: str,
     original_language: str,
     failure_threshold: int = 10,
+    excluded_statuses: frozenset[str] = frozenset(),
 ) -> IngestResult:
     candidate_ids = await _discover_candidate_ids(
         client=client,
@@ -99,11 +101,16 @@ async def run_tmdb_ingest(
 
     processed = 0
     failed = 0
+    skipped = 0
     consecutive_failures = 0
 
     for tmdb_id in candidate_ids:
         try:
             details = await client.movie_details(tmdb_id)
+            if details.status in excluded_statuses:
+                skipped += 1
+                consecutive_failures = 0
+                continue
             async with _owned_session(session_factory) as s:
                 await upsert_film(s, details)
                 await record_progress(s, run_id, processed_delta=1)
@@ -130,9 +137,14 @@ async def run_tmdb_ingest(
                     error=f"aborted after {consecutive_failures} consecutive failures",
                 )
                 await s.commit()
-            return IngestResult(processed, failed)
+            return IngestResult(processed, failed, skipped)
 
     async with _owned_session(session_factory) as s:
-        await finalize_run(s, run_id, status="succeeded")
+        await finalize_run(
+            s,
+            run_id,
+            status="succeeded",
+            detail=f"upserted {processed}, skipped {skipped} (excluded status)",
+        )
         await s.commit()
-    return IngestResult(processed, failed)
+    return IngestResult(processed, failed, skipped)
