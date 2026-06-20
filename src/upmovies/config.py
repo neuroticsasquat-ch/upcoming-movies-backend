@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
     link_recency_days: int = Field(default=45, alias="LINK_RECENCY_DAYS")
     link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
+    feed_recency_days: int = Field(default=14, alias="FEED_RECENCY_DAYS")
 
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
