@@ -10,7 +10,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import struct_time
 from typing import Any
 from uuid import UUID
@@ -21,7 +21,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import finalize_run, record_progress
-from upmovies.news.feeds import FEED_SOURCES, FeedSource
+from upmovies.news.feeds import FeedSource, feed_sources
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -91,6 +91,10 @@ def parse_feed(source: str, content: str | bytes) -> list[StoryEntry]:
     return entries
 
 
+def drop_stale(entries: Sequence[StoryEntry], *, cutoff: datetime) -> list[StoryEntry]:
+    return [e for e in entries if e.published_at is None or e.published_at >= cutoff]
+
+
 async def upsert_stories(session: AsyncSession, entries: Sequence[StoryEntry]) -> int:
     """Insert new stories, skipping any whose url already exists. Returns the count of
     rows actually inserted. Caller owns the transaction."""
@@ -125,9 +129,13 @@ async def run_feeds_ingest(
     *,
     session_factory: SessionFactory,
     run_id: UUID,
-    sources: Sequence[FeedSource] = FEED_SOURCES,
+    recency_days: int,
+    sources: Sequence[FeedSource] | None = None,
     timeout: float = 30.0,
 ) -> FeedsIngestResult:
+    if sources is None:
+        sources = feed_sources(recency_days)
+    cutoff = datetime.now(UTC) - timedelta(days=recency_days)
     feeds_processed = 0
     feeds_failed = 0
     stories_inserted = 0
@@ -140,6 +148,7 @@ async def run_feeds_ingest(
                 resp = await client.get(source.url)
                 resp.raise_for_status()
                 entries = parse_feed(source.name, resp.content)
+                entries = drop_stale(entries, cutoff=cutoff)
                 async with _owned_session(session_factory) as s:
                     inserted = await upsert_stories(s, entries)
                     await record_progress(s, run_id, processed_delta=inserted)
