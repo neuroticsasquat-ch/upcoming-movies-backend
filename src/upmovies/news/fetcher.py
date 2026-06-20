@@ -91,6 +91,10 @@ def parse_feed(source: str, content: str | bytes) -> list[StoryEntry]:
     return entries
 
 
+def drop_stale(entries: Sequence[StoryEntry], *, cutoff: datetime) -> list[StoryEntry]:
+    return [e for e in entries if e.published_at is None or e.published_at >= cutoff]
+
+
 async def upsert_stories(session: AsyncSession, entries: Sequence[StoryEntry]) -> int:
     """Insert new stories, skipping any whose url already exists. Returns the count of
     rows actually inserted. Caller owns the transaction."""
