@@ -7,6 +7,7 @@ _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
     "ADMIN_TOKEN": "xxx",
     "TMDB_API_KEY": "tmdb-xxx",
+    "ANTHROPIC_API_KEY": "anthropic-xxx",
 }
 
 
