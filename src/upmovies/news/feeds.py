@@ -27,7 +27,12 @@ FEED_SOURCES: tuple[FeedSource, ...] = (
     FeedSource("The Hollywood Reporter", "https://www.hollywoodreporter.com/feed/"),
     FeedSource("Collider", "https://collider.com/feed/"),
     FeedSource("/Film", "https://www.slashfilm.com/feed/"),
-    FeedSource("Empire", "https://www.empireonline.com/movies/news/feed/"),
+    # Empire's old /movies/news/feed/ path 404s now; the live feed is Bauer Media's
+    # central aggregator (and it 403s any client without an identifying User-Agent).
+    FeedSource(
+        "Empire",
+        "https://rss.onebauer.media/api/feed-aggregator?hostname=https://www.empireonline.com",
+    ),
     FeedSource("ScreenRant", "https://screenrant.com/feed/"),
     # Broad Google News queries.
     FeedSource("Google News: casting", _google_news("movie casting")),

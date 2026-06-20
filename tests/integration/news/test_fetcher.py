@@ -121,6 +121,18 @@ async def test_malformed_feed_handled_gracefully(session):
 
 
 @respx.mock
+async def test_requests_send_identifying_user_agent(session):
+    route = respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+
+    await _run(session, [FeedSource("Deadline", RSS_URL)])
+
+    # Some feed hosts (e.g. Empire via onebauer/CloudFront) 403 the bare
+    # `python-httpx/...` default UA, so the fetcher must identify itself.
+    ua = route.calls.last.request.headers.get("user-agent", "")
+    assert ua and not ua.startswith("python-httpx")
+
+
+@respx.mock
 async def test_run_finalized_succeeded_with_progress_counts(session):
     respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
 
