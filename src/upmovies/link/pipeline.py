@@ -1,6 +1,7 @@
-"""The `link` pipeline (Stage 1): select recent pending stories and link them in batches,
-tracking the run. Idempotent — only touches `pending` stories inside the recency window;
-re-runs with nothing pending are a no-op. One batch's failure never rolls back others."""
+"""The `link` pipeline (Stage 1 → Stage 2): select recent pending stories and link them
+in batches, then cluster each film's unclustered linked stories into events. Idempotent —
+only touches `pending` stories inside the recency window; re-runs with nothing pending are
+a no-op. One batch's failure never rolls back others."""
 
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -9,13 +10,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import finalize_run, record_progress
+from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import Completer, link_story_batch
 from upmovies.link.roster import build_roster
-from upmovies.news.models import Story
+from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ async def run_link_ingest(
     client: Completer,
     run_id: UUID,
     model: str,
+    cluster_model: str,
     recency_days: int,
     batch_size: int,
     floor: float,
@@ -81,9 +84,57 @@ async def run_link_ingest(
                 await record_progress(s, run_id, failed_delta=len(batch_ids))
                 await s.commit()
 
+    # --- Stage 2: cluster + classify, per film with unclustered linked stories ---
+    async with _owned_session(session_factory) as s:
+        clustered = exists().where(EventStory.story_id == Story.id)
+        film_ids = [
+            fid
+            for fid in (
+                await s.execute(
+                    select(Story.film_id)
+                    .where(
+                        Story.link_status == "linked",
+                        Story.film_id.is_not(None),
+                        ~clustered,
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+            if fid is not None
+        ]
+
+    events_created = 0
+    stories_clustered = 0
+    for film_id in film_ids:
+        try:
+            async with _owned_session(session_factory) as s:
+                cluster = await cluster_film_events(
+                    s,
+                    client=client,
+                    model=cluster_model,
+                    film_id=film_id,
+                    recency_days=recency_days,
+                )
+                await s.commit()
+            events_created += cluster.events_created
+            stories_clustered += cluster.stories_clustered
+        except Exception:
+            log.exception("clustering failed for film %s", film_id)
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=1)
+                await s.commit()
+
     async with _owned_session(session_factory) as s:
         await finalize_run(
-            s, run_id, status="succeeded", detail=f"linked {linked}, rejected {rejected}"
+            s,
+            run_id,
+            status="succeeded",
+            detail=(
+                f"linked {linked}, rejected {rejected}; "
+                f"{events_created} events from {stories_clustered} stories"
+            ),
         )
         await s.commit()
     return LinkIngestResult(linked, rejected)
