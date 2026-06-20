@@ -10,7 +10,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import struct_time
 from typing import Any
 from uuid import UUID
@@ -135,6 +135,7 @@ async def run_feeds_ingest(
 ) -> FeedsIngestResult:
     if sources is None:
         sources = feed_sources(recency_days)
+    cutoff = datetime.now(UTC) - timedelta(days=recency_days)
     feeds_processed = 0
     feeds_failed = 0
     stories_inserted = 0
@@ -147,6 +148,7 @@ async def run_feeds_ingest(
                 resp = await client.get(source.url)
                 resp.raise_for_status()
                 entries = parse_feed(source.name, resp.content)
+                entries = drop_stale(entries, cutoff=cutoff)
                 async with _owned_session(session_factory) as s:
                     inserted = await upsert_stories(s, entries)
                     await record_progress(s, run_id, processed_delta=inserted)

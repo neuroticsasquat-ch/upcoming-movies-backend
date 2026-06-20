@@ -1,3 +1,6 @@
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
+
 import httpx
 import respx
 from sqlalchemy import select
@@ -18,10 +21,30 @@ RSS_URL = "https://deadline.com/feed"
 ATOM_URL = "https://variety.com/feed"
 DUPE_URL = "https://collider.com/feed"
 BAD_URL = "https://broken.example/feed"
+GATE_URL = "https://gate.example/feed"
 
 
 def _xml(body: str) -> httpx.Response:
     return httpx.Response(200, text=body, headers={"Content-Type": "application/xml"})
+
+
+def _rss(items: list[tuple[str, str, datetime | None]]) -> str:
+    rows = []
+    for title, url, dt in items:
+        date_line = f"      <pubDate>{format_datetime(dt)}</pubDate>\n" if dt else ""
+        rows.append(
+            "    <item>\n"
+            f"      <title>{title}</title>\n"
+            f"      <link>{url}</link>\n"
+            f"{date_line}"
+            "    </item>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0"><channel><title>Gate</title>\n'
+        + "\n".join(rows)
+        + "\n</channel></rss>\n"
+    )
 
 
 async def _stories(session) -> list[Story]:
@@ -152,3 +175,27 @@ async def test_run_finalized_succeeded_with_progress_counts(session):
     assert row.status == "succeeded"
     assert row.finished_at is not None
     assert row.items_processed == 2
+
+
+@respx.mock
+async def test_stale_dated_entries_dropped_keeping_recent_and_undated(session):
+    now = datetime.now(UTC)
+    respx.get(GATE_URL).mock(
+        return_value=_xml(
+            _rss(
+                [
+                    ("Recent", "https://gate.example/recent", now - timedelta(days=2)),
+                    ("Stale", "https://gate.example/stale", now - timedelta(days=100)),
+                    ("Undated", "https://gate.example/undated", None),
+                ]
+            )
+        )
+    )
+
+    _, result = await _run(session, [FeedSource("Gate", GATE_URL)], recency_days=14)
+
+    assert result.stories_inserted == 2
+    assert {s.url for s in await _stories(session)} == {
+        "https://gate.example/recent",
+        "https://gate.example/undated",
+    }
