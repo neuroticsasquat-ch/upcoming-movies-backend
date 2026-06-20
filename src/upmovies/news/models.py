@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Text, text
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -16,6 +16,11 @@ class Story(Base):
     __tablename__ = "story"
     __table_args__ = (
         Index("ix_story_film_id", "film_id"),
+        Index("ix_story_link_status", "link_status"),
+        CheckConstraint(
+            "link_status IN ('pending', 'linked', 'rejected')",
+            name="ck_story_link_status",
+        ),
         {"schema": "news"},
     )
 
@@ -32,6 +37,10 @@ class Story(Base):
     film_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="SET NULL"), nullable=True
     )
+    link_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    link_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    link_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
