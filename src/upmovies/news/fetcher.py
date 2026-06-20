@@ -31,6 +31,13 @@ SessionFactory = Callable[[], AsyncSession]
 # Entry keys worth retaining verbatim in `story.raw` for later entity-linking work.
 _RAW_KEYS = ("title", "link", "summary", "published", "updated", "id", "author")
 
+# Identify ourselves to feed hosts. Some (e.g. Empire's onebauer/CloudFront host)
+# reject the bare `python-httpx/...` default UA with a 403, and politely-behaved
+# feed readers are expected to send a contactable User-Agent anyway.
+_USER_AGENT = (
+    "UpcomingMoviesBot/1.0 (+https://github.com/neuroticsasquat-ch/upcoming-movies-backend)"
+)
+
 
 @dataclass
 class StoryEntry:
@@ -125,7 +132,9 @@ async def run_feeds_ingest(
     feeds_failed = 0
     stories_inserted = 0
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=True, headers={"User-Agent": _USER_AGENT}
+    ) as client:
         for source in sources:
             try:
                 resp = await client.get(source.url)
