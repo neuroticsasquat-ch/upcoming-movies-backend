@@ -1,6 +1,6 @@
 name: Daily ingestion
 
-# Triggers the TMDB + feeds ingestion pipelines against the prod API once a day and
+# Triggers the TMDB, feeds, and link pipelines against the prod API once a day and
 # waits for each run to reach a terminal state, failing the job on failed/cancelled or
 # timeout.
 #
@@ -83,8 +83,10 @@ jobs:
             return 1
           }
 
-          # Run both pipelines independently; fail the job if either did not succeed.
+          # Run all pipelines; fail the job if any did not succeed. link runs after
+          # feeds (it consumes freshly-fetched stories).
           rc=0
           trigger_and_wait tmdb || rc=1
           trigger_and_wait feeds || rc=1
+          trigger_and_wait link || rc=1
           exit "${rc}"

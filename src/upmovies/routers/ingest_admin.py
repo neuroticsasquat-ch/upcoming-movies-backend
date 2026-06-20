@@ -19,6 +19,8 @@ from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
+from upmovies.link.pipeline import run_link_ingest
+from upmovies.llm.client import AnthropicClient
 from upmovies.news.fetcher import run_feeds_ingest
 
 log = logging.getLogger(__name__)
@@ -68,6 +70,23 @@ async def _background_feeds(run_id: UUID, settings: Settings) -> None:
         await _finalize_failed(run_id, str(e))
 
 
+async def _background_link(run_id: UUID, settings: Settings) -> None:
+    try:
+        async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
+            await run_link_ingest(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                model=settings.link_model,
+                recency_days=settings.link_recency_days,
+                batch_size=settings.link_batch_size,
+                floor=settings.link_confidence_floor,
+            )
+    except Exception as e:
+        log.exception("background link ingest crashed")
+        await _finalize_failed(run_id, str(e))
+
+
 @router.post("/tmdb", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_tmdb(
     settings: Settings = Depends(get_settings),
@@ -87,6 +106,17 @@ async def trigger_feeds(
     run_id = await create_run(session, kind="feeds")
     await session.commit()
     asyncio.create_task(_background_feeds(run_id, settings))
+    return {"run_id": str(run_id)}
+
+
+@router.post("/link", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_link(
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+    asyncio.create_task(_background_link(run_id, settings))
     return {"run_id": str(run_id)}
 
 
