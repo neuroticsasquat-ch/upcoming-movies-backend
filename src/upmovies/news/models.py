@@ -1,7 +1,16 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Text, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -44,4 +53,56 @@ class Story(Base):
     raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class Event(Base):
+    """A distinct per-film news event (a real beat: casting, trailer, release-date change,
+    production milestone, …), grouping the stories that report it. The contract Synthesis
+    writes summaries against — no summary column lives here."""
+
+    __tablename__ = "event"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('announced', 'casting', 'production_start', "
+            "'production_wrap', 'release_date', 'trailer', 'other')",
+            name="ck_event_type",
+        ),
+        CheckConstraint("confidence IN ('confirmed', 'rumored')", name="ck_event_confidence"),
+        Index("ix_event_film_id", "film_id"),
+        {"schema": "news"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class EventStory(Base):
+    """Join row: which stories belong to an event. The unique `story_id` enforces the
+    one-event-per-story rule (a story attaches to its single dominant beat)."""
+
+    __tablename__ = "event_story"
+    __table_args__ = (
+        UniqueConstraint("story_id", name="uq_event_story_story_id"),
+        {"schema": "news"},
+    )
+
+    event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.event.id", ondelete="CASCADE"), primary_key=True
+    )
+    story_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.story.id", ondelete="CASCADE"), primary_key=True
     )
