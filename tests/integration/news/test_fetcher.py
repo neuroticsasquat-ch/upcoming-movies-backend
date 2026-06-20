@@ -31,10 +31,15 @@ async def _stories(session) -> list[Story]:
     return list(result.scalars().all())
 
 
-async def _run(session, sources):
+async def _run(session, sources, recency_days=36500):
     run_id = await create_run(session, kind="feeds")
     await session.commit()
-    result = await run_feeds_ingest(session_factory=lambda: session, run_id=run_id, sources=sources)
+    result = await run_feeds_ingest(
+        session_factory=lambda: session,
+        run_id=run_id,
+        recency_days=recency_days,
+        sources=sources,
+    )
     return run_id, result
 
 

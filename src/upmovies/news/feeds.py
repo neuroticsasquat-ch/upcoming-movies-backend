@@ -20,8 +20,7 @@ def _google_news(query: str) -> str:
     return f"https://news.google.com/rss/search?q={quote(query)}&hl=en-US&gl=US&ceid=US:en"
 
 
-FEED_SOURCES: tuple[FeedSource, ...] = (
-    # Trade / enthusiast RSS + Atom.
+_TRADE_FEEDS: tuple[FeedSource, ...] = (
     FeedSource("Deadline", "https://deadline.com/feed/"),
     FeedSource("Variety", "https://variety.com/feed/"),
     FeedSource("The Hollywood Reporter", "https://www.hollywoodreporter.com/feed/"),
@@ -34,9 +33,19 @@ FEED_SOURCES: tuple[FeedSource, ...] = (
         "https://rss.onebauer.media/api/feed-aggregator?hostname=https://www.empireonline.com",
     ),
     FeedSource("ScreenRant", "https://screenrant.com/feed/"),
-    # Broad Google News queries.
-    FeedSource("Google News: casting", _google_news("movie casting")),
-    FeedSource("Google News: release date", _google_news("movie release date")),
-    FeedSource("Google News: trailer", _google_news("movie trailer")),
-    FeedSource("Google News: greenlight", _google_news("movie greenlight")),
 )
+
+_GOOGLE_QUERIES: tuple[tuple[str, str], ...] = (
+    ("Google News: casting", "movie casting"),
+    ("Google News: release date", "movie release date"),
+    ("Google News: trailer", "movie trailer"),
+    ("Google News: greenlight", "movie greenlight"),
+)
+
+
+def feed_sources(recency_days: int) -> tuple[FeedSource, ...]:
+    google = tuple(
+        FeedSource(name, _google_news(f"{query} when:{recency_days}d"))
+        for name, query in _GOOGLE_QUERIES
+    )
+    return _TRADE_FEEDS + google

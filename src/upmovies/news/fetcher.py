@@ -21,7 +21,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import finalize_run, record_progress
-from upmovies.news.feeds import FEED_SOURCES, FeedSource
+from upmovies.news.feeds import FeedSource, feed_sources
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -129,9 +129,12 @@ async def run_feeds_ingest(
     *,
     session_factory: SessionFactory,
     run_id: UUID,
-    sources: Sequence[FeedSource] = FEED_SOURCES,
+    recency_days: int,
+    sources: Sequence[FeedSource] | None = None,
     timeout: float = 30.0,
 ) -> FeedsIngestResult:
+    if sources is None:
+        sources = feed_sources(recency_days)
     feeds_processed = 0
     feeds_failed = 0
     stories_inserted = 0

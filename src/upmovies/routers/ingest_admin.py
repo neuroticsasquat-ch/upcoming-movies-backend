@@ -64,7 +64,11 @@ async def _background_tmdb(run_id: UUID, settings: Settings) -> None:
 
 async def _background_feeds(run_id: UUID, settings: Settings) -> None:
     try:
-        await run_feeds_ingest(session_factory=_session_factory, run_id=run_id)
+        await run_feeds_ingest(
+            session_factory=_session_factory,
+            run_id=run_id,
+            recency_days=settings.feed_recency_days,
+        )
     except Exception as e:
         log.exception("background feeds ingest crashed")
         await _finalize_failed(run_id, str(e))
