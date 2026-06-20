@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     link_recency_days: int = Field(default=45, alias="LINK_RECENCY_DAYS")
     link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
     feed_recency_days: int = Field(default=14, alias="FEED_RECENCY_DAYS")
+    feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
+    feeds_per_film_throttle_seconds: float = Field(
+        default=1.0, alias="FEEDS_PER_FILM_THROTTLE_SECONDS"
+    )
 
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"

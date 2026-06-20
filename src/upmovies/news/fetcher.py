@@ -6,6 +6,7 @@ TMDB ingestion service so the orchestration layer can drive both pipelines unifo
 ToS-clean: feeds only, no article-body scraping. `film_id` stays null — entity linking
 is a later project."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -17,11 +18,13 @@ from uuid import UUID
 
 import feedparser
 import httpx
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.catalog.models import Film
 from upmovies.ingest.runs import finalize_run, record_progress
-from upmovies.news.feeds import FeedSource, feed_sources
+from upmovies.news.feeds import FeedSource, feed_sources, per_film_google_sources
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -39,6 +42,15 @@ _USER_AGENT = (
 )
 
 
+def _looks_blocked(resp: httpx.Response) -> bool:
+    """True when Google is throttling/captcha-ing us rather than serving the RSS feed."""
+    if resp.status_code in (403, 429):
+        return True
+    if resp.status_code == 200 and "xml" not in resp.headers.get("content-type", "").lower():
+        return True
+    return False
+
+
 @dataclass
 class StoryEntry:
     source: str
@@ -53,6 +65,8 @@ class FeedsIngestResult:
     feeds_processed: int
     feeds_failed: int
     stories_inserted: int
+    films_queried: int = 0
+    blocked: bool = False
 
 
 @asynccontextmanager
@@ -95,6 +109,14 @@ def drop_stale(entries: Sequence[StoryEntry], *, cutoff: datetime) -> list[Story
     return [e for e in entries if e.published_at is None or e.published_at >= cutoff]
 
 
+async def _film_titles(session_factory: SessionFactory) -> list[str]:
+    """Lightweight roster read for per-film queries — the deliberate news→catalog
+    coupling. Title column only (not link.roster.build_roster's heavier rows)."""
+    async with _owned_session(session_factory) as s:
+        rows = await s.execute(select(Film.title).order_by(Film.title))
+        return list(rows.scalars().all())
+
+
 async def upsert_stories(session: AsyncSession, entries: Sequence[StoryEntry]) -> int:
     """Insert new stories, skipping any whose url already exists. Returns the count of
     rows actually inserted. Caller owns the transaction."""
@@ -130,6 +152,8 @@ async def run_feeds_ingest(
     session_factory: SessionFactory,
     run_id: UUID,
     recency_days: int,
+    per_film_enabled: bool = False,
+    per_film_throttle: float = 1.0,
     sources: Sequence[FeedSource] | None = None,
     timeout: float = 30.0,
 ) -> FeedsIngestResult:
@@ -139,39 +163,83 @@ async def run_feeds_ingest(
     feeds_processed = 0
     feeds_failed = 0
     stories_inserted = 0
+    films_queried = 0
+    blocked = False
+    block_reason: str = ""
+
+    async def _ingest_entries(source: FeedSource, content: bytes) -> int:
+        entries = drop_stale(parse_feed(source.name, content), cutoff=cutoff)
+        async with _owned_session(session_factory) as s:
+            inserted = await upsert_stories(s, entries)
+            await record_progress(s, run_id, processed_delta=inserted)
+            await s.commit()
+        return inserted
+
+    async def _record_failure() -> None:
+        async with _owned_session(session_factory) as s:
+            await record_progress(s, run_id, failed_delta=1)
+            await s.commit()
 
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=True, headers={"User-Agent": _USER_AGENT}
     ) as client:
+        # Phase A — trade + broad feeds (per-feed isolation; one bad feed never aborts).
         for source in sources:
             try:
                 resp = await client.get(source.url)
                 resp.raise_for_status()
-                entries = parse_feed(source.name, resp.content)
-                entries = drop_stale(entries, cutoff=cutoff)
-                async with _owned_session(session_factory) as s:
-                    inserted = await upsert_stories(s, entries)
-                    await record_progress(s, run_id, processed_delta=inserted)
-                    await s.commit()
+                stories_inserted += await _ingest_entries(source, resp.content)
                 feeds_processed += 1
-                stories_inserted += inserted
             except Exception:
                 log.exception("feed ingest failed for %s (%s)", source.name, source.url)
                 feeds_failed += 1
-                async with _owned_session(session_factory) as s:
-                    await record_progress(s, run_id, failed_delta=1)
-                    await s.commit()
+                await _record_failure()
 
+        # Phase B — per-film Google queries (serialized; abort the phase on a block).
+        if per_film_enabled:
+            titles = await _film_titles(session_factory)
+            for source in per_film_google_sources(titles, recency_days):
+                try:
+                    resp = await client.get(source.url)
+                    if _looks_blocked(resp):
+                        blocked = True
+                        block_reason = f"HTTP {resp.status_code}"
+                        log.error(
+                            "per-film fetch blocked after %d films (%s)",
+                            films_queried,
+                            block_reason,
+                        )
+                        break
+                    resp.raise_for_status()
+                    stories_inserted += await _ingest_entries(source, resp.content)
+                    films_queried += 1
+                except Exception:
+                    log.exception("per-film feed failed (%s)", source.url)
+                    feeds_failed += 1
+                    await _record_failure()
+                await asyncio.sleep(per_film_throttle)
+
+    run_status = "failed" if blocked else "succeeded"
+    if blocked:
+        detail = (
+            f"{feeds_processed} feeds ok, {feeds_failed} failed, "
+            f"blocked after {films_queried} films, {stories_inserted} stories inserted"
+        )
+    else:
+        detail = (
+            f"{feeds_processed} feeds ok, {feeds_failed} failed, "
+            f"{films_queried} films queried, {stories_inserted} stories inserted"
+        )
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,
             run_id,
-            status="succeeded",
-            detail=(
-                f"{feeds_processed} feeds ok, {feeds_failed} failed, "
-                f"{stories_inserted} stories inserted"
-            ),
+            status=run_status,
+            detail=detail,
+            error=(f"per-film fetch blocked ({block_reason})" if blocked else None),
         )
         await s.commit()
 
-    return FeedsIngestResult(feeds_processed, feeds_failed, stories_inserted)
+    return FeedsIngestResult(
+        feeds_processed, feeds_failed, stories_inserted, films_queried, blocked
+    )
