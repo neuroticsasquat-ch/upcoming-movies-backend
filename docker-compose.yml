@@ -10,6 +10,7 @@ services:
       - ./alembic.ini:/app/alembic.ini
       - ./pyproject.toml:/app/pyproject.toml
       - ./tests:/app/tests
+      - ./scripts:/app/scripts
       - ./htmlcov:/app/htmlcov
     environment:
       DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies"
