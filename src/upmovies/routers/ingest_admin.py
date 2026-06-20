@@ -68,6 +68,8 @@ async def _background_feeds(run_id: UUID, settings: Settings) -> None:
             session_factory=_session_factory,
             run_id=run_id,
             recency_days=settings.feed_recency_days,
+            per_film_enabled=settings.feeds_per_film_enabled,
+            per_film_throttle=settings.feeds_per_film_throttle_seconds,
         )
     except Exception as e:
         log.exception("background feeds ingest crashed")

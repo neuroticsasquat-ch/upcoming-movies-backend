@@ -5,6 +5,7 @@ Seam: this lives in code for now so it ships with the app and is trivially testa
 If the source list grows or needs per-source tuning, it can move to a DB table (e.g.
 `news.feed_source`) without changing the fetcher — the fetcher only needs `(name, url)`."""
 
+from collections.abc import Sequence
 from typing import NamedTuple
 
 
@@ -49,3 +50,16 @@ def feed_sources(recency_days: int) -> tuple[FeedSource, ...]:
         for name, query in _GOOGLE_QUERIES
     )
     return _TRADE_FEEDS + google
+
+
+_PER_FILM_SOURCE = "Google News: per-film"  # constant story.source for every per-film hit
+
+
+def per_film_google_sources(titles: Sequence[str], recency_days: int) -> tuple[FeedSource, ...]:
+    """One Google News source per tracked film, unquoted `<title> when:Nd`. Unquoted
+    maximizes recall (Google quoting is fuzzy relevance-matching, not strict phrase);
+    the entity linker owns precision downstream."""
+    return tuple(
+        FeedSource(_PER_FILM_SOURCE, _google_news(f"{title} when:{recency_days}d"))
+        for title in titles
+    )

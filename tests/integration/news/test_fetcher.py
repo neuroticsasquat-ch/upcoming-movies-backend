@@ -11,9 +11,10 @@ from tests.fixtures.news.sample_feeds import (
     RSS_FEED,
     RSS_FEED_WITH_DUPLICATE_URLS,
 )
+from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
-from upmovies.news.feeds import FeedSource
+from upmovies.news.feeds import FeedSource, per_film_google_sources
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.news.models import Story
 
@@ -199,3 +200,126 @@ async def test_stale_dated_entries_dropped_keeping_recent_and_undated(session):
         "https://gate.example/recent",
         "https://gate.example/undated",
     }
+
+
+async def _seed_films(session, titles):
+    for i, t in enumerate(titles, start=1):
+        session.add(Film(tmdb_id=i, title=t))
+    await session.commit()
+
+
+async def _run_pf(session, base_sources, *, recency_days=36500, throttle=0.0):
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+    result = await run_feeds_ingest(
+        session_factory=lambda: session,
+        run_id=run_id,
+        recency_days=recency_days,
+        per_film_enabled=True,
+        per_film_throttle=throttle,
+        sources=base_sources,
+    )
+    return run_id, result
+
+
+@respx.mock
+async def test_flag_off_does_not_query_roster_or_fetch_per_film(session):
+    await _seed_films(session, ["Spider-Man"])
+    respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+    # per_film defaults off at the function level — no per-film route is registered,
+    # so if Phase B fired it would raise (respx blocks unmocked requests).
+    _, result = await _run(session, [FeedSource("Deadline", RSS_URL)])
+    assert result.films_queried == 0
+    assert result.blocked is False
+
+
+@respx.mock
+async def test_flag_on_fetches_per_film_and_dedupes_by_url(session):
+    await _seed_films(session, ["Spider-Man"])
+    pf = per_film_google_sources(["Spider-Man"], 36500)[0]
+    respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+    respx.get(pf.url).mock(
+        return_value=_xml(_rss([("Spidey news", "https://news.example/spidey", None)]))
+    )
+
+    run_id, result = await _run_pf(session, [FeedSource("Deadline", RSS_URL)])
+
+    assert result.films_queried == 1
+    assert result.blocked is False
+    urls = {s.url for s in await _stories(session)}
+    assert "https://news.example/spidey" in urls
+    row = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert row.status == "succeeded"
+
+
+@respx.mock
+async def test_block_signal_aborts_phase_b_and_fails_run(session):
+    # Queried title-sorted: "Shrek 5" sorts before "Spider-Man", so the first lands a
+    # story and the second triggers the block/abort.
+    await _seed_films(session, ["Shrek 5", "Spider-Man"])
+    first = per_film_google_sources(["Shrek 5"], 36500)[0]
+    blocked_src = per_film_google_sources(["Spider-Man"], 36500)[0]
+    respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+    respx.get(first.url).mock(
+        return_value=_xml(_rss([("Shrek news", "https://news.example/shrek", None)]))
+    )
+    respx.get(blocked_src.url).mock(return_value=httpx.Response(429))
+
+    run_id, result = await _run_pf(session, [FeedSource("Deadline", RSS_URL)])
+
+    assert result.blocked is True
+    assert result.films_queried == 1  # Shrek 5 succeeded before Spider-Man triggered the block
+    # Phase-A + the pre-block per-film story survive.
+    assert "https://news.example/shrek" in {s.url for s in await _stories(session)}
+    row = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert row.status == "failed"
+    assert row.error and "blocked" in row.error.lower()
+
+
+@respx.mock
+async def test_ordinary_per_film_error_isolates_and_run_succeeds(session):
+    await _seed_films(session, ["Spider-Man"])
+    pf = per_film_google_sources(["Spider-Man"], 36500)[0]
+    respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+    respx.get(pf.url).mock(return_value=httpx.Response(500))  # transient, not a block signal
+
+    run_id, result = await _run_pf(session, [FeedSource("Deadline", RSS_URL)])
+
+    assert result.blocked is False
+    assert result.feeds_failed == 1
+    row = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert row.status == "succeeded"
+
+
+@respx.mock
+async def test_throttle_is_applied_between_per_film_requests(session, monkeypatch):
+    await _seed_films(session, ["Spider-Man", "Shrek 5"])
+    for t in ["Spider-Man", "Shrek 5"]:
+        respx.get(per_film_google_sources([t], 36500)[0].url).mock(
+            return_value=_xml(_rss([("x", f"https://news.example/{t}", None)]))
+        )
+    respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(secs):
+        sleeps.append(secs)
+
+    monkeypatch.setattr("upmovies.news.fetcher.asyncio.sleep", fake_sleep)
+    await _run_pf(session, [FeedSource("Deadline", RSS_URL)], throttle=1.0)
+    assert len(sleeps) == 2 and all(s == 1.0 for s in sleeps)  # one sleep per per-film request

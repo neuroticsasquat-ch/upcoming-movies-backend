@@ -169,3 +169,19 @@ async def test_background_tmdb_passes_excluded_statuses(session, monkeypatch):
     await ingest_admin._background_tmdb(run_id, get_settings())
 
     assert captured["excluded_statuses"] == frozenset({"Released", "Canceled"})
+
+
+async def test_background_feeds_passes_per_film_settings(session, monkeypatch):
+    captured: dict = {}
+
+    async def fake(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake)
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+
+    await ingest_admin._background_feeds(run_id, get_settings())
+
+    assert captured["per_film_enabled"] is True  # config default
+    assert captured["per_film_throttle"] == 1.0
