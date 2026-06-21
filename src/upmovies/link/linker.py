@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from upmovies.link.roster import Roster
-from upmovies.llm.client import cached_system_block
+from upmovies.llm.client import BatchRequest, BatchResult, cached_system_block
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,19 @@ class Completer(Protocol):
     ) -> str: ...
 
 
+class BatchCompleter(Protocol):
+    async def complete_batch(
+        self,
+        requests: list[BatchRequest],
+        *,
+        poll_interval: float = ...,
+        timeout: float = ...,
+    ) -> dict[str, BatchResult]: ...
+
+
+class LinkClient(Completer, BatchCompleter, Protocol): ...
+
+
 @dataclass
 class BatchLinkResult:
     linked: int
@@ -82,22 +95,32 @@ def _extract_json_array(text: str) -> str:
     return text[start : end + 1]
 
 
-async def link_story_batch(
-    *,
-    client: Completer,
-    model: str,
-    roster: Roster,
-    stories: Sequence[Story],
-    floor: float,
-) -> BatchLinkResult:
-    if not stories:
-        return BatchLinkResult(0, 0)
-
+def build_link_request(
+    roster: Roster, stories: Sequence[Story]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The cached roster system block + the JSON story payload — shared by both the
+    sequential `complete()` path and the batched `complete_batch()` path."""
     system = [cached_system_block(f"{_INSTRUCTIONS}\n\nROSTER:\n{roster.text}")]
     messages = [{"role": "user", "content": json.dumps(_story_payload(stories))}]
-    raw = await client.complete(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
+    return system, messages
+
+
+def build_batch_request(
+    *, custom_id: str, model: str, roster: Roster, stories: Sequence[Story]
+) -> BatchRequest:
+    """One Message-Batch request for a story chunk. `max_tokens` matches the sequential
+    path's `_MAX_TOKENS` so the two paths are token-identical."""
+    system, messages = build_link_request(roster, stories)
+    return BatchRequest(
+        custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )
+
+
+def apply_link_decisions(
+    *, raw: str, stories: Sequence[Story], roster: Roster, floor: float
+) -> BatchLinkResult:
+    """Apply the classifier's JSON decisions to each Story in place: floor/resolution rules
+    plus the no-decision fallback. Identical for both execution paths."""
     decisions = json.loads(_extract_json_array(raw))  # raises on un-parseable output
 
     by_id = {str(s.id): s for s in stories}
@@ -146,3 +169,20 @@ async def link_story_batch(
             rejected += 1
 
     return BatchLinkResult(linked, rejected)
+
+
+async def link_story_batch(
+    *,
+    client: Completer,
+    model: str,
+    roster: Roster,
+    stories: Sequence[Story],
+    floor: float,
+) -> BatchLinkResult:
+    if not stories:
+        return BatchLinkResult(0, 0)
+    system, messages = build_link_request(roster, stories)
+    raw = await client.complete(
+        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
+    )
+    return apply_link_decisions(raw=raw, stories=stories, roster=roster, floor=floor)

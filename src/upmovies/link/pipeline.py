@@ -15,8 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import finalize_run, record_progress
 from upmovies.link.cluster import cluster_film_events
-from upmovies.link.linker import Completer, link_story_batch
-from upmovies.link.roster import build_roster
+from upmovies.link.linker import (
+    BatchCompleter,
+    Completer,
+    LinkClient,
+    apply_link_decisions,
+    build_batch_request,
+    link_story_batch,
+)
+from upmovies.link.roster import Roster, build_roster
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -40,30 +47,17 @@ def _chunks(seq: Sequence[UUID], size: int) -> list[list[UUID]]:
     return [list(seq[i : i + size]) for i in range(0, len(seq), size)]
 
 
-async def run_link_ingest(
+async def _link_stage_sequential(
     *,
     session_factory: SessionFactory,
     client: Completer,
     run_id: UUID,
     model: str,
-    cluster_model: str,
-    recency_days: int,
+    roster: Roster,
+    pending_ids: Sequence[UUID],
     batch_size: int,
     floor: float,
-) -> LinkIngestResult:
-    async with _owned_session(session_factory) as s:
-        roster = await build_roster(s)
-
-    cutoff = datetime.now(UTC) - timedelta(days=recency_days)
-    async with _owned_session(session_factory) as s:
-        result = await s.execute(
-            select(Story.id).where(
-                Story.link_status == "pending",
-                func.coalesce(Story.published_at, Story.fetched_at) >= cutoff,
-            )
-        )
-        pending_ids = [row[0] for row in result.all()]
-
+) -> tuple[int, int]:
     linked = rejected = 0
     for batch_ids in _chunks(pending_ids, batch_size):
         try:
@@ -83,6 +77,114 @@ async def run_link_ingest(
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=len(batch_ids))
                 await s.commit()
+    return linked, rejected
+
+
+async def _link_stage_batched(
+    *,
+    session_factory: SessionFactory,
+    client: BatchCompleter,
+    run_id: UUID,
+    model: str,
+    roster: Roster,
+    pending_ids: Sequence[UUID],
+    batch_size: int,
+    floor: float,
+) -> tuple[int, int]:
+    chunks = _chunks(pending_ids, batch_size)
+
+    # Build phase: one read-only session; ORM rows are dropped once serialized into requests,
+    # so no session is held open across the (possibly long) batch poll.
+    requests = []
+    async with _owned_session(session_factory) as s:
+        for i, batch_ids in enumerate(chunks):
+            stories = (
+                (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
+            )
+            requests.append(
+                build_batch_request(
+                    custom_id=str(i), model=model, roster=roster, stories=list(stories)
+                )
+            )
+
+    if not requests:
+        return 0, 0
+
+    try:
+        results = await client.complete_batch(requests)
+    except Exception:
+        # Whole-batch submit/poll failed: count all chunks failed, leave stories pending.
+        log.exception("link batch submit of %d stories failed", len(pending_ids))
+        async with _owned_session(session_factory) as s:
+            await record_progress(s, run_id, failed_delta=len(pending_ids))
+            await s.commit()
+        return 0, 0
+
+    linked = rejected = 0
+    for i, batch_ids in enumerate(chunks):
+        result = results.get(str(i))
+        try:
+            if result is None or not result.ok:
+                detail = result.error_type if result else "missing"
+                raise RuntimeError(f"batch chunk {i} unavailable: {detail}")
+            async with _owned_session(session_factory) as s:
+                # Re-query: build-phase session closed before polling; fresh ORM objects required.
+                stories = (
+                    (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
+                )
+                # apply_link_decisions calls json.loads; this try/except owns failure isolation.
+                applied = apply_link_decisions(
+                    raw=result.text, stories=list(stories), roster=roster, floor=floor
+                )
+                await record_progress(s, run_id, processed_delta=applied.linked + applied.rejected)
+                await s.commit()
+            linked += applied.linked
+            rejected += applied.rejected
+        except Exception:
+            log.exception("link batch chunk %d of %d stories failed", i, len(batch_ids))
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=len(batch_ids))
+                await s.commit()
+
+    return linked, rejected
+
+
+async def run_link_ingest(
+    *,
+    session_factory: SessionFactory,
+    client: LinkClient,
+    run_id: UUID,
+    model: str,
+    cluster_model: str,
+    recency_days: int,
+    batch_size: int,
+    floor: float,
+    use_batches: bool = False,
+) -> LinkIngestResult:
+    async with _owned_session(session_factory) as s:
+        roster = await build_roster(s)
+
+    cutoff = datetime.now(UTC) - timedelta(days=recency_days)
+    async with _owned_session(session_factory) as s:
+        result = await s.execute(
+            select(Story.id).where(
+                Story.link_status == "pending",
+                func.coalesce(Story.published_at, Story.fetched_at) >= cutoff,
+            )
+        )
+        pending_ids = [row[0] for row in result.all()]
+
+    stage = _link_stage_batched if use_batches else _link_stage_sequential
+    linked, rejected = await stage(
+        session_factory=session_factory,
+        client=client,
+        run_id=run_id,
+        model=model,
+        roster=roster,
+        pending_ids=pending_ids,
+        batch_size=batch_size,
+        floor=floor,
+    )
 
     # --- Stage 2: cluster + classify, per film with unclustered linked stories ---
     async with _owned_session(session_factory) as s:

@@ -92,6 +92,7 @@ async def _background_link(run_id: UUID, settings: Settings) -> None:
                 recency_days=settings.link_recency_days,
                 batch_size=settings.link_batch_size,
                 floor=settings.link_confidence_floor,
+                use_batches=settings.link_use_batches,
             )
     except Exception as e:
         log.exception("background link ingest crashed")
