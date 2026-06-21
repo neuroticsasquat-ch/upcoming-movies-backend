@@ -1,8 +1,13 @@
-name: Daily ingestion
+name: Daily pipeline
 
-# Triggers the TMDB, feeds, and link pipelines against the prod API once a day and
-# waits for each run to reach a terminal state, failing the job on failed/cancelled or
-# timeout.
+# Triggers the full daily pipeline (TMDB → per-film feeds → link) against the prod API
+# once a day and waits for each run to reach a terminal state, failing the job on
+# failed/cancelled or timeout.
+#
+# Light feed ingestion runs hourly in hourly-feeds.yml (Phase A only). This daily run
+# does the TMDB refresh, the per-film feed pass (Phase A + B, per_film=true), and the
+# LLM link pass. Both workflows share the `upmovies-ingest` concurrency group so the
+# 09:00 overlap queues instead of running two feed ingests at once.
 #
 # Required configuration (repo Settings → Secrets and variables → Actions):
 #   secret    UPMOVIES_ADMIN_TOKEN     — must match the API's ADMIN_TOKEN
@@ -14,8 +19,12 @@ on:
     - cron: '0 9 * * *' # 09:00 UTC daily
   workflow_dispatch:
 
+concurrency:
+  group: upmovies-ingest
+  cancel-in-progress: false
+
 jobs:
-  ingest:
+  pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -28,17 +37,18 @@ jobs:
           : "${ADMIN_TOKEN:?UPMOVIES_ADMIN_TOKEN secret is required}"
           : "${API_BASE_URL:?UPMOVIES_API_BASE_URL variable is required}"
 
-          # trigger_and_wait <pipeline>: POST /admin/ingest/<pipeline>, then poll
-          # GET /admin/ingest/<run_id> every 30s until terminal. Returns non-zero on
-          # failed/cancelled, a missing run_id, or timeout (~60 min).
+          # trigger_and_wait <pipeline> [query]: POST /admin/ingest/<pipeline><query>,
+          # then poll GET /admin/ingest/<run_id> every 30s until terminal. Returns
+          # non-zero on failed/cancelled, a missing run_id, or timeout (~60 min).
           trigger_and_wait() {
             local pipeline="$1"
+            local query="${2:-}"
             local response run_id body status i
 
-            echo "::group::Trigger ${pipeline}"
+            echo "::group::Trigger ${pipeline}${query}"
             response=$(curl -fsS -X POST \
               -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-              "${API_BASE_URL}/admin/ingest/${pipeline}") || {
+              "${API_BASE_URL}/admin/ingest/${pipeline}${query}") || {
                 echo "::endgroup::"
                 echo "failed to trigger ${pipeline} ingestion"
                 return 1
@@ -83,10 +93,11 @@ jobs:
             return 1
           }
 
-          # Run all pipelines; fail the job if any did not succeed. link runs after
-          # feeds (it consumes freshly-fetched stories).
+          # Run all pipelines; fail the job if any did not succeed. feeds runs with
+          # per_film=true (Phase A + per-film Phase B); link runs after feeds (it
+          # consumes freshly-fetched stories).
           rc=0
           trigger_and_wait tmdb || rc=1
-          trigger_and_wait feeds || rc=1
+          trigger_and_wait feeds "?per_film=true" || rc=1
           trigger_and_wait link || rc=1
           exit "${rc}"
