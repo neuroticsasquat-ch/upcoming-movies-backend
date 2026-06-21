@@ -22,11 +22,11 @@ def _google_news(query: str) -> str:
 
 
 _TRADE_FEEDS: tuple[FeedSource, ...] = (
-    FeedSource("Deadline", "https://deadline.com/feed/"),
-    FeedSource("Variety", "https://variety.com/feed/"),
-    FeedSource("The Hollywood Reporter", "https://www.hollywoodreporter.com/feed/"),
+    FeedSource("Deadline", "https://deadline.com/v/film/feed/"),
+    FeedSource("Variety", "https://variety.com/v/film/feed/"),
+    FeedSource("The Hollywood Reporter", "https://www.hollywoodreporter.com/c/movies/feed/"),
     FeedSource("Collider", "https://collider.com/feed/"),
-    FeedSource("/Film", "https://www.slashfilm.com/feed/"),
+    FeedSource("/Film", "https://www.slashfilm.com/category/movies/feed/"),
     # Empire's old /movies/news/feed/ path 404s now; the live feed is Bauer Media's
     # central aggregator (and it 403s any client without an identifying User-Agent).
     FeedSource(
