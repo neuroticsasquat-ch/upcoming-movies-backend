@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from upmovies.news.fetcher import StoryEntry, drop_stale
 
@@ -17,3 +17,16 @@ def test_drop_stale_keeps_recent_and_undated_drops_old():
     kept = drop_stale([recent, at_cutoff, old, undated], cutoff=cutoff)
 
     assert kept == [recent, at_cutoff, undated]
+
+
+def test_drop_stale_excludes_entries_older_than_three_day_window():
+    # Mirrors FEED_RECENCY_DAYS=3: cutoff = now - 3d.
+    now = datetime(2026, 6, 20, 12, 0, tzinfo=UTC)
+    cutoff = now - timedelta(days=3)
+    fresh = _entry("https://e/fresh", now - timedelta(days=2))  # inside window: kept
+    stale = _entry("https://e/stale", now - timedelta(days=4))  # past window: dropped
+    undated = _entry("https://e/undated", None)  # safety net: kept
+
+    kept = drop_stale([fresh, stale, undated], cutoff=cutoff)
+
+    assert kept == [fresh, undated]
