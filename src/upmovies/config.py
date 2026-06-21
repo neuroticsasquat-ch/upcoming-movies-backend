@@ -31,9 +31,9 @@ class Settings(BaseSettings):
     link_model: str = Field(default="claude-haiku-4-5", alias="LINK_MODEL")
     cluster_model: str = Field(default="claude-sonnet-4-6", alias="CLUSTER_MODEL")
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
-    link_recency_days: int = Field(default=45, alias="LINK_RECENCY_DAYS")
+    link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
     link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
-    feed_recency_days: int = Field(default=14, alias="FEED_RECENCY_DAYS")
+    feed_recency_days: int = Field(default=3, alias="FEED_RECENCY_DAYS")
     feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
     feeds_per_film_throttle_seconds: float = Field(
         default=1.0, alias="FEEDS_PER_FILM_THROTTLE_SECONDS"
