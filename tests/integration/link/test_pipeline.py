@@ -46,14 +46,14 @@ async def _story(url, *, published_offset_days, status="pending"):
     )
 
 
-async def _run(session, run_id):
+async def _run(session, run_id, recency_days=45):
     return await run_link_ingest(
         session_factory=lambda: session,
         client=FakeClient(),
         run_id=run_id,
         model="link-m",
         cluster_model="cluster-m",
-        recency_days=45,
+        recency_days=recency_days,
         batch_size=10,
         floor=0.7,
     )
@@ -112,3 +112,36 @@ async def test_rerun_is_noop_when_fully_processed(session):
 
     result = await _run(session, run_id)
     assert result.linked == 0 and result.rejected == 0
+
+
+async def test_link_window_of_four_includes_story_past_the_feed_window(session):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add_all(
+        [
+            # Published 3.5d ago: past the 3-day feed window but inside the 4-day link
+            # window — the +1 margin must keep it eligible (fetched_at defaults to now).
+            await _story("https://e/edge", published_offset_days=3.5),
+            # Published 4.5d ago: outside the 4-day link window — stays pending.
+            await _story("https://e/past", published_offset_days=4.5),
+        ]
+    )
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    result = await _run(session, run_id, recency_days=4)
+
+    assert result.linked == 1
+    rows = {
+        s.url: s
+        for s in (
+            await session.execute(select(Story), execution_options={"populate_existing": True})
+        )
+        .scalars()
+        .all()
+    }
+    assert rows["https://e/edge"].link_status == "linked"
+    assert rows["https://e/edge"].film_id == film.id
+    assert rows["https://e/past"].link_status == "pending"
