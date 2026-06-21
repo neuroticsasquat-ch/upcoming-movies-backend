@@ -61,7 +61,7 @@ def spy_background(monkeypatch):
     async def fake_tmdb(run_id, settings):
         called.append(("tmdb", run_id))
 
-    async def fake_feeds(run_id, settings):
+    async def fake_feeds(run_id, settings, per_film_override=None):
         called.append(("feeds", run_id))
 
     monkeypatch.setattr(ingest_admin, "_background_tmdb", fake_tmdb)
@@ -185,3 +185,80 @@ async def test_background_feeds_passes_per_film_settings(session, monkeypatch):
 
     assert captured["per_film_enabled"] is True  # config default
     assert captured["per_film_throttle"] == 1.0
+
+
+async def test_trigger_feeds_per_film_override_true(client, session, monkeypatch):
+    """per_film=true query param forces per_film_enabled=True regardless of config."""
+    captured: dict = {}
+
+    async def fake_feeds(run_id, settings, per_film_override=None):
+        captured["per_film_override"] = per_film_override
+
+    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
+
+    r = await client.post("/admin/ingest/feeds?per_film=true", headers=_admin_header())
+    assert r.status_code == 202
+    await asyncio.sleep(0.05)
+    assert captured["per_film_override"] is True
+
+
+async def test_trigger_feeds_per_film_override_false(client, session, monkeypatch):
+    """per_film=false query param forces per_film_enabled=False."""
+    captured: dict = {}
+
+    async def fake_feeds(run_id, settings, per_film_override=None):
+        captured["per_film_override"] = per_film_override
+
+    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
+
+    r = await client.post("/admin/ingest/feeds?per_film=false", headers=_admin_header())
+    assert r.status_code == 202
+    await asyncio.sleep(0.05)
+    assert captured["per_film_override"] is False
+
+
+async def test_trigger_feeds_per_film_omitted_uses_config(client, session, monkeypatch):
+    """Omitting per_film passes None override → _background_feeds falls back to config."""
+    captured: dict = {}
+
+    async def fake_feeds(run_id, settings, per_film_override=None):
+        captured["per_film_override"] = per_film_override
+
+    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
+
+    r = await client.post("/admin/ingest/feeds", headers=_admin_header())
+    assert r.status_code == 202
+    await asyncio.sleep(0.05)
+    assert captured["per_film_override"] is None
+
+
+async def test_background_feeds_per_film_override_wins_over_config(session, monkeypatch):
+    """per_film_override=False is passed to run_feeds_ingest even though config default is True."""
+    captured: dict = {}
+
+    async def fake(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake)
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+
+    await ingest_admin._background_feeds(run_id, get_settings(), per_film_override=False)
+
+    assert captured["per_film_enabled"] is False
+
+
+async def test_background_feeds_per_film_override_none_uses_config(session, monkeypatch):
+    """per_film_override=None falls back to settings.feeds_per_film_enabled (True by default)."""
+    captured: dict = {}
+
+    async def fake(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake)
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+
+    await ingest_admin._background_feeds(run_id, get_settings(), per_film_override=None)
+
+    assert captured["per_film_enabled"] is True  # config default
