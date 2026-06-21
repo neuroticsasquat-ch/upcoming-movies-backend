@@ -11,8 +11,16 @@ def test_google_queries_carry_the_when_operator():
 def test_trade_feeds_are_returned_unchanged_without_a_when_operator():
     sources = feed_sources(14)
     deadline = next(s for s in sources if s.name == "Deadline")
-    assert deadline.url == "https://deadline.com/feed/"
     assert "when" not in deadline.url
+
+
+def test_trade_feeds_use_film_category_urls():
+    sources = feed_sources(14)
+    by_name = {s.name: s.url for s in sources}
+    assert by_name["Deadline"] == "https://deadline.com/v/film/feed/"
+    assert by_name["Variety"] == "https://variety.com/v/film/feed/"
+    assert by_name["The Hollywood Reporter"] == "https://www.hollywoodreporter.com/c/movies/feed/"
+    assert by_name["/Film"] == "https://www.slashfilm.com/category/movies/feed/"
 
 
 def test_per_film_sources_one_per_title_unquoted_with_when():
