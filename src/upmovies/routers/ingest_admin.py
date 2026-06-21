@@ -8,7 +8,7 @@ import logging
 from datetime import date, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,13 +62,17 @@ async def _background_tmdb(run_id: UUID, settings: Settings) -> None:
         await _finalize_failed(run_id, str(e))
 
 
-async def _background_feeds(run_id: UUID, settings: Settings) -> None:
+async def _background_feeds(
+    run_id: UUID, settings: Settings, per_film_override: bool | None = None
+) -> None:
     try:
         await run_feeds_ingest(
             session_factory=_session_factory,
             run_id=run_id,
             recency_days=settings.feed_recency_days,
-            per_film_enabled=settings.feeds_per_film_enabled,
+            per_film_enabled=per_film_override
+            if per_film_override is not None
+            else settings.feeds_per_film_enabled,
             per_film_throttle=settings.feeds_per_film_throttle_seconds,
         )
     except Exception as e:
@@ -109,10 +113,11 @@ async def trigger_tmdb(
 async def trigger_feeds(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
+    per_film: bool | None = Query(default=None),
 ) -> dict[str, str]:
     run_id = await create_run(session, kind="feeds")
     await session.commit()
-    asyncio.create_task(_background_feeds(run_id, settings))
+    asyncio.create_task(_background_feeds(run_id, settings, per_film))
     return {"run_id": str(run_id)}
 
 
