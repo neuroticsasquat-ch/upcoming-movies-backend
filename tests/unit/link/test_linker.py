@@ -1,7 +1,12 @@
 import json
 from uuid import uuid4
 
-from upmovies.link.linker import link_story_batch
+from upmovies.link.linker import (
+    apply_link_decisions,
+    build_batch_request,
+    build_link_request,
+    link_story_batch,
+)
 from upmovies.link.roster import Roster, RosterEntry
 from upmovies.news.models import Story
 
@@ -104,3 +109,32 @@ async def test_omitted_story_is_rejected_no_decision():
     assert result.rejected == 1
     assert story.link_status == "rejected"
     assert story.link_note == "no-decision"
+
+
+def test_build_link_request_uses_cached_roster_and_story_payload():
+    system, messages = build_link_request(_roster(uuid4()), [_story(title="Runner news")])
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "Runner" in system[0]["text"]
+    payload = json.loads(messages[0]["content"])
+    assert payload[0]["title"] == "Runner news"
+
+
+def test_apply_link_decisions_links_about_high_confidence():
+    film_id = uuid4()
+    story = _story()
+    raw = json.dumps([{"id": str(story.id), "film": 1, "confidence": 0.95, "reason": "about"}])
+    result = apply_link_decisions(raw=raw, stories=[story], roster=_roster(film_id), floor=0.7)
+    assert result.linked == 1
+    assert story.link_status == "linked"
+    assert story.film_id == film_id
+
+
+def test_build_batch_request_carries_custom_id_and_cached_block():
+    req = build_batch_request(
+        custom_id="3", model="link-m", roster=_roster(uuid4()), stories=[_story()]
+    )
+    assert req.custom_id == "3"
+    assert req.model == "link-m"
+    assert req.max_tokens == 2048
+    assert req.system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "entity-linking classifier" in req.system[0]["text"]

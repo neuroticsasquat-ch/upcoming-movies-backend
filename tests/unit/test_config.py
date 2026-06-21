@@ -74,6 +74,20 @@ def test_settings_ingestion_overrides_from_env(monkeypatch):
     assert s.tmdb_release_window_future_days == 365
 
 
+def test_settings_link_use_batches_defaults_false(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("LINK_USE_BATCHES", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_use_batches is False
+
+
+def test_settings_link_use_batches_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_USE_BATCHES", "true")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_use_batches is True
+
+
 def test_settings_requires_tmdb_api_key(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", _REQUIRED_ENV["DATABASE_URL"])
     monkeypatch.setenv("ADMIN_TOKEN", _REQUIRED_ENV["ADMIN_TOKEN"])
