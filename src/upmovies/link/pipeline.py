@@ -14,7 +14,12 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import finalize_run, record_progress
-from upmovies.link.cluster import cluster_film_events
+from upmovies.link.cluster import (
+    ClusterPlan,
+    apply_cluster_decisions,
+    build_cluster_batch_request,
+    cluster_film_events,
+)
 from upmovies.link.linker import (
     BatchCompleter,
     Completer,
@@ -24,6 +29,7 @@ from upmovies.link.linker import (
     link_story_batch,
 )
 from upmovies.link.roster import Roster, build_roster
+from upmovies.llm.client import BatchRequest
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -149,6 +155,90 @@ async def _link_stage_batched(
     return linked, rejected
 
 
+async def _cluster_stage_sequential(
+    *,
+    session_factory: SessionFactory,
+    client: Completer,
+    run_id: UUID,
+    model: str,
+    film_ids: Sequence[UUID],
+    recency_days: int,
+) -> tuple[int, int]:
+    events_created = stories_clustered = 0
+    for film_id in film_ids:
+        try:
+            async with _owned_session(session_factory) as s:
+                cluster = await cluster_film_events(
+                    s, client=client, model=model, film_id=film_id, recency_days=recency_days
+                )
+                await s.commit()
+            events_created += cluster.events_created
+            stories_clustered += cluster.stories_clustered
+        except Exception:
+            log.exception("clustering failed for film %s", film_id)
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=1)
+                await s.commit()
+    return events_created, stories_clustered
+
+
+async def _cluster_stage_batched(
+    *,
+    session_factory: SessionFactory,
+    client: BatchCompleter,
+    run_id: UUID,
+    model: str,
+    film_ids: Sequence[UUID],
+    recency_days: int,
+) -> tuple[int, int]:
+    # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
+    # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
+    requests: list[BatchRequest] = []
+    plans: dict[str, ClusterPlan] = {}
+    async with _owned_session(session_factory) as s:
+        for film_id in film_ids:
+            built = await build_cluster_batch_request(
+                s, custom_id=str(film_id), model=model, film_id=film_id, recency_days=recency_days
+            )
+            if built is None:
+                continue
+            request, plan = built
+            requests.append(request)
+            plans[request.custom_id] = plan
+
+    if not requests:
+        return 0, 0
+
+    try:
+        results = await client.complete_batch(requests)
+    except Exception:
+        log.exception("cluster batch submit of %d films failed", len(requests))
+        async with _owned_session(session_factory) as s:
+            await record_progress(s, run_id, failed_delta=len(requests))
+            await s.commit()
+        return 0, 0
+
+    events_created = stories_clustered = 0
+    for custom_id, plan in plans.items():
+        result = results.get(custom_id)
+        try:
+            if result is None or not result.ok:
+                detail = result.error_type if result else "missing"
+                raise RuntimeError(f"cluster film {custom_id} unavailable: {detail}")
+            async with _owned_session(session_factory) as s:
+                applied = await apply_cluster_decisions(s, plan=plan, raw=result.text)
+                await s.commit()
+            events_created += applied.events_created
+            stories_clustered += applied.stories_clustered
+        except Exception:
+            log.exception("clustering failed for film %s", custom_id)
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=1)
+                await s.commit()
+
+    return events_created, stories_clustered
+
+
 async def run_link_ingest(
     *,
     session_factory: SessionFactory,
@@ -207,26 +297,15 @@ async def run_link_ingest(
             if fid is not None
         ]
 
-    events_created = 0
-    stories_clustered = 0
-    for film_id in film_ids:
-        try:
-            async with _owned_session(session_factory) as s:
-                cluster = await cluster_film_events(
-                    s,
-                    client=client,
-                    model=cluster_model,
-                    film_id=film_id,
-                    recency_days=recency_days,
-                )
-                await s.commit()
-            events_created += cluster.events_created
-            stories_clustered += cluster.stories_clustered
-        except Exception:
-            log.exception("clustering failed for film %s", film_id)
-            async with _owned_session(session_factory) as s:
-                await record_progress(s, run_id, failed_delta=1)
-                await s.commit()
+    cluster_stage = _cluster_stage_batched if use_batches else _cluster_stage_sequential
+    events_created, stories_clustered = await cluster_stage(
+        session_factory=session_factory,
+        client=client,
+        run_id=run_id,
+        model=cluster_model,
+        film_ids=film_ids,
+        recency_days=recency_days,
+    )
 
     async with _owned_session(session_factory) as s:
         await finalize_run(

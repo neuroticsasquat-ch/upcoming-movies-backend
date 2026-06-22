@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import exists, select
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.link.linker import Completer
-from upmovies.llm.client import cached_system_block
+from upmovies.llm.client import BatchRequest, cached_system_block
 from upmovies.news.models import Event, EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,13 @@ class ClusterResult:
     stories_clustered: int
 
 
+@dataclass
+class ClusterPlan:
+    film_id: UUID
+    existing_event_ids: list[UUID]
+    unclustered_story_ids: list[UUID]
+
+
 def _extract_json_object(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
@@ -68,17 +76,18 @@ def _extract_json_object(text: str) -> str:
     return text[start : end + 1]
 
 
-async def cluster_film_events(
+async def build_cluster_request(
     session: AsyncSession,
     *,
-    client: Completer,
-    model: str,
     film_id: UUID,
     recency_days: int,
-) -> ClusterResult:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], ClusterPlan] | None:
+    """Read half: load unclustered stories and recent events, build the system + messages
+    payload and a ClusterPlan. Returns None when there is nothing to cluster (no film or
+    no unclustered stories). Makes no writes and calls no LLM."""
     film = (await session.execute(select(Film).where(Film.id == film_id))).scalar_one_or_none()
     if film is None:
-        return ClusterResult(0, 0)
+        return None
 
     already_clustered = exists().where(EventStory.story_id == Story.id)
     unclustered = (
@@ -93,7 +102,7 @@ async def cluster_film_events(
         .all()
     )
     if not unclustered:
-        return ClusterResult(0, 0)
+        return None
 
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
     existing_events = (
@@ -142,7 +151,7 @@ async def cluster_film_events(
         for sid, s in by_id.items()
     ]
 
-    user = {
+    user: dict[str, Any] = {
         "film": {
             "title": film.title,
             "year": film.release_date.year if film.release_date else None,
@@ -150,12 +159,44 @@ async def cluster_film_events(
         "existing_events": existing_payload,
         "new_stories": new_payload,
     }
-    raw = await client.complete(
-        model=model,
-        system=[cached_system_block(_INSTRUCTIONS)],
-        messages=[{"role": "user", "content": json.dumps(user)}],
-        max_tokens=_MAX_TOKENS,
+
+    system = [cached_system_block(_INSTRUCTIONS)]
+    messages = [{"role": "user", "content": json.dumps(user)}]
+    plan = ClusterPlan(
+        film_id=film_id,
+        existing_event_ids=[e.id for e in existing_events],
+        unclustered_story_ids=[s.id for s in unclustered],
     )
+    return system, messages, plan
+
+
+async def _load_events_in_order(session: AsyncSession, event_ids: list[UUID]) -> list[Event]:
+    """Re-load events by the given IDs, preserving the supplied order for positional
+    index stability (the LLM refers to events by 1-based position)."""
+    if not event_ids:
+        return []
+    rows = (await session.execute(select(Event).where(Event.id.in_(event_ids)))).scalars().all()
+    by_id = {e.id: e for e in rows}
+    return [by_id[eid] for eid in event_ids if eid in by_id]
+
+
+async def apply_cluster_decisions(
+    session: AsyncSession,
+    *,
+    plan: ClusterPlan,
+    raw: str,
+) -> ClusterResult:
+    """Write half: re-load events/stories from the plan, parse the LLM JSON, and
+    create/attach events. The caller owns the session/commit."""
+    existing_events = await _load_events_in_order(session, plan.existing_event_ids)
+
+    stories = (
+        (await session.execute(select(Story).where(Story.id.in_(plan.unclustered_story_ids))))
+        .scalars()
+        .all()
+    )
+    by_id = {str(s.id): s for s in stories}
+
     data = json.loads(_extract_json_object(raw))
 
     now = datetime.now(UTC)
@@ -176,13 +217,15 @@ async def cluster_film_events(
             if etype not in _VALID_TYPES or conf not in ("confirmed", "rumored"):
                 log.warning(
                     "cluster: invalid new event for film %s: type=%r confidence=%r",
-                    film_id,
+                    plan.film_id,
                     etype,
                     conf,
                 )
                 continue
             occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in sids)
-            event = Event(film_id=film_id, event_type=etype, confidence=conf, occurred_at=occurred)
+            event = Event(
+                film_id=plan.film_id, event_type=etype, confidence=conf, occurred_at=occurred
+            )
             session.add(event)
             await session.flush()
             events_created += 1
@@ -192,3 +235,49 @@ async def cluster_film_events(
             stories_clustered += 1
 
     return ClusterResult(events_created, stories_clustered)
+
+
+async def build_cluster_batch_request(
+    session: AsyncSession,
+    *,
+    custom_id: str,
+    model: str,
+    film_id: UUID,
+    recency_days: int,
+) -> tuple[BatchRequest, ClusterPlan] | None:
+    """Wrap build_cluster_request into a BatchRequest ready for the Anthropic Batch API."""
+    built = await build_cluster_request(session, film_id=film_id, recency_days=recency_days)
+    if built is None:
+        return None
+    system, messages, plan = built
+    return (
+        BatchRequest(
+            custom_id=custom_id,
+            model=model,
+            system=system,
+            messages=messages,
+            max_tokens=_MAX_TOKENS,
+        ),
+        plan,
+    )
+
+
+async def cluster_film_events(
+    session: AsyncSession,
+    *,
+    client: Completer,
+    model: str,
+    film_id: UUID,
+    recency_days: int,
+) -> ClusterResult:
+    built = await build_cluster_request(session, film_id=film_id, recency_days=recency_days)
+    if built is None:
+        return ClusterResult(0, 0)
+    system, messages, plan = built
+    raw = await client.complete(
+        model=model,
+        system=system,
+        messages=messages,
+        max_tokens=_MAX_TOKENS,
+    )
+    return await apply_cluster_decisions(session, plan=plan, raw=raw)
