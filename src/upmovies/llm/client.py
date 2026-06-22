@@ -22,6 +22,36 @@ def _concat_text(blocks: list[Any]) -> str:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Token counts for one Messages/Batch call. Cache fields are 0 when no caching
+    occurred. `__add__` lets callers `sum(usages, Usage())` across many calls."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_input_tokens=self.cache_read_input_tokens + other.cache_read_input_tokens,
+            cache_creation_input_tokens=(
+                self.cache_creation_input_tokens + other.cache_creation_input_tokens
+            ),
+        )
+
+    @classmethod
+    def from_sdk(cls, usage: Any) -> "Usage":
+        return cls(
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        )
+
+
+@dataclass(frozen=True)
 class BatchRequest:
     """One request in a Message Batch. Mirrors `complete()`'s args plus a `custom_id`.
     `system` carries the `cached_system_block(...)` prefix so the roster stays cacheable."""
@@ -36,13 +66,15 @@ class BatchRequest:
 @dataclass(frozen=True)
 class BatchResult:
     """One request's outcome. `text` is set when `ok`; otherwise `error_type` /
-    `error_message` describe the failure (errored / expired / canceled / missing)."""
+    `error_message` describe the failure (errored / expired / canceled / missing).
+    `usage` carries the call's token counts when `ok`, else `None`."""
 
     custom_id: str
     ok: bool
     text: str = ""
     error_type: str | None = None
     error_message: str | None = None
+    usage: Usage | None = None
 
 
 def _to_result(entry: Any) -> BatchResult:
@@ -50,7 +82,10 @@ def _to_result(entry: Any) -> BatchResult:
     result = entry.result
     if result.type == "succeeded":
         return BatchResult(
-            custom_id=entry.custom_id, ok=True, text=_concat_text(result.message.content)
+            custom_id=entry.custom_id,
+            ok=True,
+            text=_concat_text(result.message.content),
+            usage=Usage.from_sdk(result.message.usage),
         )
     if result.type == "errored":
         err = result.error.error
@@ -77,6 +112,24 @@ class AnthropicClient:
     async def __aexit__(self, *exc: object) -> None:
         await self._client.close()
 
+    async def complete_with_usage(
+        self,
+        *,
+        model: str,
+        system: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        max_tokens: int = 4096,
+    ) -> tuple[str, Usage]:
+        """Like `complete` but also returns the call's token `Usage` (incl. cache reads/
+        writes). The measurement harness uses this; production callers use `complete`."""
+        resp = await self._client.messages.create(
+            model=model,
+            system=system,  # type: ignore[arg-type]
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=max_tokens,
+        )
+        return _concat_text(resp.content), Usage.from_sdk(resp.usage)
+
     async def complete(
         self,
         *,
@@ -88,13 +141,10 @@ class AnthropicClient:
         """One Messages call. `system` is a list of content blocks — use
         `cached_system_block` for the cacheable prefix. Returns the concatenated text of
         the response content blocks."""
-        resp = await self._client.messages.create(
-            model=model,
-            system=system,  # type: ignore[arg-type]
-            messages=messages,  # type: ignore[arg-type]
-            max_tokens=max_tokens,
+        text, _ = await self.complete_with_usage(
+            model=model, system=system, messages=messages, max_tokens=max_tokens
         )
-        return _concat_text(resp.content)
+        return text
 
     async def complete_batch(
         self,
