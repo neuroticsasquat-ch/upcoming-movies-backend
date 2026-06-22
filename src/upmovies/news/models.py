@@ -106,3 +106,23 @@ class EventStory(Base):
     story_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("news.story.id", ondelete="CASCADE"), primary_key=True
     )
+
+
+class EventSummary(Base):
+    """AI-generated summary of an event. One summary per event (event_id is the PK)."""
+
+    __tablename__ = "event_summary"
+    __table_args__ = ({"schema": "news"},)
+
+    event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
