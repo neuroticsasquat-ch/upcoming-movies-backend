@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
     link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
     link_use_batches: bool = Field(default=True, alias="LINK_USE_BATCHES")
+    summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
+    summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
+    summary_prompt_version: str = Field(default="1", alias="SUMMARY_PROMPT_VERSION")
     feed_recency_days: int = Field(default=3, alias="FEED_RECENCY_DAYS")
     feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
     feeds_per_film_throttle_seconds: float = Field(
