@@ -1,10 +1,16 @@
 import json
+import types
 
 import httpx
 import pytest
 import respx
 
-from upmovies.llm.client import AnthropicClient, BatchRequest, BatchResult, cached_system_block
+from upmovies.llm.client import (
+    AnthropicClient,
+    BatchRequest,
+    Usage,
+    cached_system_block,
+)
 
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 BATCHES_URL = "https://api.anthropic.com/v1/messages/batches"
@@ -34,7 +40,7 @@ def _batch(status: str, results_url: str | None = None) -> dict:
     }
 
 
-def _succeeded_line(custom_id: str, text: str) -> dict:
+def _succeeded_line(custom_id: str, text: str, usage: dict | None = None) -> dict:
     return {
         "custom_id": custom_id,
         "result": {
@@ -47,7 +53,7 @@ def _succeeded_line(custom_id: str, text: str) -> dict:
                 "content": [{"type": "text", "text": text}],
                 "stop_reason": "end_turn",
                 "stop_sequence": None,
-                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "usage": usage or {"input_tokens": 1, "output_tokens": 1},
             },
         },
     }
@@ -77,7 +83,7 @@ def _req(custom_id: str) -> BatchRequest:
     )
 
 
-def _message_response(blocks: list[dict[str, str]]) -> httpx.Response:
+def _message_response(blocks: list[dict[str, str]], usage: dict | None = None) -> httpx.Response:
     return httpx.Response(
         200,
         json={
@@ -88,7 +94,7 @@ def _message_response(blocks: list[dict[str, str]]) -> httpx.Response:
             "content": blocks,
             "stop_reason": "end_turn",
             "stop_sequence": None,
-            "usage": {"input_tokens": 10, "output_tokens": 3},
+            "usage": usage or {"input_tokens": 10, "output_tokens": 3},
         },
     )
 
@@ -129,6 +135,35 @@ async def test_complete_concatenates_text_blocks():
 
 
 @respx.mock
+async def test_complete_with_usage_returns_text_and_usage():
+    respx.post(MESSAGES_URL).mock(
+        return_value=_message_response(
+            [{"type": "text", "text": "hi there"}],
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 100,
+            },
+        )
+    )
+    async with AnthropicClient(api_key="test-key") as c:
+        text, usage = await c.complete_with_usage(
+            model="claude-haiku-4-5",
+            system=[cached_system_block("ROSTER")],
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=16,
+        )
+    assert text == "hi there"
+    assert usage == Usage(
+        input_tokens=12,
+        output_tokens=4,
+        cache_read_input_tokens=900,
+        cache_creation_input_tokens=100,
+    )
+
+
+@respx.mock
 async def test_complete_batch_empty_requests_returns_empty_and_makes_no_calls():
     create_route = respx.post("https://api.anthropic.com/v1/messages/batches")
     async with AnthropicClient(api_key="test-key") as c:
@@ -164,8 +199,8 @@ async def test_complete_batch_polls_to_ended_and_collects_succeeded():
         out = await c.complete_batch([_req("req-0"), _req("req-1")], poll_interval=0)
 
     assert set(out) == {"req-0", "req-1"}
-    assert out["req-0"] == BatchResult(custom_id="req-0", ok=True, text="alpha")
-    assert out["req-1"] == BatchResult(custom_id="req-1", ok=True, text="beta")
+    assert out["req-0"].custom_id == "req-0" and out["req-0"].ok and out["req-0"].text == "alpha"
+    assert out["req-1"].custom_id == "req-1" and out["req-1"].ok and out["req-1"].text == "beta"
 
 
 @respx.mock
@@ -245,3 +280,95 @@ async def test_complete_batch_raises_timeout_when_never_ends():
     async with AnthropicClient(api_key="test-key") as c:
         with pytest.raises(TimeoutError):
             await c.complete_batch([_req("req-0")], poll_interval=0, timeout=0)
+
+
+@respx.mock
+async def test_complete_batch_populates_usage_on_success():
+    respx.post(BATCHES_URL).mock(return_value=httpx.Response(200, json=_batch("in_progress")))
+    respx.get(RETRIEVE_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=_batch("ended", results_url=RESULTS_URL)),
+            httpx.Response(200, json=_batch("ended", results_url=RESULTS_URL)),
+        ]
+    )
+    respx.get(RESULTS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text=_jsonl(
+                _succeeded_line(
+                    "req-0",
+                    "alpha",
+                    usage={
+                        "input_tokens": 7,
+                        "output_tokens": 2,
+                        "cache_read_input_tokens": 500,
+                        "cache_creation_input_tokens": 50,
+                    },
+                ),
+                _errored_line("req-1", "invalid_request_error", "boom"),
+            ),
+            headers={"content-type": "application/x-jsonl"},
+        )
+    )
+
+    async with AnthropicClient(api_key="test-key") as c:
+        out = await c.complete_batch([_req("req-0"), _req("req-1")], poll_interval=0)
+
+    assert out["req-0"].usage == Usage(
+        input_tokens=7, output_tokens=2, cache_read_input_tokens=500, cache_creation_input_tokens=50
+    )
+    # Errored entry has no usage.
+    assert out["req-1"].usage is None
+
+
+def test_usage_from_sdk_maps_all_four_fields():
+    sdk = types.SimpleNamespace(
+        input_tokens=100,
+        output_tokens=20,
+        cache_read_input_tokens=80,
+        cache_creation_input_tokens=5,
+    )
+    u = Usage.from_sdk(sdk)
+    assert u == Usage(
+        input_tokens=100,
+        output_tokens=20,
+        cache_read_input_tokens=80,
+        cache_creation_input_tokens=5,
+    )
+
+
+def test_usage_from_sdk_defaults_missing_cache_fields_to_zero():
+    sdk = types.SimpleNamespace(
+        input_tokens=10,
+        output_tokens=3,
+        cache_read_input_tokens=None,
+        cache_creation_input_tokens=None,
+    )
+    u = Usage.from_sdk(sdk)
+    assert u.cache_read_input_tokens == 0
+    assert u.cache_creation_input_tokens == 0
+    assert u.input_tokens == 10
+    assert u.output_tokens == 3
+
+
+def test_usage_add_sums_componentwise():
+    a = Usage(
+        input_tokens=1, output_tokens=2, cache_read_input_tokens=3, cache_creation_input_tokens=4
+    )
+    b = Usage(
+        input_tokens=10,
+        output_tokens=20,
+        cache_read_input_tokens=30,
+        cache_creation_input_tokens=40,
+    )
+    assert a + b == Usage(
+        input_tokens=11,
+        output_tokens=22,
+        cache_read_input_tokens=33,
+        cache_creation_input_tokens=44,
+    )
+
+
+def test_usage_sum_with_zero_start():
+    items = [Usage(input_tokens=1), Usage(input_tokens=2), Usage(input_tokens=3)]
+    assert sum(items, Usage()).input_tokens == 6
