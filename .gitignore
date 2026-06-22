@@ -180,3 +180,11 @@ $RECYCLE.BIN/
 .directory
 .Trash-*
 .nfs*
+
+# =============================================================================
+# Link validation review — regenerable intermediates
+# (keep validation_set.json and validation_draft.json, which are committed)
+# =============================================================================
+tests/fixtures/link/validation_candidates.json
+tests/fixtures/link/validation_review.csv
+tests/fixtures/link/validation_review.html
