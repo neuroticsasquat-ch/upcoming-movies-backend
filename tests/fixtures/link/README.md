@@ -3,6 +3,31 @@
 `validation_set.json` is the **ground truth** for the NEU-279 accuracy baseline. It is
 produced by hand-labeling a sample of real stories drawn from the current corpus.
 
+## Building the set (candidate-assisted)
+
+Labeling 490 rows from scratch is slow, so the workflow is review-and-correct:
+
+1. `scripts/export_link_validation_draft.py` → `validation_draft.json` (rows with
+   `relation: "TODO"`).
+2. `scripts/propose_validation_labels.py` reads the draft and writes
+   `validation_candidates.json` with proposed `relation` / `expected_film_tmdb_id` /
+   `event_type`.
+3. `scripts/build_review_html.py` turns the candidates into `validation_review.html` — open
+   it in a browser to **review every proposal** with full text + a searchable film picker,
+   then download the corrected `validation_set.json` (keep ~150–200 rows).
+4. `scripts/validate_linking.py` runs the live Stage-1 baseline;
+   `scripts/diagnose_linking.py` explains the misses and sweeps the confidence floor.
+
+`validation_candidates.json` and `validation_review.html` are regenerable intermediates
+(gitignored); only `validation_set.json` is committed.
+
+**Anchoring caveat:** candidates are proposed by a *stronger* model (Sonnet) than the
+production Stage-1 linker (Haiku, `link_model`), so the set measures the linker against an
+independent, human-corrected ground truth rather than its own output. The proposer still
+has blind spots — don't rubber-stamp. Scrutinize the **about/mention boundary** and the
+**film id** most (those are where it errs). `event_group` is left `null` for you to fill,
+since clustering is cross-story.
+
 ## Schema
 
 Each item in the JSON array has the following fields:
@@ -17,6 +42,7 @@ Each item in the JSON array has the following fields:
 | `expected_film_tmdb_id` | integer \| null | required for `about` | TMDB film id — stable across databases |
 | `event_type` | string \| null | required for `about` | e.g. `"trailer"`, `"casting"`, `"release_date"` |
 | `event_group` | string \| null | no | Short shared label across stories about the same news beat (e.g. `"runner-trailer-1"`). Used for cluster scoring. |
+| `untracked_film` | bool | no | `true` marks a `none` row that is real movie news about a film **not in the roster** (typically undated / not-yet-ingested). Ignored by the harness (`load_validation_set` drops unknown fields) — captured purely as coverage-gap evidence for NEU-285 (undated capture) / NEU-284 (credits). Omitted when false. |
 
 ## Relation labels
 
