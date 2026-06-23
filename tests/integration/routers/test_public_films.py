@@ -123,3 +123,22 @@ async def test_detail_empty_log_film_returns_200_with_derived_arc(client, make_f
 
 async def test_detail_unknown_slug_returns_404(client):
     assert (await client.get("/films/does-not-exist")).status_code == 404
+
+
+async def test_film_detail_source_label_uses_resolved_outlet(client, make_film, add_event):
+    film = await make_film(slug="resolve-film-2026")
+    await add_event(
+        film=film,
+        summary="Casting.",
+        sources=(
+            {
+                "url": "https://news.google.com/rss/articles/xyz",
+                "source": "Google News: per-film",
+                "title": "Director Set - Variety",
+                "outlet": "Variety",
+            },
+        ),
+    )
+
+    body = (await client.get(f"/films/{film.slug}")).json()
+    assert body["events"][0]["sources"][0]["source"] == "Variety"

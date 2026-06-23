@@ -19,6 +19,12 @@ from upmovies.public.dto import (
 )
 
 
+def outlet_label(story: Story) -> str:
+    """Display label for a source: the resolved publisher when present (Google News
+    rows), otherwise the stored `source` (trade feeds, or unresolved rows)."""
+    return story.outlet or story.source
+
+
 def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
 
@@ -122,7 +128,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             sources=[
                 SourceOut(
                     url=story.url,
-                    source=story.source,
+                    source=outlet_label(story),
                     title=story.title,
                     published_at=story.published_at,
                 )
@@ -210,7 +216,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
                 sources=[
                     SourceOut(
                         url=story.url,
-                        source=story.source,
+                        source=outlet_label(story),
                         title=story.title,
                         published_at=story.published_at,
                     )

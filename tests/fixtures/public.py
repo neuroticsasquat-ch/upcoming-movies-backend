@@ -83,6 +83,7 @@ def add_event(session: AsyncSession):
                 url=src["url"],
                 title=src.get("title", "Story title"),
                 published_at=src.get("published_at"),
+                outlet=src.get("outlet"),
             )
             session.add(story)
             await session.flush()  # populate story.id

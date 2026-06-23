@@ -24,15 +24,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.ingest.runs import finalize_run, record_progress
-from upmovies.news.feeds import FeedSource, feed_sources, per_film_google_sources
+from upmovies.news.feeds import (
+    FeedSource,
+    feed_sources,
+    is_google_source,
+    per_film_google_sources,
+)
 from upmovies.news.models import Story
+from upmovies.news.outlet import outlet_from_entry
 
 log = logging.getLogger(__name__)
 
 SessionFactory = Callable[[], AsyncSession]
 
 # Entry keys worth retaining verbatim in `story.raw` for later entity-linking work.
-_RAW_KEYS = ("title", "link", "summary", "published", "updated", "id", "author")
+_RAW_KEYS = ("title", "link", "summary", "published", "updated", "id", "author", "source")
 
 # Identify ourselves to feed hosts. Some (e.g. Empire's onebauer/CloudFront host)
 # reject the bare `python-httpx/...` default UA with a 403, and politely-behaved
@@ -57,6 +63,7 @@ class StoryEntry:
     url: str
     title: str
     published_at: datetime | None
+    outlet: str | None
     raw: dict[str, Any]
 
 
@@ -87,6 +94,7 @@ def parse_feed(source: str, content: str | bytes) -> list[StoryEntry]:
     returns no entries for unparseable content rather than raising. Entries missing a
     url or title are dropped (both are NOT NULL, and url is the dedupe key)."""
     parsed = feedparser.parse(content)
+    resolve_outlet = is_google_source(source)
     entries: list[StoryEntry] = []
     for entry in parsed.entries:
         url = entry.get("link")
@@ -99,6 +107,7 @@ def parse_feed(source: str, content: str | bytes) -> list[StoryEntry]:
                 url=url,
                 title=title,
                 published_at=_published_at(entry),
+                outlet=outlet_from_entry(entry) if resolve_outlet else None,
                 raw={k: entry[k] for k in _RAW_KEYS if k in entry},
             )
         )
@@ -133,6 +142,7 @@ async def upsert_stories(session: AsyncSession, entries: Sequence[StoryEntry]) -
             "url": e.url,
             "title": e.title,
             "published_at": e.published_at,
+            "outlet": e.outlet,
             "raw": e.raw,
         }
         for e in by_url.values()

@@ -323,3 +323,27 @@ async def test_throttle_is_applied_between_per_film_requests(session, monkeypatc
     monkeypatch.setattr("upmovies.news.fetcher.asyncio.sleep", fake_sleep)
     await _run_pf(session, [FeedSource("Deadline", RSS_URL)], throttle=1.0)
     assert len(sleeps) == 2 and all(s == 1.0 for s in sleeps)  # one sleep per per-film request
+
+
+@respx.mock
+async def test_per_film_story_persists_outlet_and_raw_source(session):
+    await _seed_films(session, ["Spider-Man"])
+    pf = per_film_google_sources(["Spider-Man"], 36500)[0]
+    feed = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<rss version="2.0"><channel><title>Google News</title>'
+        "<item><title>Spidey Lands Director - Deadline</title>"
+        "<link>https://news.example/spidey</link>"
+        '<source url="https://deadline.com">Deadline</source></item>'
+        "</channel></rss>"
+    )
+    respx.get(pf.url).mock(return_value=_xml(feed))
+
+    await _run_pf(session, [])  # no Phase-A feeds, per-film only
+
+    stories = await _stories(session)
+    assert len(stories) == 1
+    assert stories[0].outlet == "Deadline"
+    # `<source>` is retained in raw JSONB (round-trips through Postgres cleanly).
+    raw = stories[0].raw
+    assert raw is not None and raw["source"]["title"] == "Deadline"
