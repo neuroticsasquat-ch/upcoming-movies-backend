@@ -4,7 +4,7 @@ relations. Pure DB I/O — the caller owns the transaction (commit/rollback)."""
 
 from uuid import UUID
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from upmovies.catalog.models import (
     ProductionCountry,
     SpokenLanguage,
 )
+from upmovies.catalog.slug import assign_slug
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 
 
@@ -56,8 +57,10 @@ async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -
 async def _upsert_film_row(
     session: AsyncSession, details: TMDBMovieDetails, collection_id: int | None
 ) -> UUID:
+    slug = await _slug_for_insert(session, details)
     values = {
         "tmdb_id": details.id,
+        "slug": slug,
         "imdb_id": details.imdb_id,
         "title": details.title,
         "original_title": details.original_title,
@@ -81,7 +84,7 @@ async def _upsert_film_row(
         "collection_id": collection_id,
         "tmdb_raw": details.tmdb_raw,
     }
-    update_set = {k: v for k, v in values.items() if k != "tmdb_id"}
+    update_set = {k: v for k, v in values.items() if k not in ("tmdb_id", "slug")}
     update_set["updated_at"] = func.now()
     stmt = (
         insert(Film)
@@ -90,6 +93,20 @@ async def _upsert_film_row(
         .returning(Film.id)
     )
     return (await session.execute(stmt)).scalar_one()
+
+
+async def _slug_for_insert(session: AsyncSession, details: TMDBMovieDetails) -> str | None:
+    """An existing film (matched on `tmdb_id`) keeps its stored slug — it is excluded from the
+    `DO UPDATE` set, so the value here is only used when the row is actually inserted. A new film
+    gets a freshly assigned collision-safe slug."""
+    row = (await session.execute(select(Film.slug).where(Film.tmdb_id == details.id))).one_or_none()
+    if row is not None:
+        existing_slug = row[0]
+        if existing_slug is not None:
+            return existing_slug
+    return await assign_slug(
+        session, title=details.title, release_date=details.release_date, tmdb_id=details.id
+    )
 
 
 async def _upsert_references(session: AsyncSession, details: TMDBMovieDetails) -> None:

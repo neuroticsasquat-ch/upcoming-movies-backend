@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Text,
     text,
@@ -24,12 +25,16 @@ class Film(Base):
     `catalog` schema (people, credits) without altering this seam."""
 
     __tablename__ = "film"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index("ix_catalog_film_slug", "slug", unique=True),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     tmdb_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    slug: Mapped[str | None] = mapped_column(Text, nullable=True)
     imdb_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     original_title: Mapped[str | None] = mapped_column(Text, nullable=True)
