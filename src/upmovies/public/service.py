@@ -17,12 +17,7 @@ from upmovies.public.dto import (
     FilmIndexResponse,
     SourceOut,
 )
-
-
-def outlet_label(story: Story) -> str:
-    """Display label for a source: the resolved publisher when present (Google News
-    rows), otherwise the stored `source` (trade feeds, or unresolved rows)."""
-    return story.outlet or story.source
+from upmovies.public.sources import outlet_label
 
 
 def _release_year(release_date: date | None) -> int | None:
