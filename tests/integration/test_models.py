@@ -1,5 +1,8 @@
 from datetime import UTC, datetime
 
+import pytest
+from sqlalchemy.exc import IntegrityError
+
 from upmovies.app.models import User
 from upmovies.catalog.models import Film
 from upmovies.news.models import Story
@@ -78,3 +81,16 @@ async def test_catalog_normalized_tables_roundtrip(session):
     assert film.origin_country == ["US"]
     assert film.budget == 11000000
     assert film.tmdb_raw == {"id": 11, "extra": "kept"}
+
+
+async def test_film_slug_nullable_and_unique(session):
+    # nullable: a film can be created without a slug (multiple NULLs are allowed)
+    session.add(Film(tmdb_id=1, title="No Slug Yet"))
+    session.add(Film(tmdb_id=2, title="Also No Slug"))
+    await session.flush()
+
+    # unique: two films cannot share the same non-null slug
+    session.add(Film(tmdb_id=3, title="A", slug="dupe-2026"))
+    session.add(Film(tmdb_id=4, title="B", slug="dupe-2026"))
+    with pytest.raises(IntegrityError):
+        await session.flush()

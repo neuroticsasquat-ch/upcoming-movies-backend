@@ -152,3 +152,38 @@ async def test_upsert_rebuilds_joins_on_change(session):
     )
     await session.commit()
     assert await _genre_ids(session, film.id) == {878}
+
+
+async def test_upsert_assigns_slug_on_insert(session):
+    await upsert_film(
+        session, TMDBMovieDetails.model_validate(make_details(27205, title="Inception"))
+    )
+    await session.commit()
+    assert (await _films(session))[0].slug == "inception-2026"
+
+
+async def test_upsert_preserves_slug_when_title_changes(session):
+    await upsert_film(session, TMDBMovieDetails.model_validate(make_details(1, title="Old Title")))
+    await session.commit()
+    original_slug = (await _films(session))[0].slug
+    assert original_slug == "old-title-2026"
+
+    await upsert_film(
+        session, TMDBMovieDetails.model_validate(make_details(1, title="Brand New Title"))
+    )
+    await session.commit()
+    film = (await _films(session))[0]
+    assert film.title == "Brand New Title"
+    assert film.slug == original_slug, "slug is frozen on insert — never regenerated on update"
+
+
+async def test_upsert_disambiguates_slug_collision_with_tmdb_id(session):
+    # two distinct films with the same title + release year (defaults to 2026-07-15)
+    await upsert_film(session, TMDBMovieDetails.model_validate(make_details(1, title="Dune")))
+    await session.commit()
+    await upsert_film(session, TMDBMovieDetails.model_validate(make_details(2, title="Dune")))
+    await session.commit()
+
+    films = await _films(session)  # ordered by tmdb_id ascending
+    assert films[0].slug == "dune-2026"
+    assert films[1].slug == "dune-2026-2"
