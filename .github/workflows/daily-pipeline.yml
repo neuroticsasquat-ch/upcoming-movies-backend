@@ -1,13 +1,14 @@
 name: Daily pipeline
 
-# Triggers the full daily pipeline (TMDB → per-film feeds → link) against the prod API
-# once a day and waits for each run to reach a terminal state, failing the job on
-# failed/cancelled or timeout.
+# Triggers the full daily pipeline (TMDB → per-film feeds → link → synthesize) against
+# the prod API once a day and waits for each run to reach a terminal state, failing the
+# job on failed/cancelled or timeout.
 #
 # Light feed ingestion runs hourly in hourly-feeds.yml (Phase A only). This daily run
-# does the TMDB refresh, the per-film feed pass (Phase A + B, per_film=true), and the
-# LLM link pass. Both workflows share the `upmovies-ingest` concurrency group so the
-# 09:00 overlap queues instead of running two feed ingests at once.
+# does the TMDB refresh, the per-film feed pass (Phase A + B, per_film=true), the LLM
+# link pass, and the summarization pass (synthesize). Both workflows share the
+# `upmovies-ingest` concurrency group so the 09:00 overlap queues instead of running
+# two feed ingests at once.
 #
 # Required configuration (repo Settings → Secrets and variables → Actions):
 #   secret    UPMOVIES_ADMIN_TOKEN     — must match the API's ADMIN_TOKEN
@@ -95,9 +96,11 @@ jobs:
 
           # Run all pipelines; fail the job if any did not succeed. feeds runs with
           # per_film=true (Phase A + per-film Phase B); link runs after feeds (it
-          # consumes freshly-fetched stories).
+          # consumes freshly-fetched stories); synthesize runs after link (it
+          # consumes linked stories to produce per-film summaries).
           rc=0
           trigger_and_wait tmdb || rc=1
           trigger_and_wait feeds "?per_film=true" || rc=1
           trigger_and_wait link || rc=1
+          trigger_and_wait synthesize || rc=1
           exit "${rc}"

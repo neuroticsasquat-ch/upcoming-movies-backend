@@ -1,3 +1,5 @@
+from upmovies.synthesize.pipeline import SynthesizeResult as SynthesizeResult
+from upmovies.synthesize.pipeline import run_synthesize_ingest as run_synthesize_ingest
 from upmovies.synthesize.summarizer import BatchCompleter as BatchCompleter
 from upmovies.synthesize.summarizer import Completer as Completer
 from upmovies.synthesize.summarizer import EventInput as EventInput

@@ -1,0 +1,257 @@
+"""The `synthesize` pipeline: select events whose summary is missing, stale (the event grew),
+or prompt-version-mismatched; summarize each (sequential Messages path or batched Batches path);
+and upsert news.event_summary. Idempotent — a re-run with nothing pending is a no-op. One event's
+failure never rolls back others. Mirrors link/pipeline.py structurally."""
+
+import logging
+from collections import defaultdict
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from uuid import UUID
+
+from sqlalchemy import func, nulls_last, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from upmovies.catalog.models import Film
+from upmovies.ingest.runs import finalize_run, record_progress
+from upmovies.news.models import Event, EventStory, EventSummary, Story
+from upmovies.synthesize.summarizer import (
+    EventInput,
+    StoryInput,
+    SummaryClient,
+    SummaryResult,
+    build_summary_batch_request,
+    parse_summary,
+    summarize_event,
+)
+
+log = logging.getLogger(__name__)
+
+SessionFactory = Callable[[], AsyncSession]
+
+
+@dataclass
+class SynthesizeResult:
+    new: int
+    refreshed: int
+    failed: int
+
+
+@dataclass
+class _PendingEvent:
+    event_id: UUID
+    is_new: bool
+    event_input: EventInput
+
+
+@asynccontextmanager
+async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[AsyncSession]:
+    async with session_factory() as s:
+        yield s
+
+
+async def _select_pending(session: AsyncSession, *, prompt_version: str) -> list[_PendingEvent]:
+    """Events missing a summary, or whose summary is stale (event.updated_at later than the
+    stored source_updated_at), or whose stored prompt_version differs from the current one.
+    Returns each mapped to an EventInput (plain dataclasses — safe to use after the session
+    closes), with is_new = no prior summary existed."""
+    rows = (
+        await session.execute(
+            select(Event, Film.title, EventSummary.event_id)
+            .join(Film, Film.id == Event.film_id)
+            .outerjoin(EventSummary, EventSummary.event_id == Event.id)
+            .where(
+                EventSummary.event_id.is_(None)
+                | (Event.updated_at > EventSummary.source_updated_at)
+                | (EventSummary.prompt_version != prompt_version)
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+
+    event_ids = [event.id for event, _title, _existing in rows]
+    stories_by_event: dict[UUID, list[Story]] = defaultdict(list)
+    story_rows = (
+        await session.execute(
+            select(EventStory.event_id, Story)
+            .join(Story, Story.id == EventStory.story_id)
+            .where(EventStory.event_id.in_(event_ids))
+            .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
+        )
+    ).all()
+    for event_id, story in story_rows:
+        stories_by_event[event_id].append(story)
+
+    pending: list[_PendingEvent] = []
+    for event, film_title, existing in rows:
+        story_inputs = [
+            StoryInput(
+                title=s.title,
+                dek=str((s.raw or {}).get("summary", "")),
+                source=s.source,
+            )
+            for s in stories_by_event.get(event.id, [])
+        ]
+        pending.append(
+            _PendingEvent(
+                event_id=event.id,
+                is_new=existing is None,
+                event_input=EventInput(
+                    event_type=event.event_type,
+                    film_title=film_title,
+                    source_updated_at=event.updated_at,
+                    stories=story_inputs,
+                ),
+            )
+        )
+    return pending
+
+
+async def _upsert_summary(session: AsyncSession, event_id: UUID, result: SummaryResult) -> None:
+    """Insert or update the one summary row for an event (PK event_id). Refreshes generated_at
+    on update. Caller owns the commit."""
+    stmt = pg_insert(EventSummary).values(
+        event_id=event_id,
+        summary=result.summary,
+        model=result.model,
+        prompt_version=result.prompt_version,
+        source_updated_at=result.source_updated_at,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["event_id"],
+        set_={
+            "summary": result.summary,
+            "model": result.model,
+            "prompt_version": result.prompt_version,
+            "source_updated_at": result.source_updated_at,
+            "generated_at": func.now(),
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _summary_stage_sequential(
+    *,
+    session_factory: SessionFactory,
+    client: SummaryClient,
+    run_id: UUID,
+    model: str,
+    prompt_version: str,
+    pending: list[_PendingEvent],
+) -> tuple[int, int, int]:
+    new = refreshed = failed = 0
+    for pe in pending:
+        try:
+            result = await summarize_event(
+                client=client, model=model, prompt_version=prompt_version, event=pe.event_input
+            )
+            async with _owned_session(session_factory) as s:
+                await _upsert_summary(s, pe.event_id, result)
+                await record_progress(s, run_id, processed_delta=1)
+                await s.commit()
+            if pe.is_new:
+                new += 1
+            else:
+                refreshed += 1
+        except Exception:
+            log.exception("summarize failed for event %s", pe.event_id)
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=1)
+                await s.commit()
+            failed += 1
+    return new, refreshed, failed
+
+
+async def _summary_stage_batched(
+    *,
+    session_factory: SessionFactory,
+    client: SummaryClient,
+    run_id: UUID,
+    model: str,
+    prompt_version: str,
+    pending: list[_PendingEvent],
+) -> tuple[int, int, int]:
+    if not pending:
+        return 0, 0, 0
+
+    by_id = {str(pe.event_id): pe for pe in pending}
+    requests = [
+        build_summary_batch_request(custom_id=str(pe.event_id), model=model, event=pe.event_input)
+        for pe in pending
+    ]
+
+    try:
+        results = await client.complete_batch(requests)
+    except Exception:
+        log.exception("summary batch submit of %d events failed", len(requests))
+        async with _owned_session(session_factory) as s:
+            await record_progress(s, run_id, failed_delta=len(requests))
+            await s.commit()
+        return 0, 0, len(requests)
+
+    new = refreshed = failed = 0
+    for custom_id, pe in by_id.items():
+        result = results.get(custom_id)
+        try:
+            if result is None or not result.ok:
+                detail = result.error_type if result else "missing"
+                raise RuntimeError(f"summary for event {custom_id} unavailable: {detail}")
+            summary_result = SummaryResult(
+                summary=parse_summary(result.text),
+                model=model,
+                prompt_version=prompt_version,
+                source_updated_at=pe.event_input.source_updated_at,
+            )
+            async with _owned_session(session_factory) as s:
+                await _upsert_summary(s, pe.event_id, summary_result)
+                await record_progress(s, run_id, processed_delta=1)
+                await s.commit()
+            if pe.is_new:
+                new += 1
+            else:
+                refreshed += 1
+        except Exception:
+            log.exception("summary apply failed for event %s", custom_id)
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=1)
+                await s.commit()
+            failed += 1
+    return new, refreshed, failed
+
+
+async def run_synthesize_ingest(
+    *,
+    session_factory: SessionFactory,
+    client: SummaryClient,
+    run_id: UUID,
+    model: str,
+    prompt_version: str,
+    use_batches: bool = True,
+) -> SynthesizeResult:
+    async with _owned_session(session_factory) as s:
+        pending = await _select_pending(s, prompt_version=prompt_version)
+
+    stage = _summary_stage_batched if use_batches else _summary_stage_sequential
+    new, refreshed, failed = await stage(
+        session_factory=session_factory,
+        client=client,
+        run_id=run_id,
+        model=model,
+        prompt_version=prompt_version,
+        pending=pending,
+    )
+
+    async with _owned_session(session_factory) as s:
+        await finalize_run(
+            s,
+            run_id,
+            status="succeeded",
+            detail=(
+                f"summarized {new + refreshed} ({new} new, {refreshed} refreshed); {failed} failed"
+            ),
+        )
+        await s.commit()
+    return SynthesizeResult(new=new, refreshed=refreshed, failed=failed)
