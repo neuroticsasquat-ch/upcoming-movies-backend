@@ -138,3 +138,41 @@ def test_build_batch_request_carries_custom_id_and_cached_block():
     assert req.max_tokens == 2048
     assert req.system[0]["cache_control"] == {"type": "ephemeral"}
     assert "entity-linking classifier" in req.system[0]["text"]
+
+
+async def test_not_news_with_category_is_rejected():
+    story, _, _, result = await _run(
+        lambda sid: json.dumps(
+            [
+                {
+                    "id": sid,
+                    "film": 1,
+                    "confidence": 0.9,
+                    "reason": "not-news",
+                    "category": "reaction",
+                }
+            ]
+        )
+    )
+    assert result.rejected == 1 and result.linked == 0
+    assert story.link_status == "rejected"
+    assert story.film_id is None
+    assert story.link_confidence is None
+    assert story.link_note == "not-news:reaction"
+
+
+async def test_not_news_without_category_is_rejected():
+    story, _, _, _ = await _run(
+        lambda sid: json.dumps([{"id": sid, "film": 1, "confidence": 0.9, "reason": "not-news"}])
+    )
+    assert story.link_status == "rejected"
+    assert story.link_note == "not-news"
+
+
+async def test_not_news_unknown_category_falls_back_to_bare_note():
+    story, _, _, _ = await _run(
+        lambda sid: json.dumps(
+            [{"id": sid, "film": 1, "confidence": 0.9, "reason": "not-news", "category": "bogus"}]
+        )
+    )
+    assert story.link_note == "not-news"

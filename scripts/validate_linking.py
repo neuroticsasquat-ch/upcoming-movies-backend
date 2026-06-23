@@ -17,13 +17,26 @@ from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.catalog.models import Film
 from upmovies.link.linker import link_story_batch
-from upmovies.link.metrics import compute_link_metrics
+from collections.abc import Iterable
+
+from upmovies.link.metrics import compute_link_metrics, compute_news_value_metrics
 from upmovies.link.roster import build_roster
-from upmovies.link.validation import load_validation_set
+from upmovies.link.validation import ValidationItem, load_validation_set
 from upmovies.llm.client import AnthropicClient
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
+
+
+def news_value_rows(
+    items_with_linked: Iterable[tuple[ValidationItem, bool]],
+) -> list[tuple[bool, bool | None, str | None]]:
+    """Map (item, linked) pairs to the news-value scorer's row shape, keeping 'about' only."""
+    return [
+        (linked, it.is_production_news, it.exclusion_category)
+        for it, linked in items_with_linked
+        if it.relation == "about"
+    ]
 
 
 async def main(path: str) -> None:
@@ -72,6 +85,19 @@ async def main(path: str) -> None:
     print(f"n={len(pairs)}  floor={settings.link_confidence_floor}  model={settings.link_model}")
     print(f"TP={m.true_positives} FP={m.false_positives} FN={m.false_negatives} TN={m.true_negatives}")
     print(f"precision={m.precision:.3f}  recall={m.recall:.3f}  f1={m.f1:.3f}")
+
+    nv = compute_news_value_metrics(
+        news_value_rows((it, st.film_id is not None) for st, it in zip(stories, items, strict=True))
+    )
+    print("\n=== NEWS-VALUE (production-news axis, 'about' rows) ===")
+    print(
+        f"kept-real={nv.true_positives} kept-excluded(leak)={nv.false_positives} "
+        f"dropped-real={nv.false_negatives} dropped-excluded={nv.true_negatives}"
+    )
+    print(f"precision={nv.precision:.3f}  recall={nv.recall:.3f}")
+    if nv.leaks_by_category:
+        leaks = ", ".join(f"{k}={v}" for k, v in sorted(nv.leaks_by_category.items()))
+        print(f"leaks by category: {leaks}")
 
 
 if __name__ == "__main__":

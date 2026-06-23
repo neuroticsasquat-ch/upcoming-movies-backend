@@ -42,6 +42,8 @@ Each item in the JSON array has the following fields:
 | `expected_film_tmdb_id` | integer \| null | required for `about` | TMDB film id — stable across databases |
 | `event_type` | string \| null | required for `about` | e.g. `"trailer"`, `"casting"`, `"release_date"` |
 | `event_group` | string \| null | no | Short shared label across stories about the same news beat (e.g. `"runner-trailer-1"`). Used for cluster scoring. |
+| `is_production_news` | bool \| null | no (about only) | `false` marks an `about` story that is **not** production news (should not link). `null` = treated as production news (expected to link). |
+| `exclusion_category` | string \| null | no | One of `reaction｜roundup｜streaming-move｜interview-quote｜downstream｜other`. Set only when `is_production_news` is `false`. Diagnoses *why* a story was excluded. |
 | `untracked_film` | bool | no | `true` marks a `none` row that is real movie news about a film **not in the roster** (typically undated / not-yet-ingested). Ignored by the harness (`load_validation_set` drops unknown fields) — captured purely as coverage-gap evidence for NEU-285 (undated capture) / NEU-284 (credits). Omitted when false. |
 
 ## Relation labels
@@ -52,6 +54,15 @@ Each item in the JSON array has the following fields:
 - **`mention`** — a tracked film is mentioned, but the story is not primarily about it
   (e.g. a top-10 list that includes the film). No `expected_film_tmdb_id` or `event_type`.
 - **`none`** — the story does not reference any tracked film in our roster.
+
+## Production-news axis (NEU-358)
+
+Orthogonal to about/mention/none: an `about` story can still fail the *production-news*
+test (it talks about the film but announces nothing new — a reaction, a roundup, interview
+color, a streaming-catalogue move, or a downstream piece). For scoring, an `about` row is
+**expected to link** iff `is_production_news is not False`; rows with `is_production_news:
+false` are expected to be rejected by the Stage-1 linker. Run `scripts/validate_linking.py`
+to see news-value precision/recall and the leak-by-category table.
 
 ## TMDB-id keying
 

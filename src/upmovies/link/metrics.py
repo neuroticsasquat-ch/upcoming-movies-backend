@@ -53,3 +53,39 @@ def cluster_purity(
         total += len(cluster)
         correct += max(counts.values())
     return correct / total if total else 0.0
+
+
+@dataclass
+class NewsValueMetrics:
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    true_negatives: int
+    precision: float
+    recall: float
+    leaks_by_category: dict[str, int]
+
+
+def compute_news_value_metrics(
+    rows: Iterable[tuple[bool, bool | None, str | None]],
+) -> NewsValueMetrics:
+    """Score the production-news axis over 'about' rows. Each row is
+    (linked, is_production_news, exclusion_category); expected-news is True unless
+    is_production_news is explicitly False. precision/recall are about the *kept* (linked)
+    stories being real news; leaks_by_category counts excluded rows that still linked."""
+    tp = fp = fn = tn = 0
+    leaks: Counter[str] = Counter()
+    for linked, is_news, category in rows:
+        expected_news = is_news is not False
+        if linked and expected_news:
+            tp += 1
+        elif linked:  # linked an excluded story — a leak
+            fp += 1
+            leaks[category or "other"] += 1
+        elif expected_news:  # dropped a real-news story
+            fn += 1
+        else:  # correctly dropped an excluded story
+            tn += 1
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    return NewsValueMetrics(tp, fp, fn, tn, precision, recall, dict(leaks))

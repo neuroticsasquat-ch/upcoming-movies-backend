@@ -1,4 +1,8 @@
-from upmovies.link.metrics import cluster_purity, compute_link_metrics
+from upmovies.link.metrics import (
+    cluster_purity,
+    compute_link_metrics,
+    compute_news_value_metrics,
+)
 
 
 def test_all_correct_links():
@@ -34,3 +38,31 @@ def test_cluster_purity_perfect():
 
 def test_cluster_purity_mixed():
     assert cluster_purity([{"a", "b", "c"}], {"a": "G1", "b": "G1", "c": "G2"}) == 2 / 3
+
+
+def test_news_value_all_real_news_linked():
+    m = compute_news_value_metrics([(True, True, None), (True, None, None)])
+    assert (m.true_positives, m.false_positives, m.false_negatives) == (2, 0, 0)
+    assert m.precision == 1.0 and m.recall == 1.0
+    assert m.leaks_by_category == {}
+
+
+def test_news_value_linked_excluded_is_a_leak():
+    m = compute_news_value_metrics([(True, False, "reaction")])
+    assert m.false_positives == 1 and m.precision == 0.0
+    assert m.leaks_by_category == {"reaction": 1}
+
+
+def test_news_value_leak_without_category_buckets_other():
+    m = compute_news_value_metrics([(True, False, None)])
+    assert m.leaks_by_category == {"other": 1}
+
+
+def test_news_value_dropped_excluded_is_true_negative():
+    m = compute_news_value_metrics([(False, False, "roundup")])
+    assert m.true_negatives == 1 and not m.leaks_by_category
+
+
+def test_news_value_dropped_real_news_is_false_negative():
+    m = compute_news_value_metrics([(False, True, None)])
+    assert m.false_negatives == 1 and m.recall == 0.0

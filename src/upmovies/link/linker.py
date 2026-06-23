@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 _SUMMARY_MAX = 500
 _MAX_TOKENS = 2048
+_NOT_NEWS_CATEGORIES = {"reaction", "roundup", "streaming-move", "interview-quote", "downstream"}
 
 _INSTRUCTIONS = """You are an entity-linking classifier for an upcoming-movies tracker.
 
@@ -25,8 +26,17 @@ stories (each an id, headline, and short dek). For every story, decide whether i
 primarily ABOUT exactly one of the tracked films.
 
 Definitions:
-- "about": the story's main subject is that tracked film (its casting, release date, \
-trailer, production, etc.).
+- "about": the story announces or confirms something NEW about exactly one tracked film's \
+production — casting, a filming start/wrap/status change, a trailer or teaser, a release \
+date set or moved, a major creative/production change (director, studio, format), or a \
+release-affecting distribution deal.
+- "not-news": the story is primarily about a tracked film but announces nothing new about \
+its production. Do NOT link these. Examples: cast/crew or fan/social-media reactions, \
+praise, or enthusiasm; "everything we know so far" roundups and aggregators with no new \
+information; interview color about what it is like to work on the project; talent comments \
+on plot points that are not a formal announcement; streaming-platform or catalogue moves \
+of an existing title; and any story whose news value is entirely downstream of an earlier \
+beat.
 - "mention": the film is only referenced in passing (an aside, a list, a comparison, or \
 an actor's other project). Mentions are NOT links.
 - "no-match": the story is not about any tracked film. Most stories are no-match — \
@@ -40,10 +50,12 @@ disambiguate.
 Return ONLY a JSON array — no prose, no markdown — one object per input story, using the \
 story's id:
 [{"id": "<story id>", "film": <roster index or null>, "confidence": <0.0-1.0>, "reason": \
-"about" | "mention" | "no-match"}]
+"about" | "mention" | "no-match" | "not-news", "category": "reaction" | "roundup" | \
+"streaming-move" | "interview-quote" | "downstream" | null}]
 
 "confidence" is your probability that the story is about that exact roster film (0.0 for \
-mention/no-match)."""
+mention/no-match/not-news). "category" labels why a "not-news" story was excluded (null \
+otherwise)."""
 
 
 class Completer(Protocol):
@@ -156,6 +168,11 @@ def apply_link_decisions(
                 story.link_note = "below-floor"
             elif reason == "mention":
                 story.link_note = "mention"
+            elif reason == "not-news":
+                category = decision.get("category")
+                story.link_note = (
+                    f"not-news:{category}" if category in _NOT_NEWS_CATEGORIES else "not-news"
+                )
             else:
                 story.link_note = "no-match"
             rejected += 1
