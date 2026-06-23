@@ -10,6 +10,8 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.public.arc import derive_arc_stage
 from upmovies.public.dto import (
     EventOut,
+    FeedItem,
+    FeedResponse,
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
@@ -157,3 +159,63 @@ async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
         )
     ).all()
     return [SitemapFilm(slug=slug, lastmod=last_event_created) for slug, last_event_created in rows]
+
+
+async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedResponse:
+    total = await session.scalar(
+        select(func.count())
+        .select_from(Event)
+        .join(EventSummary, EventSummary.event_id == Event.id)
+        .join(Film, Film.id == Event.film_id)
+        .where(Film.slug.is_not(None))
+    )
+    rows = (
+        await session.execute(
+            select(Event, EventSummary.summary, Film.slug, Film.title)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .join(Film, Film.id == Event.film_id)
+            .where(Film.slug.is_not(None))
+            .order_by(Event.created_at.desc(), Event.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    event_ids = [event.id for event, _summary, _slug, _title in rows]
+    sources_by_event: dict[UUID, list[Story]] = {}
+    if event_ids:
+        source_rows = (
+            await session.execute(
+                select(EventStory.event_id, Story)
+                .join(Story, Story.id == EventStory.story_id)
+                .where(EventStory.event_id.in_(event_ids))
+                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
+            )
+        ).all()
+        for event_id, story in source_rows:
+            sources_by_event.setdefault(event_id, []).append(story)
+
+    items: list[FeedItem] = []
+    for event, summary, slug, title in rows:
+        assert slug is not None
+        items.append(
+            FeedItem(
+                film_slug=slug,
+                film_title=title,
+                event_type=event.event_type,
+                confidence=event.confidence,
+                occurred_at=event.occurred_at,
+                created_at=event.created_at,
+                summary=summary,
+                sources=[
+                    SourceOut(
+                        url=story.url,
+                        source=story.source,
+                        title=story.title,
+                        published_at=story.published_at,
+                    )
+                    for story in sources_by_event.get(event.id, [])
+                ],
+            )
+        )
+    return FeedResponse(items=items, total=total or 0, limit=limit, offset=offset)

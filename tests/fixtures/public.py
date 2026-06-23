@@ -53,6 +53,7 @@ def add_event(session: AsyncSession):
         event_type: str = "casting",
         confidence: str = "confirmed",
         occurred_at: datetime = datetime(2025, 3, 1, tzinfo=UTC),
+        created_at: datetime | None = None,
         summary: str | None = "A neutral summary.",
         sources: tuple[dict, ...] = (),
     ) -> Event:
@@ -62,6 +63,8 @@ def add_event(session: AsyncSession):
             confidence=confidence,
             occurred_at=occurred_at,
         )
+        if created_at is not None:
+            event.created_at = created_at
         session.add(event)
         await session.flush()  # populate event.id
         if summary is not None:

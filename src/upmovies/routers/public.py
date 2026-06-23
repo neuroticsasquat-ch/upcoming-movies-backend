@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.config import get_settings
 from upmovies.deps import get_session
 from upmovies.public import service
-from upmovies.public.dto import FilmDetailResponse, FilmIndexResponse
+from upmovies.public.dto import FeedResponse, FilmDetailResponse, FilmIndexResponse
 from upmovies.public.sitemap import render_sitemap
 
 router = APIRouter(tags=["public"])
@@ -28,6 +28,15 @@ async def get_film(
     if film is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="film not found")
     return film
+
+
+@router.get("/feed", response_model=FeedResponse)
+async def get_feed(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> FeedResponse:
+    return await service.get_feed(session, limit=limit, offset=offset)
 
 
 @router.get("/sitemap.xml")

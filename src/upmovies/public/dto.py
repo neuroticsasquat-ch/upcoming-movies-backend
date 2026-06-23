@@ -41,3 +41,21 @@ class FilmDetailResponse(BaseModel):
     poster_path: str | None
     arc_stage: str
     events: list[EventOut]
+
+
+class FeedItem(BaseModel):
+    film_slug: str
+    film_title: str
+    event_type: str
+    confidence: str
+    occurred_at: datetime
+    created_at: datetime
+    summary: str
+    sources: list[SourceOut]
+
+
+class FeedResponse(BaseModel):
+    items: list[FeedItem]
+    total: int
+    limit: int
+    offset: int
