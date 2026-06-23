@@ -17,7 +17,7 @@ from upmovies.public.dto import (
     FilmIndexResponse,
     SourceOut,
 )
-from upmovies.public.sources import outlet_label
+from upmovies.public.sources import cap_sources, outlet_label
 
 
 def _release_year(release_date: date | None) -> int | None:
@@ -127,7 +127,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
                     title=story.title,
                     published_at=story.published_at,
                 )
-                for story in sources_by_event.get(event.id, [])
+                for story in cap_sources(sources_by_event.get(event.id, []))
             ],
         )
         for event, summary in summarized
@@ -215,7 +215,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
                         title=story.title,
                         published_at=story.published_at,
                     )
-                    for story in sources_by_event.get(event.id, [])
+                    for story in cap_sources(sources_by_event.get(event.id, []))
                 ],
             )
         )

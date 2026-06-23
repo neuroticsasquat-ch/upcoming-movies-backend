@@ -140,3 +140,48 @@ async def test_feed_source_label_uses_resolved_outlet(client, make_film, add_eve
     item = (await client.get("/feed")).json()["items"][0]
     labels = {s["source"] for s in item["sources"]}
     assert labels == {"Deadline", "Variety"}  # google resolved; trade falls back to source
+
+
+async def test_feed_caps_sources_at_three_distinct_outlets_newest_first(
+    client, make_film, add_event
+):
+    film = await make_film(slug="cap-feed-2026")
+    await add_event(
+        film=film,
+        summary="Lots of coverage.",
+        sources=(
+            {
+                "url": "https://d/old",
+                "source": "Deadline",
+                "published_at": datetime(2025, 3, 1, tzinfo=UTC),
+            },
+            {
+                "url": "https://d/new",
+                "source": "Deadline",
+                "published_at": datetime(2025, 3, 5, tzinfo=UTC),
+            },
+            {
+                "url": "https://v/1",
+                "source": "Variety",
+                "published_at": datetime(2025, 3, 4, tzinfo=UTC),
+            },
+            {
+                "url": "https://t/1",
+                "source": "The Hollywood Reporter",
+                "published_at": datetime(2025, 3, 3, tzinfo=UTC),
+            },
+            {
+                "url": "https://c/1",
+                "source": "Collider",
+                "published_at": datetime(2025, 3, 2, tzinfo=UTC),
+            },
+        ),
+    )
+
+    item = (await client.get("/feed")).json()["items"][0]
+    # 5 stories / 4 distinct outlets -> top 3 by recency, deduped, newest-first.
+    assert [s["source"] for s in item["sources"]] == [
+        "Deadline",
+        "Variety",
+        "The Hollywood Reporter",
+    ]
