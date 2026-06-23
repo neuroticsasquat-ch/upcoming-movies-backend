@@ -7,7 +7,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1003596,
     "event_type": "other",
-    "event_group": null
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://deadline.com/2026/06/first-look-the-wedding-dress-golden-globe-edoardo-ponti-1236963072/",
@@ -2852,5 +2854,65 @@
     "expected_film_tmdb_id": null,
     "event_type": null,
     "event_group": null
+  },
+  {
+    "url": "https://example.test/neu358/lotr-gollum-mckellen-cant-wait",
+    "source": "Empire",
+    "title": "Ian McKellen \"Can't Wait\" To Return As Gandalf In The Hunt For Gollum",
+    "summary": "The actor gushed about reuniting with Andy Serkis, calling the upcoming film a dream he never expected to revisit.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1090869,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "reaction"
+  },
+  {
+    "url": "https://example.test/neu358/spider-man-brand-new-day-everything-we-know",
+    "source": "ScreenRant",
+    "title": "Spider-Man: Brand New Day — Everything We Know So Far About The MCU Reboot",
+    "summary": "A roundup of previously reported casting, plot rumors, and release details — no new information.",
+    "relation": "about",
+    "expected_film_tmdb_id": 969681,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "roundup"
+  },
+  {
+    "url": "https://example.test/neu358/enola-holmes-netflix-top-10-resurgence",
+    "source": "Collider",
+    "title": "Enola Holmes 1 & 2 Surge Back Into Netflix's Global Top 10 Ahead Of The Threequel",
+    "summary": "The first two films are climbing the streaming charts again as catalogue interest builds.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1202033,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "streaming-move"
+  },
+  {
+    "url": "https://example.test/neu358/evil-dead-burn-producer-teases-deadites",
+    "source": "Bloody Disgusting",
+    "title": "Evil Dead Burn Producer Teases A \"Nastier\" Deadite Ahead Of Release",
+    "summary": "In a new interview the producer dropped a minor plot detail about the creature design, downstream of the already-reported greenlight.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1212763,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "downstream"
+  },
+  {
+    "url": "https://example.test/neu358/how-to-rob-a-bank-dubai-screening-reaction",
+    "source": "X",
+    "title": "Audiences Go Wild Over How To Rob A Bank Footage At Surprise Dubai Screening",
+    "summary": "Social media erupted with praise after a sizzle reel screened for fans — a reaction, not an announcement.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1437511,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "reaction"
   }
 ]
