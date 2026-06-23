@@ -15,7 +15,9 @@ class IngestRun(Base):
 
     __tablename__ = "ingest_run"
     __table_args__ = (
-        CheckConstraint("kind IN ('tmdb', 'feeds', 'link')", name="ck_ingest_run_kind"),
+        CheckConstraint(
+            "kind IN ('tmdb', 'feeds', 'link', 'synthesize')", name="ck_ingest_run_kind"
+        ),
         CheckConstraint(
             "status IN ('running', 'succeeded', 'failed', 'cancelled')",
             name="ck_ingest_run_status",

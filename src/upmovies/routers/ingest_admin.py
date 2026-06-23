@@ -22,6 +22,7 @@ from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm.client import AnthropicClient
 from upmovies.news.fetcher import run_feeds_ingest
+from upmovies.synthesize.pipeline import run_synthesize_ingest
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/ingest", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -130,6 +131,33 @@ async def trigger_link(
     run_id = await create_run(session, kind="link")
     await session.commit()
     asyncio.create_task(_background_link(run_id, settings))
+    return {"run_id": str(run_id)}
+
+
+async def _background_synth(run_id: UUID, settings: Settings) -> None:
+    try:
+        async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
+            await run_synthesize_ingest(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                model=settings.summary_model,
+                prompt_version=settings.summary_prompt_version,
+                use_batches=settings.summary_use_batches,
+            )
+    except Exception as e:
+        log.exception("background synthesize ingest crashed")
+        await _finalize_failed(run_id, str(e))
+
+
+@router.post("/synthesize", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_synthesize(
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    run_id = await create_run(session, kind="synthesize")
+    await session.commit()
+    asyncio.create_task(_background_synth(run_id, settings))
     return {"run_id": str(run_id)}
 
 
