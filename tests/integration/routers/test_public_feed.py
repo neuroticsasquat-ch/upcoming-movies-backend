@@ -114,3 +114,29 @@ async def test_feed_empty_returns_empty_list(client):
     body = (await client.get("/feed")).json()
     assert body["items"] == []
     assert body["total"] == 0
+
+
+async def test_feed_source_label_uses_resolved_outlet(client, make_film, add_event):
+    film = await make_film(slug="resolve-feed-2026")
+    await add_event(
+        film=film,
+        summary="Casting.",
+        sources=(
+            {
+                "url": "https://news.google.com/rss/articles/abc",
+                "source": "Google News: per-film",
+                "title": "Cast Revealed - Deadline",
+                "outlet": "Deadline",
+            },
+            {
+                "url": "https://variety.com/trade",
+                "source": "Variety",
+                "title": "Trade story",
+                "outlet": None,
+            },
+        ),
+    )
+
+    item = (await client.get("/feed")).json()["items"][0]
+    labels = {s["source"] for s in item["sources"]}
+    assert labels == {"Deadline", "Variety"}  # google resolved; trade falls back to source

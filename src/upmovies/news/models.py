@@ -37,6 +37,7 @@ class Story(Base):
         PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     source: Mapped[str] = mapped_column(Text, nullable=False)
+    outlet: Mapped[str | None] = mapped_column(Text, nullable=True)
     url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

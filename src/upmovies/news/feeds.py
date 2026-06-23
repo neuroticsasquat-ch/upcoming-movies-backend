@@ -55,6 +55,12 @@ def feed_sources(recency_days: int) -> tuple[FeedSource, ...]:
 _PER_FILM_SOURCE = "Google News: per-film"  # constant story.source for every per-film hit
 
 
+def is_google_source(name: str) -> bool:
+    """True for any Google News feed name (per-film search + the broad queries).
+    These are aggregator labels whose stories need outlet resolution."""
+    return name.startswith("Google News:")
+
+
 def per_film_google_sources(titles: Sequence[str], recency_days: int) -> tuple[FeedSource, ...]:
     """One Google News source per tracked film, unquoted `<title> when:Nd`. Unquoted
     maximizes recall (Google quoting is fuzzy relevance-matching, not strict phrase);

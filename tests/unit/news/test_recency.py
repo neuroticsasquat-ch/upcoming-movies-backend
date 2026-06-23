@@ -4,7 +4,9 @@ from upmovies.news.fetcher import StoryEntry, drop_stale
 
 
 def _entry(url: str, published_at: datetime | None) -> StoryEntry:
-    return StoryEntry(source="X", url=url, title="t", published_at=published_at, raw={})
+    return StoryEntry(
+        source="X", url=url, title="t", published_at=published_at, outlet=None, raw={}
+    )
 
 
 def test_drop_stale_keeps_recent_and_undated_drops_old():

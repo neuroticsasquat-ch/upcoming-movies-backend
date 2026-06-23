@@ -1,4 +1,4 @@
-from upmovies.news.feeds import feed_sources, per_film_google_sources
+from upmovies.news.feeds import feed_sources, is_google_source, per_film_google_sources
 
 
 def test_google_queries_carry_the_when_operator():
@@ -34,3 +34,17 @@ def test_per_film_sources_one_per_title_unquoted_with_when():
 
 def test_per_film_sources_empty_roster_is_empty():
     assert per_film_google_sources([], 14) == ()
+
+
+def test_is_google_source_matches_all_google_labels():
+    assert is_google_source("Google News: per-film") is True
+    assert is_google_source("Google News: casting") is True
+    assert is_google_source("Google News: release date") is True
+    assert is_google_source("Google News: trailer") is True
+    assert is_google_source("Google News: greenlight") is True
+
+
+def test_is_google_source_false_for_trade_feeds():
+    assert is_google_source("Deadline") is False
+    assert is_google_source("The Hollywood Reporter") is False
+    assert is_google_source("/Film") is False
