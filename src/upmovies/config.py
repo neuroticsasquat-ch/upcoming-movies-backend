@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     cors_allowed_origins_raw: str = Field(
         default="https://app.upmovies.localhost", alias="CORS_ALLOWED_ORIGINS"
     )
+    public_base_url: str = Field(default="http://localhost:5173", alias="PUBLIC_BASE_URL")
 
     session_cookie_name: str = Field(default="upmovies_session", alias="SESSION_COOKIE_NAME")
     csrf_cookie_name: str = Field(default="csrf_token", alias="CSRF_COOKIE_NAME")

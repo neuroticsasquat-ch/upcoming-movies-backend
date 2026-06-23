@@ -3,7 +3,7 @@ import os
 os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 os.environ.pop("COOKIE_DOMAIN", None)
 
-pytest_plugins = ["tests.fixtures.users"]
+pytest_plugins = ["tests.fixtures.users", "tests.fixtures.public"]
 
 from collections.abc import AsyncIterator  # noqa: E402
 

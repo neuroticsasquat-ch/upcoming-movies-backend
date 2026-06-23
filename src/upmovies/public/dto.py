@@ -1,0 +1,43 @@
+from datetime import date, datetime
+
+from pydantic import BaseModel
+
+
+class SourceOut(BaseModel):
+    url: str
+    source: str
+    title: str
+    published_at: datetime | None
+
+
+class EventOut(BaseModel):
+    event_type: str
+    confidence: str
+    occurred_at: datetime
+    summary: str
+    sources: list[SourceOut]
+
+
+class FilmIndexItem(BaseModel):
+    slug: str
+    title: str
+    release_year: int | None
+    poster_path: str | None
+    arc_stage: str
+
+
+class FilmIndexResponse(BaseModel):
+    items: list[FilmIndexItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class FilmDetailResponse(BaseModel):
+    slug: str
+    title: str
+    release_date: date | None
+    release_year: int | None
+    poster_path: str | None
+    arc_stage: str
+    events: list[EventOut]
