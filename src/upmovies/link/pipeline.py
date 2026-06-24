@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.ingest.runs import finalize_run, record_progress
+from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
 from upmovies.link.cluster import (
     ClusterPlan,
     apply_cluster_decisions,
@@ -29,7 +29,7 @@ from upmovies.link.linker import (
     link_story_batch,
 )
 from upmovies.link.roster import Roster, build_roster
-from upmovies.llm.client import BatchRequest
+from upmovies.llm.client import BatchRequest, Usage
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -63,27 +63,29 @@ async def _link_stage_sequential(
     pending_ids: Sequence[UUID],
     batch_size: int,
     floor: float,
-) -> tuple[int, int]:
+) -> tuple[int, int, Usage]:
     linked = rejected = 0
+    total_usage = Usage()
     for batch_ids in _chunks(pending_ids, batch_size):
         try:
             async with _owned_session(session_factory) as s:
                 stories = (
                     (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
                 )
-                batch = await link_story_batch(
+                batch, usage = await link_story_batch(
                     client=client, model=model, roster=roster, stories=list(stories), floor=floor
                 )
                 await record_progress(s, run_id, processed_delta=batch.linked + batch.rejected)
                 await s.commit()
             linked += batch.linked
             rejected += batch.rejected
+            total_usage += usage
         except Exception:
             log.exception("link batch of %d stories failed", len(batch_ids))
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=len(batch_ids))
                 await s.commit()
-    return linked, rejected
+    return linked, rejected, total_usage
 
 
 async def _link_stage_batched(
@@ -96,7 +98,7 @@ async def _link_stage_batched(
     pending_ids: Sequence[UUID],
     batch_size: int,
     floor: float,
-) -> tuple[int, int]:
+) -> tuple[int, int, Usage]:
     chunks = _chunks(pending_ids, batch_size)
 
     # Build phase: one read-only session; ORM rows are dropped once serialized into requests,
@@ -114,7 +116,7 @@ async def _link_stage_batched(
             )
 
     if not requests:
-        return 0, 0
+        return 0, 0, Usage()
 
     try:
         results = await client.complete_batch(requests)
@@ -124,9 +126,10 @@ async def _link_stage_batched(
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(pending_ids))
             await s.commit()
-        return 0, 0
+        return 0, 0, Usage()
 
     linked = rejected = 0
+    total_usage = Usage()
     for i, batch_ids in enumerate(chunks):
         result = results.get(str(i))
         try:
@@ -146,13 +149,15 @@ async def _link_stage_batched(
                 await s.commit()
             linked += applied.linked
             rejected += applied.rejected
+            if result.usage is not None:
+                total_usage += result.usage
         except Exception:
             log.exception("link batch chunk %d of %d stories failed", i, len(batch_ids))
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=len(batch_ids))
                 await s.commit()
 
-    return linked, rejected
+    return linked, rejected, total_usage
 
 
 async def _cluster_stage_sequential(
@@ -164,12 +169,13 @@ async def _cluster_stage_sequential(
     film_ids: Sequence[UUID],
     attach_limit: int,
     cluster_max_tokens: int,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, Usage]:
     events_created = stories_clustered = stories_rejected = 0
+    total_usage = Usage()
     for film_id in film_ids:
         try:
             async with _owned_session(session_factory) as s:
-                cluster = await cluster_film_events(
+                cluster, usage = await cluster_film_events(
                     s,
                     client=client,
                     model=model,
@@ -181,12 +187,13 @@ async def _cluster_stage_sequential(
             events_created += cluster.events_created
             stories_clustered += cluster.stories_clustered
             stories_rejected += cluster.stories_rejected
+            total_usage += usage
         except Exception:
             log.exception("clustering failed for film %s", film_id)
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
-    return events_created, stories_clustered, stories_rejected
+    return events_created, stories_clustered, stories_rejected, total_usage
 
 
 async def _cluster_stage_batched(
@@ -198,7 +205,7 @@ async def _cluster_stage_batched(
     film_ids: Sequence[UUID],
     attach_limit: int,
     cluster_max_tokens: int,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, Usage]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
     # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
     requests: list[BatchRequest] = []
@@ -220,7 +227,7 @@ async def _cluster_stage_batched(
             plans[request.custom_id] = plan
 
     if not requests:
-        return 0, 0, 0
+        return 0, 0, 0, Usage()
 
     try:
         results = await client.complete_batch(requests)
@@ -229,9 +236,10 @@ async def _cluster_stage_batched(
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(requests))
             await s.commit()
-        return 0, 0, 0
+        return 0, 0, 0, Usage()
 
     events_created = stories_clustered = stories_rejected = 0
+    total_usage = Usage()
     for custom_id, plan in plans.items():
         result = results.get(custom_id)
         try:
@@ -244,13 +252,15 @@ async def _cluster_stage_batched(
             events_created += applied.events_created
             stories_clustered += applied.stories_clustered
             stories_rejected += applied.stories_rejected
+            if result.usage is not None:
+                total_usage += result.usage
         except Exception:
             log.exception("clustering failed for film %s", custom_id)
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
 
-    return events_created, stories_clustered, stories_rejected
+    return events_created, stories_clustered, stories_rejected, total_usage
 
 
 async def run_link_ingest(
@@ -281,7 +291,7 @@ async def run_link_ingest(
         pending_ids = [row[0] for row in result.all()]
 
     stage = _link_stage_batched if use_batches else _link_stage_sequential
-    linked, rejected = await stage(
+    linked, rejected, link_usage = await stage(
         session_factory=session_factory,
         client=client,
         run_id=run_id,
@@ -291,6 +301,11 @@ async def run_link_ingest(
         batch_size=batch_size,
         floor=floor,
     )
+    async with _owned_session(session_factory) as s:
+        await record_llm_usage(
+            s, run_id, stage="link", model=model, batched=use_batches, usage=link_usage
+        )
+        await s.commit()
 
     # --- Stage 2: cluster + classify, per film with unclustered linked stories ---
     async with _owned_session(session_factory) as s:
@@ -314,7 +329,7 @@ async def run_link_ingest(
         ]
 
     cluster_stage = _cluster_stage_batched if use_batches else _cluster_stage_sequential
-    events_created, stories_clustered, stories_rejected = await cluster_stage(
+    events_created, stories_clustered, stories_rejected, cluster_usage = await cluster_stage(
         session_factory=session_factory,
         client=client,
         run_id=run_id,
@@ -323,6 +338,16 @@ async def run_link_ingest(
         attach_limit=attach_limit,
         cluster_max_tokens=cluster_max_tokens,
     )
+    async with _owned_session(session_factory) as s:
+        await record_llm_usage(
+            s,
+            run_id,
+            stage="cluster",
+            model=cluster_model,
+            batched=use_batches,
+            usage=cluster_usage,
+        )
+        await s.commit()
 
     async with _owned_session(session_factory) as s:
         await finalize_run(

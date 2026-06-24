@@ -21,9 +21,11 @@ class FakeClient:
         self._response = response
         self.calls: list[dict] = []
 
-    async def complete(self, *, model, system, messages, max_tokens=4096) -> str:
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        from upmovies.llm.client import Usage
+
         self.calls.append({"system": system, "messages": messages})
-        return json.dumps(self._response)
+        return json.dumps(self._response), Usage()
 
 
 async def _linked_story(session, film, url, *, title="Runner news"):
@@ -60,7 +62,7 @@ async def test_creates_new_event_for_unclustered_stories(session):
             ]
         }
     )
-    result = await cluster_film_events(
+    result, _usage = await cluster_film_events(
         session, client=client, model="m", film_id=film.id, attach_limit=45
     )
     await session.commit()
@@ -90,7 +92,7 @@ async def test_attaches_to_existing_event(session):
     await session.commit()
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
-    result = await cluster_film_events(
+    result, _usage = await cluster_film_events(
         session, client=client, model="m", film_id=film.id, attach_limit=45
     )
     await session.commit()
@@ -117,7 +119,7 @@ async def test_noop_when_nothing_unclustered(session):
     await session.commit()
 
     client = FakeClient({"events": []})
-    result = await cluster_film_events(
+    result, _usage = await cluster_film_events(
         session, client=client, model="m", film_id=film.id, attach_limit=45
     )
     assert result == result.__class__(0, 0)
@@ -703,7 +705,7 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
     await session.commit()
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
-    result = await cluster_film_events(
+    result, _usage = await cluster_film_events(
         session, client=client, model="m", film_id=film.id, attach_limit=25
     )
     await session.commit()

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.link.linker import Completer
-from upmovies.llm.client import BatchRequest, cached_system_block
+from upmovies.llm.client import BatchRequest, Usage, cached_system_block
 from upmovies.news.models import Event, EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -315,15 +315,15 @@ async def cluster_film_events(
     film_id: UUID,
     attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
-) -> ClusterResult:
+) -> tuple[ClusterResult, Usage]:
     built = await build_cluster_request(session, film_id=film_id, attach_limit=attach_limit)
     if built is None:
-        return ClusterResult(0, 0)
+        return ClusterResult(0, 0), Usage()
     system, messages, plan = built
-    raw = await client.complete(
+    raw, usage = await client.complete_with_usage(
         model=model,
         system=system,
         messages=messages,
         max_tokens=max_tokens,
     )
-    return await apply_cluster_decisions(session, plan=plan, raw=raw)
+    return await apply_cluster_decisions(session, plan=plan, raw=raw), usage
