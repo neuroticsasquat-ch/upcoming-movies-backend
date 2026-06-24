@@ -410,7 +410,7 @@ async def test_batched_cluster_request_mapping(session):
     for r in reqs:
         assert r.model == "claude-sonnet-4-6"
         assert r.max_tokens == 4096
-        assert r.system[0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in r.system[0]
         assert "distinct EVENTS" in r.system[0]["text"]
 
 
