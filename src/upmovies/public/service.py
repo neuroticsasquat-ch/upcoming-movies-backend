@@ -237,7 +237,6 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
 
 async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) -> FeedDayResponse:
     day = cast(func.timezone("UTC", Event.created_at), Date)
-    last_created = func.max(Event.created_at)
 
     base = (
         select(
@@ -259,7 +258,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
 
     rows = (
         await session.execute(
-            base.order_by(day.desc(), last_created.desc(), Film.slug.asc())
+            base.order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
             .limit(limit)
             .offset(offset)
         )

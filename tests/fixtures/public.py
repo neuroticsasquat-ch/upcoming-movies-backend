@@ -27,6 +27,7 @@ def make_film(session: AsyncSession):
         status: str | None = "Planned",
         release_date: date | None = date(2026, 7, 17),
         poster_path: str | None = "/poster.jpg",
+        popularity: float | None = None,
     ) -> Film:
         counter["n"] += 1
         film = Film(
@@ -36,6 +37,7 @@ def make_film(session: AsyncSession):
             status=status,
             release_date=release_date,
             poster_path=poster_path,
+            popularity=popularity,
         )
         session.add(film)
         await session.commit()

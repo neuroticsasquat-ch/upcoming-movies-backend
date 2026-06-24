@@ -69,16 +69,41 @@ async def test_grouped_newest_day_first_across_films(client, make_film, add_even
     assert [i["film_slug"] for i in body["items"]] == ["b-2026", "a-2026"]
 
 
-async def test_grouped_within_day_orders_by_latest_event_time(client, make_film, add_event):
-    # Same UTC day. latest-event-time must win over slug ordering:
-    # zzz-late (22:00) precedes aaa-early (08:00) even though "aaa" < "zzz".
-    early = await make_film(slug="aaa-early")
-    late = await make_film(slug="zzz-late")
-    await add_event(film=early, summary="early", created_at=datetime(2026, 6, 5, 8, tzinfo=UTC))
-    await add_event(film=late, summary="late", created_at=datetime(2026, 6, 5, 22, tzinfo=UTC))
+async def test_grouped_within_day_orders_by_popularity(client, make_film, add_event):
+    # Same UTC day. Popularity must win over BOTH slug order and event time:
+    # zzz-blockbuster (pop 90, earlier event) precedes aaa-popular (pop 5, later event),
+    # even though "aaa" < "zzz" and aaa's event is more recent.
+    low = await make_film(slug="aaa-popular", popularity=5.0)
+    high = await make_film(slug="zzz-blockbuster", popularity=90.0)
+    await add_event(film=low, summary="low", created_at=datetime(2026, 6, 5, 22, tzinfo=UTC))
+    await add_event(film=high, summary="high", created_at=datetime(2026, 6, 5, 8, tzinfo=UTC))
 
     items = (await client.get("/feed/grouped")).json()["items"]
-    assert [i["film_slug"] for i in items] == ["zzz-late", "aaa-early"]
+    assert [i["film_slug"] for i in items] == ["zzz-blockbuster", "aaa-popular"]
+
+
+async def test_grouped_within_day_null_popularity_sorts_last(client, make_film, add_event):
+    # A film with no popularity sorts after one that has popularity, regardless of slug:
+    # aaa-nopop (None) has the alphabetically-first slug but must come last.
+    nopop = await make_film(slug="aaa-nopop", popularity=None)
+    haspop = await make_film(slug="zzz-haspop", popularity=10.0)
+    await add_event(film=nopop, summary="nopop", created_at=datetime(2026, 6, 5, tzinfo=UTC))
+    await add_event(film=haspop, summary="haspop", created_at=datetime(2026, 6, 5, tzinfo=UTC))
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [i["film_slug"] for i in items] == ["zzz-haspop", "aaa-nopop"]
+
+
+async def test_grouped_within_day_equal_popularity_ties_break_by_slug(client, make_film, add_event):
+    # Equal popularity falls back to slug ascending (NOT event time):
+    # aaa-2026 wins on slug even though bbb-2026 has the later event.
+    a = await make_film(slug="aaa-2026", popularity=10.0)
+    b = await make_film(slug="bbb-2026", popularity=10.0)
+    await add_event(film=a, summary="a", created_at=datetime(2026, 6, 5, 8, tzinfo=UTC))
+    await add_event(film=b, summary="b", created_at=datetime(2026, 6, 5, 22, tzinfo=UTC))
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [i["film_slug"] for i in items] == ["aaa-2026", "bbb-2026"]
 
 
 async def test_grouped_only_counts_summarized_events(client, make_film, add_event):
