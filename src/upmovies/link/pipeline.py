@@ -162,7 +162,7 @@ async def _cluster_stage_sequential(
     run_id: UUID,
     model: str,
     film_ids: Sequence[UUID],
-    recency_days: int,
+    attach_limit: int,
     cluster_max_tokens: int,
 ) -> tuple[int, int, int]:
     events_created = stories_clustered = stories_rejected = 0
@@ -174,7 +174,7 @@ async def _cluster_stage_sequential(
                     client=client,
                     model=model,
                     film_id=film_id,
-                    recency_days=recency_days,
+                    attach_limit=attach_limit,
                     max_tokens=cluster_max_tokens,
                 )
                 await s.commit()
@@ -196,7 +196,7 @@ async def _cluster_stage_batched(
     run_id: UUID,
     model: str,
     film_ids: Sequence[UUID],
-    recency_days: int,
+    attach_limit: int,
     cluster_max_tokens: int,
 ) -> tuple[int, int, int]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
@@ -210,7 +210,7 @@ async def _cluster_stage_batched(
                 custom_id=str(film_id),
                 model=model,
                 film_id=film_id,
-                recency_days=recency_days,
+                attach_limit=attach_limit,
                 max_tokens=cluster_max_tokens,
             )
             if built is None:
@@ -261,6 +261,7 @@ async def run_link_ingest(
     model: str,
     cluster_model: str,
     recency_days: int,
+    attach_limit: int = 25,
     batch_size: int,
     floor: float,
     use_batches: bool = False,
@@ -319,7 +320,7 @@ async def run_link_ingest(
         run_id=run_id,
         model=cluster_model,
         film_ids=film_ids,
-        recency_days=recency_days,
+        attach_limit=attach_limit,
         cluster_max_tokens=cluster_max_tokens,
     )
 

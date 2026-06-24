@@ -91,6 +91,7 @@ async def _background_link(run_id: UUID, settings: Settings) -> None:
                 model=settings.link_model,
                 cluster_model=settings.cluster_model,
                 recency_days=settings.link_recency_days,
+                attach_limit=settings.link_cluster_attach_limit,
                 batch_size=settings.link_batch_size,
                 floor=settings.link_confidence_floor,
                 use_batches=settings.link_use_batches,
