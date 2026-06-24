@@ -508,7 +508,7 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
         run_id=run_id,
         model="cluster-m",
         film_ids=[ok_film.id, fail_film.id],
-        recency_days=45,
+        attach_limit=45,
         cluster_max_tokens=4096,
     )
 

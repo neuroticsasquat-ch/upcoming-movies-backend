@@ -6,11 +6,11 @@ backstop. The caller owns the session/commit."""
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
@@ -42,6 +42,7 @@ def is_stale_stage(event_type: str, film_status: str | None) -> bool:
 
 _SUMMARY_MAX = 500
 _DEFAULT_MAX_TOKENS = 4096
+_HEADLINES_PER_EVENT = 3
 
 _INSTRUCTIONS = """You group a single film's news stories into distinct EVENTS — real beats \
 in its life (casting, a trailer, a release-date change, production milestones, etc.) — and \
@@ -95,7 +96,7 @@ async def build_cluster_request(
     session: AsyncSession,
     *,
     film_id: UUID,
-    recency_days: int,
+    attach_limit: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], ClusterPlan] | None:
     """Read half: load unclustered stories and recent events, build the system + messages
     payload and a ClusterPlan. Returns None when there is nothing to cluster (no film or
@@ -119,17 +120,21 @@ async def build_cluster_request(
     if not unclustered:
         return None
 
-    cutoff = datetime.now(UTC) - timedelta(days=recency_days)
-    existing_events = (
-        (
-            await session.execute(
-                select(Event)
-                .where(Event.film_id == film_id, Event.updated_at >= cutoff)
-                .order_by(Event.occurred_at, Event.id)
+    # Most-recent N events by occurred_at, age-independent (NEU-372), then reversed to
+    # oldest->newest so the 1-based positional indices the model uses stay stable.
+    existing_events = list(
+        reversed(
+            (
+                await session.execute(
+                    select(Event)
+                    .where(Event.film_id == film_id)
+                    .order_by(Event.occurred_at.desc(), Event.id.desc())
+                    .limit(attach_limit)
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
     )
 
     existing_payload = []
@@ -140,6 +145,8 @@ async def build_cluster_request(
                     select(Story.title)
                     .join(EventStory, EventStory.story_id == Story.id)
                     .where(EventStory.event_id == event.id)
+                    .order_by(func.coalesce(Story.published_at, Story.fetched_at).desc())
+                    .limit(_HEADLINES_PER_EVENT)
                 )
             )
             .scalars()
@@ -280,11 +287,11 @@ async def build_cluster_batch_request(
     custom_id: str,
     model: str,
     film_id: UUID,
-    recency_days: int,
+    attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
 ) -> tuple[BatchRequest, ClusterPlan] | None:
     """Wrap build_cluster_request into a BatchRequest ready for the Anthropic Batch API."""
-    built = await build_cluster_request(session, film_id=film_id, recency_days=recency_days)
+    built = await build_cluster_request(session, film_id=film_id, attach_limit=attach_limit)
     if built is None:
         return None
     system, messages, plan = built
@@ -306,10 +313,10 @@ async def cluster_film_events(
     client: Completer,
     model: str,
     film_id: UUID,
-    recency_days: int,
+    attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
 ) -> ClusterResult:
-    built = await build_cluster_request(session, film_id=film_id, recency_days=recency_days)
+    built = await build_cluster_request(session, film_id=film_id, attach_limit=attach_limit)
     if built is None:
         return ClusterResult(0, 0)
     system, messages, plan = built

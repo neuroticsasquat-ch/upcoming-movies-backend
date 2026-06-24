@@ -61,7 +61,7 @@ async def test_creates_new_event_for_unclustered_stories(session):
         }
     )
     result = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, recency_days=45
+        session, client=client, model="m", film_id=film.id, attach_limit=45
     )
     await session.commit()
 
@@ -91,7 +91,7 @@ async def test_attaches_to_existing_event(session):
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
     result = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, recency_days=45
+        session, client=client, model="m", film_id=film.id, attach_limit=45
     )
     await session.commit()
 
@@ -118,7 +118,7 @@ async def test_noop_when_nothing_unclustered(session):
 
     client = FakeClient({"events": []})
     result = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, recency_days=45
+        session, client=client, model="m", film_id=film.id, attach_limit=45
     )
     assert result == result.__class__(0, 0)
     assert client.calls == []  # short-circuits before calling the model
@@ -134,11 +134,11 @@ async def test_build_cluster_request_returns_none_when_no_unclustered(session):
     session.add(film)
     await session.flush()
     await session.commit()
-    assert await build_cluster_request(session, film_id=film.id, recency_days=45) is None
+    assert await build_cluster_request(session, film_id=film.id, attach_limit=45) is None
 
 
 async def test_build_cluster_request_returns_none_for_missing_film(session):
-    assert await build_cluster_request(session, film_id=uuid.uuid4(), recency_days=45) is None
+    assert await build_cluster_request(session, film_id=uuid.uuid4(), attach_limit=45) is None
 
 
 async def test_build_cluster_request_builds_payload_and_plan(session):
@@ -149,7 +149,7 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
     s2 = await _linked_story(session, film, "https://e/2", title="B")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, recency_days=45)
+    built = await build_cluster_request(session, film_id=film.id, attach_limit=45)
     assert built is not None
     system, messages, plan = built
 
@@ -286,7 +286,7 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
     s2 = await _linked_story(session, film, "https://e/s2")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, recency_days=3650)
+    built = await build_cluster_request(session, film_id=film.id, attach_limit=3650)
     assert built is not None
     _system, _messages, plan = built
     assert plan.existing_event_ids == [e1.id, e2.id]  # ordered by occurred_at at build time
@@ -345,7 +345,7 @@ async def test_build_cluster_batch_request_wraps_into_batch_request(session):
     await session.commit()
 
     built = await build_cluster_batch_request(
-        session, custom_id=str(film.id), model="cluster-m", film_id=film.id, recency_days=45
+        session, custom_id=str(film.id), model="cluster-m", film_id=film.id, attach_limit=45
     )
     assert built is not None
     req, plan = built
@@ -370,7 +370,7 @@ async def test_build_cluster_batch_request_honours_max_tokens(session):
         custom_id=str(film.id),
         model="cluster-m",
         film_id=film.id,
-        recency_days=45,
+        attach_limit=45,
         max_tokens=9999,
     )
     assert built is not None
@@ -385,7 +385,7 @@ async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session)
     await session.commit()
     assert (
         await build_cluster_batch_request(
-            session, custom_id=str(film.id), model="cluster-m", film_id=film.id, recency_days=45
+            session, custom_id=str(film.id), model="cluster-m", film_id=film.id, attach_limit=45
         )
         is None
     )
@@ -453,7 +453,7 @@ async def test_build_cluster_request_captures_film_status(session):
     await _linked_story(session, film, "https://e/1")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, recency_days=45)
+    built = await build_cluster_request(session, film_id=film.id, attach_limit=45)
     assert built is not None
     _system, _messages, plan = built
     assert plan.film_status == "Post Production"
@@ -577,3 +577,143 @@ async def test_apply_does_not_gate_attach_to_existing(session):
     assert result.stories_rejected == 0 and result.stories_clustered == 1
     member_ids = {el.story_id for el in (await session.execute(select(EventStory))).scalars().all()}
     assert member_ids == {first.id, second.id}
+
+
+# ---------------------------------------------------------------------------
+# NEU-372 — attach lookback decoupled from the story-recency window
+# ---------------------------------------------------------------------------
+
+
+async def test_build_cluster_request_includes_event_older_than_recency_window(session):
+    """An event last touched well beyond LINK_RECENCY_DAYS (4) is still offered as an
+    attach candidate — the lookback no longer depends on updated_at recency."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=old,
+        updated_at=old,  # far older than the 4-day window
+    )
+    session.add(event)
+    await session.flush()
+    member = await _linked_story(session, film, "https://e/old", title="Old casting beat")
+    session.add(EventStory(event_id=event.id, story_id=member.id))
+    await _linked_story(session, film, "https://e/new", title="Re-report")  # unclustered
+    await session.commit()
+
+    built = await build_cluster_request(session, film_id=film.id, attach_limit=25)
+    assert built is not None
+    _system, messages, plan = built
+    payload = json.loads(messages[0]["content"])
+    assert [e["type"] for e in payload["existing_events"]] == ["casting"]
+    assert plan.existing_event_ids == [event.id]
+
+
+async def test_build_cluster_request_caps_existing_events_to_attach_limit(session):
+    """With more events than attach_limit, only the most-recent N by occurred_at are
+    offered, presented oldest->newest so 1-based positional indices stay stable."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    events = []
+    for day in (1, 2, 3):
+        ev = Event(
+            film_id=film.id,
+            event_type="casting",
+            confidence="confirmed",
+            occurred_at=datetime(2026, 1, day, tzinfo=UTC),
+        )
+        session.add(ev)
+        await session.flush()
+        st = await _linked_story(session, film, f"https://e/m{day}", title=f"beat day {day}")
+        session.add(EventStory(event_id=ev.id, story_id=st.id))
+        events.append(ev)
+    await _linked_story(session, film, "https://e/new")  # unclustered -> request is built
+    await session.commit()
+
+    built = await build_cluster_request(session, film_id=film.id, attach_limit=2)
+    assert built is not None
+    _system, messages, plan = built
+    payload = json.loads(messages[0]["content"])
+    titles = [h for e in payload["existing_events"] for h in e["headlines"]]
+    assert titles == ["beat day 2", "beat day 3"]  # 2 most recent, oldest->newest
+    assert plan.existing_event_ids == [events[1].id, events[2].id]
+
+
+async def test_build_cluster_request_caps_headlines_per_event(session):
+    """An event with many member stories contributes at most 3 headlines, most-recent first."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session.add(event)
+    await session.flush()
+    for i in range(1, 6):
+        st = Story(
+            source="X",
+            url=f"https://e/m{i}",
+            title=f"headline {i}",
+            link_status="linked",
+            film_id=film.id,
+            published_at=datetime(2026, 1, i, tzinfo=UTC),
+            raw={"summary": ""},
+        )
+        session.add(st)
+        await session.flush()
+        session.add(EventStory(event_id=event.id, story_id=st.id))
+    await _linked_story(session, film, "https://e/new")  # unclustered -> request is built
+    await session.commit()
+
+    built = await build_cluster_request(session, film_id=film.id, attach_limit=25)
+    assert built is not None
+    _system, messages, _plan = built
+    payload = json.loads(messages[0]["content"])
+    assert len(payload["existing_events"]) == 1
+    assert payload["existing_events"][0]["headlines"] == ["headline 5", "headline 4", "headline 3"]
+
+
+async def test_cluster_film_events_attaches_across_day_window_without_moving_occurred_at(session):
+    """NEU-372 end-to-end: a re-report of a beat logged long ago attaches to the existing
+    event (no duplicate) and leaves occurred_at anchored to the original beat date."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=old,
+        updated_at=old,
+    )
+    session.add(event)
+    await session.flush()
+    first = await _linked_story(session, film, "https://e/1", title="Original casting")
+    session.add(EventStory(event_id=event.id, story_id=first.id))
+    rereport = await _linked_story(session, film, "https://e/2", title="Casting, revisited")
+    await session.commit()
+
+    client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
+    result = await cluster_film_events(
+        session, client=client, model="m", film_id=film.id, attach_limit=25
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1  # attached, no duplicate
+    member_ids = {el.story_id for el in (await session.execute(select(EventStory))).scalars().all()}
+    assert member_ids == {first.id, rereport.id}
+    refreshed = (await session.execute(select(Event).where(Event.id == event.id))).scalar_one()
+    assert refreshed.occurred_at == old  # unchanged — timeline stays anchored
+    assert refreshed.updated_at > old  # attach bumped updated_at

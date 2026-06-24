@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
     link_use_batches: bool = Field(default=True, alias="LINK_USE_BATCHES")
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
+    link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
     summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
     summary_prompt_version: str = Field(default="3", alias="SUMMARY_PROMPT_VERSION")
