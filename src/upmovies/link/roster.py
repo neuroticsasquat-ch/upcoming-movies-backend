@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmGenre, Genre
 
-_OVERVIEW_MAX = 240
+_OVERVIEW_MAX = 120
 
 
 @dataclass(frozen=True)
