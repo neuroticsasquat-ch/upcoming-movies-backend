@@ -38,3 +38,13 @@ def derive_arc_stage(status: str | None, event_types: Iterable[str]) -> str:
         if stage is not None:
             best = max(best, _RANK[stage])
     return ARC_STAGES[best]
+
+
+def most_significant_event_type(event_types: Iterable[str]) -> str:
+    """Return the most-significant event_type from a non-empty group, using the same
+    ordering as the film arc. event_types with no arc stage (i.e. "other") rank below
+    "announced", so an other-only group returns "other"."""
+    return max(
+        event_types,
+        key=lambda t: _RANK[_EVENT_STAGE[t]] if t in _EVENT_STAGE else -1,
+    )

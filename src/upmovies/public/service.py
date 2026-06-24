@@ -2,14 +2,16 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import func, nulls_last, select
+from sqlalchemy import Date, cast, distinct, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.news.models import Event, EventStory, EventSummary, Story
-from upmovies.public.arc import derive_arc_stage
+from upmovies.public.arc import derive_arc_stage, most_significant_event_type
 from upmovies.public.dto import (
     EventOut,
+    FeedDayItem,
+    FeedDayResponse,
     FeedItem,
     FeedResponse,
     FilmDetailResponse,
@@ -220,3 +222,47 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
             )
         )
     return FeedResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) -> FeedDayResponse:
+    day = cast(func.timezone("UTC", Event.created_at), Date)
+    last_created = func.max(Event.created_at)
+
+    base = (
+        select(
+            Film.slug.label("slug"),
+            Film.title.label("title"),
+            Film.poster_path.label("poster_path"),
+            day.label("day"),
+            func.count().label("event_count"),
+            func.array_agg(distinct(Event.event_type)).label("event_types"),
+        )
+        .select_from(Event)
+        .join(EventSummary, EventSummary.event_id == Event.id)
+        .join(Film, Film.id == Event.film_id)
+        .where(Film.slug.is_not(None))
+        .group_by(Film.id, Film.slug, Film.title, Film.poster_path, day)
+    )
+
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+
+    rows = (
+        await session.execute(
+            base.order_by(day.desc(), last_created.desc(), Film.slug.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    items = [
+        FeedDayItem(
+            film_slug=slug,
+            film_title=title,
+            poster_path=poster_path,
+            day=day_value,
+            top_event_type=most_significant_event_type(event_types),
+            event_count=event_count,
+        )
+        for slug, title, poster_path, day_value, event_count, event_types in rows
+    ]
+    return FeedDayResponse(items=items, total=total or 0, limit=limit, offset=offset)

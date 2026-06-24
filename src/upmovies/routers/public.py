@@ -4,7 +4,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.config import get_settings
 from upmovies.deps import get_session
 from upmovies.public import service
-from upmovies.public.dto import FeedResponse, FilmDetailResponse, FilmIndexResponse
+from upmovies.public.dto import (
+    FeedDayResponse,
+    FeedResponse,
+    FilmDetailResponse,
+    FilmIndexResponse,
+)
 from upmovies.public.sitemap import render_sitemap
 
 router = APIRouter(tags=["public"])
@@ -37,6 +42,15 @@ async def get_feed(
     session: AsyncSession = Depends(get_session),
 ) -> FeedResponse:
     return await service.get_feed(session, limit=limit, offset=offset)
+
+
+@router.get("/feed/grouped", response_model=FeedDayResponse)
+async def get_grouped_feed(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> FeedDayResponse:
+    return await service.get_feed_grouped(session, limit=limit, offset=offset)
 
 
 @router.get("/sitemap.xml")
