@@ -59,3 +59,19 @@ class FeedResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class FeedDayItem(BaseModel):
+    film_slug: str
+    film_title: str
+    poster_path: str | None
+    day: date
+    top_event_type: str
+    event_count: int
+
+
+class FeedDayResponse(BaseModel):
+    items: list[FeedDayItem]
+    total: int
+    limit: int
+    offset: int
