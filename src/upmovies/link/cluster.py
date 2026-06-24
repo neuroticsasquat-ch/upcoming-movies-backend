@@ -29,6 +29,17 @@ _VALID_TYPES = {
     "trailer",
     "other",
 }
+_STALE_EVENT_TYPES = {"announced", "casting", "production_start"}
+_WRAPPED_STATUSES = {"Post Production", "Released"}
+
+
+def is_stale_stage(event_type: str, film_status: str | None) -> bool:
+    """A new event is 'stale-stage' when an early-production beat (casting/announced/
+    production_start) is reported for a film that has already wrapped or released. Such
+    events are dropped at clustering (NEU-367). NULL/unknown status is never stale."""
+    return event_type in _STALE_EVENT_TYPES and film_status in _WRAPPED_STATUSES
+
+
 _SUMMARY_MAX = 500
 _DEFAULT_MAX_TOKENS = 4096
 
@@ -61,6 +72,7 @@ story's "n" must appear in exactly one group."""
 class ClusterResult:
     events_created: int
     stories_clustered: int
+    stories_rejected: int = 0
 
 
 @dataclass
@@ -68,6 +80,7 @@ class ClusterPlan:
     film_id: UUID
     existing_event_ids: list[UUID]
     unclustered_story_ids: list[UUID]
+    film_status: str | None = None
 
 
 def _extract_json_object(text: str) -> str:
@@ -167,6 +180,7 @@ async def build_cluster_request(
         film_id=film_id,
         existing_event_ids=[e.id for e in existing_events],
         unclustered_story_ids=[s.id for s in unclustered],
+        film_status=film.status,
     )
     return system, messages, plan
 
@@ -207,7 +221,7 @@ async def apply_cluster_decisions(
 
     now = datetime.now(UTC)
     assigned: set[UUID] = set()
-    events_created = stories_clustered = 0
+    events_created = stories_clustered = stories_rejected = 0
 
     for group in data.get("events", []):
         group_sids: list[UUID] = []
@@ -235,6 +249,16 @@ async def apply_cluster_decisions(
                     conf,
                 )
                 continue
+            if is_stale_stage(etype, plan.film_status):
+                for sid in group_sids:
+                    story = by_id[sid]
+                    story.link_status = "rejected"
+                    story.film_id = None
+                    story.link_confidence = None
+                    story.link_note = f"stale-stage:{etype}"
+                    assigned.add(sid)
+                    stories_rejected += 1
+                continue
             occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids)
             event = Event(
                 film_id=plan.film_id, event_type=etype, confidence=conf, occurred_at=occurred
@@ -247,7 +271,7 @@ async def apply_cluster_decisions(
             assigned.add(sid)
             stories_clustered += 1
 
-    return ClusterResult(events_created, stories_clustered)
+    return ClusterResult(events_created, stories_clustered, stories_rejected)
 
 
 async def build_cluster_batch_request(

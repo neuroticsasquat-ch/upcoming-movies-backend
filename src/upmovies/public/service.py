@@ -21,6 +21,16 @@ from upmovies.public.dto import (
 )
 from upmovies.public.sources import cap_sources, outlet_label
 
+_HIDDEN_EVENT_TYPES = ("other",)
+
+
+def _visible_events():
+    """SQL predicate: an event reaches the public surface unless its type is hidden.
+
+    `other` is the uncategorized catch-all where residual hype lands (NEU-367); it is
+    hidden from users but kept in the table (reversible)."""
+    return Event.event_type.notin_(_HIDDEN_EVENT_TYPES)
+
 
 def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
@@ -44,7 +54,7 @@ async def get_film_index(session: AsyncSession, *, limit: int, offset: int) -> F
     has_summary = (
         select(Event.id)
         .join(EventSummary, EventSummary.event_id == Event.id)
-        .where(Event.film_id == Film.id)
+        .where(Event.film_id == Film.id, _visible_events())
         .exists()
     )
     total = await session.scalar(
@@ -97,7 +107,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         await session.execute(
             select(Event, EventSummary.summary)
             .join(EventSummary, EventSummary.event_id == Event.id)
-            .where(Event.film_id == film.id)
+            .where(Event.film_id == film.id, _visible_events())
             .order_by(Event.occurred_at.asc(), Event.id.asc())
         )
     ).all()
@@ -157,6 +167,7 @@ async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
             select(Film.slug, func.max(Event.created_at))
             .join(Event, Event.film_id == Film.id)
             .join(EventSummary, EventSummary.event_id == Event.id)
+            .where(_visible_events())
             .group_by(Film.id, Film.slug)
             .order_by(Film.slug.asc())
         )
@@ -170,14 +181,14 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None))
+        .where(Film.slug.is_not(None), _visible_events())
     )
     rows = (
         await session.execute(
             select(Event, EventSummary.summary, Film.slug, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Film.slug.is_not(None))
+            .where(Film.slug.is_not(None), _visible_events())
             .order_by(Event.created_at.desc(), Event.id.asc())
             .limit(limit)
             .offset(offset)
@@ -240,7 +251,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None))
+        .where(Film.slug.is_not(None), _visible_events())
         .group_by(Film.id, Film.slug, Film.title, Film.poster_path, day)
     )
 

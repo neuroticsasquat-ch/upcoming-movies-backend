@@ -183,7 +183,7 @@ async def test_grouped_empty_returns_empty_list(client):
     assert body["total"] == 0
 
 
-async def test_grouped_other_only_day_surfaces_other(client, make_film, add_event):
+async def test_grouped_other_only_day_is_hidden(client, make_film, add_event):
     film = await make_film(slug="other-2026")
     await add_event(
         film=film,
@@ -192,6 +192,6 @@ async def test_grouped_other_only_day_surfaces_other(client, make_film, add_even
         created_at=datetime(2026, 6, 1, tzinfo=UTC),
     )
 
-    item = (await client.get("/feed/grouped")).json()["items"][0]
-    assert item["top_event_type"] == "other"
-    assert item["event_count"] == 1
+    body = (await client.get("/feed/grouped")).json()
+    assert body["items"] == []
+    assert body["total"] == 0

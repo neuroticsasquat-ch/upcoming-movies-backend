@@ -164,8 +164,8 @@ async def _cluster_stage_sequential(
     film_ids: Sequence[UUID],
     recency_days: int,
     cluster_max_tokens: int,
-) -> tuple[int, int]:
-    events_created = stories_clustered = 0
+) -> tuple[int, int, int]:
+    events_created = stories_clustered = stories_rejected = 0
     for film_id in film_ids:
         try:
             async with _owned_session(session_factory) as s:
@@ -180,12 +180,13 @@ async def _cluster_stage_sequential(
                 await s.commit()
             events_created += cluster.events_created
             stories_clustered += cluster.stories_clustered
+            stories_rejected += cluster.stories_rejected
         except Exception:
             log.exception("clustering failed for film %s", film_id)
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
-    return events_created, stories_clustered
+    return events_created, stories_clustered, stories_rejected
 
 
 async def _cluster_stage_batched(
@@ -197,7 +198,7 @@ async def _cluster_stage_batched(
     film_ids: Sequence[UUID],
     recency_days: int,
     cluster_max_tokens: int,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
     # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
     requests: list[BatchRequest] = []
@@ -219,7 +220,7 @@ async def _cluster_stage_batched(
             plans[request.custom_id] = plan
 
     if not requests:
-        return 0, 0
+        return 0, 0, 0
 
     try:
         results = await client.complete_batch(requests)
@@ -228,9 +229,9 @@ async def _cluster_stage_batched(
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(requests))
             await s.commit()
-        return 0, 0
+        return 0, 0, 0
 
-    events_created = stories_clustered = 0
+    events_created = stories_clustered = stories_rejected = 0
     for custom_id, plan in plans.items():
         result = results.get(custom_id)
         try:
@@ -242,13 +243,14 @@ async def _cluster_stage_batched(
                 await s.commit()
             events_created += applied.events_created
             stories_clustered += applied.stories_clustered
+            stories_rejected += applied.stories_rejected
         except Exception:
             log.exception("clustering failed for film %s", custom_id)
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
 
-    return events_created, stories_clustered
+    return events_created, stories_clustered, stories_rejected
 
 
 async def run_link_ingest(
@@ -311,7 +313,7 @@ async def run_link_ingest(
         ]
 
     cluster_stage = _cluster_stage_batched if use_batches else _cluster_stage_sequential
-    events_created, stories_clustered = await cluster_stage(
+    events_created, stories_clustered, stories_rejected = await cluster_stage(
         session_factory=session_factory,
         client=client,
         run_id=run_id,
@@ -328,7 +330,8 @@ async def run_link_ingest(
             status="succeeded",
             detail=(
                 f"linked {linked}, rejected {rejected}; "
-                f"{events_created} events from {stories_clustered} stories"
+                f"{events_created} events from {stories_clustered} stories "
+                f"({stories_rejected} stale-stage rejected)"
             ),
         )
         await s.commit()
