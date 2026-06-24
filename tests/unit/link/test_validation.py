@@ -106,3 +106,20 @@ def test_curated_excluded_rows_score_clean_when_dropped():
     m = compute_news_value_metrics(rows)
     assert m.true_negatives == len(excluded)
     assert m.false_positives == 0 and m.leaks_by_category == {}
+
+
+def test_fixture_has_neu367_interview_reaction_rows():
+    items = load_validation_set(_FIXTURE)
+    by_url = {it.url: it for it in items}
+    neu367_urls = [
+        "https://example.test/neu367/starfighter-amy-adams-teases-excitement",
+        "https://example.test/neu367/starfighter-matt-smith-opens-up-role",
+        "https://example.test/neu367/anya-taylor-joy-reacts-to-casting",
+        "https://example.test/neu367/lewis-pullman-working-with-dad",
+    ]
+    for url in neu367_urls:
+        assert url in by_url, f"missing curated row {url}"
+        it = by_url[url]
+        assert it.relation == "about"
+        assert it.is_production_news is False
+        assert it.exclusion_category in {"interview-quote", "reaction"}

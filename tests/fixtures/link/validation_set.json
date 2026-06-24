@@ -2914,5 +2914,53 @@
     "event_group": null,
     "is_production_news": false,
     "exclusion_category": "reaction"
+  },
+  {
+    "url": "https://example.test/neu367/starfighter-amy-adams-teases-excitement",
+    "source": "Mshale",
+    "title": "Amy Adams TEASES Her Excitement For Star Wars: Starfighter Ahead Of Its Release",
+    "summary": "The actor shares how thrilled she is for fans to finally see the film, with no new production detail.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1003596,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
+  },
+  {
+    "url": "https://example.test/neu367/starfighter-matt-smith-opens-up-role",
+    "source": "SuperHeroHype",
+    "title": "Star Wars: Matt Smith Opens Up On His 'Interesting Guy Or Girl' Starfighter Role",
+    "summary": "Smith discusses what drew him to the part in a wide-ranging interview; no casting or production news.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1003596,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
+  },
+  {
+    "url": "https://example.test/neu367/anya-taylor-joy-reacts-to-casting",
+    "source": "Collider",
+    "title": "Anya Taylor-Joy Reacts To Her Lord Of The Rings Casting: 'A Dream Come True'",
+    "summary": "The actor responds with delight to fan reaction over her casting — a reaction, not an announcement.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1090869,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "reaction"
+  },
+  {
+    "url": "https://example.test/neu367/lewis-pullman-working-with-dad",
+    "source": "JoBlo",
+    "title": "Lewis Pullman On Getting The Chance To Work With His Dad On The Spaceballs Sequel",
+    "summary": "Pullman reflects on sharing the screen with his father — biographical interview color, no new beat.",
+    "relation": "about",
+    "expected_film_tmdb_id": 969681,
+    "event_type": null,
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   }
 ]

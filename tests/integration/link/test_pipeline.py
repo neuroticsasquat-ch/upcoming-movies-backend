@@ -126,7 +126,12 @@ async def test_links_then_clusters_recent_pending(session, use_batches):
         )
     ).scalar_one()
     assert run.status == "succeeded"
-    assert run.detail and "linked 1" in run.detail and "1 events" in run.detail
+    assert (
+        run.detail
+        and "linked 1" in run.detail
+        and "1 events" in run.detail
+        and "stale-stage rejected" in run.detail
+    )
 
 
 @pytest.mark.parametrize("use_batches", [False, True])
@@ -497,7 +502,7 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    events_created, stories_clustered = await _cluster_stage_batched(
+    events_created, stories_clustered, stories_rejected = await _cluster_stage_batched(
         session_factory=lambda: session,
         client=_ClusterFailBatchClient(),
         run_id=run_id,
@@ -509,6 +514,7 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
 
     assert events_created == 1
     assert stories_clustered == 1
+    assert stories_rejected == 0
     ok_events = (
         (await session.execute(select(Event).where(Event.film_id == ok_film.id))).scalars().all()
     )

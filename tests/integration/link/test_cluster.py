@@ -439,3 +439,141 @@ async def test_apply_returns_empty_on_unparseable_response(session):
 
     assert result.events_created == 0 and result.stories_clustered == 0
     assert (await session.execute(select(EventStory))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — stale-stage rejection
+# ---------------------------------------------------------------------------
+
+
+async def test_build_cluster_request_captures_film_status(session):
+    film = Film(tmdb_id=1, title="Runner", status="Post Production")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    built = await build_cluster_request(session, film_id=film.id, recency_days=45)
+    assert built is not None
+    _system, _messages, plan = built
+    assert plan.film_status == "Post Production"
+
+
+async def test_apply_rejects_stale_stage_new_event(session):
+    film = Film(tmdb_id=1, title="Starfighter", status="Post Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="Post Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 0
+    assert result.stories_rejected == 1
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+    assert (await session.execute(select(EventStory))).scalars().all() == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.film_id is None
+    assert refreshed.link_confidence is None
+    assert refreshed.link_note == "stale-stage:casting"
+
+
+async def test_apply_keeps_late_stage_event_on_wrapped_film(session):
+    film = Film(tmdb_id=1, title="Starfighter", status="Post Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="Post Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1 and result.stories_rejected == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1 and events[0].event_type == "trailer"
+
+
+async def test_apply_keeps_early_stage_event_on_unwrapped_film(session):
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="In Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1 and result.stories_rejected == 0
+
+
+async def test_apply_does_not_gate_attach_to_existing(session):
+    film = Film(tmdb_id=1, title="Starfighter", status="Post Production")
+    session.add(film)
+    await session.flush()
+    first = await _linked_story(session, film, "https://e/1")
+    event = Event(
+        film_id=film.id, event_type="casting", confidence="confirmed", occurred_at=datetime.now(UTC)
+    )
+    session.add(event)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=first.id))
+    second = await _linked_story(session, film, "https://e/2")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[event.id],
+        unclustered_story_ids=[second.id],
+        film_status="Post Production",
+    )
+    raw = json.dumps({"events": [{"existing": 1, "stories": [1]}]})
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.stories_rejected == 0 and result.stories_clustered == 1
+    member_ids = {el.story_id for el in (await session.execute(select(EventStory))).scalars().all()}
+    assert member_ids == {first.id, second.id}

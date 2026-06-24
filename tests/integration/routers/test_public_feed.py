@@ -185,3 +185,20 @@ async def test_feed_caps_sources_at_three_distinct_outlets_newest_first(
         "Variety",
         "The Hollywood Reporter",
     ]
+
+
+async def test_feed_excludes_other_events(client, make_film, add_event):
+    film = await make_film(slug="mixed-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="shown",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    await add_event(
+        film=film, event_type="other", summary="hidden", created_at=datetime(2026, 6, 2, tzinfo=UTC)
+    )
+
+    body = (await client.get("/feed")).json()
+    assert body["total"] == 1
+    assert [i["event_type"] for i in body["items"]] == ["casting"]

@@ -176,3 +176,12 @@ async def test_not_news_unknown_category_falls_back_to_bare_note():
         )
     )
     assert story.link_note == "not-news"
+
+
+def test_instructions_warn_against_interview_enthusiasm_headlines():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "teases" in lowered
+    assert "reacts to" in lowered
+    assert "no new production fact" in lowered

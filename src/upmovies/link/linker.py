@@ -31,12 +31,15 @@ production — casting, a filming start/wrap/status change, a trailer or teaser,
 date set or moved, a major creative/production change (director, studio, format), or a \
 release-affecting distribution deal.
 - "not-news": the story is primarily about a tracked film but announces nothing new about \
-its production. Do NOT link these. Examples: cast/crew or fan/social-media reactions, \
-praise, or enthusiasm; "everything we know so far" roundups and aggregators with no new \
-information; interview color about what it is like to work on the project; talent comments \
-on plot points that are not a formal announcement; streaming-platform or catalogue moves \
-of an existing title; and any story whose news value is entirely downstream of an earlier \
-beat.
+its production. Do NOT link these. Core test: if it reports no NEW production fact, it is \
+not-news even when it is unmistakably about the film. Examples: cast/crew enthusiasm, \
+praise, or fan and social-media reactions; interview color about working on the project — \
+headlines where a cast member "teases", "reacts to", or "opens up on" the film, says they \
+"can't wait" or are "excited for" it, or anything framed as "ahead of its release"; \
+"everything we know so far" roundups and aggregators with no new information; talent \
+comments on plot points that are not a formal announcement; streaming-platform or \
+catalogue moves of an existing title; and any story whose news value is entirely \
+downstream of an earlier beat.
 - "mention": the film is only referenced in passing (an aside, a list, a comparison, or \
 an actor's other project). Mentions are NOT links.
 - "no-match": the story is not about any tracked film. Most stories are no-match — \

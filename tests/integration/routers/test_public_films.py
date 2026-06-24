@@ -182,3 +182,22 @@ async def test_film_detail_caps_sources_at_three_distinct_outlets_newest_first(
 
     sources = (await client.get("/films/cap-detail-2026")).json()["events"][0]["sources"]
     assert [s["source"] for s in sources] == ["Deadline", "Variety", "The Hollywood Reporter"]
+
+
+async def test_detail_excludes_other_events(client, make_film, add_event):
+    film = await make_film(slug="mixed-detail-2026")
+    await add_event(film=film, event_type="casting", summary="Casting.")
+    await add_event(film=film, event_type="other", summary="Misc.")
+
+    body = (await client.get("/films/mixed-detail-2026")).json()
+    assert [e["event_type"] for e in body["events"]] == ["casting"]
+
+
+async def test_index_excludes_film_with_only_other_events(client, make_film, add_event):
+    shown = await make_film(slug="real-2026")
+    await add_event(film=shown, event_type="casting", summary="s")
+    other_only = await make_film(slug="otheronly-2026")
+    await add_event(film=other_only, event_type="other", summary="s")
+
+    slugs = [i["slug"] for i in (await client.get("/films")).json()["items"]]
+    assert slugs == ["real-2026"]

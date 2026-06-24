@@ -29,3 +29,11 @@ async def test_sitemap_lastmod_is_a_valid_date(client, make_film, add_event):
     lastmods = [el.text for el in root.findall(".//sm:url/sm:lastmod", _NS)]
     assert len(lastmods) == 1
     assert lastmods[0] == date.today().isoformat()
+
+
+async def test_sitemap_excludes_film_with_only_other_events(client, make_film, add_event):
+    other_only = await make_film(slug="otheronly-sitemap-2026")
+    await add_event(film=other_only, event_type="other", summary="s")
+
+    r = await client.get("/sitemap.xml")
+    assert "otheronly-sitemap-2026" not in r.text
