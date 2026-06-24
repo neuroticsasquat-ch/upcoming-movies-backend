@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from upmovies.deps import get_session, require_current_admin
 from upmovies.ingest.dto import RunOut
@@ -27,7 +28,12 @@ async def list_runs(
     db: AsyncSession = Depends(get_session),
 ) -> list[IngestRun]:
     rows = (
-        await db.execute(select(IngestRun).order_by(IngestRun.started_at.desc()).limit(limit))
+        await db.execute(
+            select(IngestRun)
+            .options(selectinload(IngestRun.llm_usage))
+            .order_by(IngestRun.started_at.desc())
+            .limit(limit)
+        )
     ).scalars()
     return list(rows)
 
@@ -37,7 +43,13 @@ async def get_run(
     run_id: UUID,
     db: AsyncSession = Depends(get_session),
 ) -> IngestRun:
-    row = (await db.execute(select(IngestRun).where(IngestRun.id == run_id))).scalar_one_or_none()
+    row = (
+        await db.execute(
+            select(IngestRun)
+            .options(selectinload(IngestRun.llm_usage))
+            .where(IngestRun.id == run_id)
+        )
+    ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
     return row

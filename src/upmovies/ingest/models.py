@@ -14,7 +14,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from upmovies.db import Base
 
@@ -52,6 +52,9 @@ class IngestRun(Base):
     )
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_usage: Mapped[list["RunLLMUsage"]] = relationship(
+        "RunLLMUsage", cascade="all, delete-orphan", back_populates="run"
+    )
 
 
 class RunLLMUsage(Base):
@@ -87,3 +90,4 @@ class RunLLMUsage(Base):
         Integer, nullable=False, server_default=text("0")
     )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="llm_usage")
