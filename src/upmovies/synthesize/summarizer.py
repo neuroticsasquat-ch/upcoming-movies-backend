@@ -1,5 +1,5 @@
 """Summarization service: turn one news event (as an in-memory EventInput) into one neutral
-1–2 sentence paraphrase via the Anthropic Messages/Batches API. Self-contained (no DB); the
+single-sentence paraphrase via the Anthropic Messages/Batches API. Self-contained (no DB); the
 caller maps ORM→EventInput and persists the returned SummaryResult. The LLM client is injected
 (Completer / BatchCompleter) so this is unit-testable with fakes."""
 
@@ -17,8 +17,9 @@ _MAX_TOKENS = 256
 _INSTRUCTIONS = """You write neutral, factual update blurbs for an upcoming-movies tracker.
 
 You are given one tracked film, the TYPE of news beat being reported, and the stories that \
-report it (each a headline, a short dek, and its publication's name). Write ONE update of \
-1–2 sentences summarizing this beat for a reader following the film.
+report it (each a headline, a short dek, and its publication's name). Write ONE sentence \
+summarizing this beat for a reader who is already on this film's page and knows which film \
+it is.
 
 Rules:
 - Strict paraphrase. State the facts (who / what / when) entirely in your own words. \
@@ -31,16 +32,27 @@ hedge ("reportedly", "is said to"), hedge; if they confirm, state it plainly. Ne
 the sources' level of certainty.
 - Stay within the sources. Add no facts, dates, names, or speculation not present in the \
 provided material.
+- Do NOT restate the film's title. It renders on the film's own page, so naming the film is \
+redundant. Use "the film" only if a reference is grammatically necessary.
+- Name only the people party to THIS beat — e.g. the cast member for a casting beat. Omit \
+the director and other crew unless the beat is itself about them (e.g. an "X to direct" \
+announcement).
+- No relational or biographical framing — don't add who someone is related to, married to, \
+or reuniting with ("daughter of …", "reuniting with his father").
 - Report only the production fact. State who / what / when and stop. Exclude: fan, audience, \
 or social-media reactions; whether the news "generated discussion" or "circulated on social \
 media"; the talent's stated feelings about their role or the project; "ahead of" / "in \
-advance of" release framing that adds no fact; and any meta-commentary about the announcement \
-itself. If the summary could be replaced by the headline with nothing lost, it has too much \
-filler — cut it back.
-- Refer to the film by its title where natural. 1–2 sentences, one paragraph.
+advance of" / "approaches release" framing that adds no fact; and any meta-commentary about \
+the announcement itself. If the summary could be replaced by the headline with nothing lost, \
+it has too much filler — cut it back.
+- Prefer the canonical shape: state the beat in the film's already-known context and nothing \
+more — e.g. "{Star} has joined the cast", "{Star} has been cast as {Character}" (character \
+optional), "{Star} will reprise their role", "{Star} will make their acting debut".
+- ONE sentence. Add a second only if it carries a distinct production fact (not a trailer \
+like "Composer X has discussed the process").
 
 Return ONLY a JSON object, no prose or markdown:
-{"summary": "<your 1–2 sentence update>"}"""
+{"summary": "<your one-sentence update>"}"""
 
 
 @dataclass(frozen=True)
