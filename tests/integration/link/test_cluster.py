@@ -55,7 +55,7 @@ async def test_creates_new_event_for_unclustered_stories(session):
                     "existing": None,
                     "type": "trailer",
                     "confidence": "confirmed",
-                    "stories": [str(story.id)],
+                    "stories": [1],
                 }
             ]
         }
@@ -89,7 +89,7 @@ async def test_attaches_to_existing_event(session):
     second = await _linked_story(session, film, "https://e/2")  # unclustered
     await session.commit()
 
-    client = FakeClient({"events": [{"existing": 1, "stories": [str(second.id)]}]})
+    client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
     result = await cluster_film_events(
         session, client=client, model="m", film_id=film.id, recency_days=45
     )
@@ -158,7 +158,8 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
     payload = json.loads(messages[0]["content"])
     assert payload["film"]["title"] == "Runner"
     assert payload["existing_events"] == []
-    assert {s["id"] for s in payload["new_stories"]} == {str(s1.id), str(s2.id)}
+    assert {s["n"] for s in payload["new_stories"]} == {1, 2}
+    assert {s["title"] for s in payload["new_stories"]} == {"A", "B"}
 
     assert isinstance(plan, ClusterPlan)
     assert plan.film_id == film.id
@@ -186,7 +187,7 @@ async def test_apply_creates_new_event(session):
                     "existing": None,
                     "type": "trailer",
                     "confidence": "confirmed",
-                    "stories": [str(s1.id)],
+                    "stories": [1],
                 }
             ]
         }
@@ -219,7 +220,7 @@ async def test_apply_attaches_to_existing_by_plan_index(session):
     plan = ClusterPlan(
         film_id=film.id, existing_event_ids=[event.id], unclustered_story_ids=[second.id]
     )
-    raw = json.dumps({"events": [{"existing": 1, "stories": [str(second.id)]}]})
+    raw = json.dumps({"events": [{"existing": 1, "stories": [1]}]})
     result = await apply_cluster_decisions(session, plan=plan, raw=raw)
     await session.commit()
 
@@ -244,7 +245,7 @@ async def test_apply_skips_invalid_new_event(session):
                     "existing": None,
                     "type": "not-a-type",
                     "confidence": "confirmed",
-                    "stories": [str(s1.id)],
+                    "stories": [1],
                 }
             ]
         }
@@ -294,15 +295,17 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
     e1.occurred_at = datetime(2026, 3, 1, tzinfo=UTC)
     await session.commit()
 
+    n_s1 = plan.unclustered_story_ids.index(s1.id) + 1
+    n_s2 = plan.unclustered_story_ids.index(s2.id) + 1
     raw = json.dumps(
         {
             "events": [
-                {"existing": 1, "stories": [str(s1.id)]},
+                {"existing": 1, "stories": [n_s1]},
                 {
                     "existing": None,
                     "type": "casting",
                     "confidence": "rumored",
-                    "stories": [str(s2.id)],
+                    "stories": [n_s2],
                 },
             ]
         }
@@ -348,11 +351,31 @@ async def test_build_cluster_batch_request_wraps_into_batch_request(session):
     req, plan = built
     assert req.custom_id == str(film.id)
     assert req.model == "cluster-m"
-    assert req.max_tokens == 1500
+    assert req.max_tokens == 4096
     assert req.system[0]["cache_control"] == {"type": "ephemeral"}
     assert "distinct EVENTS" in req.system[0]["text"]
     assert plan.film_id == film.id
     assert set(plan.unclustered_story_ids) == {s1.id}
+
+
+async def test_build_cluster_batch_request_honours_max_tokens(session):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    built = await build_cluster_batch_request(
+        session,
+        custom_id=str(film.id),
+        model="cluster-m",
+        film_id=film.id,
+        recency_days=45,
+        max_tokens=9999,
+    )
+    assert built is not None
+    req, _plan = built
+    assert req.max_tokens == 9999
 
 
 async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session):
@@ -366,3 +389,53 @@ async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session)
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — intra-group dedup
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_dedups_repeated_story_within_group(session):
+    """Failure mode 2: a story number repeated inside one group must insert once,
+    not violate event_story_pkey."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "trailer",
+                    "confidence": "confirmed",
+                    "stories": [1, 1],
+                }
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.stories_clustered == 1
+    links = (await session.execute(select(EventStory))).scalars().all()
+    assert [el.story_id for el in links] == [s1.id]
+
+
+async def test_apply_returns_empty_on_unparseable_response(session):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    result = await apply_cluster_decisions(session, plan=plan, raw="not json {")
+    await session.commit()
+
+    assert result.events_created == 0 and result.stories_clustered == 0
+    assert (await session.execute(select(EventStory))).scalars().all() == []

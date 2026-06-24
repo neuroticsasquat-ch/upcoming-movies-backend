@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
     link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
     link_use_batches: bool = Field(default=True, alias="LINK_USE_BATCHES")
+    link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
     summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
     summary_prompt_version: str = Field(default="2", alias="SUMMARY_PROMPT_VERSION")

@@ -163,13 +163,19 @@ async def _cluster_stage_sequential(
     model: str,
     film_ids: Sequence[UUID],
     recency_days: int,
+    cluster_max_tokens: int,
 ) -> tuple[int, int]:
     events_created = stories_clustered = 0
     for film_id in film_ids:
         try:
             async with _owned_session(session_factory) as s:
                 cluster = await cluster_film_events(
-                    s, client=client, model=model, film_id=film_id, recency_days=recency_days
+                    s,
+                    client=client,
+                    model=model,
+                    film_id=film_id,
+                    recency_days=recency_days,
+                    max_tokens=cluster_max_tokens,
                 )
                 await s.commit()
             events_created += cluster.events_created
@@ -190,6 +196,7 @@ async def _cluster_stage_batched(
     model: str,
     film_ids: Sequence[UUID],
     recency_days: int,
+    cluster_max_tokens: int,
 ) -> tuple[int, int]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
     # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
@@ -198,7 +205,12 @@ async def _cluster_stage_batched(
     async with _owned_session(session_factory) as s:
         for film_id in film_ids:
             built = await build_cluster_batch_request(
-                s, custom_id=str(film_id), model=model, film_id=film_id, recency_days=recency_days
+                s,
+                custom_id=str(film_id),
+                model=model,
+                film_id=film_id,
+                recency_days=recency_days,
+                max_tokens=cluster_max_tokens,
             )
             if built is None:
                 continue
@@ -250,6 +262,7 @@ async def run_link_ingest(
     batch_size: int,
     floor: float,
     use_batches: bool = False,
+    cluster_max_tokens: int = 4096,
 ) -> LinkIngestResult:
     async with _owned_session(session_factory) as s:
         roster = await build_roster(s)
@@ -305,6 +318,7 @@ async def run_link_ingest(
         model=cluster_model,
         film_ids=film_ids,
         recency_days=recency_days,
+        cluster_max_tokens=cluster_max_tokens,
     )
 
     async with _owned_session(session_factory) as s:
