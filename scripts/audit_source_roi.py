@@ -20,6 +20,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun, RunLLMUsage
@@ -98,7 +99,7 @@ def _is_direct_pull_outlet(outlet: str | None) -> bool:
     if outlet is None:
         return False
     # outlet may be a full domain or domain with path; match on hostname portion
-    hostname = outlet.split("/")[0].lower().lstrip("www.")
+    hostname = outlet.split("/")[0].lower().removeprefix("www.")
     return outlet.lower() in DIRECT_PULL_DOMAINS or f"www.{hostname}" in DIRECT_PULL_DOMAINS or hostname in DIRECT_PULL_DOMAINS  # noqa: E501
 
 
@@ -166,7 +167,7 @@ class AuditResult:
 
 
 async def _load_story_stats(
-    session,
+    session: AsyncSession,
     *,
     fetched_after: datetime | None,
     fetched_before: datetime | None,
@@ -210,7 +211,7 @@ async def _load_story_stats(
 
 
 async def _load_event_stats(
-    session,
+    session: AsyncSession,
     stats: dict[str, SourceStats],
     *,
     fetched_after: datetime | None,
@@ -265,7 +266,7 @@ async def _load_event_stats(
 
 
 async def _load_link_cost(
-    session,
+    session: AsyncSession,
     *,
     run_id: UUID | None,
     started_after: datetime | None,
@@ -485,9 +486,11 @@ async def _amain(args: argparse.Namespace) -> None:
     if args.window_days is not None:
         cutoff = datetime.now(UTC) - timedelta(days=args.window_days)
         fetched_after = cutoff
+        fetched_before = datetime.now(UTC)
         started_after = cutoff
+        started_before = datetime.now(UTC)
         date_window_start = cutoff
-        date_window_end = datetime.now(UTC)
+        date_window_end = fetched_before
         log.info("window: last %d days (since %s)", args.window_days, cutoff.strftime("%Y-%m-%d"))
 
     async with SessionLocal() as session:
