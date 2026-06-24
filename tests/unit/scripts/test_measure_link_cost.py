@@ -1,14 +1,13 @@
 from uuid import uuid4
 
 from scripts.measure_link_cost import (
-    Rates,
     format_report,
     measure_batched,
     measure_sequential,
-    price,
 )
 from upmovies.link.roster import Roster, RosterEntry
 from upmovies.llm.client import BatchResult, Usage
+from upmovies.llm.pricing import Rates, price
 from upmovies.news.models import Story
 
 RATES = Rates(input_per_mtok=1.00, output_per_mtok=5.00)
