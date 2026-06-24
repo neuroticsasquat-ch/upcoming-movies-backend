@@ -142,3 +142,43 @@ async def test_film_detail_source_label_uses_resolved_outlet(client, make_film, 
 
     body = (await client.get(f"/films/{film.slug}")).json()
     assert body["events"][0]["sources"][0]["source"] == "Variety"
+
+
+async def test_film_detail_caps_sources_at_three_distinct_outlets_newest_first(
+    client, make_film, add_event
+):
+    film = await make_film(slug="cap-detail-2026")
+    await add_event(
+        film=film,
+        summary="Lots of coverage.",
+        sources=(
+            {
+                "url": "https://d/old",
+                "source": "Deadline",
+                "published_at": datetime(2025, 3, 1, tzinfo=UTC),
+            },
+            {
+                "url": "https://d/new",
+                "source": "Deadline",
+                "published_at": datetime(2025, 3, 5, tzinfo=UTC),
+            },
+            {
+                "url": "https://v/1",
+                "source": "Variety",
+                "published_at": datetime(2025, 3, 4, tzinfo=UTC),
+            },
+            {
+                "url": "https://t/1",
+                "source": "The Hollywood Reporter",
+                "published_at": datetime(2025, 3, 3, tzinfo=UTC),
+            },
+            {
+                "url": "https://c/1",
+                "source": "Collider",
+                "published_at": datetime(2025, 3, 2, tzinfo=UTC),
+            },
+        ),
+    )
+
+    sources = (await client.get("/films/cap-detail-2026")).json()["events"][0]["sources"]
+    assert [s["source"] for s in sources] == ["Deadline", "Variety", "The Hollywood Reporter"]
