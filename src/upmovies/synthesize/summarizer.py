@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from upmovies.llm.client import BatchRequest, BatchResult
+from upmovies.llm.client import BatchRequest, BatchResult, Usage
 
 _DEK_MAX = 500
 _MAX_TOKENS = 256
@@ -79,14 +79,14 @@ class SummaryResult:
 
 
 class Completer(Protocol):
-    async def complete(
+    async def complete_with_usage(
         self,
         *,
         model: str,
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         max_tokens: int = ...,
-    ) -> str: ...
+    ) -> tuple[str, "Usage"]: ...
 
 
 class BatchCompleter(Protocol):
@@ -152,17 +152,18 @@ def build_summary_batch_request(*, custom_id: str, model: str, event: EventInput
 
 async def summarize_event(
     *, client: Completer, model: str, prompt_version: str, event: EventInput
-) -> SummaryResult:
-    """Sequential path: build the request, call `complete` (max_tokens pinned to `_MAX_TOKENS`
-    for parity with the batched path), parse the JSON envelope, and bundle the provenance the
-    caller persists into `event_summary`."""
+) -> tuple[SummaryResult, Usage]:
+    """Sequential path: build the request, call `complete_with_usage` (max_tokens pinned to
+    `_MAX_TOKENS` for parity with the batched path), parse the JSON envelope, and bundle the
+    provenance the caller persists into `event_summary` alongside the call's token `Usage`."""
     system, messages = build_summary_request(event)
-    raw = await client.complete(
+    raw, usage = await client.complete_with_usage(
         model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )
-    return SummaryResult(
+    result = SummaryResult(
         summary=parse_summary(raw),
         model=model,
         prompt_version=prompt_version,
         source_updated_at=event.source_updated_at,
     )
+    return result, usage
