@@ -78,7 +78,19 @@ async def _story(url, *, published_offset_days, status="pending", title="Runner 
     )
 
 
-async def _run(session, run_id, *, recency_days=45, use_batches=False, batch_size=10, client=None):
+async def _run(
+    session,
+    run_id,
+    *,
+    recency_days=45,
+    use_batches=False,
+    cluster_use_batches=None,
+    batch_size=10,
+    client=None,
+):
+    kwargs = {}
+    if cluster_use_batches is not None:
+        kwargs["cluster_use_batches"] = cluster_use_batches
     return await run_link_ingest(
         session_factory=lambda: session,
         client=client or FakeClient(),
@@ -89,11 +101,12 @@ async def _run(session, run_id, *, recency_days=45, use_batches=False, batch_siz
         batch_size=batch_size,
         floor=0.7,
         use_batches=use_batches,
+        **kwargs,
     )
 
 
-@pytest.mark.parametrize("use_batches", [False, True])
-async def test_links_then_clusters_recent_pending(session, use_batches):
+@pytest.mark.parametrize("use_batches,cluster_use_batches", [(False, False), (True, True)])
+async def test_links_then_clusters_recent_pending(session, use_batches, cluster_use_batches):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -107,7 +120,9 @@ async def test_links_then_clusters_recent_pending(session, use_batches):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=use_batches)
+    result = await _run(
+        session, run_id, use_batches=use_batches, cluster_use_batches=cluster_use_batches
+    )
 
     assert result.linked == 1
     rows = {
@@ -141,8 +156,8 @@ async def test_links_then_clusters_recent_pending(session, use_batches):
     )
 
 
-@pytest.mark.parametrize("use_batches", [False, True])
-async def test_rerun_is_noop_when_fully_processed(session, use_batches):
+@pytest.mark.parametrize("use_batches,cluster_use_batches", [(False, False), (True, True)])
+async def test_rerun_is_noop_when_fully_processed(session, use_batches, cluster_use_batches):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -150,7 +165,9 @@ async def test_rerun_is_noop_when_fully_processed(session, use_batches):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=use_batches)
+    result = await _run(
+        session, run_id, use_batches=use_batches, cluster_use_batches=cluster_use_batches
+    )
     assert result.linked == 0 and result.rejected == 0
 
 
@@ -287,7 +304,9 @@ async def test_batched_whole_submit_failure_leaves_pending_and_run_succeeds(sess
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=True, client=_RaisingBatchClient())
+    result = await _run(
+        session, run_id, use_batches=True, cluster_use_batches=True, client=_RaisingBatchClient()
+    )
 
     assert result.linked == 0 and result.rejected == 0
     rows = {
@@ -378,11 +397,50 @@ async def test_flag_on_uses_batch_for_stage1(session):
     await session.commit()
 
     client = FakeClient()
-    await _run(session, run_id, use_batches=True, client=client)
+    await _run(session, run_id, use_batches=True, cluster_use_batches=True, client=client)
 
     assert client.batch_requests is not None  # Stage 1 went through complete_batch()
     assert _stage1_complete_calls(client) == 0  # no Stage-1 complete() call
     assert client.cluster_batch_requests is not None  # Stage 2 also went through complete_batch()
+
+
+async def test_link_batched_cluster_sequential_are_independent(session):
+    """link batches, cluster sequential — proves the two flags are independent."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add_all([await _story("https://e/x", published_offset_days=1)])
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    client = FakeClient()
+    await _run(session, run_id, use_batches=True, cluster_use_batches=False, client=client)
+
+    assert client.batch_requests is not None  # Stage 1 used the batch surface
+    assert client.cluster_batch_requests is None  # Stage 2 did NOT use the batch surface
+    # Stage 2 went through complete(): a non-link complete() call was made.
+    assert any(
+        "entity-linking classifier" not in c["system"][0]["text"] for c in client.complete_calls
+    )
+
+
+async def test_link_sequential_cluster_batched_are_independent(session):
+    """link sequential, cluster batched — the mirror image."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add_all([await _story("https://e/x", published_offset_days=1)])
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    client = FakeClient()
+    await _run(session, run_id, use_batches=False, cluster_use_batches=True, client=client)
+
+    assert client.batch_requests is None  # Stage 1 did NOT use the batch surface
+    assert _stage1_complete_calls(client) == 1  # Stage 1 went through complete()
+    assert client.cluster_batch_requests is not None  # Stage 2 used the batch surface
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +458,7 @@ async def test_batched_cluster_request_mapping(session):
     await session.commit()
 
     client = FakeClient()
-    await _run(session, run_id, use_batches=True, client=client)
+    await _run(session, run_id, use_batches=True, cluster_use_batches=True, client=client)
 
     reqs = client.cluster_batch_requests
     assert reqs is not None
@@ -434,6 +492,7 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
         batch_size=1,
         floor=0.7,
         use_batches=True,
+        cluster_use_batches=True,
         cluster_max_tokens=7777,
     )
 

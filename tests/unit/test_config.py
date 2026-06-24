@@ -88,6 +88,20 @@ def test_settings_link_use_batches_override_from_env(monkeypatch):
     assert s.link_use_batches is True
 
 
+def test_settings_cluster_use_batches_defaults_true(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("CLUSTER_USE_BATCHES", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.cluster_use_batches is True
+
+
+def test_settings_cluster_use_batches_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("CLUSTER_USE_BATCHES", "false")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.cluster_use_batches is False
+
+
 def test_settings_summary_defaults(monkeypatch):
     _set_required(monkeypatch)
     for key in ("SUMMARY_MODEL", "SUMMARY_USE_BATCHES", "SUMMARY_PROMPT_VERSION"):
