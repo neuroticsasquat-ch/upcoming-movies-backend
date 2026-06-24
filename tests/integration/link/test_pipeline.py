@@ -8,7 +8,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import BatchResult
+from upmovies.llm.client import BatchResult, Usage
 from upmovies.news.models import Event, EventStory, Story
 
 
@@ -25,6 +25,10 @@ class FakeClient:
         self.complete_calls.append({"system": system, "messages": messages})
         return self._decide(system, messages)
 
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        self.complete_calls.append({"system": system, "messages": messages})
+        return self._decide(system, messages), Usage()
+
     async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
         reqs = list(requests)
         if reqs and "entity-linking classifier" in reqs[0].system[0]["text"]:
@@ -33,7 +37,10 @@ class FakeClient:
             self.cluster_batch_requests = reqs  # Stage-2 cluster batch
         return {
             r.custom_id: BatchResult(
-                custom_id=r.custom_id, ok=True, text=self._decide(r.system, r.messages)
+                custom_id=r.custom_id,
+                ok=True,
+                text=self._decide(r.system, r.messages),
+                usage=Usage(),
             )
             for r in reqs
         }
@@ -76,8 +83,8 @@ async def _run(session, run_id, *, recency_days=45, use_batches=False, batch_siz
         session_factory=lambda: session,
         client=client or FakeClient(),
         run_id=run_id,
-        model="link-m",
-        cluster_model="cluster-m",
+        model="claude-haiku-4-5",
+        cluster_model="claude-sonnet-4-6",
         recency_days=recency_days,
         batch_size=batch_size,
         floor=0.7,
@@ -205,7 +212,10 @@ class _TaggedFailBatchClient(FakeClient):
                 out[r.custom_id] = BatchResult(custom_id=r.custom_id, ok=True, text="not json")
             else:
                 out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id, ok=True, text=self._decide(r.system, r.messages)
+                    custom_id=r.custom_id,
+                    ok=True,
+                    text=self._decide(r.system, r.messages),
+                    usage=Usage(),
                 )
         return out
 
@@ -325,7 +335,7 @@ async def test_batched_request_mapping(session):
     assert reqs is not None
     assert {r.custom_id for r in reqs} == {"0", "1"}  # set of chunk indices
     for r in reqs:
-        assert r.model == "link-m"
+        assert r.model == "claude-haiku-4-5"
         assert r.max_tokens == 2048  # == linker._MAX_TOKENS, for parity with the sequential path
         assert r.system[0]["cache_control"] == {"type": "ephemeral"}
         assert "entity-linking classifier" in r.system[0]["text"]
@@ -398,7 +408,7 @@ async def test_batched_cluster_request_mapping(session):
         str(film.id)
     }  # one cluster request per film, keyed by id
     for r in reqs:
-        assert r.model == "cluster-m"
+        assert r.model == "claude-sonnet-4-6"
         assert r.max_tokens == 4096
         assert r.system[0]["cache_control"] == {"type": "ephemeral"}
         assert "distinct EVENTS" in r.system[0]["text"]
@@ -418,8 +428,8 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
         session_factory=lambda: session,
         client=client,
         run_id=run_id,
-        model="link-m",
-        cluster_model="cluster-m",
+        model="claude-haiku-4-5",
+        cluster_model="claude-sonnet-4-6",
         recency_days=45,
         batch_size=1,
         floor=0.7,
@@ -470,6 +480,7 @@ class _ClusterFailBatchClient:
                             ]
                         }
                     ),
+                    usage=Usage(),
                 )
         return out
 
@@ -502,7 +513,7 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    events_created, stories_clustered, stories_rejected = await _cluster_stage_batched(
+    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_batched(
         session_factory=lambda: session,
         client=_ClusterFailBatchClient(),
         run_id=run_id,

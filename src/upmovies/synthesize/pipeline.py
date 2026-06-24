@@ -15,7 +15,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
-from upmovies.ingest.runs import finalize_run, record_progress
+from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
+from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.synthesize.summarizer import (
     EventInput,
@@ -141,17 +142,19 @@ async def _summary_stage_sequential(
     model: str,
     prompt_version: str,
     pending: list[_PendingEvent],
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, Usage]:
     new = refreshed = failed = 0
+    total_usage = Usage()
     for pe in pending:
         try:
-            result = await summarize_event(
+            result, usage = await summarize_event(
                 client=client, model=model, prompt_version=prompt_version, event=pe.event_input
             )
             async with _owned_session(session_factory) as s:
                 await _upsert_summary(s, pe.event_id, result)
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
+            total_usage += usage
             if pe.is_new:
                 new += 1
             else:
@@ -162,7 +165,7 @@ async def _summary_stage_sequential(
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
             failed += 1
-    return new, refreshed, failed
+    return new, refreshed, failed, total_usage
 
 
 async def _summary_stage_batched(
@@ -173,9 +176,9 @@ async def _summary_stage_batched(
     model: str,
     prompt_version: str,
     pending: list[_PendingEvent],
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, Usage]:
     if not pending:
-        return 0, 0, 0
+        return 0, 0, 0, Usage()
 
     by_id = {str(pe.event_id): pe for pe in pending}
     requests = [
@@ -190,9 +193,10 @@ async def _summary_stage_batched(
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(requests))
             await s.commit()
-        return 0, 0, len(requests)
+        return 0, 0, len(requests), Usage()
 
     new = refreshed = failed = 0
+    total_usage = Usage()
     for custom_id, pe in by_id.items():
         result = results.get(custom_id)
         try:
@@ -209,6 +213,8 @@ async def _summary_stage_batched(
                 await _upsert_summary(s, pe.event_id, summary_result)
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
+            if result.usage is not None:
+                total_usage += result.usage
             if pe.is_new:
                 new += 1
             else:
@@ -219,7 +225,7 @@ async def _summary_stage_batched(
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
             failed += 1
-    return new, refreshed, failed
+    return new, refreshed, failed, total_usage
 
 
 async def run_synthesize_ingest(
@@ -235,7 +241,7 @@ async def run_synthesize_ingest(
         pending = await _select_pending(s, prompt_version=prompt_version)
 
     stage = _summary_stage_batched if use_batches else _summary_stage_sequential
-    new, refreshed, failed = await stage(
+    new, refreshed, failed, summary_usage = await stage(
         session_factory=session_factory,
         client=client,
         run_id=run_id,
@@ -243,6 +249,11 @@ async def run_synthesize_ingest(
         prompt_version=prompt_version,
         pending=pending,
     )
+    async with _owned_session(session_factory) as s:
+        await record_llm_usage(
+            s, run_id, stage="summarize", model=model, batched=use_batches, usage=summary_usage
+        )
+        await s.commit()
 
     async with _owned_session(session_factory) as s:
         await finalize_run(

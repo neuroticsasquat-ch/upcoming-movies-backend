@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from upmovies.link.roster import Roster
-from upmovies.llm.client import BatchRequest, BatchResult, cached_system_block
+from upmovies.llm.client import BatchRequest, BatchResult, Usage, cached_system_block
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -62,14 +62,14 @@ otherwise)."""
 
 
 class Completer(Protocol):
-    async def complete(
+    async def complete_with_usage(
         self,
         *,
         model: str,
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         max_tokens: int = ...,
-    ) -> str: ...
+    ) -> tuple[str, "Usage"]: ...
 
 
 class BatchCompleter(Protocol):
@@ -198,11 +198,11 @@ async def link_story_batch(
     roster: Roster,
     stories: Sequence[Story],
     floor: float,
-) -> BatchLinkResult:
+) -> tuple[BatchLinkResult, Usage]:
     if not stories:
-        return BatchLinkResult(0, 0)
+        return BatchLinkResult(0, 0), Usage()
     system, messages = build_link_request(roster, stories)
-    raw = await client.complete(
+    raw, usage = await client.complete_with_usage(
         model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )
-    return apply_link_decisions(raw=raw, stories=stories, roster=roster, floor=floor)
+    return apply_link_decisions(raw=raw, stories=stories, roster=roster, floor=floor), usage

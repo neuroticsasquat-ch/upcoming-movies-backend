@@ -16,9 +16,11 @@ class FakeClient:
         self._response = response
         self.calls: list[dict] = []
 
-    async def complete(self, *, model, system, messages, max_tokens=4096) -> str:
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        from upmovies.llm.client import Usage
+
         self.calls.append({"model": model, "system": system, "messages": messages})
-        return self._response
+        return self._response, Usage()
 
 
 def _roster(film_id):
@@ -38,7 +40,7 @@ async def _run(response, *, floor=0.7):
     film_id = uuid4()
     story = _story()
     client = FakeClient(response(str(story.id)))
-    result = await link_story_batch(
+    result, _usage = await link_story_batch(
         client=client, model="m", roster=_roster(film_id), stories=[story], floor=floor
     )
     return story, film_id, client, result

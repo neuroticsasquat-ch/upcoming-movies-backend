@@ -16,7 +16,7 @@ import argparse
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -28,41 +28,10 @@ from upmovies.link.linker import _MAX_TOKENS, build_batch_request, build_link_re
 from upmovies.link.pipeline import _chunks
 from upmovies.link.roster import Roster, build_roster
 from upmovies.llm.client import AnthropicClient, BatchResult, Usage
+from upmovies.llm.pricing import HAIKU_4_5, Rates, price
 from upmovies.news.models import Story
 
 log = logging.getLogger("measure_link_cost")
-
-# Cache pricing multipliers (relative to base input): 5-min ephemeral write = 1.25x, read = 0.10x.
-_CACHE_WRITE_MULT = 1.25
-_CACHE_READ_MULT = 0.10
-_BATCH_DISCOUNT = 0.50
-
-
-@dataclass(frozen=True)
-class Rates:
-    """Per-million-token USD rates. VERIFY against https://www.anthropic.com/pricing before
-    trusting the $ figures — raw token counts are the recorded source of truth."""
-
-    input_per_mtok: float
-    output_per_mtok: float
-
-
-# Claude Haiku 4.5 (the link model). VERIFY current rates before trusting $ output.
-HAIKU_4_5 = Rates(input_per_mtok=1.00, output_per_mtok=5.00)
-
-
-def price(usage: Usage, rates: Rates, *, batch: bool) -> float:
-    """Dollar cost of `usage` at `rates`. Cache writes cost 1.25x base input, cache reads
-    0.10x; the batch path applies a flat 50% discount on the whole total."""
-    base_in = rates.input_per_mtok / 1_000_000
-    out = rates.output_per_mtok / 1_000_000
-    cost = (
-        usage.input_tokens * base_in
-        + usage.cache_creation_input_tokens * base_in * _CACHE_WRITE_MULT
-        + usage.cache_read_input_tokens * base_in * _CACHE_READ_MULT
-        + usage.output_tokens * out
-    )
-    return cost * (_BATCH_DISCOUNT if batch else 1.0)
 
 
 def _mean(values: list[float]) -> float:

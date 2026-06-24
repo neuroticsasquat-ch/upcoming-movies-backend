@@ -2,3 +2,8 @@ from upmovies.llm.client import AnthropicClient as AnthropicClient
 from upmovies.llm.client import BatchRequest as BatchRequest
 from upmovies.llm.client import BatchResult as BatchResult
 from upmovies.llm.client import cached_system_block as cached_system_block
+from upmovies.llm.pricing import HAIKU_4_5 as HAIKU_4_5
+from upmovies.llm.pricing import SONNET_4_6 as SONNET_4_6
+from upmovies.llm.pricing import Rates as Rates
+from upmovies.llm.pricing import price as price
+from upmovies.llm.pricing import rates_for as rates_for

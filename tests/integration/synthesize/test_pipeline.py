@@ -7,7 +7,7 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run as _create_run
-from upmovies.llm.client import BatchResult
+from upmovies.llm.client import BatchResult, Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.synthesize.pipeline import _select_pending, _upsert_summary, run_synthesize_ingest
 from upmovies.synthesize.summarizer import SummaryResult
@@ -174,25 +174,26 @@ async def test_upsert_summary_inserts_then_updates_idempotently(session):
 
 
 class FakeSummaryClient:
-    """Serves both surfaces. `complete` (sequential) and `complete_batch` (batched) both return
-    the JSON summary envelope the service expects."""
+    """Serves both surfaces. `complete_with_usage` (sequential) and `complete_batch` (batched)
+    both return the JSON summary envelope the service expects."""
 
     def __init__(self, summary="A neutral update."):
         self._summary = summary
         self.complete_calls = 0
         self.batch_requests = None
 
-    async def complete(self, *, model, system, messages, max_tokens=4096) -> str:
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
         self.complete_calls += 1
-        return json.dumps({"summary": self._summary})
+        return json.dumps({"summary": self._summary}), Usage()
 
     async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        from upmovies.llm.client import BatchResult
-
         self.batch_requests = list(requests)
         return {
             r.custom_id: BatchResult(
-                custom_id=r.custom_id, ok=True, text=json.dumps({"summary": self._summary})
+                custom_id=r.custom_id,
+                ok=True,
+                text=json.dumps({"summary": self._summary}),
+                usage=Usage(),
             )
             for r in self.batch_requests
         }
@@ -278,11 +279,11 @@ async def test_prompt_version_bump_refreshes(session):
 class _FailOneCompleter(FakeSummaryClient):
     """Raises for the event whose film title starts 'FAIL', succeeds otherwise."""
 
-    async def complete(self, *, model, system, messages, max_tokens=4096) -> str:
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
         payload = json.loads(messages[0]["content"])
         if payload["film"].startswith("FAIL"):
             raise RuntimeError("boom")
-        return json.dumps({"summary": self._summary})
+        return json.dumps({"summary": self._summary}), Usage()
 
 
 async def test_sequential_failure_is_isolated_per_event(session):
@@ -372,7 +373,10 @@ class _BatchFailOne:
                 )
             else:
                 out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id, ok=True, text=json.dumps({"summary": "ok."})
+                    custom_id=r.custom_id,
+                    ok=True,
+                    text=json.dumps({"summary": "ok."}),
+                    usage=Usage(),
                 )
         return out
 

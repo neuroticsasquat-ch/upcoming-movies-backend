@@ -1,12 +1,16 @@
 """Run-tracking helpers for the ingestion pipelines. Pure DB I/O — callers own commits."""
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.ingest.models import IngestRun
+from upmovies.ingest.models import IngestRun, RunLLMUsage
+from upmovies.llm.client import Usage
+from upmovies.llm.pricing import price, rates_for
 
 
 async def create_run(session: AsyncSession, kind: str) -> UUID:
@@ -68,3 +72,43 @@ async def mark_stale_runs_cancelled(session: AsyncSession, *, stale_after_minute
         )
     )
     return result.rowcount or 0  # type: ignore[attr-defined]  # CursorResult has rowcount
+
+
+async def record_llm_usage(
+    session: AsyncSession,
+    run_id: UUID,
+    *,
+    stage: str,
+    model: str,
+    batched: bool,
+    usage: Usage,
+) -> None:
+    """UPSERT the per-stage LLM usage + estimated dollar cost for a run. Prices `usage` via
+    the shared pricing module (`rates_for(model)` raises KeyError on an unknown model) and
+    writes one row per (run_id, stage), overwriting on the uq_run_llm_usage_run_stage
+    conflict so a stage re-run refreshes rather than duplicates. Caller owns the commit."""
+    cost = Decimal(str(price(usage, rates_for(model), batch=batched)))
+    stmt = pg_insert(RunLLMUsage).values(
+        run_id=run_id,
+        stage=stage,
+        model=model,
+        batched=batched,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_input_tokens=usage.cache_read_input_tokens,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens,
+        cost_usd=cost,
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_run_llm_usage_run_stage",
+        set_={
+            "model": model,
+            "batched": batched,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "cost_usd": cost,
+        },
+    )
+    await session.execute(stmt)

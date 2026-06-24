@@ -28,11 +28,13 @@ class FakeCompleter:
         self._response = response
         self.calls: list[dict] = []
 
-    async def complete(self, *, model, system, messages, max_tokens=4096) -> str:
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        from upmovies.llm.client import Usage
+
         self.calls.append(
             {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
         )
-        return self._response
+        return self._response, Usage()
 
 
 class FakeBatchCompleter:
@@ -103,7 +105,7 @@ def test_parse_summary_raises_on_malformed():
 async def test_summarize_event_returns_result_with_provenance():
     client = FakeCompleter('{"summary": "The studio confirmed a 2027 release."}')
     event = _event()
-    result = await summarize_event(
+    result, _usage = await summarize_event(
         client=client, model="claude-haiku-4-5", prompt_version="1", event=event
     )
     assert result.summary == "The studio confirmed a 2027 release."
