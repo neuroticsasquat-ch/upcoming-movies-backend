@@ -92,7 +92,7 @@ def test_settings_link_batch_size_default(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.delenv("LINK_BATCH_SIZE", raising=False)
     s = Settings()  # type: ignore[call-arg]
-    assert s.link_batch_size == 30
+    assert s.link_batch_size == 15
 
 
 def test_settings_link_batch_size_override_from_env(monkeypatch):
