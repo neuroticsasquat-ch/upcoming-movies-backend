@@ -53,7 +53,11 @@ async def run_model(model: str, attach_limit: int, max_tokens: int) -> dict:
                 model=model, system=system, messages=messages, max_tokens=max_tokens
             )
             # Snapshot the RAW decision (model output) before applying — that's the diff unit.
-            out[str(fid)] = {"raw": raw, "n_unclustered": len(plan.unclustered_story_ids)}
+            out[str(fid)] = {
+                "raw": raw,
+                "n_unclustered": len(plan.unclustered_story_ids),
+                "n_existing_events": len(plan.existing_event_ids),
+            }
             await apply_cluster_decisions(s, plan=plan, raw=raw)
             await s.commit()
     return out
@@ -78,6 +82,7 @@ def _parse_film_decisions(film_data: dict) -> dict:
       - new_event_classifications: list of (group_idx, type, confidence)
     """
     raw = film_data.get("raw", "")
+    n_existing_events: int = film_data.get("n_existing_events", 0)
     # Mirror _extract_json_object from cluster.py — find the outermost JSON object.
     start = raw.find("{")
     end = raw.rfind("}")
@@ -95,7 +100,7 @@ def _parse_film_decisions(film_data: dict) -> dict:
     for group_idx, group in enumerate(data.get("events", [])):
         existing_idx = group.get("existing")
         stories = [n for n in (group.get("stories") or []) if isinstance(n, int)]
-        if isinstance(existing_idx, int):
+        if isinstance(existing_idx, int) and 1 <= existing_idx <= n_existing_events:
             for n in stories:
                 attach_decisions.append((n, "attach", existing_idx))
         else:
