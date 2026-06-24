@@ -115,8 +115,8 @@ def build_link_request(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The cached roster system block + the JSON story payload — shared by both the
     sequential `complete()` path and the batched `complete_batch()` path."""
-    # Cacheable iff `instructions + roster` > Haiku 4.5's 4096-tok floor; otherwise this
-    # no-ops (cache_creation=0). Verifiable per-run via NEU-375 telemetry (NEU-377 Task 2).
+    # `instructions + roster` prefix = ~15 193 tok — clears Haiku 4.5's 4096-tok cache floor.
+    # Verified 2026-06-24: call 1 cache_creation=15 193, call 2 cache_read=15 193 (NEU-377).
     system = [cached_system_block(f"{_INSTRUCTIONS}\n\nROSTER:\n{roster.text}")]
     messages = [{"role": "user", "content": json.dumps(_story_payload(stories))}]
     return system, messages
