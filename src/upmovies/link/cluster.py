@@ -30,11 +30,12 @@ _VALID_TYPES = {
     "other",
 }
 _SUMMARY_MAX = 500
-_MAX_TOKENS = 1500
+_DEFAULT_MAX_TOKENS = 4096
 
 _INSTRUCTIONS = """You group a single film's news stories into distinct EVENTS — real beats \
 in its life (casting, a trailer, a release-date change, production milestones, etc.) — and \
-classify each. You are given the FILM, its EXISTING recent events, and NEW stories to place.
+classify each. You are given the FILM, its EXISTING recent events (numbered from 1), and NEW \
+stories to place (each with an integer id "n").
 
 For each new story, either attach it to an existing event (it continues a beat already \
 logged) or assign it to a new event (a beat not yet logged). Group new stories that report \
@@ -48,11 +49,12 @@ trailer, other
 
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
-"confidence": "confirmed" | "rumored" | null, "stories": ["<story id>", ...]}]}
+"confidence": "confirmed" | "rumored" | null, "stories": [<story number n>, ...]}]}
 
 When "existing" is a number, attach its "stories" to that event ("type"/"confidence" may \
-be null). Otherwise it is a new event and "type"/"confidence" are required. Every new \
-story id must appear in exactly one group."""
+be null). Otherwise it is a new event and "type"/"confidence" are required. "existing" \
+refers to an EXISTING event's number; "stories" lists NEW story numbers "n". Every new \
+story's "n" must appear in exactly one group."""
 
 
 @dataclass
@@ -139,16 +141,15 @@ async def build_cluster_request(
             }
         )
 
-    by_id = {str(s.id): s for s in unclustered}
     new_payload = [
         {
-            "id": sid,
+            "n": i,
             "title": s.title,
             "summary": (str(s.raw.get("summary", "")) if isinstance(s.raw, dict) else "")[
                 :_SUMMARY_MAX
             ],
         }
-        for sid, s in by_id.items()
+        for i, s in enumerate(unclustered, start=1)
     ]
 
     user: dict[str, Any] = {
@@ -195,17 +196,29 @@ async def apply_cluster_decisions(
         .scalars()
         .all()
     )
-    by_id = {str(s.id): s for s in stories}
+    by_id = {s.id: s for s in stories}
+    story_ids = plan.unclustered_story_ids  # n (1-based) -> story_ids[n - 1]
 
-    data = json.loads(_extract_json_object(raw))
+    try:
+        data = json.loads(_extract_json_object(raw))
+    except json.JSONDecodeError:
+        log.warning("cluster: unparseable response for film %s", plan.film_id)
+        return ClusterResult(0, 0)
 
     now = datetime.now(UTC)
-    assigned: set[str] = set()
+    assigned: set[UUID] = set()
     events_created = stories_clustered = 0
 
     for group in data.get("events", []):
-        sids = [sid for sid in (group.get("stories") or []) if sid in by_id and sid not in assigned]
-        if not sids:
+        group_sids: list[UUID] = []
+        for n in group.get("stories") or []:
+            if not isinstance(n, int) or not (1 <= n <= len(story_ids)):
+                continue
+            sid = story_ids[n - 1]
+            if sid not in by_id or sid in assigned or sid in group_sids:
+                continue
+            group_sids.append(sid)
+        if not group_sids:
             continue
         existing_idx = group.get("existing")
         if isinstance(existing_idx, int) and 1 <= existing_idx <= len(existing_events):
@@ -222,15 +235,15 @@ async def apply_cluster_decisions(
                     conf,
                 )
                 continue
-            occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in sids)
+            occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids)
             event = Event(
                 film_id=plan.film_id, event_type=etype, confidence=conf, occurred_at=occurred
             )
             session.add(event)
             await session.flush()
             events_created += 1
-        for sid in sids:
-            session.add(EventStory(event_id=event.id, story_id=UUID(sid)))
+        for sid in group_sids:
+            session.add(EventStory(event_id=event.id, story_id=sid))
             assigned.add(sid)
             stories_clustered += 1
 
@@ -244,6 +257,7 @@ async def build_cluster_batch_request(
     model: str,
     film_id: UUID,
     recency_days: int,
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
 ) -> tuple[BatchRequest, ClusterPlan] | None:
     """Wrap build_cluster_request into a BatchRequest ready for the Anthropic Batch API."""
     built = await build_cluster_request(session, film_id=film_id, recency_days=recency_days)
@@ -256,7 +270,7 @@ async def build_cluster_batch_request(
             model=model,
             system=system,
             messages=messages,
-            max_tokens=_MAX_TOKENS,
+            max_tokens=max_tokens,
         ),
         plan,
     )
@@ -269,6 +283,7 @@ async def cluster_film_events(
     model: str,
     film_id: UUID,
     recency_days: int,
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
 ) -> ClusterResult:
     built = await build_cluster_request(session, film_id=film_id, recency_days=recency_days)
     if built is None:
@@ -278,6 +293,6 @@ async def cluster_film_events(
         model=model,
         system=system,
         messages=messages,
-        max_tokens=_MAX_TOKENS,
+        max_tokens=max_tokens,
     )
     return await apply_cluster_decisions(session, plan=plan, raw=raw)

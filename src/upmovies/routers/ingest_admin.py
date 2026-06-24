@@ -94,6 +94,7 @@ async def _background_link(run_id: UUID, settings: Settings) -> None:
                 batch_size=settings.link_batch_size,
                 floor=settings.link_confidence_floor,
                 use_batches=settings.link_use_batches,
+                cluster_max_tokens=settings.link_cluster_max_tokens,
             )
     except Exception as e:
         log.exception("background link ingest crashed")

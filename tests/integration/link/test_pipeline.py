@@ -44,7 +44,7 @@ class FakeClient:
             return json.dumps(
                 [{"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"} for s in stories]
             )
-        new_ids = [s["id"] for s in json.loads(messages[0]["content"])["new_stories"]]
+        new_ns = [s["n"] for s in json.loads(messages[0]["content"])["new_stories"]]
         return json.dumps(
             {
                 "events": [
@@ -52,7 +52,7 @@ class FakeClient:
                         "existing": None,
                         "type": "trailer",
                         "confidence": "confirmed",
-                        "stories": new_ids,
+                        "stories": new_ns,
                     }
                 ]
             }
@@ -394,9 +394,37 @@ async def test_batched_cluster_request_mapping(session):
     }  # one cluster request per film, keyed by id
     for r in reqs:
         assert r.model == "cluster-m"
-        assert r.max_tokens == 1500
+        assert r.max_tokens == 4096
         assert r.system[0]["cache_control"] == {"type": "ephemeral"}
         assert "distinct EVENTS" in r.system[0]["text"]
+
+
+async def test_run_link_ingest_threads_cluster_max_tokens(session):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add_all([await _story("https://e/a", published_offset_days=1)])
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    client = FakeClient()
+    await run_link_ingest(
+        session_factory=lambda: session,
+        client=client,
+        run_id=run_id,
+        model="link-m",
+        cluster_model="cluster-m",
+        recency_days=45,
+        batch_size=1,
+        floor=0.7,
+        use_batches=True,
+        cluster_max_tokens=7777,
+    )
+
+    reqs = client.cluster_batch_requests
+    assert reqs is not None
+    assert all(r.max_tokens == 7777 for r in reqs)
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +449,7 @@ class _ClusterFailBatchClient:
                     custom_id=r.custom_id, ok=False, error_type="errored", error_message="boom"
                 )
             else:
-                new_ids = [s["id"] for s in payload["new_stories"]]
+                new_ns = [s["n"] for s in payload["new_stories"]]
                 out[r.custom_id] = BatchResult(
                     custom_id=r.custom_id,
                     ok=True,
@@ -432,7 +460,7 @@ class _ClusterFailBatchClient:
                                     "existing": None,
                                     "type": "trailer",
                                     "confidence": "confirmed",
-                                    "stories": new_ids,
+                                    "stories": new_ns,
                                 }
                             ]
                         }
@@ -476,6 +504,7 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
         model="cluster-m",
         film_ids=[ok_film.id, fail_film.id],
         recency_days=45,
+        cluster_max_tokens=4096,
     )
 
     assert events_created == 1
