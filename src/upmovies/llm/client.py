@@ -12,7 +12,14 @@ from anthropic import AsyncAnthropic
 
 def cached_system_block(text: str) -> dict[str, Any]:
     """A system content block marked for ephemeral prompt caching. Put the stable prefix
-    (e.g. the film roster) in one of these so repeated calls reuse the cached tokens."""
+    (e.g. the film roster) in one of these so repeated calls reuse the cached tokens.
+
+    Caching only engages above a per-model prefix floor: Haiku 4.5 = 4096 tokens,
+    Sonnet 4.6 = 2048 tokens. Below the floor `cache_control` silently no-ops
+    (cache_creation_input_tokens == 0). Per stage (NEU-377): LINK uses this and caches
+    iff `instructions + roster` exceeds 4096 tok; CLUSTER does NOT (per-film payload,
+    instructions under 2048 — uses a plain block); SUMMARIZE does NOT (instructions
+    under 4096 — uses a plain block)."""
     return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
 
 

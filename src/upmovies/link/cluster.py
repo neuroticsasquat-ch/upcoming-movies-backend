@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.link.linker import Completer
-from upmovies.llm.client import BatchRequest, Usage, cached_system_block
+from upmovies.llm.client import BatchRequest, Usage
 from upmovies.news.models import Event, EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -181,7 +181,11 @@ async def build_cluster_request(
         "new_stories": new_payload,
     }
 
-    system = [cached_system_block(_INSTRUCTIONS)]
+    # NEU-377: the cluster instruction block is a few hundred tokens — below Sonnet
+    # 4.6's 2048-token prompt-cache floor — and the per-call payload is per-film with no
+    # shared prefix, so cache_control here can never produce a hit. Emit a plain system
+    # block (mirrors synthesize/summarizer.py) rather than carry a dead cache marker.
+    system = [{"type": "text", "text": _INSTRUCTIONS}]
     messages = [{"role": "user", "content": json.dumps(user)}]
     plan = ClusterPlan(
         film_id=film_id,

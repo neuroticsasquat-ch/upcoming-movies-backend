@@ -155,7 +155,10 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
     assert built is not None
     system, messages, plan = built
 
-    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    # NEU-377: cluster instructions are below Sonnet's 2048-tok cache floor and the
+    # per-call payload is per-film (no shared prefix), so the block is intentionally
+    # un-cached — a plain {"type": "text", "text": ...} block with no cache_control.
+    assert "cache_control" not in system[0]
     assert "distinct EVENTS" in system[0]["text"]
     payload = json.loads(messages[0]["content"])
     assert payload["film"]["title"] == "Runner"
@@ -354,7 +357,7 @@ async def test_build_cluster_batch_request_wraps_into_batch_request(session):
     assert req.custom_id == str(film.id)
     assert req.model == "cluster-m"
     assert req.max_tokens == 4096
-    assert req.system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in req.system[0]
     assert "distinct EVENTS" in req.system[0]["text"]
     assert plan.film_id == film.id
     assert set(plan.unclustered_story_ids) == {s1.id}
