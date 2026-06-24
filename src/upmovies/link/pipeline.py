@@ -275,6 +275,7 @@ async def run_link_ingest(
     batch_size: int,
     floor: float,
     use_batches: bool = False,
+    cluster_use_batches: bool = False,
     cluster_max_tokens: int = 4096,
 ) -> LinkIngestResult:
     async with _owned_session(session_factory) as s:
@@ -328,7 +329,7 @@ async def run_link_ingest(
             if fid is not None
         ]
 
-    cluster_stage = _cluster_stage_batched if use_batches else _cluster_stage_sequential
+    cluster_stage = _cluster_stage_batched if cluster_use_batches else _cluster_stage_sequential
     events_created, stories_clustered, stories_rejected, cluster_usage = await cluster_stage(
         session_factory=session_factory,
         client=client,
