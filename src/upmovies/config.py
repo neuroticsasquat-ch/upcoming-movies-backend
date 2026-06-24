@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     cluster_model: str = Field(default="claude-sonnet-4-6", alias="CLUSTER_MODEL")
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
-    link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
+    link_batch_size: int = Field(default=30, alias="LINK_BATCH_SIZE")
     link_use_batches: bool = Field(default=True, alias="LINK_USE_BATCHES")
     cluster_use_batches: bool = Field(default=True, alias="CLUSTER_USE_BATCHES")
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")

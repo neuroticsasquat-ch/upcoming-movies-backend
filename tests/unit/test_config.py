@@ -88,6 +88,20 @@ def test_settings_link_use_batches_override_from_env(monkeypatch):
     assert s.link_use_batches is True
 
 
+def test_settings_link_batch_size_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("LINK_BATCH_SIZE", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_batch_size == 30
+
+
+def test_settings_link_batch_size_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_BATCH_SIZE", "10")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_batch_size == 10
+
+
 def test_settings_cluster_use_batches_defaults_true(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.delenv("CLUSTER_USE_BATCHES", raising=False)
