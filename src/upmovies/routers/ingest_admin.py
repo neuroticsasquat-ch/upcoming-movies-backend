@@ -75,6 +75,8 @@ async def _background_feeds(
             if per_film_override is not None
             else settings.feeds_per_film_enabled,
             per_film_throttle=settings.feeds_per_film_throttle_seconds,
+            per_film_title_filter_enabled=settings.per_film_title_filter_enabled,
+            per_film_title_match_min_ratio=settings.per_film_title_match_min_ratio,
         )
     except Exception as e:
         log.exception("background feeds ingest crashed")

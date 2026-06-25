@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     feeds_per_film_throttle_seconds: float = Field(
         default=1.0, alias="FEEDS_PER_FILM_THROTTLE_SECONDS"
     )
+    per_film_title_filter_enabled: bool = Field(default=True, alias="PER_FILM_TITLE_FILTER_ENABLED")
+    per_film_title_match_min_ratio: float = Field(
+        default=0.4, alias="PER_FILM_TITLE_MATCH_MIN_RATIO"
+    )
 
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
