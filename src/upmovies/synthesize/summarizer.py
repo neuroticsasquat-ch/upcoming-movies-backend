@@ -4,6 +4,8 @@ caller maps ORM→EventInput and persists the returned SummaryResult. The LLM cl
 (Completer / BatchCompleter) so this is unit-testable with fakes."""
 
 import json
+import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,6 +15,15 @@ from upmovies.llm.client import BatchRequest, BatchResult, Usage
 
 _DEK_MAX = 500
 _MAX_TOKENS = 256
+
+log = logging.getLogger(__name__)
+
+# Permissive recovery for malformed `{"summary": "..."}` envelopes (NEU-366). The greedy
+# capture runs to the last quote before the closing brace, so an unescaped inner quote is
+# captured as text rather than treated as the string terminator. Safe because the prompt
+# mandates a single-key object.
+_SUMMARY_VALUE_RE = re.compile(r'"summary"\s*:\s*"(.*)"\s*}?\s*$', re.DOTALL)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f]+")
 
 _INSTRUCTIONS = """You write neutral, factual update blurbs for an upcoming-movies tracker.
 
@@ -121,10 +132,35 @@ def _extract_json_object(text: str) -> str:
     return text[start : end + 1]
 
 
+def _recover_summary(candidate: str) -> str | None:
+    """Permissive fallback for when strict JSON parsing fails: pull the `summary` value by
+    regex (greedy to the last quote before the closing brace, so an unescaped inner quote is
+    captured as text), strip ASCII control chars, and collapse whitespace. Returns the cleaned
+    summary, or None if nothing usable is found."""
+    match = _SUMMARY_VALUE_RE.search(candidate)
+    if match is None:
+        return None
+    value = _CONTROL_CHARS_RE.sub(" ", match.group(1))
+    value = " ".join(value.split())
+    return value or None
+
+
 def parse_summary(raw: str) -> str:
-    """Extract the JSON object, read its `summary`, and return it stripped. Raises on
-    un-parseable output (`json.JSONDecodeError`) or a missing/empty `summary` (`ValueError`)."""
-    obj = json.loads(_extract_json_object(raw))
+    """Extract the JSON object, read its `summary`, and return it stripped. On malformed JSON
+    (`json.JSONDecodeError`), fall back to a permissive recovery of the `summary` value and log
+    a WARNING; if recovery also fails, the original `JSONDecodeError` propagates. Raises
+    `ValueError` when valid JSON carries a missing/empty `summary`."""
+    candidate = _extract_json_object(raw)
+    try:
+        obj = json.loads(candidate)
+    except json.JSONDecodeError:
+        recovered = _recover_summary(candidate)
+        if recovered:
+            log.warning(
+                "parse_summary recovered summary from malformed JSON envelope: %r", raw[:500]
+            )
+            return recovered
+        raise
     summary = obj.get("summary") if isinstance(obj, dict) else None
     if not isinstance(summary, str) or not summary.strip():
         raise ValueError(f"no usable summary in model output: {raw!r}")
