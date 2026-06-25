@@ -92,3 +92,15 @@ Use a short, dash-separated slug: `"<film-slug>-<event>-<n>"`, e.g.
 
 This fixture was drawn from the story corpus as of the labeling date. It is a point-in-time
 snapshot and does not update automatically as new stories are ingested.
+
+## `event_group` (Stage-2 gold groups)
+
+Gold beat-grouping key for the cluster-purity baseline (NEU-300). Set **only** on linkable
+`about` rows (`relation == "about"` AND `is_production_news` not `false`); `null` elsewhere.
+Stories about the **same production beat** share an `event_group`; different beats differ.
+
+Slugs are **film-namespaced** — `"{expected_film_tmdb_id}-{beat-slug}"` (e.g.
+`"1003596-doctor-doom-casting"`) — so they are globally unique, which lets
+`compute_cluster_metrics` pool predicted clusters across films without cross-film pair
+leakage. Draft with `scripts/propose_event_groups.py` (Opus), then hand-correct; score with
+`scripts/validate_clustering.py`.
