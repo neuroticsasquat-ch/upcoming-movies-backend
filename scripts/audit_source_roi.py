@@ -93,9 +93,9 @@ DIRECT_PULL_DOMAINS: frozenset[str] = frozenset(
 def _is_direct_pull_outlet(outlet: str | None) -> bool:
     if outlet is None:
         return False
-    # outlet may be a full domain or domain with path; match on hostname portion
+    # outlet may be a full domain or domain with path; normalise to bare hostname
     hostname = outlet.split("/")[0].lower().removeprefix("www.")
-    return outlet.lower() in DIRECT_PULL_DOMAINS or f"www.{hostname}" in DIRECT_PULL_DOMAINS or hostname in DIRECT_PULL_DOMAINS  # noqa: E501
+    return hostname in DIRECT_PULL_DOMAINS
 
 
 # ---------------------------------------------------------------------------
