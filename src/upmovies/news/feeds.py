@@ -25,14 +25,6 @@ _TRADE_FEEDS: tuple[FeedSource, ...] = (
     FeedSource("Deadline", "https://deadline.com/v/film/feed/"),
     FeedSource("Variety", "https://variety.com/v/film/feed/"),
     FeedSource("The Hollywood Reporter", "https://www.hollywoodreporter.com/c/movies/feed/"),
-    FeedSource("Collider", "https://collider.com/feed/"),
-    FeedSource("/Film", "https://www.slashfilm.com/category/movies/feed/"),
-    # Empire's old /movies/news/feed/ path 404s now; the live feed is Bauer Media's
-    # central aggregator (and it 403s any client without an identifying User-Agent).
-    FeedSource(
-        "Empire",
-        "https://rss.onebauer.media/api/feed-aggregator?hostname=https://www.empireonline.com",
-    ),
     FeedSource("ScreenRant", "https://screenrant.com/feed/"),
 )
 

@@ -188,3 +188,5 @@ $RECYCLE.BIN/
 tests/fixtures/link/validation_candidates.json
 tests/fixtures/link/validation_review.csv
 tests/fixtures/link/validation_review.html
+tests/fixtures/link/validation_eventgroups.json
+tests/fixtures/link/eventgroup_review.html
