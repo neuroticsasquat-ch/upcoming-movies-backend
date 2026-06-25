@@ -162,9 +162,11 @@ def test_parse_summary_recovers_unescaped_inner_quote(caplog):
     assert "recovered summary from malformed" in caplog.text
 
 
-def test_parse_summary_recovers_control_char_in_value():
+def test_parse_summary_recovers_control_char_in_value(caplog):
     raw = '{"summary": "Filming\x01wrapped in Atlanta."}'
-    assert parse_summary(raw) == "Filming wrapped in Atlanta."
+    with caplog.at_level("WARNING"):
+        assert parse_summary(raw) == "Filming wrapped in Atlanta."
+    assert "recovered summary from malformed" in caplog.text
 
 
 def test_parse_summary_recovers_from_fenced_malformed_envelope():
