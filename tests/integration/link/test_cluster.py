@@ -2,11 +2,13 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from upmovies.catalog.models import Film
 from upmovies.link.cluster import (
+    ClusterParseError,
     ClusterPlan,
     apply_cluster_decisions,
     build_cluster_batch_request,
@@ -431,7 +433,7 @@ async def test_apply_dedups_repeated_story_within_group(session):
     assert [el.story_id for el in links] == [s1.id]
 
 
-async def test_apply_returns_empty_on_unparseable_response(session):
+async def test_apply_raises_on_unparseable_response(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -439,11 +441,8 @@ async def test_apply_returns_empty_on_unparseable_response(session):
     await session.commit()
 
     plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
-    result = await apply_cluster_decisions(session, plan=plan, raw="not json {")
-    await session.commit()
-
-    assert result.events_created == 0 and result.stories_clustered == 0
-    assert (await session.execute(select(EventStory))).scalars().all() == []
+    with pytest.raises(ClusterParseError):
+        await apply_cluster_decisions(session, plan=plan, raw="not json {")
 
 
 # ---------------------------------------------------------------------------
