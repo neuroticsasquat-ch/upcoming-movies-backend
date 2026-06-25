@@ -153,3 +153,28 @@ async def test_batched_path_round_trips_to_same_summary():
     assert result.ok
     # batched path yields the identical parsed summary as the sequential path
     assert parse_summary(result.text) == "Principal photography has begun."
+
+
+def test_parse_summary_recovers_unescaped_inner_quote(caplog):
+    raw = '{"summary": "Netflix calls it "the one" of the franchise."}'
+    with caplog.at_level("WARNING"):
+        assert parse_summary(raw) == 'Netflix calls it "the one" of the franchise.'
+    assert "recovered summary from malformed" in caplog.text
+
+
+def test_parse_summary_recovers_control_char_in_value(caplog):
+    raw = '{"summary": "Filming\x01wrapped in Atlanta."}'
+    with caplog.at_level("WARNING"):
+        assert parse_summary(raw) == "Filming wrapped in Atlanta."
+    assert "recovered summary from malformed" in caplog.text
+
+
+def test_parse_summary_recovers_from_fenced_malformed_envelope():
+    raw = 'Sure:\n```json\n{"summary": "She said "yes" to the role."}\n```'
+    assert parse_summary(raw) == 'She said "yes" to the role.'
+
+
+def test_parse_summary_happy_path_does_not_warn(caplog):
+    with caplog.at_level("WARNING"):
+        assert parse_summary('{"summary": "A clean update."}') == "A clean update."
+    assert "recovered summary from malformed" not in caplog.text
