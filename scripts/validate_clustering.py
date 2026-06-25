@@ -116,7 +116,7 @@ async def main(path: str) -> None:
     for cluster, ptype in zip(predicted_clusters, predicted_type_by_cluster, strict=True):
         if ptype is None:
             continue
-        gold_types = Counter(gold_type_by_key.get(u) for u in cluster)
+        gold_types = Counter(t for u in cluster if (t := gold_type_by_key.get(u)) is not None)
         majority = max(gold_types, key=lambda k: gold_types[k]) if gold_types else None
         type_total += 1
         if ptype == majority:
