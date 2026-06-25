@@ -20,6 +20,11 @@ from upmovies.news.models import Event, EventStory, Story
 
 log = logging.getLogger(__name__)
 
+
+class ClusterParseError(Exception):
+    """Raised when the cluster LLM response cannot be parsed into cluster groups."""
+
+
 _VALID_TYPES = {
     "announced",
     "casting",
@@ -277,8 +282,7 @@ async def apply_cluster_decisions(
 
     groups = parse_cluster_groups(raw, n_stories=len(story_ids))
     if groups is None:
-        log.warning("cluster: unparseable response for film %s", plan.film_id)
-        return ClusterResult(0, 0)
+        raise ClusterParseError(f"unparseable cluster response for film {plan.film_id}")
 
     now = datetime.now(UTC)
     assigned: set[UUID] = set()

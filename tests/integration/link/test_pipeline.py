@@ -7,7 +7,7 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
-from upmovies.link.pipeline import run_link_ingest
+from upmovies.link.pipeline import _cluster_stage_sequential, run_link_ingest
 from upmovies.llm.client import BatchResult, Usage
 from upmovies.news.models import Event, EventStory, Story
 
@@ -594,3 +594,103 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
     assert len(ok_events) == 1 and len(fail_events) == 0
     members = {el.story_id for el in (await session.execute(select(EventStory))).scalars().all()}
     assert ok_story.id in members and fail_story.id not in members
+
+
+# ---------------------------------------------------------------------------
+# NEU-365: cluster parse failure surfaces as items_failed (not silent drop)
+# ---------------------------------------------------------------------------
+
+
+class _UnparseableClusterClient:
+    """Returns an unparseable cluster response for every film, so apply_cluster_decisions
+    raises ClusterParseError, which the pipeline catch-block records as failed_delta=1."""
+
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        return "not json {", Usage()
+
+
+async def test_cluster_parse_failure_surfaces_as_failed_sequential(session):
+    """Sequential path: a ClusterParseError increments items_failed on the run."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_unclustered(session, film, "https://e/1")
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_sequential(
+        session_factory=lambda: session,
+        client=_UnparseableClusterClient(),
+        run_id=run_id,
+        model="cluster-m",
+        film_ids=[film.id],
+        attach_limit=45,
+        cluster_max_tokens=4096,
+    )
+
+    assert events_created == 0
+    assert stories_clustered == 0
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.items_failed == 1
+
+
+class _UnparseableClusterBatchClient:
+    """Returns an unparseable (but ok=True) BatchResult for every cluster film,
+    so apply_cluster_decisions raises ClusterParseError in the batched path."""
+
+    def __init__(self):
+        self.cluster_batch_requests: list | None = None
+
+    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
+        reqs = list(requests)
+        self.cluster_batch_requests = reqs
+        return {
+            r.custom_id: BatchResult(
+                custom_id=r.custom_id,
+                ok=True,
+                text="not json {",
+                usage=Usage(),
+            )
+            for r in reqs
+        }
+
+
+async def test_cluster_parse_failure_surfaces_as_failed_batched(session):
+    """Batched path: a ClusterParseError increments items_failed on the run."""
+    from upmovies.link.pipeline import _cluster_stage_batched
+
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_unclustered(session, film, "https://e/1")
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_batched(
+        session_factory=lambda: session,
+        client=_UnparseableClusterBatchClient(),
+        run_id=run_id,
+        model="cluster-m",
+        film_ids=[film.id],
+        attach_limit=45,
+        cluster_max_tokens=4096,
+    )
+
+    assert events_created == 0
+    assert stories_clustered == 0
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.items_failed == 1
