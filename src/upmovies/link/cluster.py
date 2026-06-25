@@ -92,6 +92,26 @@ def _extract_json_object(text: str) -> str:
     return text[start : end + 1]
 
 
+def assemble_cluster_payload(
+    *,
+    film_title: str,
+    film_year: int | None,
+    existing_payload: list[dict[str, Any]],
+    new_payload: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pure prompt assembly shared by build_cluster_request (production) and the
+    validate_clustering harness. No DB, no LLM. NEU-377: plain system block (cluster
+    instructions are below Sonnet's 2048-token cache floor, so no cache_control)."""
+    user: dict[str, Any] = {
+        "film": {"title": film_title, "year": film_year},
+        "existing_events": existing_payload,
+        "new_stories": new_payload,
+    }
+    system = [{"type": "text", "text": _INSTRUCTIONS}]
+    messages = [{"role": "user", "content": json.dumps(user)}]
+    return system, messages
+
+
 async def build_cluster_request(
     session: AsyncSession,
     *,
@@ -172,21 +192,12 @@ async def build_cluster_request(
         for i, s in enumerate(unclustered, start=1)
     ]
 
-    user: dict[str, Any] = {
-        "film": {
-            "title": film.title,
-            "year": film.release_date.year if film.release_date else None,
-        },
-        "existing_events": existing_payload,
-        "new_stories": new_payload,
-    }
-
-    # NEU-377: the cluster instruction block is a few hundred tokens — below Sonnet
-    # 4.6's 2048-token prompt-cache floor — and the per-call payload is per-film with no
-    # shared prefix, so cache_control here can never produce a hit. Emit a plain system
-    # block (mirrors synthesize/summarizer.py) rather than carry a dead cache marker.
-    system = [{"type": "text", "text": _INSTRUCTIONS}]
-    messages = [{"role": "user", "content": json.dumps(user)}]
+    system, messages = assemble_cluster_payload(
+        film_title=film.title,
+        film_year=film.release_date.year if film.release_date else None,
+        existing_payload=existing_payload,
+        new_payload=new_payload,
+    )
     plan = ClusterPlan(
         film_id=film_id,
         existing_event_ids=[e.id for e in existing_events],
