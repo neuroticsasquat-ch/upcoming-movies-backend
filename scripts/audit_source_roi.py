@@ -19,13 +19,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun, RunLLMUsage
 from upmovies.news.feeds import is_google_source
-from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger("audit_source_roi")
 
@@ -82,15 +82,10 @@ DIRECT_PULL_DOMAINS: frozenset[str] = frozenset(
         "deadline.com",
         "variety.com",
         "hollywoodreporter.com",
-        "www.hollywoodreporter.com",
         "collider.com",
-        "www.collider.com",
         "slashfilm.com",
-        "www.slashfilm.com",
         "empireonline.com",
-        "www.empireonline.com",
         "screenrant.com",
-        "www.screenrant.com",
     }
 )
 
@@ -220,9 +215,8 @@ async def _load_event_stats(
     """Populate event_rate and unique_events on existing SourceStats (mutates in place)."""
     # events per source = distinct events contributed by stories of that source
     event_stmt = (
-        select(Story.source, func.count(EventStory.event_id.distinct()).label("events"))
+        select(Story.source, func.count(Story.id).label("events"))
         .join(EventStory, EventStory.story_id == Story.id)
-        .join(Event, Event.id == EventStory.event_id)
         .group_by(Story.source)
     )
     if fetched_after is not None:
@@ -273,7 +267,7 @@ async def _load_link_cost(
     started_before: datetime | None,
 ) -> Decimal:
     """Sum cost_usd for stage='link' rows within the requested scope."""
-    stmt = select(func.coalesce(func.sum(RunLLMUsage.cost_usd), text("0"))).where(
+    stmt = select(func.coalesce(func.sum(RunLLMUsage.cost_usd), Decimal("0"))).where(
         RunLLMUsage.stage == "link"
     )
     if run_id is not None:
@@ -482,8 +476,16 @@ async def _amain(args: argparse.Namespace) -> None:
     if args.run_id:
         run_id = UUID(args.run_id)
         log.info("scoping to run_id=%s", run_id)
+        # scope story stats to the run's time window
+        async with SessionLocal() as s:
+            run = await s.get(IngestRun, run_id)
+            if run is None:
+                print(f"run_id {run_id} not found in ingest.ingest_run")
+                return
+            fetched_after = run.started_at
+            fetched_before = run.finished_at  # may be None if still running
 
-    if args.window_days is not None:
+    elif args.window_days is not None:
         cutoff = datetime.now(UTC) - timedelta(days=args.window_days)
         fetched_after = cutoff
         fetched_before = datetime.now(UTC)
@@ -530,6 +532,7 @@ async def _amain(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Per-source ingestion ROI audit.")
-    parser.add_argument("--window-days", type=int, default=None, help="look-back window in days")
-    parser.add_argument("--run-id", type=str, default=None, help="scope to a single ingest run")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--window-days", type=int, default=None, help="look-back window in days")
+    group.add_argument("--run-id", type=str, default=None, help="scope to a single ingest run")
     asyncio.run(_amain(parser.parse_args()))
