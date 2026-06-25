@@ -20,7 +20,6 @@ def test_trade_feeds_use_film_category_urls():
     assert by_name["Deadline"] == "https://deadline.com/v/film/feed/"
     assert by_name["Variety"] == "https://variety.com/v/film/feed/"
     assert by_name["The Hollywood Reporter"] == "https://www.hollywoodreporter.com/c/movies/feed/"
-    assert by_name["/Film"] == "https://www.slashfilm.com/category/movies/feed/"
 
 
 def test_per_film_sources_one_per_title_unquoted_with_when():
@@ -47,4 +46,9 @@ def test_is_google_source_matches_all_google_labels():
 def test_is_google_source_false_for_trade_feeds():
     assert is_google_source("Deadline") is False
     assert is_google_source("The Hollywood Reporter") is False
-    assert is_google_source("/Film") is False
+    assert is_google_source("ScreenRant") is False
+
+
+def test_pruned_trade_feeds_absent():
+    non_google = {s.name for s in feed_sources(14) if not is_google_source(s.name)}
+    assert non_google == {"Deadline", "Variety", "The Hollywood Reporter", "ScreenRant"}
