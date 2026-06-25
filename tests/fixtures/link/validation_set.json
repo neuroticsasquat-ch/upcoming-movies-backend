@@ -82,7 +82,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1090869,
     "event_type": "casting",
-    "event_group": null
+    "event_group": "1090869-anya-taylor-joy-casting"
   },
   {
     "url": "https://www.empireonline.com/movies/news/avatar-fire-and-ash-sets-june-disney-streaming-release-date/",
@@ -154,7 +154,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1538497,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1538497-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/news/issue-preview-spider-man-brand-new-day-supergirl-jackass-minions-monsters/",
@@ -174,7 +174,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "other",
-    "event_group": null
+    "event_group": "969681-empire-covers-reveal",
+    "is_production_news": false,
+    "exclusion_category": "downstream"
   },
   {
     "url": "https://www.empireonline.com/movies/news/enola-holmes-3-trailer-millie-bobby-brown-goes-to-malta-in-philip-barantinis-netflix-sleuth-sequel/",
@@ -184,7 +186,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1202033,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1202033-trailer-release"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/erupcja/",
@@ -214,7 +216,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1212763,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1212763-alice-character-reveal",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.empireonline.com/movies/news/fall-2-deadpoint-trailer-teases-a-vertigo-inducing-thriller-at-5000-feet/",
@@ -224,7 +228,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1101412,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1101412-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/finding-emily/",
@@ -245,7 +249,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1263337,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1263337-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/news/how-to-rob-a-bank-trailer-nicholas-hoult-leads-a-viral-heist-crew-in-david-leitch-crime-thriller/",
@@ -255,7 +259,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1437511,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1437511-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/i-am-frankelda/",
@@ -297,7 +301,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1368337,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1368337-score-details",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/masters-of-the-universe-2026/",
@@ -380,7 +386,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1284046,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1284046-new-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/over-your-dead-body/",
@@ -420,7 +426,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1497464,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1497464-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/power-ballad/",
@@ -472,7 +478,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/news/spider-man-brand-new-day-classic-elements-of-spidey-kevin-feige-exclusive/",
@@ -482,7 +488,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "other",
-    "event_group": null
+    "event_group": "969681-feige-classic-elements",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.empireonline.com/movies/news/spider-man-brand-new-day-trailer-sees-peter-parker-fighting-with-scorpion-the-hulk-and-himself/",
@@ -492,7 +500,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/news/supergirl-lobo-jason-momoa-couldnt-imagine-anyone-else-exclusive/",
@@ -512,7 +520,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1523140,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1523140-luthor-warsuit-first-look"
   },
   {
     "url": "https://www.empireonline.com/movies/news/the-grinch-sequel-in-the-works-at-universal-jim-carrey-and-ron-howard-in-talks-to-return/",
@@ -533,7 +541,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1284041,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1284041-official-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/news/spider-man-brand-new-day-authentic-frank-castle-exclusive/",
@@ -543,7 +551,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "other",
-    "event_group": null
+    "event_group": "969681-punisher-details",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.empireonline.com/movies/news/social-reckoning-trailer-jeremy-strong-mark-zuckerberg-aaron-sorkin-facebook/",
@@ -553,7 +563,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1281331,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1281331-first-trailer"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/the-thing-expanded/",
@@ -593,7 +603,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "other",
-    "event_group": null
+    "event_group": "969681-holland-spider-puberty-pitch",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.empireonline.com/movies/news/tom-holland-repay-the-favour-spider-man-r-rated-punisher-exclusive/",
@@ -603,7 +615,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "other",
-    "event_group": null
+    "event_group": "969681-holland-r-rated-punisher",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.empireonline.com/movies/reviews/toy-story-5/",
@@ -644,7 +658,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1255833,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1255833-whalefall-feature",
+    "is_production_news": false,
+    "exclusion_category": "roundup"
   },
   {
     "url": "https://www.empireonline.com/movies/news/why-supergirl-is-so-different-to-superman-milly-alcock-exclusive/",
@@ -675,7 +691,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "other",
-    "event_group": null
+    "event_group": "969681-zendaya-peter-mj-split",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://www.slashfilm.com/2198122/james-gunn-superman-streaming-prime-video/",
@@ -787,7 +805,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1400940,
     "event_type": "casting",
-    "event_group": null
+    "event_group": "1400940-aaron-paul-casting"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMipgFBVV95cUxNLTRRZXZHMGhvWFYtWGI3WWVWejhRYkpRRDE5cGNDelNkMG1FUmxDd0pqN1NGMXVBbEV3NkJZMGdoa1NweVdHVHdvX3dCdzJYMVNIaTlNRmZ3bUxEMXZCSmp4WEc2OWVPU0llejRUTkpGdWpYNFZKZFdXQ1Z5VXZzcVpweWlSUml1MkMwX3NJVkFiQU5YbWVFX1Vma3hjRWRzektGb2VR?oc=5",
@@ -841,7 +859,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1400940,
     "event_type": "casting",
-    "event_group": null
+    "event_group": "1400940-aaron-paul-casting"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMingFBVV95cUxNNi12NTM1em0xSHVzS3ZUUHp2WUpEQk5sM1ZuUXdvclphd19lWWNtYUxRTE9LMUt4bEJPX3ZISkpjTEplNGRoMVJnTUYzZGhhNUh2MDRFbXA2bkhXOWpjWlFFdTZjdDZtYXRzTlV3cG1jN280N1RLNGxjMDZaTUVKb1RCeVhKRFBJQzB6UHNkemo0cHJuZ1FnNmJtOGl5QQ?oc=5",
@@ -862,7 +880,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1003596,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1003596-cast-set-comments",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMisgFBVV95cUxPdk0zMzJhd3VtUzNoR1pISjNrMF81TU9LQ0hzN3ZNbC1ta19NY2Q5YjRUOVJTYzZianJkOXBDUHdFQ181c3ZURUlCall2RDZCQXplR3BUREpKcXAyN245VHUzbmlHZVlRVFdST05hRVY1MTNvYWJNeGI2VnVzckktWndFQXFQYUVOYkpsMzUybEVaWHlXSzlYazRNWDBIdHY3QXR1R2NWUUNkd3lrUE92MTl3?oc=5",
@@ -904,7 +924,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1368337,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1368337-casting-backlash",
+    "is_production_news": false,
+    "exclusion_category": "reaction"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMimgFBVV95cUxOSE9aZ1NtTzdQYzZwd3NpT2lCcnBuelVBZ3AyVWRqUzNXMlotY1BxWVR0ZXo1eTkyVFZRdlg2TXlwbm5VMWZCWWRkMzJiWms2NURwaVBwNWFpRkxxTDVLckpXSXJFcV94V3JNMng2NVRzc2xJZmNtSm5iUmdqcXF0bE1STEhZT2QwSUx3MkVjd09vNVZFdUZGenR3?oc=5",
@@ -990,7 +1012,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1090869,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1090869-anya-taylor-joy-casting",
+    "is_production_news": false,
+    "exclusion_category": "reaction"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiiwFBVV95cUxPc1d2S3h4aWZSSE1xS2pmZEp3YmtRd1E3TjZkdVFYYmJGcHQxMzVKNjlPSWNxSWQzZHlkblVxRzdPbTlnUTBKZXBKT2JGalBSbHI2NE5aRFFtVzZLek5aSzlwZjJNOVlKdktEcDdVWkwwYXZ1ZXRvTnZkcFlFeGxWRnp0TE9sR1ZSNUVj?oc=5",
@@ -1000,7 +1024,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1368337,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1368337-cast-reveal",
+    "is_production_news": false,
+    "exclusion_category": "roundup"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiqAFBVV95cUxOYmFGbFYwNmx2MlVEcTRWaXRheTdSRUh4SF9JSURFREs3d2U4UkJWNk5HRXVOZW10Z0NKUVlraUlYSE9wNzJuX1E3SXc2LUM1TnVBMEc2clRmYnlKRkhQV2tqZmc5NnNQazRZMTIwZEc4MlhRNUllWktuTlU4VU1mdEtwOVBST0N6RlNhV1lPX2xWWlZsbGN3ZHJ3VUk0M0xiUHlDMTJhMUw?oc=5",
@@ -1010,7 +1036,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1177369,
     "event_type": "casting",
-    "event_group": null
+    "event_group": "1177369-dichen-lachman-casting"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMickFVX3lxTE42b1BNM0FZZjF4aXplck5NV2k1WlRpcDlXTzRReExMNGVuMmszVEs2c3VJVmhrazhybUdxUW83V1dRa3V1OEN1YzRVNUFERDJzNGt0QXh1bUc2NTJfbmpEUGdVcHI0ZV8xSHhfV25BeXBVdw?oc=5",
@@ -1104,7 +1130,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 806704,
     "event_type": "other",
-    "event_group": null
+    "event_group": "806704-brian-tyree-henry-casting",
+    "is_production_news": false,
+    "exclusion_category": "reaction"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMitwFBVV95cUxNcFJhenVvZjJ4dG4ya1JSMDZET1RrNXA5NUl1dkZuSEFGOWxQdzFOQ21FSlp3UnBUeTZEVHRGSll2NjE3WVN3cjZoRWItNHVfOUZXcTlLUkZoSUhCUHlKRW1ETENuMjVqQ3BXYlFsUS1GSmhGYVFHSTd6R0tCclRDMVdSNFRDNkVzT0x5OFRoWEE1dFNpMHF5Z1dPVThIeENjM2hOMVo5RnROVmdwcTNRaHhQbURacDQ?oc=5",
@@ -1114,7 +1142,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 806704,
     "event_type": "casting",
-    "event_group": null
+    "event_group": "806704-brian-tyree-henry-casting"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMirAFBVV95cUxNeEVLVFhFUGtzS19kUnhld1BLNlRhcmRuY0xRd3hpSFQ4Tm52TGJDdzUzUy0xMmZzMnVLcnI0TmY2cTZvSk80LXZPWE1mbDhub1dUYVlER0l4bDFIUjZObFlHZzJhN3BTb1hiUjJURkNDaTRLNUFRS2pEeUwwbkstX3lzUkw2STRJZmZtYVBHWjhfQW4tb0hPWUswQ1puMVZoRnhMOGhXckxNLXBy?oc=5",
@@ -1124,7 +1152,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1368337,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1368337-cast-reveal",
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMixAFBVV95cUxObDhoaDNBVlM3WkMzQ3c3UmNzZFBQQ2VBNlRReENjajdZcmp5MG5Cemk5QnNOaGc4R2w4VzNYODlZWm9uX1VtdkpoWXdDeUczRVRTQTJCOTVaSFJBWUZVYWNVZHdyVThNSlpHZUJLZ0p3TGh2TER3bGhmc2lJWEJ1M3BWeVFidno1N1JTc1BLdUE4bXV0QmduVHlIYXNMTHliNlI3MVZOd0tYUTUyZWMxakc5d1FXUHJCamhWSktLSXNCVDdR?oc=5",
@@ -1209,7 +1239,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1417668,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1417668-casting",
+    "is_production_news": false,
+    "exclusion_category": "other"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMitgFBVV95cUxPb1FJVjRPTFNrNDhwRno0ZkZ3UzB3ajNIUnNtdUE5bUNUaHR0U2E3NVlMNEs1aTNxZlBHV2tlQ2xxaUlHY1BrTjZPRm1WVm9JcC1hMFpoczRMZ0Q5elk3cDFVZU5lbldGaGpqYXV3VURKb3V2MHBqUFg5ZVFRQ1dnVnRvVjVQYWxSVnVFWlpTUVhNWUVuMGtpVTBxWlRILXVmeXNpWE9KMlZVMmhwZm1YUGhpZFdYUQ?oc=5",
@@ -1457,7 +1489,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1263337,
     "event_type": "release_date",
-    "event_group": null
+    "event_group": "1263337-release-date-announcement"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMikAFBVV95cUxOLVJ4a3JuN2hvcW9tZXVHZFVZOXNUbXZfQkdLZ0ZXc29VUUExQVdxMUd2anROSG8wWElocGhFRmVSU1BBVXFUcktNVGx5dGlMc0hqNFJRRVlUMEJaN2tYUE9QeGd6aE9Xemt5RXFITmJBUHc2Y2VVTjF6VzBtRDQzbEVBb3BscFd1QUdzQTlYa1DSAZYBQVVfeXFMT01MdVZId0FycEJodVkwakU4MTZ5emstUG9DSng2R2oxR1ozd2U3QXo0WVcxdXYxY3FjZVl2U3MxUlV4OVZtbEJPaDVJQjk2bGw2ZF9Md29IQ2ltZ3QyRnJDMGE5cU1DVEt1eWNwelBycHdtLUZqU3ZlZzV0MlVqc0pfTUVFVzhwQkNQSUlMQUoxMlFYYjVB?oc=5",
@@ -1467,7 +1499,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1468683,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1468683-trailer-release"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMia0FVX3lxTE8waTlQSHdua3JLYjJZUlRLV0N6Q05tazJJNnkxdGllbVR4SGF6Wm1LTUhuemk4TWNoWHI2RC1XWUFkQUtOV3V3R1M1emZickF4alNPZFBsaGhpcjBkUXZoM3BLeDRVQlNlRk5n?oc=5",
@@ -1477,7 +1509,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1468683,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1468683-trailer-release"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMikgFBVV95cUxPUHgwMzhEWDU3MUZySDZCY043YXdnWDBWQUNHZ2pOMWlnd0xDVHBzQ0xVbEtWNUVjTWZrZ3FOS3lpY1FOOFljeHkzRWpsNHY3T3BoV0FKOGluLWlzaVJQbXJEYjZuWVJEeE5GVElzTExCQ2o1TUZuYmp1cVgzTGNrYUJQblBoV3RycTlFQlR5ODdwZw?oc=5",
@@ -1528,7 +1560,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1101383,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1101383-preview-everything-we-know",
+    "is_production_news": false,
+    "exclusion_category": "roundup"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiUkFVX3lxTE5xTjQ1YzJUWFRFZWJUMHdGOTNsLWVzSTNQOU9sQXBrQWRhNlktQm5XU3lsV3ZQNC1zcDJrXzFUbkR4SkhEdW5mbnZGU0VZVy1ZWEE?oc=5",
@@ -1664,7 +1698,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1380417,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1380417-trailer-release"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMilwFBVV95cUxOZ2xCdVFhVlV4aDFmY0Q1YjMzSUFwSDQ4aFBTU0wxN3FIbTJZYUdoZG41TjlZQ0RqaHBQVmxmbUZCME93Zm5sbm4zdkVqV2tPdkJoQWQxYjI0dEFSNFpLeEM3cVJ1bHpaejJJUkZPWlhSdjUtMEZSZFJmY2c5LWlPOXRvRXJCM29YRGF1bnBicnRhbk84Tm800gGrAUFVX3lxTE5BemtaMExSbkltbnVSdW9qay12Z0NNRzBXT3Y0cEVncGpUQWRvMHhqejllcWRCN2c1d2ozSVNKek9LamFQN0VDT292ZEVkOWRjaUU1ZVB5VTJJdmhNbFZYUXBMb0pFMUFjN1R4REhkckpBNVB5V3NRSHhFY1g5ZHhpQXVmOThGdmpuTVZZdTlPVmgxSnQzeVpvdS1ZQ1pOS3puRnpjaXdSVXdmbw?oc=5",
@@ -2133,7 +2167,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1177369,
     "event_type": "release_date",
-    "event_group": null
+    "event_group": "1177369-release-date-shift"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMivwFBVV95cUxOQThkLXVnWFV3MkFnT0lCbFNKTWdmeXczSzZuUWl0dHNKYzNmaDlTQnc5aDBPZDdqaHJKZXVqb1RJUkVYNFJxUTlFWGctWkVreWRISmtLV0NtSGo5YWZsTFRDa3NJSmVYek1wVXNnaFJCVDdqUHFWckE5SmFlMmNiN090SHp4QllQMmUwc1FaNmtRdEZuZUZjUFZJT3B1QjFTSmYtc09Ka3hhU3pOUTc1dlRIMEIyWWs3ZGR1Q3BnONIBxAFBVV95cUxORjBuU2h2NTFBdVh1TWVyRkdhM3dsRzlRZXlNdUVrNFNJb3EtY3VYVXR3MmFiNXM1dVNneUdldS1Ec0FUYWxTdFh3LVpBbkFBSmh1UFNhZ0ZVb0pnSDZtQWY0TjZDdjd0TFo2NldsM2xGVm1hN0I3T0tHMmVuNDFmTGhoemJmaERrNTJJU05LRXJ3M3RySGt2WDd4NWY2R1hEbE5TRTM4RjlPUjE4WHR2cGR4bXdyZF9tZ2R3dmxDTEFVb2t5?oc=5",
@@ -2143,7 +2177,9 @@
     "relation": "about",
     "expected_film_tmdb_id": 1368337,
     "event_type": "other",
-    "event_group": null
+    "event_group": "1368337-film-overview",
+    "is_production_news": false,
+    "exclusion_category": "roundup"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMikwFBVV95cUxOdTIxSTBRTW8yUGFWdkdVZnhRX2xFZWZNVXJIOHhYcVZDRFU2WER2YlFJSGJpcTVudXVnbk1SeV9pWkNHbmJGSnQ1NjBGNFU0NmRxcmROQ1Nfc1hNVUJPdEpiOG5JUmMtaHA2QnQ3X2JoNXl2S3Y0Tl9POUliUDI0dzA4cjZlR3R3VTNfcHFQbUl1cEk?oc=5",
@@ -2224,7 +2260,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1656220,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1656220-official-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMingFBVV95cUxOejJ6MHI1TkE3Y25yTlFZc1U3ZkxWcUZveTVLa0RnbHRsbW9hMm1ZM2twLVphTUVNd3k4MDlXLXYxR3Zldmpmbk0tSlVtbjRoTVp0TUlWNWhHcm1VbHl0VGllYjhudlNmMElVUDBOb2NNNVpjelZqMFE3UzBfckdNRDdKUVNUM1h3YVpvbDF2RVY5TkFHZkxMRGZwYWFFQdIBnAFBVV95cUxNdC1KcDNaaDA0VmdVV2kzREhsdUJ1WnR3VlhtSDdWcEliVW8waEREd3pnY1JZUVdJdE1HeENUUE9ybnMwa29fWFBrQVY0cEZZLU5PZzc5ME5wWnBKbE5fMG1WcTFPU2FVZHpTWmRhZFRFNHltS0p1TW5JTm1YT3NIcFIwTzNUZUZEUVpsMXZaTVBja0RfTklSSGxMR3k?oc=5",
@@ -2234,7 +2270,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiowFBVV95cUxQb0R1YXBuWmxpTTBEVEgtSXFQQXJ3VlBrb0RzdndQUmg1OUJ5bWQ1YmV2T0lQNHdYVEczaTFob0xfbE1VYUlvbUJid3NwOEVvdUFvdTBkVWVnQ1E5NzVKY0FxSkhkU1JXemY4RENfZDNhNDZDQUpRdUU0VzFzVTZiOTJUOXlEaGMtN3FpR3pnX1Jkb2tSY0Z0Qk1iTUdpYV9Yempr?oc=5",
@@ -2299,7 +2335,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMinwFBVV95cUxQTTBNTHNBVG9DaXJ1ZkdkQ1B3dnlRWG1xZEpVM0NSX3Bsdy1RelZlQXc1dUQ4dk0yWFVLdEQ2UFpnaEJGMzNGTmVvcXZpYUxHajFmenJ3OTFNcW16U0NhbnNXc2prSHJfdk1hRUVZelc5NHZUVnVjUXdndVB5R3hFMkcwZnF3eTRnSG5CNmJsNUNHMm1EZW82M2t3dXJ4dFE?oc=5",
@@ -2309,7 +2345,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1538497,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1538497-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiiwFBVV95cUxOejdjTE9GaDdhNlVwbmJNUXZJVDRncjJKRUJ3ZF9jdzlpM2FmaU1CVlRqdHdKc0l3N01Rbk5OWk9zNVpNNFBoeURIbUJxQ2NseG1mbFZUZkZUY1dJWFduTWZ2elBEbGtSdG0zRUtVTE5WTC0tUVNLdm9TS1Ntem5hWFNaMldIUGdDXzNB?oc=5",
@@ -2319,7 +2355,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1538497,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1538497-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiggFBVV95cUxQdGk2eXBQdlY3QV9kSEhSZi1WN2Y0N2hzMnlvRndqSDl0d3lXaW14dnVnQ1B1aVliS2Flckxxa21aNjRaMUpZVnhsMVQtb1dEV2gtYVdvLVEyZ1d1SHgtbzg1ZmIxWnp4X0o3M2lIVVU2c2tjdW9mamhvSEwtWnZaVUVn?oc=5",
@@ -2329,7 +2365,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1202033,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1202033-trailer-release"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMigwFBVV95cUxNc3FQdlI3UlNuMk85ZmRkX1dRTXA3cklwaWtEcHg1d05HU2hIcWZINk8zZ00yMGVnZm5aQzM2WHhfeWxtdjhIYVdXREhuTHRnV2NGcGhnVUhPV3BrdmJ0T2dyM0xPaEdOaDJyLVdsaDhCcEg0NUtBcmJfQWtaSGloNmcwRQ?oc=5",
@@ -2350,7 +2386,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiogFBVV95cUxQOUphRkZrUnIyYkpiQkp4U0VEUnJIV05faHpYX1daWDVWaVRDRWJXeUF6TlotQ0VoODBkbVhKUl92UFFnZjlLR1pmenBkRHNZY1dlN204N1ViRmdXTTVOSmM3MGNOcE9UZGh6RzFTdEdNbDljSUI5SkRqNEhWZ1VULXk5LU5nUkJiQzBNUkxKeDdsZ1pmcUFkcTE1djBxOGxOTnc?oc=5",
@@ -2360,7 +2396,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1538497,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1538497-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMingFBVV95cUxORWQwRzRXLUF6LWpnSktpNFctY3VJRW5aejVDU1dFUlhlR0pxS3lELXhPZWdYeW9BNWkzc0p4Q09ZTUJPdENUbTBqbUQyUllmODdhUHpITHRnRXJXTnlqR0Z4cVNKcEhhUV9SZUZfOGhyYVRzTklvQklSX0hweW5uUTBTWnExYmFPQmhmN1VFcUlvdnM2THNKQkI0cnFWdw?oc=5",
@@ -2403,7 +2439,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1477712,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1477712-trailer-release"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMixgFBVV95cUxQVTFPNi04TXZ0UkI2Q0lFNXV2Sm5qMHYzZTg1Y1JrNkdQZFgyTWItUWJBMVdzb2VBeWxUQWVpZGxZdDMxQ2RLQW9mWmN5OTVSaXRBaE9IbndzOGladUIxb09EUmtEcXdnSzRyNlNfc3YzeVNXNmxURHg2WUxtd2VtV0JkbGNqcmlJWU83bW94VTFjVVI4dDVsOWQwSHM5VWYtNDhaUVpzUDNJN2xPcG1UczNUV3c0bW54SWxMc0MxRG1XS2dZbHc?oc=5",
@@ -2435,7 +2471,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1241478,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1241478-official-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMifkFVX3lxTE9rRVJWZ2Iwb1BKOHRtRzBxTEc0ZU5SWDFsZUJBWC1YUTgxRWRUOWdRVmFkM2xKdUJuSGdtZzd5RmxTZ3ZYZTRLRUNrT3dJbWc1eGpweEFaWDFTcm5nblJSbUYxVWVrVkdQcFkyZmdHTzl2SGhxVnRUSnIycVZEZ9IBigFBVV95cUxPbEd0VXFBSnhLZG9rNEhtb0Q0QzZMX2hxNS1CcHFmWTZfQXVPbnVWQUFyb2Q0VHRSMlZqWmhJLXFmVjBYV3lQTEt6VkxEMFVvaE55SXRfRFRjNXpzdlAtdHN2ZjNGX25pV3p6MEJRZHBEdkt0VEwyMVRyODNpcEs0RjkwZzVpUXE4MXc?oc=5",
@@ -2466,7 +2502,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1442396,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1442396-trailer-launch"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiqwFBVV95cUxOY0hHN3VUMzdjZUdGMURXOHRIbGhCN1htNGRKMkdaRHpPTUJkcU8weGJxMmwxVHg1c2FYWlUtQ2pEeExjTXpnRkx6cThHd2k4OXhTN0lEUUdJZHdFRlVqN0tUMmRoVTRDSG5Ja0Zwb1BwRGlKQThTRGJXQlhZZ1dzZjJIRkZ2SHZDNm1JV0hPU1IzRkp6dmlOLThob3hPaVNFSDhzZF9NLUI3dVE?oc=5",
@@ -2476,7 +2512,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1284041,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1284041-official-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMimwFBVV95cUxQanVjaGpMLXk1ZGhxN191NzQ1MFJsbDUxcFVGSjg5cGFYcGU1bF9vTlpCNDZucGdTTnFYUEJMQWpxTURTYVNhcVdBcHdScnkwNm5SU0hqbkstbVZkTXQxcmJ6NEpMUUpEdThaaC1veWFhNmNmQkstZHUtLUxNdlZGMnFSOGEtWk9HNHVrV21oZHFoZ2YydXBoaXotaw?oc=5",
@@ -2486,7 +2522,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMinwFBVV95cUxPQnlzZ05mN3pBcWNiakZ4bE4zY3BvY20wdXlKMkxFWDdiNlFuMGs5YkhmMHlqQjk0VlB1eTVoTDE0eDkxOEVVVmU4UURBSHdZNEhKTjhCSU9RWHQ4akp5WXlBb0hnWUpXbWtqSlFXRUYzWVFqdmppX3p6MExRQXE0Q0hvRnk2X0FMbGt6U0oxV2Y5ZzJuSUhzNUhDNFpPU2c?oc=5",
@@ -2507,7 +2543,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1284046,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1284046-new-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMijgFBVV95cUxNR0pPcUJXVXFlQmNPQlBmNGYydlJDS2dhaGhMRjEyQTdpSV9yeUJrUWgtNU1qUkVTbWJXWjV2X3Bma3BXM1NPQURMZWNmeDZ5WTNiZ0FuY1Fhd3NicHZBVExBOXRwNTVKWndPMXIxUi0tRVRPalhWWm00ZHIyMHZCaWVlT3dzRHEtaGkzWldB?oc=5",
@@ -2560,7 +2596,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1477104,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1477104-official-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMidkFVX3lxTE1ETjE0YlNnSUd0LTZYRXo0azVkSlFnNGk5bXNfc2NBSDcyMGMxWHFBNmZHcjN3bWM2N1JPRDBLcUhxUXlQRmVFLXZEMER0X3pWUXZia1NhRnZsQ3A2eUZLSVNFSTJFUkd6Nkc2dlJqZjBjRWJTQkE?oc=5",
@@ -2570,7 +2606,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMic0FVX3lxTFBDeW94eFZvanFOWHpqNHRha0FGeVc1Ykd4WjhyeTFfUTh3WnpsUmtxcE1kSkN5alhQTXpsc0ZHY3V6SDhlbm8wMjJIY0RZYUVlbnZER3FZWjRqVmNNNm5VTkFJNzd2TmY0cjV2dHRQS1hON28?oc=5",
@@ -2580,7 +2616,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMi9gFBVV95cUxPZFd2MGxiMElTcFpHcTZtdkpqMXl0NmNxTWlIaFRWMm5hUmtJa2swYjItUklvaVIxaXhNSnpPNjdHNXlxWmlSVUtoZm9wcG9tbUxNRzZpWG82QUNjcllZV09NMDBVZFV4MGx4RlVwQ2pqX2ZjYmRKZXJ2WmhqUkhFb21KZXVrLTQ0QkR1WElGNko2aFM2R0lScG5paVRRdVl2TVhsdVVhaTVERnZ2cU1EaGNhSVZEb3FYLTBpaUpDXzh3aGhWWUNic0ZsTFo5QldWaF9JU1cxVVR1aFNJLVBEdFBPUV9DejBTMjljQk92VjVoUEFwX0E?oc=5",
@@ -2590,7 +2626,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiogFBVV95cUxOMkVRTGxaa2oxMUV2bkx3WHE0ZnkwSHVvYjUxZHBLRkxOUXpRVUtlM3NvQy1wcnFqZW9RM0pGOWU4VDVOc1I1V2d0Rk5LeURlbm8zbjNIV0E4VmtLRnpuOENfRmZSajJHdUNMM3hnQ3lQcDM1WGwzZFk4T3dTVHVPczJRNThWS0RJSlNiQ09jaGlKeXNpRXk3LWQ0Tm12M2JaVkE?oc=5",
@@ -2600,7 +2636,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiqwFBVV95cUxNOGpFc3JCUGt3Z1BSV2NEZVhfeVJnX2ViLWZjQnNVTlZrVG5qNS14NS12aW5XckFXSWhKR3d1czVmZTNhbzN5R2NxS0phazctbTExblZXd1V5YWNzVkpqMmhCV0o1Z0pMOGdqSHhzMWttRmgydi1CVXg2c0NaN0JqS2stVENzWFZfeWxnUDBaMmhySDBET1hTVUFXRGU1OVRjUTR5WWljUFNFTGc?oc=5",
@@ -2610,7 +2646,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 421892,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "421892-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMivAFBVV95cUxPQjFXYmhPR08yWGNweG41NjRJTk94MEM1NG1sYzJYNUlGQVA4N3J0QkttTHFLOWdVTlZuVEM2WkoxaGdyUUstbDA4clM4WW91My1YTXFySDdUN1Z0Z2xqSGtNalVZNGNwTGludWpWVGNDWWNmeVdTY1VrMUtKRllWRjdRNTZjV25ZQ2ZwSHJ0MFdNTXF5N1dKa1NFYzROaEtTMDRxeU9uRE40VUpWRFdBYW9XSFRnU0RuTGZ3UtIBwgFBVV95cUxOOXRLNDVXVTRjSVJueVp5WXljbEhSZVFDVHpsMmhscWt3MzNTYnpmbk1RSVcybEtOU0pHX3hkX1UwWW9tM0lSWlA4SDE2cXBBdk1taUJKejlMYmhnMmxQMkxNM3R6aEFhTnppdFZZVjVmeFUtc1JzZjU2MFVMNXpZc1lDSDREc2cteFRYQzVKU241Smk3UGdKb1ZTZnduWEMxVUlZODY3UDRCd2MyVVZfcERVWFlWczlrUmsxZDlGaU5sQQ?oc=5",
@@ -2620,7 +2656,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMipgFBVV95cUxNa0Rsb3Vac18zMXFWWUt2bWlMQmllcWluT3huUGhpbGpZVkdSdmFqemRFMjFNN3hURHd5WGRRVy1rQnhBaW5uTVJjV1FHclIwY3NkLWtHRUtuS0JEVVlkVm1YaVFmdHZSbGtIcGJVa21CbTRSUkJfdlhjQXM4M2N0RXJrZVIwa3FsWEh4YU13SG5HU21lY3FxX0xQY2hzTFFmbDVlOFpR?oc=5",
@@ -2630,7 +2666,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiowFBVV95cUxPbkpOOUhlNGoxV2EzZ2VPZHU2Y3dfaC0xSGljM1RERVh1YW9oVjlVOVdPTVlLa0hOYVNIYndoTnVLVDZHWVpmSmp3eURDVTg0c0xNSHd0alU2OVVLZ20xOGU2WFpsbkF2TGV0OTVyRnpWbHMzdExmakljdFBLRXFYaDF5OUZLRUpMQmI2R2luaGR6N2Y5VFo2b1JUdjgwRXRRQnpJ?oc=5",
@@ -2640,7 +2676,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMiowFBVV95cUxNbjdrVW1GZWpnYnFZdV9SUUludHJyS3NmWVdzc1FQQ1VpcEVrUFoxQnpuSzZaNEdvcUxRN19xNWxxYmRlXzlacFZ1YXZ5UENpaG85U3VXMlB5Sm01OFZhV1VJTE9yNWw5aTFkWlBYTVRxSkRyMUlValFqVTlual9GZFdNbGFuN0R0TnpJZVlCbTBMZ2JCOHc2LXhOV3lRYzkzVV9V?oc=5",
@@ -2650,7 +2686,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMijAFBVV95cUxOTlhrM0I0MXB6UU1iRmIzVkUwWWsyWmVzQjAxMnF3VjI1RzdaVUYyc3RsaF9oUmtFSTdCenYwbF90d193VlIyZDBCYlhxbGFOXzRoRFowc1dpQmxHUFNtOFZIWG5WTzlIWWkwaFZIYUFMNS1WYktxOUZjTkNfMkRSVW93VmRSMW41SDk2OA?oc=5",
@@ -2660,7 +2696,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMijAFBVV95cUxQMFNXMjBZajhDeG5vZXo4VFdYVzBMUkNNaTRVNFI1U2JhMjZPenZaTzNjY3ItUjNVVlpma0t3d1hHRVdub0dpMFVJbzVGYWg0TFg4WDVQNnU2VjItQzlkczhrOHVHN3FxNjF4V3BDSUlVYmY0eG9hOUdKY0htWERqQVo0a1Z1NmxRVE5fTQ?oc=5",
@@ -2670,7 +2706,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMingFBVV95cUxOeXFwTXhVZEhCQVNTaHJESC1GbDZfcXZ1RjVGZ21fNWxJMVdDMVIzeVBKdjFlelVyLUJ5dmRJcFZvMWUwNU5ZelZIQ29vZ1JHVVhNMElXNHVCakZlYWljazNOUTBFQUVZSVJxVXl2NExFS1g0dWZueXpGOHpBeXdVM2xTYmt4eEFKdXdtSFNNYlZCTXJlX24zMkowYS14UQ?oc=5",
@@ -2680,7 +2716,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMinAFBVV95cUxNeUFJNUN1UjFENFBFYjZqbW5rUmw0UnVPOFlLc2hnZUx2Q1RMbHlYMUdqS0pjcVNiNGZuQjdubFJ4cnhjZlpXam83TWFUdFdSb2pUS3RsV0UxV05UdVVPNGZpYzdiZkxva00zbGFET0ttRjFhTjk2dXc3QzR5LVNzanY4RDBiYmV1VWJkQWRIbGZOenRmc21uRzJZemI?oc=5",
@@ -2690,7 +2726,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMi3gFBVV95cUxONVRKSW8xam5vbDEzWUlGaktrRmN5ZHFnVGNTQ2JhMXpLc1NjWHY0aTZDaGpsbFpQNnFfSF80dG5jcjg2TDliU1JiNzh3ZVFZdG9DMDJ4Y0RRRnRVNTRnbEIwVVBVS201UlFGQkhEWXN3Z3Y0QmlNS3ZUdG93STNYQ3pLMXJ0STNRRDA5LU00TTZ4U1pFTEJRVlFOU0ZLWGZ5d3JwN3M1UHRsRW9HMllGYjZpWGxJa0FZckQ2SmNESmRrR3FmMWwwenk1TjZXMDlibWJKY0ZvYzhBS0s2N1HSAeMBQVVfeXFMTmxacnJpcGRKVkthWkxINTBTYWZRdWo3dXYtcVBFSndMbnBhRnlzcG1zSWZuT3R2YjVfVXBtOTdaNnZ0Zmo2dEt6eVBwX3BLR0N1UG1zLUJueFFqUmFHNjRMUmVWdnlqcXFNS2U0dGRaaDVhS2hUSWxnZmFXV1ZHWE9mT2laTWE2S2hMbVBUSTFRNmM0U2swQjFZLWJUQ0RoOU0tNnRBM2VYMXN5azV1UGk5LTNnejRValVJb2prQTdiZXhfOWRlZGtUMmlYT3Q0eUJHbXhLZEQwdlVBTklNYXVUU0k?oc=5",
@@ -2700,7 +2736,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMi0gFBVV95cUxQb2pPUl9TdF9lM3V2R1V0eXFKbkxDc0FKTW41VU5sY0U2SkJKUmdIM0l5YnRMTlFDMDhhcXRHM0o0ZWd5ZXMzbVBvd0tEVHJjNWk0eG85a0VRUnR2NDdaQVE3OEJDZ1hTSGhOMUdwOGdXQU0zVTR0Ylloczd4YS1ESTNlZi1YaE53Z0tOQVRsbGJhbGI3LVpXc1dXSElSR3ExWkZYT1prS3BFV3ItWjRUS1VNeWdnSjFVMmEwWExlWGNLTW51Y2FCdWxRU0JrcHVBV2c?oc=5",
@@ -2721,7 +2757,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1187326,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1187326-official-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMixgFBVV95cUxOWm5DbTFaNTJxZ2pUOWs5TzY1bFN2dWVBLV9DdVA0eXN5TDNHRWxzcm5Ubk9PS2wtMVdXQ0tBSGdJQ2dSSm9RZEhVYkdMLWl1OERUNFJranlGZVZWUnhfSHoyYmdON1J2V2dFMWZnaU5rV2tYZWJCUTdKQTVhekJOOVozeGlGeGJvaVlBck5fcFVES1Q4d2h6VVdPSkx1WnJXYlp0QTZkRDJsMG1Cczc2b0g3WXdja0tzMUtmNkI0VG12cXR1UVE?oc=5",
@@ -2731,7 +2767,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1101383,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1101383-official-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMivwFBVV95cUxNOEZjRkZKMHZZUzZiSWdNTUhVcjM1dWNfSFVSSldHTXNkR0E2aWI5NHZDQldsQ2ZHdDZOempma1dpMUZMX2VlMzVRNFF5ZnNlNnVCNmZkRnZMUWdKeG1fZnU5ZjhUZ0dMemg3NG92QXBkRVc2VzBPb09aYmozdEM1aXFfbXl2Q2JobEl0SHphSGNvT21ka1NIMUlhTWZ3WHVYektfd2hwSkxjUmhLekRtMThkQUU3S3B2amplNlNHUQ?oc=5",
@@ -2763,7 +2799,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1281331,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1281331-first-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMipAFBVV95cUxOd1k1RHJEVmVIOFMyVTN5T01YR09GZEFtTjAyTlo1VzNBeWRkNWVBY2FaaFNZRXc5NENUb2RSdXFVTWJlYy1mN0JpUXdyLVF5WU5fVURfalZKeVpueGNFZHZqZVNLZVRHeklqRWV6bVFiY0V2NXBlSm5sRWxZZnh6RFNVZkMzRlhtSEFtTFd1TGhJdklvaHZMZGc5ZTRaejM2cHFkYQ?oc=5",
@@ -2773,7 +2809,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMi1gFBVV95cUxPMVlJLU03b2tFWW1SUV8zVHd1M0Qwd3IzVWtHaUFrcDZEa0V3T2N5a2hqUlV4bzhia2tYV2Q1c1lXMWhGbXpKVjJsYmM5Q3YxbnhqWVhTRmY3V0pIX1YzU3VPNzk5WC1zajVBR0xhOFFHcWJNS05hSEVvLWFlR2c0QnNyaGlueTNlZ2RhSjA2Mk1GS2FqWWJfaHA0c1FiS1dwbEpkb19qa1ZmYnpnUldFaGEtejlMSW1vd3JWMnhoNnJPZnd5Vk1Pbm9qS2tWZnZLR1kxM3Vn0gHbAUFVX3lxTE5RN2pmZkV5ZTdGbnctSV9MMVE4TFE5bWQzOWliRFZ0cWNqYzJOQWpBaklLbnlqbVNLQ29ET2lGbFFyV0VBTDlrRVgwODJ5bWw0eGZkMlNySFV5YzNZMGF3bWJnTUZ3VjRia20yS2c0blZFWW1uZ0FRb3pZREhmNENkbTR3ODdVYXhwS01nYVpGQWNSNW1RS1ZhVS1XMjZZWWNNRm1lLUV2a1BxOTFnU2pERnBiSU9tY3djVFNrU2ZGRXozZ0wtRWV2ZFRYXzZXRTJ4V2p6ZmZmWXlDcw?oc=5",
@@ -2783,7 +2819,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 969681,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "969681-second-trailer"
   },
   {
     "url": "https://news.google.com/rss/articles/CBMi1AFBVV95cUxNWWs3b3p2VnZMcWVtM1BRRVhPZFgydmJTYkNuRVI3bl80Tmptb0xNd1RfMWdZZldrR3FxU2lwc3lSZUJ5N3dqRmEySVVxU3dUNC1OMnowSS03NFpVV0JTaWw1X3dLVmh0TTlMTGZZMDI2eXNVSDFjN0NzUWF1Z0xkb3VLd0JfMEViME5wQ3ZkQWtXLUpjb2dfMEpNRnFJR0Z5ZHBJNF9oem83MlNtbWtlNXd0d0dyRHNNMmdicHJzYkR2UXlKZS1STlA2YWhaOTM4REhJWg?oc=5",
@@ -2813,7 +2849,7 @@
     "relation": "about",
     "expected_film_tmdb_id": 1255833,
     "event_type": "trailer",
-    "event_group": null
+    "event_group": "1255833-first-trailer"
   },
   {
     "url": "https://screenrant.com/toy-story-5-easter-eggs-pixar-disney-references/",
