@@ -1,5 +1,6 @@
 from upmovies.link.metrics import (
     cluster_purity,
+    compute_cluster_metrics,
     compute_link_metrics,
     compute_news_value_metrics,
 )
@@ -66,3 +67,34 @@ def test_news_value_dropped_excluded_is_true_negative():
 def test_news_value_dropped_real_news_is_false_negative():
     m = compute_news_value_metrics([(False, True, None)])
     assert m.false_negatives == 1 and m.recall == 0.0
+
+
+def test_cluster_metrics_perfect():
+    pred = [{"a", "b"}, {"c"}]
+    gold = {"a": "g1", "b": "g1", "c": "g2"}
+    m = compute_cluster_metrics(pred, gold)
+    assert m.purity == 1.0
+    assert m.pairwise_precision == 1.0
+    assert m.pairwise_recall == 1.0
+    assert m.pairwise_f1 == 1.0
+    assert m.n_items == 3
+
+
+def test_cluster_metrics_over_merge_drops_precision():
+    pred = [{"a", "b"}]  # model merged two distinct beats
+    gold = {"a": "g1", "b": "g2"}
+    m = compute_cluster_metrics(pred, gold)
+    assert m.pairwise_precision == 0.0  # 1 predicted pair, 0 gold pairs
+    assert m.pairwise_recall == 1.0  # no gold pair to miss
+    assert m.purity == 0.5
+    assert m.n_predicted_pairs == 1 and m.n_gold_pairs == 0
+
+
+def test_cluster_metrics_over_split_drops_recall():
+    pred = [{"a"}, {"b"}]  # model fragmented one beat → duplicate events
+    gold = {"a": "g1", "b": "g1"}
+    m = compute_cluster_metrics(pred, gold)
+    assert m.pairwise_recall == 0.0  # missed the one gold pair
+    assert m.pairwise_precision == 1.0  # no predicted pair → none false
+    assert m.purity == 1.0  # purity is blind to splitting
+    assert m.n_predicted_pairs == 0 and m.n_gold_pairs == 1

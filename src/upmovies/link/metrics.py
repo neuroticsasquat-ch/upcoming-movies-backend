@@ -4,6 +4,7 @@ runner feeds these (predicted, expected) pairs and predicted clusters."""
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from itertools import combinations
 
 
 @dataclass
@@ -64,6 +65,53 @@ class NewsValueMetrics:
     precision: float
     recall: float
     leaks_by_category: dict[str, int]
+
+
+@dataclass
+class ClusterMetrics:
+    purity: float
+    pairwise_precision: float
+    pairwise_recall: float
+    pairwise_f1: float
+    n_items: int
+    n_predicted_pairs: int
+    n_gold_pairs: int
+
+
+def _co_pairs(groups: Iterable[Iterable[str]]) -> set[frozenset[str]]:
+    """All unordered same-group key pairs across the given groups."""
+    pairs: set[frozenset[str]] = set()
+    for group in groups:
+        for a, b in combinations(sorted(set(group)), 2):
+            pairs.add(frozenset((a, b)))
+    return pairs
+
+
+def compute_cluster_metrics(
+    predicted_clusters: Iterable[set[str]],
+    gold_group_by_key: Mapping[str, str | None],
+) -> ClusterMetrics:
+    """Score predicted clusters (sets of story keys) against gold event_group slugs.
+    Purity catches over-merging; pairwise recall catches over-splitting (the dedup axis).
+    Empty pair-sets score 1.0 by convention (no pairs to get wrong)."""
+    clusters = [set(c) for c in predicted_clusters]
+    purity = cluster_purity(clusters, gold_group_by_key)
+
+    gold_groups: dict[str, set[str]] = {}
+    for key, slug in gold_group_by_key.items():
+        if slug is not None:
+            gold_groups.setdefault(slug, set()).add(key)
+
+    predicted_pairs = _co_pairs(clusters)
+    gold_pairs = _co_pairs(gold_groups.values())
+    tp = len(predicted_pairs & gold_pairs)
+    pp = len(predicted_pairs)
+    gp = len(gold_pairs)
+    precision = tp / pp if pp else 1.0
+    recall = tp / gp if gp else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    n_items = sum(len(c) for c in clusters)
+    return ClusterMetrics(purity, precision, recall, f1, n_items, pp, gp)
 
 
 def compute_news_value_metrics(

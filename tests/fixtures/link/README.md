@@ -41,7 +41,7 @@ Each item in the JSON array has the following fields:
 | `relation` | `"about"` \| `"mention"` \| `"none"` | yes | See below |
 | `expected_film_tmdb_id` | integer \| null | required for `about` | TMDB film id — stable across databases |
 | `event_type` | string \| null | required for `about` | e.g. `"trailer"`, `"casting"`, `"release_date"` |
-| `event_group` | string \| null | no | Short shared label across stories about the same news beat (e.g. `"runner-trailer-1"`). Used for cluster scoring. |
+| `event_group` | string \| null | no | Gold beat-grouping label, film-namespaced `"{tmdb_id}-{beat}"` (e.g. `"1003596-doctor-doom-casting"`). Used for cluster scoring — see "Event group convention". |
 | `is_production_news` | bool \| null | no (about only) | `false` marks an `about` story that is **not** production news (should not link). `null` = treated as production news (expected to link). |
 | `exclusion_category` | string \| null | no | One of `reaction｜roundup｜streaming-move｜interview-quote｜downstream｜other`. Set only when `is_production_news` is `false`. Diagnoses *why* a story was excluded. |
 | `untracked_film` | bool | no | `true` marks a `none` row that is real movie news about a film **not in the roster** (typically undated / not-yet-ingested). Ignored by the harness (`load_validation_set` drops unknown fields) — captured purely as coverage-gap evidence for NEU-285 (undated capture) / NEU-284 (credits). Omitted when false. |
@@ -80,13 +80,17 @@ The labeled set should contain:
 
 ## Event group convention
 
-`event_group` is an optional free-text label that links multiple stories about the *same
-news beat* (e.g. several outlets all covering the same trailer drop). The NEU-279 accuracy
-harness uses it to score cluster quality: stories sharing a group label should end up in
-the same cluster.
+`event_group` is the gold beat-grouping key for the Stage-2 cluster-purity baseline
+(NEU-300, harness `scripts/validate_clustering.py`). It links multiple stories about the
+*same news beat* (e.g. several outlets covering the same trailer drop) so the harness can
+score cluster quality: stories sharing a group label should end up in the same cluster.
 
-Use a short, dash-separated slug: `"<film-slug>-<event>-<n>"`, e.g.
-`"runner-trailer-1"`. Leave it `null` if the story stands alone.
+Set it **only** on linkable `about` rows (`relation == "about"` AND `is_production_news` not
+`false`); leave it `null` elsewhere. Slugs are **film-namespaced** —
+`"{expected_film_tmdb_id}-{beat-slug}"` (e.g. `"1003596-doctor-doom-casting"`) — so they are
+globally unique, which lets `compute_cluster_metrics` pool predicted clusters across films
+without cross-film pair leakage. Draft with `scripts/propose_event_groups.py` (Opus), then
+hand-correct; score with `scripts/validate_clustering.py`.
 
 ## Corpus date
 

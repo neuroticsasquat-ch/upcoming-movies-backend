@@ -84,12 +84,72 @@ class ClusterPlan:
     film_status: str | None = None
 
 
+@dataclass
+class ClusterGroup:
+    existing: int | None
+    event_type: str | None
+    confidence: str | None
+    story_indices: list[int]
+
+
+def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | None:
+    """Pure parse of the cluster LLM response. Returns None when the JSON is unparseable
+    (the caller decides what a None means). Validates story indices are ints within
+    1..n_stories and de-duplicates them *within a group*; cross-group dedup and
+    type/confidence validation stay in apply_cluster_decisions."""
+    try:
+        data = json.loads(_extract_json_object(raw))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return []
+    groups: list[ClusterGroup] = []
+    for group in data.get("events", []):
+        seen: set[int] = set()
+        indices: list[int] = []
+        for n in group.get("stories") or []:
+            if not isinstance(n, int) or not (1 <= n <= n_stories) or n in seen:
+                continue
+            seen.add(n)
+            indices.append(n)
+        existing = group.get("existing")
+        groups.append(
+            ClusterGroup(
+                existing=existing if isinstance(existing, int) else None,
+                event_type=group.get("type"),
+                confidence=group.get("confidence"),
+                story_indices=indices,
+            )
+        )
+    return groups
+
+
 def _extract_json_object(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
         return text
     return text[start : end + 1]
+
+
+def assemble_cluster_payload(
+    *,
+    film_title: str,
+    film_year: int | None,
+    existing_payload: list[dict[str, Any]],
+    new_payload: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pure prompt assembly shared by build_cluster_request (production) and the
+    validate_clustering harness. No DB, no LLM. NEU-377: plain system block (cluster
+    instructions are below Sonnet's 2048-token cache floor, so no cache_control)."""
+    user: dict[str, Any] = {
+        "film": {"title": film_title, "year": film_year},
+        "existing_events": existing_payload,
+        "new_stories": new_payload,
+    }
+    system = [{"type": "text", "text": _INSTRUCTIONS}]
+    messages = [{"role": "user", "content": json.dumps(user)}]
+    return system, messages
 
 
 async def build_cluster_request(
@@ -172,21 +232,12 @@ async def build_cluster_request(
         for i, s in enumerate(unclustered, start=1)
     ]
 
-    user: dict[str, Any] = {
-        "film": {
-            "title": film.title,
-            "year": film.release_date.year if film.release_date else None,
-        },
-        "existing_events": existing_payload,
-        "new_stories": new_payload,
-    }
-
-    # NEU-377: the cluster instruction block is a few hundred tokens — below Sonnet
-    # 4.6's 2048-token prompt-cache floor — and the per-call payload is per-film with no
-    # shared prefix, so cache_control here can never produce a hit. Emit a plain system
-    # block (mirrors synthesize/summarizer.py) rather than carry a dead cache marker.
-    system = [{"type": "text", "text": _INSTRUCTIONS}]
-    messages = [{"role": "user", "content": json.dumps(user)}]
+    system, messages = assemble_cluster_payload(
+        film_title=film.title,
+        film_year=film.release_date.year if film.release_date else None,
+        existing_payload=existing_payload,
+        new_payload=new_payload,
+    )
     plan = ClusterPlan(
         film_id=film_id,
         existing_event_ids=[e.id for e in existing_events],
@@ -224,9 +275,8 @@ async def apply_cluster_decisions(
     by_id = {s.id: s for s in stories}
     story_ids = plan.unclustered_story_ids  # n (1-based) -> story_ids[n - 1]
 
-    try:
-        data = json.loads(_extract_json_object(raw))
-    except json.JSONDecodeError:
+    groups = parse_cluster_groups(raw, n_stories=len(story_ids))
+    if groups is None:
         log.warning("cluster: unparseable response for film %s", plan.film_id)
         return ClusterResult(0, 0)
 
@@ -234,24 +284,21 @@ async def apply_cluster_decisions(
     assigned: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
-    for group in data.get("events", []):
+    for group in groups:
         group_sids: list[UUID] = []
-        for n in group.get("stories") or []:
-            if not isinstance(n, int) or not (1 <= n <= len(story_ids)):
-                continue
+        for n in group.story_indices:
             sid = story_ids[n - 1]
-            if sid not in by_id or sid in assigned or sid in group_sids:
+            if sid not in by_id or sid in assigned:
                 continue
             group_sids.append(sid)
         if not group_sids:
             continue
-        existing_idx = group.get("existing")
-        if isinstance(existing_idx, int) and 1 <= existing_idx <= len(existing_events):
-            event = existing_events[existing_idx - 1]
+        if group.existing is not None and 1 <= group.existing <= len(existing_events):
+            event = existing_events[group.existing - 1]
             event.updated_at = now
         else:
-            etype = group.get("type")
-            conf = group.get("confidence")
+            etype = group.event_type
+            conf = group.confidence
             if etype not in _VALID_TYPES or conf not in ("confirmed", "rumored"):
                 log.warning(
                     "cluster: invalid new event for film %s: type=%r confidence=%r",
