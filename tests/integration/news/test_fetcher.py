@@ -347,3 +347,42 @@ async def test_per_film_story_persists_outlet_and_raw_source(session):
     # `<source>` is retained in raw JSONB (round-trips through Postgres cleanly).
     raw = stories[0].raw
     assert raw is not None and raw["source"]["title"] == "Deadline"
+
+
+@respx.mock
+async def test_per_film_title_filter_drops_off_topic_and_leaves_trades(session):
+    await _seed_films(session, ["Spider-Man"])
+    pf = per_film_google_sources(["Spider-Man"], 36500)[0]
+    respx.get(RSS_URL).mock(
+        return_value=_xml(
+            _rss([("Totally unrelated trade headline", "https://deadline.com/x", None)])
+        )
+    )
+    respx.get(pf.url).mock(
+        return_value=_xml(
+            _rss(
+                [
+                    ("Spider-Man swings into a new trailer", "https://news.example/spidey", None),
+                    ("Local bakery wins an award", "https://news.example/bakery", None),
+                ]
+            )
+        )
+    )
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+    result = await run_feeds_ingest(
+        session_factory=lambda: session,
+        run_id=run_id,
+        recency_days=36500,
+        per_film_enabled=True,
+        per_film_throttle=0.0,
+        per_film_title_filter_enabled=True,
+        per_film_title_match_min_ratio=0.5,
+        sources=[FeedSource("Deadline", RSS_URL)],
+    )
+
+    urls = {s.url for s in await _stories(session)}
+    assert "https://news.example/spidey" in urls  # on-topic per-film kept
+    assert "https://news.example/bakery" not in urls  # off-topic per-film dropped
+    assert "https://deadline.com/x" in urls  # trade feed NOT filtered
+    assert result.stories_filtered == 1

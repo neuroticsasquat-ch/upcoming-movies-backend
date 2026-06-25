@@ -143,3 +143,19 @@ def test_settings_requires_tmdb_api_key(monkeypatch):
     monkeypatch.delenv("TMDB_API_KEY", raising=False)
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]
+
+
+def test_settings_per_film_title_filter_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("PER_FILM_TITLE_FILTER_ENABLED", raising=False)
+    monkeypatch.delenv("PER_FILM_TITLE_MATCH_MIN_RATIO", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.per_film_title_filter_enabled is True
+    assert s.per_film_title_match_min_ratio == 0.4
+
+
+def test_settings_per_film_title_match_min_ratio_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("PER_FILM_TITLE_MATCH_MIN_RATIO", "0.6")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.per_film_title_match_min_ratio == 0.6

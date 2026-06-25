@@ -32,6 +32,7 @@ from upmovies.news.feeds import (
 )
 from upmovies.news.models import Story
 from upmovies.news.outlet import outlet_from_entry
+from upmovies.news.title_match import title_matches
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class FeedsIngestResult:
     stories_inserted: int
     films_queried: int = 0
     blocked: bool = False
+    stories_filtered: int = 0
 
 
 @asynccontextmanager
@@ -164,6 +166,8 @@ async def run_feeds_ingest(
     recency_days: int,
     per_film_enabled: bool = False,
     per_film_throttle: float = 1.0,
+    per_film_title_filter_enabled: bool = False,
+    per_film_title_match_min_ratio: float = 0.5,
     sources: Sequence[FeedSource] | None = None,
     timeout: float = 30.0,
 ) -> FeedsIngestResult:
@@ -176,9 +180,21 @@ async def run_feeds_ingest(
     films_queried = 0
     blocked = False
     block_reason: str = ""
+    stories_filtered = 0
 
-    async def _ingest_entries(source: FeedSource, content: bytes) -> int:
+    async def _ingest_entries(
+        source: FeedSource, content: bytes, *, match_title: str | None = None
+    ) -> int:
+        nonlocal stories_filtered
         entries = drop_stale(parse_feed(source.name, content), cutoff=cutoff)
+        if match_title is not None:
+            kept = [
+                e
+                for e in entries
+                if title_matches(match_title, e.title, min_ratio=per_film_title_match_min_ratio)
+            ]
+            stories_filtered += len(entries) - len(kept)
+            entries = kept
         async with _owned_session(session_factory) as s:
             inserted = await upsert_stories(s, entries)
             await record_progress(s, run_id, processed_delta=inserted)
@@ -208,7 +224,8 @@ async def run_feeds_ingest(
         # Phase B — per-film Google queries (serialized; abort the phase on a block).
         if per_film_enabled:
             titles = await _film_titles(session_factory)
-            for source in per_film_google_sources(titles, recency_days):
+            pf_sources = per_film_google_sources(titles, recency_days)
+            for title, source in zip(titles, pf_sources, strict=True):
                 try:
                     resp = await client.get(source.url)
                     if _looks_blocked(resp):
@@ -221,13 +238,18 @@ async def run_feeds_ingest(
                         )
                         break
                     resp.raise_for_status()
-                    stories_inserted += await _ingest_entries(source, resp.content)
+                    match_title = title if per_film_title_filter_enabled else None
+                    stories_inserted += await _ingest_entries(
+                        source, resp.content, match_title=match_title
+                    )
                     films_queried += 1
                 except Exception:
                     log.exception("per-film feed failed (%s)", source.url)
                     feeds_failed += 1
                     await _record_failure()
                 await asyncio.sleep(per_film_throttle)
+            if stories_filtered:
+                log.info("per-film title filter dropped %d off-topic entries", stories_filtered)
 
     run_status = "failed" if blocked else "succeeded"
     if blocked:
@@ -251,5 +273,5 @@ async def run_feeds_ingest(
         await s.commit()
 
     return FeedsIngestResult(
-        feeds_processed, feeds_failed, stories_inserted, films_queried, blocked
+        feeds_processed, feeds_failed, stories_inserted, films_queried, blocked, stories_filtered
     )
