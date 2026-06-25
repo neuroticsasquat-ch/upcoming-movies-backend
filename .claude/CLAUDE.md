@@ -2,6 +2,11 @@
 
 FastAPI service backing the Upcoming Movies Tracker. Python 3.13, SQLAlchemy 2 (async) + asyncpg, Alembic, Pydantic v2 / pydantic-settings, httpx, feedparser, argon2. Tooling: ruff, pyright, pytest. Packaged as a single container — **no local Python**.
 
+## Linear
+
+- `linear_initiative`: Upcoming Movies Tracker
+- `linear_team`: Neuroticsasquatch
+
 ## Golden rule: everything runs in the container via `task`
 
 Do **not** run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Use the `task` targets (they `docker compose exec` into the `upmovies-backend` container). Source is bind-mounted, so edits are picked up live; **dependency changes (`pyproject.toml`) require `task build`** to reinstall into the image.
