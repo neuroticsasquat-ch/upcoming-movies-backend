@@ -9,6 +9,12 @@ services:
       TMDB_API_KEY: "${TMDB_API_KEY}"
       LOG_LEVEL: "INFO"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+      # BE PUBLIC_BASE_URL must equal the FE public origin (VITE_PUBLIC_SITE_URL / Cloudflare
+      # custom domain) — https://backlotter.com in prod — or the sitemap will list URLs on a
+      # different host than serves it. DEPLOY CHECKLIST: ensure PUBLIC_BASE_URL is set to
+      # https://backlotter.com in the deploy environment (unset = empty string overrides the
+      # code default; the fallback below prevents silent misconfiguration).
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://backlotter.com}"
       COOKIE_DOMAIN: "${COOKIE_DOMAIN}"
       COOKIE_SAMESITE: "lax"
       ENVIRONMENT: "production"

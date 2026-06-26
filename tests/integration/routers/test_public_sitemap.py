@@ -1,6 +1,8 @@
 from datetime import UTC, date, datetime
 from xml.etree import ElementTree
 
+from upmovies.config import get_settings
+
 _NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
 
@@ -37,3 +39,24 @@ async def test_sitemap_excludes_film_with_only_other_events(client, make_film, a
 
     r = await client.get("/sitemap.xml")
     assert "otheronly-sitemap-2026" not in r.text
+
+
+async def test_sitemap_uses_overridden_base_url(client, make_film, add_event, monkeypatch):
+    """Prove the wiring: when get_settings returns backlotter.com, <loc>s use that origin."""
+    film = await make_film(slug="wired-film-2026")
+    await add_event(film=film, summary="s")
+
+    base_settings = get_settings()
+    monkeypatch.setattr(
+        "upmovies.routers.public.get_settings",
+        lambda: base_settings.model_copy(update={"public_base_url": "https://backlotter.com"}),
+    )
+
+    r = await client.get("/sitemap.xml")
+    assert r.status_code == 200
+
+    root = ElementTree.fromstring(r.text)
+    locs = [el.text for el in root.findall(".//sm:url/sm:loc", _NS)]
+    assert "https://backlotter.com/" in locs
+    assert "https://backlotter.com/film/wired-film-2026" in locs
+    assert not any("localhost" in (loc or "") for loc in locs)
