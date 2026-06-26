@@ -20,15 +20,18 @@ from upmovies.catalog.models import (
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmCredit,
     FilmGenre,
     FilmProductionCompany,
     FilmReleaseDate,
     Genre,
+    Person,
     ProductionCompany,
 )
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.public.arc import derive_arc_stage, most_significant_event_type
 from upmovies.public.dto import (
+    CastMemberOut,
     CollectionOut,
     EventOut,
     FeedDayItem,
@@ -343,6 +346,34 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             _deduped.append(_t)
     alternative_titles = sorted(_deduped, key=str.lower)[:8]
 
+    cast_rows = (
+        await session.execute(
+            select(Person.name, FilmCredit.character, Person.profile_path)
+            .join(FilmCredit, FilmCredit.person_id == Person.id)
+            .where(FilmCredit.film_id == film.id, FilmCredit.credit_type == "cast")
+            .order_by(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc())
+            .limit(12)
+        )
+    ).all()
+    cast_out = [
+        CastMemberOut(name=r.name, character=r.character, profile_path=r.profile_path)
+        for r in cast_rows
+    ]
+
+    director_rows = (
+        await session.execute(
+            select(Person.name)
+            .join(FilmCredit, FilmCredit.person_id == Person.id)
+            .where(
+                FilmCredit.film_id == film.id,
+                FilmCredit.credit_type == "crew",
+                FilmCredit.job == "Director",
+            )
+            .order_by(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc())
+        )
+    ).all()
+    directors_out = [r.name for r in director_rows]
+
     return FilmDetailResponse(
         slug=film.slug,
         title=film.title,
@@ -363,6 +394,8 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         production_companies=companies,
         collection=collection,
         alternative_titles=alternative_titles,
+        cast=cast_out,
+        directors=directors_out,
     )
 
 

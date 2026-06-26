@@ -46,6 +46,12 @@ class CollectionOut(BaseModel):
     poster_path: str | None = None
 
 
+class CastMemberOut(BaseModel):
+    name: str
+    character: str | None
+    profile_path: str | None
+
+
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
@@ -66,6 +72,8 @@ class FilmDetailResponse(BaseModel):
     production_companies: list[str] = []
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
+    cast: list[CastMemberOut] = []
+    directors: list[str] = []
 
 
 class FeedItem(BaseModel):
