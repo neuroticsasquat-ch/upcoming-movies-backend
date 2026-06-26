@@ -263,9 +263,7 @@ async def _rebuild_alternative_titles(
         await session.execute(insert(FilmAlternativeTitle).values(rows))
 
 
-async def _upsert_credits(
-    session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
-) -> None:
+async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMovieDetails) -> None:
     """Upsert people from credits, then rebuild film_credit rows for this film.
 
     People are upserted (on_conflict_do_update) so that the same person appearing

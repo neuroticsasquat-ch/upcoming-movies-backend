@@ -809,9 +809,7 @@ async def test_upsert_credits_idempotent(session):
 
 async def test_upsert_credits_removes_stale_credits_on_change(session):
     """Re-ingesting with a changed cast/crew set removes stale credits and inserts the new ones."""
-    details_v1 = TMDBMovieDetails.model_validate(
-        make_details(304, credits=_CREDITS_CAST_AND_CREW)
-    )
+    details_v1 = TMDBMovieDetails.model_validate(make_details(304, credits=_CREDITS_CAST_AND_CREW))
     await upsert_film(session, details_v1)
     await session.commit()
 
@@ -819,9 +817,7 @@ async def test_upsert_credits_removes_stale_credits_on_change(session):
     credits_v1 = await _film_credits(session, film.id)
     assert len(credits_v1) == 3
 
-    details_v2 = TMDBMovieDetails.model_validate(
-        make_details(304, credits=_CREDITS_CHANGED)
-    )
+    details_v2 = TMDBMovieDetails.model_validate(make_details(304, credits=_CREDITS_CHANGED))
     await upsert_film(session, details_v2)
     await session.commit()
 
