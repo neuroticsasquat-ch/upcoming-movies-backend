@@ -110,7 +110,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             select(Event, EventSummary.summary)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .where(Event.film_id == film.id, _visible_events())
-            .order_by(Event.occurred_at.asc(), Event.id.asc())
+            .order_by(Event.created_at.asc(), Event.id.asc())
         )
     ).all()
 
@@ -132,7 +132,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         EventOut(
             event_type=event.event_type,
             confidence=event.confidence,
-            occurred_at=event.occurred_at,
+            created_at=event.created_at,
             summary=summary,
             sources=[
                 SourceOut(

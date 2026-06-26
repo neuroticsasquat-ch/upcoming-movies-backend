@@ -13,7 +13,7 @@ class SourceOut(BaseModel):
 class EventOut(BaseModel):
     event_type: str
     confidence: str
-    occurred_at: datetime
+    created_at: datetime
     summary: str
     sources: list[SourceOut]
 
