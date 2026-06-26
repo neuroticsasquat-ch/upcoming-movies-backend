@@ -3,8 +3,18 @@
 from typing import Any
 
 
-def make_details(tmdb_id: int, **overrides: Any) -> dict[str, Any]:
-    """A `/movie/{id}` details payload with sensible defaults."""
+def make_details(
+    tmdb_id: int,
+    *,
+    release_dates: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A `/movie/{id}` details payload with sensible defaults.
+
+    Pass ``release_dates`` to include an appended release_dates block (as TMDB returns
+    when ``append_to_response=release_dates`` is set). All other fields can be overridden
+    via keyword arguments.
+    """
     payload: dict[str, Any] = {
         "id": tmdb_id,
         "title": f"Movie {tmdb_id}",
@@ -35,6 +45,8 @@ def make_details(tmdb_id: int, **overrides: Any) -> dict[str, Any]:
         "spoken_languages": [{"english_name": "English", "iso_639_1": "en", "name": "English"}],
         "belongs_to_collection": None,
     }
+    if release_dates is not None:
+        payload["release_dates"] = release_dates
     payload.update(overrides)
     return payload
 
