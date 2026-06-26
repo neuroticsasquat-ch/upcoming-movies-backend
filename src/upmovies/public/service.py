@@ -2,12 +2,24 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Date, cast, distinct, func, nulls_last, or_, select
+from sqlalchemy import (
+    ColumnElement,
+    Date,
+    case,
+    cast,
+    distinct,
+    exists,
+    func,
+    nulls_last,
+    or_,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import (
     Collection,
     Film,
+    FilmAlternativeTitle,
     FilmGenre,
     FilmProductionCompany,
     FilmReleaseDate,
@@ -97,16 +109,30 @@ def _escape_like(q: str) -> str:
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _title_match(q: str) -> ColumnElement[bool]:
-    """Return a boolean SQLAlchemy clause that matches q against title/original_title."""
-    # FUTURE: ILIKE '%term%' is non-sargable -- a pg_trgm GIN index on
-    # title/original_title would let this skip the sequential scan if search gets hot.
-    pattern = f"%{_escape_like(q)}%"
+def _primary_title_match(pattern: str) -> ColumnElement[bool]:
+    """Match q against the film's primary title or original_title (no alt-title)."""
     return or_(
         Film.title.ilike(pattern, escape="\\"),
         Film.original_title.ilike(pattern, escape="\\"),
-        # FUTURE (NEU-406): or_(..., <alt-title EXISTS subquery>)
     )
+
+
+def _title_match(q: str) -> ColumnElement[bool]:
+    """Return a boolean SQLAlchemy clause that matches q against title/original_title/alt-titles.
+
+    Alt-title matching uses a correlated EXISTS subquery so each film appears at most once
+    (no DISTINCT needed). The same escaped pattern is reused across all three arms.
+    FUTURE: ILIKE '%term%' is non-sargable -- a pg_trgm GIN index on
+    title/original_title/alt-title would let this skip the sequential scan if search gets hot.
+    """
+    pattern = f"%{_escape_like(q)}%"
+    alt_title_match = exists(
+        select(1).where(
+            FilmAlternativeTitle.film_id == Film.id,
+            FilmAlternativeTitle.title.ilike(pattern, escape="\\"),
+        )
+    )
+    return or_(_primary_title_match(pattern), alt_title_match)
 
 
 async def get_film_index(session: AsyncSession, *, limit: int, offset: int) -> FilmIndexResponse:
@@ -144,6 +170,7 @@ async def get_film_search(
     alphanumeric_len = sum(1 for c in term if c.isalnum())
     if alphanumeric_len < MIN_QUERY_LEN:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
+    pattern = f"%{_escape_like(term)}%"
     where = (*_publicly_visible_film(), _title_match(term))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
     films = (
@@ -151,7 +178,12 @@ async def get_film_search(
             await session.execute(
                 select(Film)
                 .where(*where)
-                .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
+                .order_by(
+                    # case() avoids NULL from original_title IS NULL sorting first under DESC.
+                    case((_primary_title_match(pattern), 1), else_=0).desc(),
+                    nulls_last(Film.release_date.desc()),
+                    Film.id.asc(),
+                )
                 .limit(limit)
                 .offset(offset)
             )
@@ -289,6 +321,28 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         if col_row is not None:
             collection = CollectionOut(name=col_row.name, poster_path=col_row.poster_path)
 
+    _excluded_titles = {t.lower() for t in [film.title, film.original_title] if t}
+    _alt_title_rows = list(
+        (
+            await session.execute(
+                select(FilmAlternativeTitle.title).where(
+                    FilmAlternativeTitle.film_id == film.id,
+                    func.lower(FilmAlternativeTitle.title).notin_(_excluded_titles),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Deduplicate case-insensitively, order alphabetically, cap at 8.
+    _seen: set[str] = set()
+    _deduped: list[str] = []
+    for _t in _alt_title_rows:
+        if _t.lower() not in _seen:
+            _seen.add(_t.lower())
+            _deduped.append(_t)
+    alternative_titles = sorted(_deduped, key=str.lower)[:8]
+
     return FilmDetailResponse(
         slug=film.slug,
         title=film.title,
@@ -308,6 +362,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         genres=genres,
         production_companies=companies,
         collection=collection,
+        alternative_titles=alternative_titles,
     )
 
 

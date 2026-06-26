@@ -192,3 +192,23 @@ class FilmReleaseDate(Base):
     certification: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     iso_639_1: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FilmAlternativeTitle(Base):
+    """Per-country TMDB alternative title for a film."""
+
+    __tablename__ = "film_alternative_title"
+    __table_args__ = (
+        Index("ix_catalog_film_alt_title_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    iso_3166_1: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_type: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -6,6 +6,7 @@ from tests.fixtures.tmdb import make_details
 from upmovies.catalog.models import (
     Collection,
     Film,
+    FilmAlternativeTitle,
     FilmGenre,
     FilmProductionCountry,
     FilmReleaseDate,
@@ -499,4 +500,121 @@ async def test_upsert_release_dates_cascade_delete(session):
     await session.commit()
 
     rows_after = await _release_dates(session, film.id)
+    assert rows_after == []
+
+
+# ---------------------------------------------------------------------------
+# upsert_film → FilmAlternativeTitle rebuild tests (Task 3 — NEU-406)
+# ---------------------------------------------------------------------------
+
+_ALT_TITLES_2_COUNTRIES = {
+    "titles": [
+        {"iso_3166_1": "US", "title": "Inception US Alt", "type": ""},
+        {"iso_3166_1": "FR", "title": "Inception FR", "type": "working title"},
+    ]
+}
+
+_ALT_TITLES_CHANGED = {
+    "titles": [
+        {"iso_3166_1": "DE", "title": "Inception DE", "type": ""},
+    ]
+}
+
+
+async def _alt_titles(session, film_id) -> list[FilmAlternativeTitle]:
+    result = await session.execute(
+        select(FilmAlternativeTitle).where(FilmAlternativeTitle.film_id == film_id),
+        execution_options={"populate_existing": True},
+    )
+    return list(result.scalars().all())
+
+
+async def test_upsert_populates_alternative_title_rows(session):
+    """upsert_film with an alternative_titles block inserts one row per title entry."""
+    details = TMDBMovieDetails.model_validate(
+        make_details(201, alternative_titles=_ALT_TITLES_2_COUNTRIES)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _alt_titles(session, film.id)
+    assert len(rows) == 2
+
+    rows_by_country = {r.iso_3166_1: r for r in rows}
+    assert "US" in rows_by_country
+    assert "FR" in rows_by_country
+    assert rows_by_country["US"].title == "Inception US Alt"
+    assert rows_by_country["FR"].title == "Inception FR"
+    assert rows_by_country["FR"].title_type == "working title"
+
+
+async def test_upsert_alternative_titles_idempotent(session):
+    """Re-running upsert_film with same alternative_titles data produces no duplicate rows."""
+    details = TMDBMovieDetails.model_validate(
+        make_details(202, alternative_titles=_ALT_TITLES_2_COUNTRIES)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _alt_titles(session, film.id)
+    assert len(rows) == 2
+
+
+async def test_upsert_alternative_titles_rebuild_on_change(session):
+    """Re-upserting with different alternative_titles replaces stale rows with the new set."""
+    details_v1 = TMDBMovieDetails.model_validate(
+        make_details(203, alternative_titles=_ALT_TITLES_2_COUNTRIES)
+    )
+    await upsert_film(session, details_v1)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows_v1 = await _alt_titles(session, film.id)
+    assert len(rows_v1) == 2
+
+    details_v2 = TMDBMovieDetails.model_validate(
+        make_details(203, alternative_titles=_ALT_TITLES_CHANGED)
+    )
+    await upsert_film(session, details_v2)
+    await session.commit()
+
+    rows_v2 = await _alt_titles(session, film.id)
+    assert len(rows_v2) == 1
+    assert rows_v2[0].iso_3166_1 == "DE"
+    assert rows_v2[0].title == "Inception DE"
+
+
+async def test_upsert_no_alternative_titles_is_noop(session):
+    """upsert_film without an alternative_titles key leaves film_alternative_title empty."""
+    details = TMDBMovieDetails.model_validate(make_details(204))
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _alt_titles(session, film.id)
+    assert rows == []
+
+
+async def test_upsert_alternative_titles_cascade_delete(session):
+    """Deleting the Film row cascade-deletes its FilmAlternativeTitle rows."""
+    from sqlalchemy import delete as sa_delete
+
+    details = TMDBMovieDetails.model_validate(
+        make_details(205, alternative_titles=_ALT_TITLES_2_COUNTRIES)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows_before = await _alt_titles(session, film.id)
+    assert len(rows_before) == 2
+
+    await session.execute(sa_delete(Film).where(Film.id == film.id))
+    await session.commit()
+
+    rows_after = await _alt_titles(session, film.id)
     assert rows_after == []

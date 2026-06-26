@@ -434,6 +434,130 @@ async def test_detail_metadata_is_scoped_per_film(
     assert body_b["collection"] == {"name": "Collection B", "poster_path": None}
 
 
+# ── alternative_titles exposure tests ────────────────────────────────────────
+
+
+async def test_detail_no_alt_titles_returns_empty_list(client, make_film, add_event):
+    film = await make_film(slug="no-alt-2026", title="No Alt Titles Film")
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/no-alt-2026")
+    assert r.status_code == 200
+    assert r.json()["alternative_titles"] == []
+
+
+async def test_detail_alt_titles_returned_as_strings(
+    client, make_film, add_event, attach_alt_titles
+):
+    film = await make_film(slug="alt-basic-2026", title="Alt Titles Film")
+    await add_event(film=film, summary="Event.")
+    await attach_alt_titles(film, ["International Title", "Another Title"])
+
+    r = await client.get("/films/alt-basic-2026")
+    assert r.status_code == 200
+    body = r.json()
+    assert "alternative_titles" in body
+    assert isinstance(body["alternative_titles"], list)
+    assert all(isinstance(t, str) for t in body["alternative_titles"])
+    assert "International Title" in body["alternative_titles"]
+    assert "Another Title" in body["alternative_titles"]
+
+
+async def test_detail_alt_titles_exclude_film_title(
+    client, make_film, add_event, attach_alt_titles
+):
+    """Alt-titles equal to the canonical title (case-insensitive) are excluded."""
+    film = await make_film(slug="alt-excl-title-2026", title="The Movie")
+    await add_event(film=film, summary="Event.")
+    await attach_alt_titles(film, ["The Movie", "the movie", "THE MOVIE", "Foreign Title"])
+
+    r = await client.get("/films/alt-excl-title-2026")
+    assert r.status_code == 200
+    alt_titles = r.json()["alternative_titles"]
+    assert "The Movie" not in alt_titles
+    assert "the movie" not in alt_titles
+    assert "THE MOVIE" not in alt_titles
+    assert "Foreign Title" in alt_titles
+
+
+async def test_detail_alt_titles_exclude_original_title(
+    client, make_film, add_event, attach_alt_titles, session
+):
+    """Alt-titles equal to original_title (case-insensitive) are excluded."""
+    film = await make_film(slug="alt-excl-orig-2026", title="The Movie")
+    film.original_title = "기생충"
+    session.add(film)
+    await session.commit()
+    await session.refresh(film)
+    await add_event(film=film, summary="Event.")
+    await attach_alt_titles(film, ["기생충", "기생충 Extra", "Another Title"])
+
+    r = await client.get("/films/alt-excl-orig-2026")
+    assert r.status_code == 200
+    alt_titles = r.json()["alternative_titles"]
+    assert "기생충" not in alt_titles
+    assert "기생충 Extra" in alt_titles
+    assert "Another Title" in alt_titles
+
+
+async def test_detail_alt_titles_ordered_alphabetically_case_insensitive(
+    client, make_film, add_event, attach_alt_titles
+):
+    """Alt-titles are returned in case-insensitive alphabetical order."""
+    film = await make_film(slug="alt-order-2026", title="Order Film")
+    await add_event(film=film, summary="Event.")
+    await attach_alt_titles(film, ["Zebra Title", "apple title", "Mango Title"])
+
+    r = await client.get("/films/alt-order-2026")
+    assert r.status_code == 200
+    alt_titles = r.json()["alternative_titles"]
+    assert alt_titles == sorted(alt_titles, key=str.lower)
+
+
+async def test_detail_alt_titles_capped_at_eight(client, make_film, add_event, attach_alt_titles):
+    """More than 8 alt-titles are capped to 8."""
+    film = await make_film(slug="alt-cap-2026", title="Cap Film")
+    await add_event(film=film, summary="Event.")
+    titles = [f"Title {chr(ord('A') + i)}" for i in range(12)]
+    await attach_alt_titles(film, titles)
+
+    r = await client.get("/films/alt-cap-2026")
+    assert r.status_code == 200
+    alt_titles = r.json()["alternative_titles"]
+    assert len(alt_titles) <= 8
+
+
+async def test_detail_alt_titles_distinct(client, make_film, add_event, attach_alt_titles):
+    """Duplicate alt-title rows are returned as a single entry."""
+    film = await make_film(slug="alt-dedup-2026", title="Dedup Film")
+    await add_event(film=film, summary="Event.")
+    await attach_alt_titles(film, ["Duplicate Title", "Duplicate Title", "Other Title"])
+
+    r = await client.get("/films/alt-dedup-2026")
+    assert r.status_code == 200
+    alt_titles = r.json()["alternative_titles"]
+    assert alt_titles.count("Duplicate Title") == 1
+
+
+async def test_detail_alt_titles_scoped_per_film(client, make_film, add_event, attach_alt_titles):
+    """Alt-titles from one film must not appear on another film's detail."""
+    film_a = await make_film(slug="alt-scope-a-2026", title="Film A")
+    await add_event(film=film_a, summary="Event A.")
+    await attach_alt_titles(film_a, ["Title A Only"])
+
+    film_b = await make_film(slug="alt-scope-b-2026", title="Film B")
+    await add_event(film=film_b, summary="Event B.")
+    await attach_alt_titles(film_b, ["Title B Only"])
+
+    body_a = (await client.get("/films/alt-scope-a-2026")).json()
+    body_b = (await client.get("/films/alt-scope-b-2026")).json()
+
+    assert "Title A Only" in body_a["alternative_titles"]
+    assert "Title B Only" not in body_a["alternative_titles"]
+    assert "Title B Only" in body_b["alternative_titles"]
+    assert "Title A Only" not in body_b["alternative_titles"]
+
+
 # ── /films/search tests ───────────────────────────────────────────────────────
 
 
@@ -655,3 +779,93 @@ async def test_search_backslash_is_literal(client, make_film, add_event):
     slugs = [i["slug"] for i in r.json()["items"]]
     assert "acdc-slash-2026" in slugs
     assert "acdc-plain-2026" not in slugs
+
+
+# ── NEU-406: alt-title search extension ──────────────────────────────────────
+
+
+async def test_search_found_by_aka(client, make_film, add_event, attach_alt_titles):
+    """A film whose primary title does NOT contain the query but has a matching alt-title
+    is returned by the search endpoint."""
+    film = await make_film(slug="aka-match-2026", title="Primary Title Only")
+    await add_event(film=film, summary="A summary.")
+    await attach_alt_titles(film, ["The Known AKA", "Another AKA"])
+
+    r = await client.get("/films/search", params={"q": "Known AKA"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "aka-match-2026" in slugs
+
+
+async def test_search_aka_no_dedup(client, make_film, add_event, attach_alt_titles):
+    """A film matching on BOTH primary title and alt-title appears exactly once."""
+    film = await make_film(slug="dual-match-2026", title="Odyssey Film")
+    await add_event(film=film, summary="A summary.")
+    await attach_alt_titles(film, ["The Odyssey AKA"])  # "Odyssey" in both title and alt-title
+
+    r = await client.get("/films/search", params={"q": "Odyssey"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert slugs.count("dual-match-2026") == 1
+
+
+async def test_search_aka_visibility_parity(client, make_film, add_event, attach_alt_titles):
+    """A film matching via alt-title but with no summarized event / no slug is excluded."""
+    # visible via AKA
+    visible = await make_film(slug="aka-visible-2026", title="Unrelated Title A")
+    await add_event(film=visible, summary="A summary.")
+    await attach_alt_titles(visible, ["Searchable AKA"])
+
+    # hidden: matches alt-title but no summarized event
+    hidden = await make_film(slug="aka-hidden-2026", title="Unrelated Title B")
+    await add_event(film=hidden, summary=None)  # no summary
+    await attach_alt_titles(hidden, ["Searchable AKA"])
+
+    # bare: matches alt-title but no events at all
+    bare = await make_film(slug="aka-bare-2026", title="Unrelated Title C")
+    await attach_alt_titles(bare, ["Searchable AKA"])
+
+    r = await client.get("/films/search", params={"q": "Searchable AKA"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "aka-visible-2026" in slugs
+    assert "aka-hidden-2026" not in slugs
+    assert "aka-bare-2026" not in slugs
+
+
+async def test_search_primary_title_ranks_before_aka(
+    client, make_film, add_event, attach_alt_titles
+):
+    """A film matching on primary title sorts before a film matching only on alt-title.
+
+    We use release dates that would interleave them without the tiebreak:
+    - primary-hit has an earlier release_date (would normally sort second by date desc)
+    - aka-only-hit has a later release_date (would normally sort first by date desc)
+    The primary-first tiebreak must override the date ordering so primary-hit comes first.
+    """
+    from datetime import date
+
+    # AKA-only hit has a *later* release date — without the tiebreak, date-desc puts it first.
+    aka_only = await make_film(
+        slug="aka-only-hit-2026",
+        title="Completely Different",
+        release_date=date(2027, 6, 1),
+    )
+    await add_event(film=aka_only, summary="A summary.")
+    await attach_alt_titles(aka_only, ["Fantastic Journey"])
+
+    # Primary-title hit has an *earlier* release date — date-desc alone would put it second.
+    primary_hit = await make_film(
+        slug="primary-title-hit-2026",
+        title="Fantastic Journey",
+        release_date=date(2026, 1, 1),
+    )
+    await add_event(film=primary_hit, summary="A summary.")
+
+    r = await client.get("/films/search", params={"q": "Fantastic Journey"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "primary-title-hit-2026" in slugs
+    assert "aka-only-hit-2026" in slugs
+    # Primary-title match must appear before the AKA-only match.
+    assert slugs.index("primary-title-hit-2026") < slugs.index("aka-only-hit-2026")

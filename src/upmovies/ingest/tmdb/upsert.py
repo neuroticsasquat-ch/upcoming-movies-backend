@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import (
     Collection,
     Film,
+    FilmAlternativeTitle,
     FilmGenre,
     FilmProductionCompany,
     FilmProductionCountry,
@@ -35,6 +36,7 @@ async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     await _upsert_references(session, details)
     await _rebuild_joins(session, film_id, details)
     await _rebuild_release_dates(session, film_id, details)
+    await _rebuild_alternative_titles(session, film_id, details)
 
 
 async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -> int | None:
@@ -230,3 +232,29 @@ async def _rebuild_release_dates(
     ]
     if rows:
         await session.execute(insert(FilmReleaseDate).values(rows))
+
+
+async def _rebuild_alternative_titles(
+    session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
+) -> None:
+    # Delete-then-reinsert, mirroring `_rebuild_release_dates`: a film that drops its
+    # alternative_titles between runs must have its stale rows cleared, so the delete is
+    # unconditional and only the insert is guarded.
+    await session.execute(
+        delete(FilmAlternativeTitle).where(FilmAlternativeTitle.film_id == film_id)
+    )
+
+    if not details.alternative_titles or not details.alternative_titles.titles:
+        return
+
+    rows = [
+        {
+            "film_id": film_id,
+            "iso_3166_1": t.iso_3166_1,
+            "title": t.title,
+            "title_type": t.type,
+        }
+        for t in details.alternative_titles.titles
+    ]
+    if rows:
+        await session.execute(insert(FilmAlternativeTitle).values(rows))
