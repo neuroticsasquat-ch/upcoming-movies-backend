@@ -196,7 +196,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
                 select(Genre.name)
                 .join(FilmGenre, FilmGenre.genre_id == Genre.id)
                 .where(FilmGenre.film_id == film.id)
-                .order_by(Genre.name.asc())
+                .order_by(Genre.name.asc(), Genre.id.asc())
             )
         )
         .scalars()
@@ -211,7 +211,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
                     FilmProductionCompany, FilmProductionCompany.company_id == ProductionCompany.id
                 )
                 .where(FilmProductionCompany.film_id == film.id)
-                .order_by(ProductionCompany.name.asc())
+                .order_by(ProductionCompany.name.asc(), ProductionCompany.id.asc())
             )
         )
         .scalars()
