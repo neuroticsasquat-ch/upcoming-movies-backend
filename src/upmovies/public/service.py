@@ -5,10 +5,19 @@ from uuid import UUID
 from sqlalchemy import Date, cast, distinct, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film, FilmReleaseDate
+from upmovies.catalog.models import (
+    Collection,
+    Film,
+    FilmGenre,
+    FilmProductionCompany,
+    FilmReleaseDate,
+    Genre,
+    ProductionCompany,
+)
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.public.arc import derive_arc_stage, most_significant_event_type
 from upmovies.public.dto import (
+    CollectionOut,
     EventOut,
     FeedDayItem,
     FeedDayResponse,
@@ -181,6 +190,42 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         for row in release_date_rows
     ]
 
+    genres = list(
+        (
+            await session.execute(
+                select(Genre.name)
+                .join(FilmGenre, FilmGenre.genre_id == Genre.id)
+                .where(FilmGenre.film_id == film.id)
+                .order_by(Genre.name.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    companies = list(
+        (
+            await session.execute(
+                select(ProductionCompany.name)
+                .join(
+                    FilmProductionCompany, FilmProductionCompany.company_id == ProductionCompany.id
+                )
+                .where(FilmProductionCompany.film_id == film.id)
+                .order_by(ProductionCompany.name.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    collection: CollectionOut | None = None
+    if film.collection_id is not None:
+        col_row = (
+            await session.execute(select(Collection).where(Collection.id == film.collection_id))
+        ).scalar_one_or_none()
+        if col_row is not None:
+            collection = CollectionOut(name=col_row.name, poster_path=col_row.poster_path)
+
     return FilmDetailResponse(
         slug=film.slug,
         title=film.title,
@@ -190,6 +235,16 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         arc_stage=arc_stage,
         events=events,
         release_dates=release_dates,
+        overview=film.overview,
+        tagline=film.tagline,
+        runtime=film.runtime,
+        vote_average=film.vote_average,
+        vote_count=film.vote_count,
+        original_language=film.original_language,
+        backdrop_path=film.backdrop_path,
+        genres=genres,
+        production_companies=companies,
+        collection=collection,
     )
 
 

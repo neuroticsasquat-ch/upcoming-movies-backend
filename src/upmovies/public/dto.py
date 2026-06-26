@@ -41,6 +41,11 @@ class ReleaseDateOut(BaseModel):
     certification: str | None
 
 
+class CollectionOut(BaseModel):
+    name: str
+    poster_path: str | None = None
+
+
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
@@ -50,6 +55,16 @@ class FilmDetailResponse(BaseModel):
     arc_stage: str
     events: list[EventOut]
     release_dates: list[ReleaseDateOut] = []
+    overview: str | None = None
+    tagline: str | None = None
+    runtime: int | None = None
+    vote_average: float | None = None
+    vote_count: int | None = None
+    original_language: str | None = None
+    backdrop_path: str | None = None
+    genres: list[str] = []
+    production_companies: list[str] = []
+    collection: CollectionOut | None = None
 
 
 class FeedItem(BaseModel):

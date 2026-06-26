@@ -327,3 +327,75 @@ async def test_detail_includes_origin_country_dates(
     assert "KR" in countries
     assert "JP" not in countries
     assert len(rds) == 2
+
+
+# ── film metadata (genres, companies, collection, scalars) ────────────────────
+
+
+async def test_detail_exposes_film_metadata_all_fields(
+    client, make_film, add_event, make_collection, attach_genres, attach_companies
+):
+    col = await make_collection(id=1, name="The Franchise Collection")
+    film = await make_film(
+        slug="meta-full-2026",
+        title="Full Meta Film",
+        overview="A gripping story.",
+        tagline="The tagline.",
+        runtime=120,
+        vote_average=7.5,
+        vote_count=1200,
+        original_language="en",
+        backdrop_path="/backdrop.jpg",
+        collection_id=col.id,
+    )
+    await add_event(film=film, summary="Event.")
+    await attach_genres(film, [(28, "Action"), (12, "Adventure")])
+    await attach_companies(film, [(10, "Zeta Studios"), (5, "Alpha Films")])
+
+    r = await client.get("/films/meta-full-2026")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["overview"] == "A gripping story."
+    assert body["tagline"] == "The tagline."
+    assert body["runtime"] == 120
+    assert body["vote_average"] == 7.5
+    assert body["vote_count"] == 1200
+    assert body["original_language"] == "en"
+    assert body["backdrop_path"] == "/backdrop.jpg"
+    # genres: name-ascending — Action before Adventure
+    assert body["genres"] == ["Action", "Adventure"]
+    # companies: name-ascending — Alpha before Zeta
+    assert body["production_companies"] == ["Alpha Films", "Zeta Studios"]
+    assert body["collection"] == {"name": "The Franchise Collection", "poster_path": None}
+
+
+async def test_detail_sparse_film_returns_nulls_and_empty_lists(client, make_film, add_event):
+    film = await make_film(slug="meta-sparse-2026")
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/meta-sparse-2026")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["overview"] is None
+    assert body["tagline"] is None
+    assert body["runtime"] is None
+    assert body["vote_average"] is None
+    assert body["vote_count"] is None
+    assert body["original_language"] is None
+    assert body["backdrop_path"] is None
+    assert body["genres"] == []
+    assert body["production_companies"] == []
+    assert body["collection"] is None
+
+
+async def test_detail_rating_raw_passthrough(client, make_film, add_event):
+    film = await make_film(slug="meta-zero-rating-2026", vote_average=0.0, vote_count=0)
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/meta-zero-rating-2026")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["vote_average"] == 0.0
+    assert body["vote_count"] == 0
