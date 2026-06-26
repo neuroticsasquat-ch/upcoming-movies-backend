@@ -106,7 +106,7 @@ class TMDBClient:
         JSON as `tmdb_raw` so the caller can persist fields we don't model."""
         url = f"{self._base_url}/movie/{tmdb_id}"
         resp = await self._request(
-            "GET", url, params={"append_to_response": "release_dates,alternative_titles"}
+            "GET", url, params={"append_to_response": "credits,release_dates,alternative_titles"}
         )
         data = resp.json()
         details = TMDBMovieDetails.model_validate(data)

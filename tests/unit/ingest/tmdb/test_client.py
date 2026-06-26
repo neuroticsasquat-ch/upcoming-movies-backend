@@ -6,7 +6,7 @@ import respx
 
 from tests.fixtures.tmdb import make_details
 from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient
-from upmovies.ingest.tmdb.schemas import TMDBDiscoverResponse, TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import TMDBCredits, TMDBDiscoverResponse, TMDBMovieDetails
 
 BASE_URL = "https://api.themoviedb.org/3"
 
@@ -216,6 +216,61 @@ async def test_movie_details_parses_appended_alternative_titles_block_and_captur
     assert details.alternative_titles.titles[0].title == "Inception - Der Film"
     # Also present in raw payload
     assert details.tmdb_raw["alternative_titles"] == alternative_titles_block
+
+
+@respx.mock
+async def test_movie_details_sends_append_to_response_with_credits():
+    """movie_details must issue exactly one request with credits in append_to_response."""
+    route = respx.get(f"{BASE_URL}/movie/27205").mock(
+        return_value=httpx.Response(200, json=make_details(27205))
+    )
+    async with _client() as c:
+        await c.movie_details(27205)
+
+    assert route.call_count == 1
+    params = route.calls.last.request.url.params
+    atr = params.get("append_to_response", "")
+    assert "credits" in atr.split(",")
+
+
+@respx.mock
+async def test_movie_details_parses_appended_credits_block_and_captures_in_raw():
+    """When the response includes an appended credits block, it must parse into
+    details.credits (TMDBCredits) and also be present verbatim in details.tmdb_raw."""
+    credits_block = {
+        "cast": [
+            {
+                "id": 6193,
+                "name": "Leonardo DiCaprio",
+                "credit_id": "52fe4251c3a36847f8014199",
+                "character": "Cobb",
+                "order": 0,
+            }
+        ],
+        "crew": [
+            {
+                "id": 525,
+                "name": "Christopher Nolan",
+                "credit_id": "52fe4251c3a36847f8014201",
+                "department": "Directing",
+                "job": "Director",
+            }
+        ],
+    }
+    payload = make_details(27205, credits=credits_block)
+    respx.get(f"{BASE_URL}/movie/27205").mock(return_value=httpx.Response(200, json=payload))
+    async with _client() as c:
+        details = await c.movie_details(27205)
+
+    # Parsed into typed DTO
+    assert isinstance(details.credits, TMDBCredits)
+    assert len(details.credits.cast) == 1
+    assert details.credits.cast[0].name == "Leonardo DiCaprio"
+    assert details.credits.cast[0].character == "Cobb"
+    assert len(details.credits.crew) == 1
+    assert details.credits.crew[0].job == "Director"
+    # Also present in raw payload
+    assert details.tmdb_raw["credits"] == credits_block
 
 
 @respx.mock

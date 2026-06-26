@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from upmovies.ingest.tmdb.schemas import (
+    TMDBCredits,
     TMDBDiscoverResponse,
     TMDBMovieDetails,
     TMDBMovieSummary,
@@ -271,6 +272,110 @@ def test_alternative_titles_ignores_unknown_extra_keys():
     assert details.alternative_titles is not None
     assert details.alternative_titles.titles[0].iso_3166_1 == "US"
     assert details.alternative_titles.titles[0].title == "Fight Club"
+
+
+# --- credits DTO tests ---
+
+
+def test_movie_details_parses_nested_credits():
+    """A credits block validates into TMDBCredits with typed cast and crew members."""
+    payload = {
+        "id": 27205,
+        "title": "Inception",
+        "credits": {
+            "cast": [
+                {
+                    "id": 6193,
+                    "name": "Leonardo DiCaprio",
+                    "credit_id": "52fe4251c3a36847f8014199",
+                    "original_name": "Leonardo DiCaprio",
+                    "profile_path": "/wolf.jpg",
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "popularity": 42.1,
+                    "character": "Cobb",
+                    "order": 0,
+                }
+            ],
+            "crew": [
+                {
+                    "id": 525,
+                    "name": "Christopher Nolan",
+                    "credit_id": "52fe4251c3a36847f8014201",
+                    "original_name": "Christopher Nolan",
+                    "profile_path": "/nolan.jpg",
+                    "known_for_department": "Directing",
+                    "gender": 2,
+                    "popularity": 15.3,
+                    "department": "Directing",
+                    "job": "Director",
+                }
+            ],
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert isinstance(details.credits, TMDBCredits)
+    assert len(details.credits.cast) == 1
+    cast_member = details.credits.cast[0]
+    assert cast_member.id == 6193
+    assert cast_member.name == "Leonardo DiCaprio"
+    assert cast_member.credit_id == "52fe4251c3a36847f8014199"
+    assert cast_member.character == "Cobb"
+    assert cast_member.order == 0
+    assert len(details.credits.crew) == 1
+    crew_member = details.credits.crew[0]
+    assert crew_member.id == 525
+    assert crew_member.name == "Christopher Nolan"
+    assert crew_member.department == "Directing"
+    assert crew_member.job == "Director"
+
+
+def test_movie_details_credits_absent_is_none():
+    """A film with no credits key leaves the field None."""
+    details = TMDBMovieDetails.model_validate({"id": 1, "title": "Minimal"})
+    assert details.credits is None
+
+
+def test_credits_cast_crew_ignore_unknown_extra_keys():
+    """Extra keys in cast/crew members are silently ignored (extra='ignore')."""
+    payload = {
+        "id": 27205,
+        "title": "Inception",
+        "credits": {
+            "cast": [
+                {
+                    "id": 6193,
+                    "name": "Leonardo DiCaprio",
+                    "credit_id": "abc",
+                    "future_tmdb_field": "should be ignored",
+                    "character": "Cobb",
+                    "order": 0,
+                }
+            ],
+            "crew": [
+                {
+                    "id": 525,
+                    "name": "Christopher Nolan",
+                    "credit_id": "def",
+                    "another_future_field": 42,
+                    "department": "Directing",
+                    "job": "Director",
+                }
+            ],
+            "id": 27205,  # TMDB sometimes embeds the movie id in subresources
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.credits is not None
+    assert details.credits.cast[0].name == "Leonardo DiCaprio"
+    assert details.credits.crew[0].job == "Director"
+
+
+def test_credits_empty_cast_and_crew_default_to_empty_lists():
+    """TMDBCredits with no cast/crew key defaults both to empty lists."""
+    credits = TMDBCredits.model_validate({})
+    assert credits.cast == []
+    assert credits.crew == []
 
 
 def test_movie_details_release_dates_ignores_unknown_extra_keys():

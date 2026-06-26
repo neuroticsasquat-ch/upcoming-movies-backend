@@ -95,6 +95,43 @@ class TMDBAlternativeTitles(BaseModel):
     titles: list[TMDBAlternativeTitle] = Field(default_factory=list)
 
 
+class TMDBCastMember(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    credit_id: str
+    original_name: str | None = None
+    profile_path: str | None = None
+    known_for_department: str | None = None
+    gender: int | None = None
+    popularity: float | None = None
+    character: str | None = None
+    order: int | None = None
+
+
+class TMDBCrewMember(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    credit_id: str
+    original_name: str | None = None
+    profile_path: str | None = None
+    known_for_department: str | None = None
+    gender: int | None = None
+    popularity: float | None = None
+    department: str | None = None
+    job: str | None = None
+
+
+class TMDBCredits(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    cast: list[TMDBCastMember] = Field(default_factory=list)
+    crew: list[TMDBCrewMember] = Field(default_factory=list)
+
+
 class TMDBMovieSummary(BaseModel):
     """A movie as it appears in a `/discover/movie` results list."""
 
@@ -133,6 +170,7 @@ class TMDBMovieDetails(TMDBMovieSummary):
     belongs_to_collection: TMDBCollection | None = None
     release_dates: TMDBReleaseDates | None = None
     alternative_titles: TMDBAlternativeTitles | None = None
+    credits: TMDBCredits | None = None
     # Populated by the client post-validation with the verbatim /movie/{id} payload, so
     # we can persist fields we don't model and backfill later without re-ingesting.
     tmdb_raw: dict[str, Any] = Field(default_factory=dict)
