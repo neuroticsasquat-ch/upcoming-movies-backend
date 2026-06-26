@@ -271,6 +271,7 @@ async def test_calendar_visibility(client, make_film, add_release_date):
     body = resp.json()
     slugs = [item["film_slug"] for item in body["items"]]
 
+    assert None not in slugs
     assert "film-adult" not in slugs
     assert "film-no-events" in slugs
 
