@@ -173,6 +173,43 @@ def test_movie_details_release_dates_absent_is_none():
     assert details.release_dates is None
 
 
+def test_release_date_entry_with_empty_string_date_parses_as_none():
+    """TMDB returns release_date: "" for unannounced entries — should parse to None, not crash."""
+    payload = {
+        "id": 999,
+        "title": "TBA Film",
+        "release_dates": {
+            "results": [
+                {
+                    "iso_3166_1": "US",
+                    "release_dates": [
+                        {
+                            "certification": "NR",
+                            "iso_639_1": "en",
+                            "note": "",
+                            "release_date": "",
+                            "type": 3,
+                        },
+                        {
+                            "certification": "R",
+                            "iso_639_1": "en",
+                            "note": "",
+                            "release_date": "2026-07-15T00:00:00.000Z",
+                            "type": 4,
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.release_dates is not None
+    country = details.release_dates.results[0]
+    assert len(country.release_dates) == 2
+    assert country.release_dates[0].release_date is None
+    assert isinstance(country.release_dates[1].release_date, datetime)
+
+
 def test_movie_details_release_dates_ignores_unknown_extra_keys():
     payload = {
         "id": 550,

@@ -420,6 +420,47 @@ async def test_upsert_no_release_dates_is_noop(session):
     assert rows == []
 
 
+async def test_upsert_skips_release_date_entries_with_empty_date(session):
+    """upsert_film with a mix of valid and empty-date entries inserts only the valid rows."""
+    release_dates_with_empty = {
+        "results": [
+            {
+                "iso_3166_1": "US",
+                "release_dates": [
+                    {
+                        "certification": "NR",
+                        "iso_639_1": "en",
+                        "note": "",
+                        "release_date": "",  # TMDB empty-string unknown date
+                        "type": 3,
+                    },
+                    {
+                        "certification": "PG-13",
+                        "iso_639_1": "en",
+                        "note": "wide",
+                        "release_date": "2026-07-16T00:00:00.000Z",
+                        "type": 4,
+                    },
+                ],
+            }
+        ]
+    }
+    details = TMDBMovieDetails.model_validate(
+        make_details(200, release_dates=release_dates_with_empty)
+    )
+    # No exception should be raised
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _release_dates(session, film.id)
+    # Only the entry with a real date is persisted
+    assert len(rows) == 1
+    assert rows[0].release_type == 4
+    assert rows[0].certification == "PG-13"
+    assert rows[0].release_date is not None
+
+
 async def test_upsert_release_dates_cascade_delete(session):
     """Deleting the Film row cascade-deletes its FilmReleaseDate rows."""
     from sqlalchemy import delete as sa_delete

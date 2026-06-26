@@ -15,6 +15,7 @@ def _empty_to_none(v: Any) -> Any:
 
 
 OptionalDate = Annotated[date | None, BeforeValidator(_empty_to_none)]
+OptionalDatetime = Annotated[datetime | None, BeforeValidator(_empty_to_none)]
 
 
 class TMDBGenre(BaseModel):
@@ -63,7 +64,7 @@ class TMDBReleaseDate(BaseModel):
     certification: str | None = None
     iso_639_1: str | None = None
     note: str | None = None
-    release_date: datetime
+    release_date: OptionalDatetime = None
     type: int
 
 

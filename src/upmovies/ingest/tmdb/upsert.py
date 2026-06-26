@@ -223,6 +223,7 @@ async def _rebuild_release_dates(
         }
         for country in details.release_dates.results
         for entry in country.release_dates
+        if entry.release_date is not None  # skip entries TMDB returned with empty date
     ]
     if rows:
         await session.execute(insert(FilmReleaseDate).values(rows))
