@@ -143,14 +143,18 @@ async def get_film_search(
     where = (*_publicly_visible_film(), _title_match(term))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
     films = (
-        await session.execute(
-            select(Film)
-            .where(*where)
-            .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
-            .limit(limit)
-            .offset(offset)
+        (
+            await session.execute(
+                select(Film)
+                .where(*where)
+                .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     items = await _film_index_items(session, list(films))
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
