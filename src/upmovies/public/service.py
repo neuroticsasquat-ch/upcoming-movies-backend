@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import Date, cast, distinct, func, nulls_last, select
+from sqlalchemy import Date, cast, distinct, func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import (
@@ -34,6 +34,8 @@ from upmovies.public.sources import cap_sources, outlet_label
 
 _HIDDEN_EVENT_TYPES = ("other",)
 
+MIN_QUERY_LEN = 2
+
 
 def _visible_events():
     """SQL predicate: an event reaches the public surface unless its type is hidden.
@@ -61,29 +63,19 @@ async def _event_types_by_film(
     return result
 
 
-async def get_film_index(session: AsyncSession, *, limit: int, offset: int) -> FilmIndexResponse:
+def _publicly_visible_film():
+    """Return a tuple of WHERE clauses that restrict a Film query to publicly visible films."""
     has_summary = (
         select(Event.id)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .where(Event.film_id == Film.id, _visible_events())
         .exists()
     )
-    total = await session.scalar(
-        select(func.count()).select_from(Film).where(Film.slug.is_not(None), has_summary)
-    )
-    films = (
-        (
-            await session.execute(
-                select(Film)
-                .where(Film.slug.is_not(None), has_summary)
-                .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
-                .limit(limit)
-                .offset(offset)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    return Film.slug.is_not(None), has_summary
+
+
+async def _film_index_items(session: AsyncSession, films: list[Film]) -> list[FilmIndexItem]:
+    """Build FilmIndexItem list for a page of Film rows."""
     event_types = await _event_types_by_film(session, [film.id for film in films])
     items: list[FilmIndexItem] = []
     for film in films:
@@ -97,6 +89,63 @@ async def get_film_index(session: AsyncSession, *, limit: int, offset: int) -> F
                 arc_stage=derive_arc_stage(film.status, event_types.get(film.id, [])),
             )
         )
+    return items
+
+
+def _escape_like(q: str) -> str:
+    """Escape LIKE special characters so user input is treated as a literal substring."""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _title_match(q: str):
+    """Return a boolean SQLAlchemy clause that matches q against title/original_title."""
+    pattern = f"%{_escape_like(q)}%"
+    return or_(
+        Film.title.ilike(pattern, escape="\\"),
+        Film.original_title.ilike(pattern, escape="\\"),
+        # FUTURE (NEU-406): or_(..., <alt-title EXISTS subquery>)
+    )
+
+
+async def get_film_index(session: AsyncSession, *, limit: int, offset: int) -> FilmIndexResponse:
+    total = await session.scalar(
+        select(func.count()).select_from(Film).where(*_publicly_visible_film())
+    )
+    films = (
+        (
+            await session.execute(
+                select(Film)
+                .where(*_publicly_visible_film())
+                .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = await _film_index_items(session, list(films))
+    return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_film_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> FilmIndexResponse:
+    term = q.strip()
+    if len(term) < MIN_QUERY_LEN:
+        return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
+    where = (*_publicly_visible_film(), _title_match(term))
+    total = await session.scalar(select(func.count()).select_from(Film).where(*where))
+    films = (
+        await session.execute(
+            select(Film)
+            .where(*where)
+            .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    items = await _film_index_items(session, list(films))
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 

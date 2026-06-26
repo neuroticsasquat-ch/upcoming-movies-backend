@@ -468,7 +468,7 @@ async def test_search_title_match_case_insensitive_and_substring(client, make_fi
 
 
 async def test_search_original_title_match(client, make_film, add_event, session):
-    """A film matched by original_title (but not title) is returned; NULL original_title is excluded."""
+    """A film matched by original_title is returned; NULL original_title is excluded."""
     film = await make_film(slug="parasite-2019", title="Parasite")
     film.original_title = "기생충"
     session.add(film)
@@ -496,7 +496,7 @@ async def test_search_visibility_parity_no_summarized_event(client, make_film, a
     hidden = await make_film(slug="hidden-odyssey-2026", title="The Odyssey Hidden")
     await add_event(film=hidden, summary=None)
     # bare: no events at all
-    bare = await make_film(slug="bare-odyssey-2026", title="The Odyssey Bare")
+    _ = await make_film(slug="bare-odyssey-2026", title="The Odyssey Bare")
 
     r = await client.get("/films/search", params={"q": "Odyssey"})
     assert r.status_code == 200
@@ -539,29 +539,38 @@ async def test_search_envelope_and_pagination(client, make_film, add_event):
     assert len(body["items"]) == 5
 
     # Page 1: limit=2
-    page1 = (await client.get("/films/search", params={"q": "Odyssey Search", "limit": 2, "offset": 0})).json()
+    page1 = (
+        await client.get("/films/search", params={"q": "Odyssey Search", "limit": 2, "offset": 0})
+    ).json()
     assert page1["total"] == 5
     assert len(page1["items"]) == 2
     assert page1["limit"] == 2
     assert page1["offset"] == 0
 
     # Page 2: limit=2, offset=2
-    page2 = (await client.get("/films/search", params={"q": "Odyssey Search", "limit": 2, "offset": 2})).json()
+    page2 = (
+        await client.get("/films/search", params={"q": "Odyssey Search", "limit": 2, "offset": 2})
+    ).json()
     assert page2["total"] == 5
     assert len(page2["items"]) == 2
     assert page2["offset"] == 2
 
     # Last page: limit=2, offset=4
-    page3 = (await client.get("/films/search", params={"q": "Odyssey Search", "limit": 2, "offset": 4})).json()
+    page3 = (
+        await client.get("/films/search", params={"q": "Odyssey Search", "limit": 2, "offset": 4})
+    ).json()
     assert page3["total"] == 5
     assert len(page3["items"]) == 1
 
 
 async def test_search_rejects_out_of_range_pagination(client):
     """limit=0, limit=101, offset=-1 all return 422."""
-    assert (await client.get("/films/search", params={"q": "odyssey", "limit": 0})).status_code == 422
-    assert (await client.get("/films/search", params={"q": "odyssey", "limit": 101})).status_code == 422
-    assert (await client.get("/films/search", params={"q": "odyssey", "offset": -1})).status_code == 422
+    r0 = await client.get("/films/search", params={"q": "odyssey", "limit": 0})
+    assert r0.status_code == 422
+    r1 = await client.get("/films/search", params={"q": "odyssey", "limit": 101})
+    assert r1.status_code == 422
+    r2 = await client.get("/films/search", params={"q": "odyssey", "offset": -1})
+    assert r2.status_code == 422
 
 
 async def test_search_item_shape_parity(client, make_film, add_event):
