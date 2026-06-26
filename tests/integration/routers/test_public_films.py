@@ -201,3 +201,106 @@ async def test_index_excludes_film_with_only_other_events(client, make_film, add
 
     slugs = [i["slug"] for i in (await client.get("/films")).json()["items"]]
     assert slugs == ["real-2026"]
+
+
+# ── release_dates projection tests ───────────────────────────────────────────
+
+
+async def test_detail_exposes_us_release_dates(client, make_film, add_event, add_release_date):
+    film = await make_film(slug="rd-us-2026", title="US Dates Film")
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=datetime(2026, 7, 17, tzinfo=UTC),
+        certification="PG-13",
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=1,
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+        certification=None,
+    )
+
+    r = await client.get("/films/rd-us-2026")
+    assert r.status_code == 200
+    body = r.json()
+    rds = body["release_dates"]
+    assert len(rds) == 2
+    # ordered by release_date asc: June before July
+    assert rds[0]["date"].startswith("2026-06-01")
+    assert rds[0]["release_type"] == 1
+    assert rds[0]["type_label"] == "Premiere"
+    assert rds[0]["country"] == "US"
+    assert rds[0]["certification"] is None
+    assert rds[1]["date"].startswith("2026-07-17")
+    assert rds[1]["release_type"] == 3
+    assert rds[1]["type_label"] == "Theatrical"
+    assert rds[1]["certification"] == "PG-13"
+
+
+async def test_detail_excludes_non_home_region_dates(
+    client, make_film, add_event, add_release_date
+):
+    film = await make_film(slug="rd-excl-2026", title="Exclusion Film")
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="FR",
+        release_type=3,
+        release_date=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+
+    r = await client.get("/films/rd-excl-2026")
+    assert r.status_code == 200
+    assert r.json()["release_dates"] == []
+
+
+async def test_detail_release_dates_empty_when_none(client, make_film, add_event):
+    film = await make_film(slug="rd-none-2026", title="No Dates Film")
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/rd-none-2026")
+    assert r.status_code == 200
+    assert r.json()["release_dates"] == []
+
+
+async def test_detail_includes_origin_country_dates(
+    client, make_film, add_event, add_release_date, session
+):
+    film = await make_film(slug="rd-kr-2026", title="Korean Film")
+    film.origin_country = ["KR"]
+    session.add(film)
+    await session.commit()
+    await session.refresh(film)
+
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="KR",
+        release_type=3,
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="JP",
+        release_type=3,
+        release_date=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    r = await client.get("/films/rd-kr-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    countries = [rd["country"] for rd in rds]
+    assert "US" in countries
+    assert "KR" in countries
+    assert "JP" not in countries
+    assert len(rds) == 2

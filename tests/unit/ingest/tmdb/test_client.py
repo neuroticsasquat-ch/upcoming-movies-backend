@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from tests.fixtures.tmdb import make_details
 from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient
 from upmovies.ingest.tmdb.schemas import TMDBDiscoverResponse, TMDBMovieDetails
 
@@ -157,3 +158,53 @@ async def test_movie_details_captures_raw_payload_including_unmodeled_keys():
     assert details.tmdb_raw == payload
     assert details.tmdb_raw["production_code"] == "ABC-123"
     assert [g.id for g in details.genres] == [28]
+
+
+@respx.mock
+async def test_movie_details_sends_append_to_response_with_release_dates():
+    """movie_details must issue exactly one request with release_dates in append_to_response."""
+    route = respx.get(f"{BASE_URL}/movie/27205").mock(
+        return_value=httpx.Response(200, json=make_details(27205))
+    )
+    async with _client() as c:
+        await c.movie_details(27205)
+
+    assert route.call_count == 1
+    params = route.calls.last.request.url.params
+    atr = params.get("append_to_response", "")
+    assert "release_dates" in atr.split(",")
+    # The request-level append_to_response must not clobber the client's default api_key auth.
+    assert params.get("api_key") == "test-key"
+
+
+@respx.mock
+async def test_movie_details_parses_appended_release_dates_block_and_captures_in_raw():
+    """When the response includes an appended release_dates block, it must parse into
+    details.release_dates and also be present verbatim in details.tmdb_raw."""
+    release_dates_block = {
+        "results": [
+            {
+                "iso_3166_1": "US",
+                "release_dates": [
+                    {
+                        "certification": "PG-13",
+                        "iso_639_1": "",
+                        "note": "",
+                        "release_date": "2010-07-16T00:00:00.000Z",
+                        "type": 3,
+                    }
+                ],
+            }
+        ]
+    }
+    payload = make_details(27205, release_dates=release_dates_block)
+    respx.get(f"{BASE_URL}/movie/27205").mock(return_value=httpx.Response(200, json=payload))
+    async with _client() as c:
+        details = await c.movie_details(27205)
+
+    # Parsed into typed DTO
+    assert details.release_dates is not None
+    assert details.release_dates.results[0].iso_3166_1 == "US"
+    assert details.release_dates.results[0].release_dates[0].type == 3
+    # Also present in raw payload
+    assert details.tmdb_raw["release_dates"] == release_dates_block

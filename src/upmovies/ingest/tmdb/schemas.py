@@ -1,7 +1,7 @@
 """Typed DTOs for the TMDB payloads we consume. `extra="ignore"` keeps us tolerant
 of TMDB's many fields we don't use, so the API growing never breaks parsing."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -15,6 +15,7 @@ def _empty_to_none(v: Any) -> Any:
 
 
 OptionalDate = Annotated[date | None, BeforeValidator(_empty_to_none)]
+OptionalDatetime = Annotated[datetime | None, BeforeValidator(_empty_to_none)]
 
 
 class TMDBGenre(BaseModel):
@@ -57,6 +58,29 @@ class TMDBCollection(BaseModel):
     backdrop_path: str | None = None
 
 
+class TMDBReleaseDate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    certification: str | None = None
+    iso_639_1: str | None = None
+    note: str | None = None
+    release_date: OptionalDatetime = None
+    type: int
+
+
+class TMDBReleaseDatesByCountry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    iso_3166_1: str
+    release_dates: list[TMDBReleaseDate]
+
+
+class TMDBReleaseDates(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    results: list[TMDBReleaseDatesByCountry]
+
+
 class TMDBMovieSummary(BaseModel):
     """A movie as it appears in a `/discover/movie` results list."""
 
@@ -93,6 +117,7 @@ class TMDBMovieDetails(TMDBMovieSummary):
     production_countries: list[TMDBProductionCountry] = Field(default_factory=list)
     spoken_languages: list[TMDBSpokenLanguage] = Field(default_factory=list)
     belongs_to_collection: TMDBCollection | None = None
+    release_dates: TMDBReleaseDates | None = None
     # Populated by the client post-validation with the verbatim /movie/{id} payload, so
     # we can persist fields we don't model and backfill later without re-ingesting.
     tmdb_raw: dict[str, Any] = Field(default_factory=dict)

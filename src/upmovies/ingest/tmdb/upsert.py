@@ -14,6 +14,7 @@ from upmovies.catalog.models import (
     FilmGenre,
     FilmProductionCompany,
     FilmProductionCountry,
+    FilmReleaseDate,
     FilmSpokenLanguage,
     Genre,
     ProductionCompany,
@@ -33,6 +34,7 @@ async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     film_id = await _upsert_film_row(session, details, collection_id)
     await _upsert_references(session, details)
     await _rebuild_joins(session, film_id, details)
+    await _rebuild_release_dates(session, film_id, details)
 
 
 async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -> int | None:
@@ -199,3 +201,32 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
                 [{"film_id": film_id, "iso_639_1": sl.iso_639_1} for sl in details.spoken_languages]
             )
         )
+
+
+async def _rebuild_release_dates(
+    session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
+) -> None:
+    # Delete-then-reinsert, mirroring `_rebuild_joins`: a film that drops its release_dates
+    # between runs (empty or absent payload) must have its stale rows cleared, so the delete
+    # is unconditional and only the insert is guarded.
+    await session.execute(delete(FilmReleaseDate).where(FilmReleaseDate.film_id == film_id))
+
+    if not details.release_dates or not details.release_dates.results:
+        return
+
+    rows = [
+        {
+            "film_id": film_id,
+            "iso_3166_1": country.iso_3166_1,
+            "release_type": entry.type,
+            "release_date": entry.release_date,
+            "certification": entry.certification,
+            "note": entry.note,
+            "iso_639_1": entry.iso_639_1,
+        }
+        for country in details.release_dates.results
+        for entry in country.release_dates
+        if entry.release_date is not None  # skip entries TMDB returned with empty date
+    ]
+    if rows:
+        await session.execute(insert(FilmReleaseDate).values(rows))

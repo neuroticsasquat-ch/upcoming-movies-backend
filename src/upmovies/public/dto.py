@@ -33,6 +33,14 @@ class FilmIndexResponse(BaseModel):
     offset: int
 
 
+class ReleaseDateOut(BaseModel):
+    country: str
+    release_type: int
+    type_label: str
+    date: datetime
+    certification: str | None
+
+
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
@@ -41,6 +49,7 @@ class FilmDetailResponse(BaseModel):
     poster_path: str | None
     arc_stage: str
     events: list[EventOut]
+    release_dates: list[ReleaseDateOut] = []
 
 
 class FeedItem(BaseModel):

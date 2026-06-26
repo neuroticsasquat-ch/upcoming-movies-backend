@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from upmovies.ingest.tmdb.schemas import (
     TMDBDiscoverResponse,
@@ -129,3 +129,110 @@ def test_movie_details_defaults_nested_collections_when_absent():
     assert details.origin_country == []
     assert details.belongs_to_collection is None
     assert details.tmdb_raw == {}
+
+
+# --- release_dates DTO tests ---
+
+
+def test_movie_details_parses_nested_release_dates():
+    payload = {
+        "id": 550,
+        "title": "Fight Club",
+        "release_dates": {
+            "results": [
+                {
+                    "iso_3166_1": "US",
+                    "release_dates": [
+                        {
+                            "certification": "R",
+                            "iso_639_1": "en",
+                            "note": "",
+                            "release_date": "1999-10-15T00:00:00.000Z",
+                            "type": 3,
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.release_dates is not None
+    assert len(details.release_dates.results) == 1
+    country = details.release_dates.results[0]
+    assert country.iso_3166_1 == "US"
+    assert len(country.release_dates) == 1
+    rd = country.release_dates[0]
+    assert rd.certification == "R"
+    assert rd.type == 3
+    assert isinstance(rd.release_date, datetime)
+    assert rd.release_date.year == 1999
+
+
+def test_movie_details_release_dates_absent_is_none():
+    details = TMDBMovieDetails.model_validate({"id": 1, "title": "Minimal"})
+    assert details.release_dates is None
+
+
+def test_release_date_entry_with_empty_string_date_parses_as_none():
+    """TMDB returns release_date: "" for unannounced entries — should parse to None, not crash."""
+    payload = {
+        "id": 999,
+        "title": "TBA Film",
+        "release_dates": {
+            "results": [
+                {
+                    "iso_3166_1": "US",
+                    "release_dates": [
+                        {
+                            "certification": "NR",
+                            "iso_639_1": "en",
+                            "note": "",
+                            "release_date": "",
+                            "type": 3,
+                        },
+                        {
+                            "certification": "R",
+                            "iso_639_1": "en",
+                            "note": "",
+                            "release_date": "2026-07-15T00:00:00.000Z",
+                            "type": 4,
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.release_dates is not None
+    country = details.release_dates.results[0]
+    assert len(country.release_dates) == 2
+    assert country.release_dates[0].release_date is None
+    assert isinstance(country.release_dates[1].release_date, datetime)
+
+
+def test_movie_details_release_dates_ignores_unknown_extra_keys():
+    payload = {
+        "id": 550,
+        "title": "Fight Club",
+        "unknown_future_key": "ignored",
+        "release_dates": {
+            "results": [
+                {
+                    "iso_3166_1": "GB",
+                    "release_dates": [
+                        {
+                            "release_date": "2000-01-01T00:00:00.000Z",
+                            "type": 5,
+                            "extra_key_from_tmdb": "should be ignored",
+                        }
+                    ],
+                    "another_extra_key": 42,
+                }
+            ],
+            "id": 550,  # TMDB sometimes embeds the movie id here
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.release_dates is not None
+    assert details.release_dates.results[0].iso_3166_1 == "GB"
+    assert details.release_dates.results[0].release_dates[0].type == 5
