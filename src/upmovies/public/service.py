@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import Date, cast, distinct, func, nulls_last, or_, select
+from sqlalchemy import ColumnElement, Date, cast, distinct, func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import (
@@ -37,7 +37,7 @@ _HIDDEN_EVENT_TYPES = ("other",)
 MIN_QUERY_LEN = 2
 
 
-def _visible_events():
+def _visible_events() -> ColumnElement[bool]:
     """SQL predicate: an event reaches the public surface unless its type is hidden.
 
     `other` is the uncategorized catch-all where residual hype lands (NEU-367); it is
@@ -63,7 +63,7 @@ async def _event_types_by_film(
     return result
 
 
-def _publicly_visible_film():
+def _publicly_visible_film() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     """Return a tuple of WHERE clauses that restrict a Film query to publicly visible films."""
     has_summary = (
         select(Event.id)
@@ -97,8 +97,10 @@ def _escape_like(q: str) -> str:
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _title_match(q: str):
+def _title_match(q: str) -> ColumnElement[bool]:
     """Return a boolean SQLAlchemy clause that matches q against title/original_title."""
+    # FUTURE: ILIKE '%term%' is non-sargable -- a pg_trgm GIN index on
+    # title/original_title would let this skip the sequential scan if search gets hot.
     pattern = f"%{_escape_like(q)}%"
     return or_(
         Film.title.ilike(pattern, escape="\\"),
@@ -132,13 +134,15 @@ async def get_film_search(
     session: AsyncSession, *, q: str, limit: int, offset: int
 ) -> FilmIndexResponse:
     term = q.strip()
-    # Count only alphanumeric characters for the length check.
-    # Special characters like % and _ are allowed for literal searches,
-    # but pure alphanumeric queries must be at least MIN_QUERY_LEN.
+    # Gate on alphanumeric count, not raw length: require at least MIN_QUERY_LEN
+    # alphanumeric characters. One check short-circuits blank/whitespace, single-
+    # character, and all-punctuation queries (e.g. "", "a", "%", "_", "--") to an
+    # empty page instead of running an unbounded %term% scan. This also gates the
+    # wildcard-literal path: "%"/"_" have zero alphanumerics, so they return empty
+    # here -- _escape_like / the wildcard-literal tests only exercise escaping for
+    # queries that clear this gate (e.g. "50%", which has two alphanumerics).
     alphanumeric_len = sum(1 for c in term if c.isalnum())
-    if alphanumeric_len > 0 and alphanumeric_len < MIN_QUERY_LEN:
-        return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
-    if len(term) == 0:
+    if alphanumeric_len < MIN_QUERY_LEN:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
     where = (*_publicly_visible_film(), _title_match(term))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))

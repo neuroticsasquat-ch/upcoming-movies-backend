@@ -596,9 +596,14 @@ async def test_search_item_shape_parity(client, make_film, add_event):
     assert item["arc_stage"] == index_item["arc_stage"]
 
 
-async def test_search_blank_and_whitespace_q_returns_empty(client):
-    """Blank, whitespace-only, and too-short q returns 200 with empty items."""
-    for q in ["", "   ", "a"]:
+async def test_search_subthreshold_q_returns_empty(client):
+    """Queries below the two-alphanumeric gate return 200 with an empty page, not 422.
+
+    Covers blank, whitespace-only, single-character, and all-punctuation queries. The
+    all-punctuation cases ("%", "_", "--", "\\") pin the gate for the same input shapes
+    the wildcard-literal escaping handles, so a future gate change can't silently start
+    running an unbounded scan on them (see get_film_search's gate comment)."""
+    for q in ["", "   ", "a", "%", "_", "--", "\\"]:
         r = await client.get("/films/search", params={"q": q})
         assert r.status_code == 200, f"q={q!r} → {r.status_code}"
         body = r.json()
@@ -607,24 +612,46 @@ async def test_search_blank_and_whitespace_q_returns_empty(client):
 
 
 async def test_search_like_wildcard_is_literal(client, make_film, add_event):
-    """% and _ in q are treated as literal characters, not LIKE wildcards."""
-    percent_film = await make_film(slug="percent-film-2026", title="100% Real")
+    """% and _ in q are matched literally, not as LIKE wildcards (queries clear the gate)."""
+    # "50%" has two alphanumerics, so it clears the gate. Escaped, it matches only the
+    # literal "50%"; an unescaped %50%% would also sweep in "5000 Reasons".
+    percent_film = await make_film(slug="percent-film-2026", title="50% Off")
     await add_event(film=percent_film, summary="s")
-    plain_film = await make_film(slug="plain-film-2026", title="Plain Film")
-    await add_event(film=plain_film, summary="s")
-    underscore_film = await make_film(slug="under-film-2026", title="Under_Score Film")
-    await add_event(film=underscore_film, summary="s")
+    not_percent = await make_film(slug="not-percent-2026", title="5000 Reasons")
+    await add_event(film=not_percent, summary="s")
 
-    # q=% should only match "100% Real", not everything (LIKE wildcard would match all)
-    r_percent = await client.get("/films/search", params={"q": "%"})
+    r_percent = await client.get("/films/search", params={"q": "50%"})
     assert r_percent.status_code == 200
     slugs_percent = [i["slug"] for i in r_percent.json()["items"]]
     assert "percent-film-2026" in slugs_percent
-    assert "plain-film-2026" not in slugs_percent
+    assert "not-percent-2026" not in slugs_percent
 
-    # q=_ should only match "Under_Score Film"
-    r_underscore = await client.get("/films/search", params={"q": "_"})
+    # "py_Ki" has four alphanumerics. Escaped, the "_" matches a literal underscore, so
+    # only "Spy_Kids" matches; an unescaped "_" wildcard would also match "SpyXKids".
+    underscore_film = await make_film(slug="under-film-2026", title="Spy_Kids")
+    await add_event(film=underscore_film, summary="s")
+    not_underscore = await make_film(slug="not-under-2026", title="SpyXKids")
+    await add_event(film=not_underscore, summary="s")
+
+    r_underscore = await client.get("/films/search", params={"q": "py_Ki"})
     assert r_underscore.status_code == 200
     slugs_underscore = [i["slug"] for i in r_underscore.json()["items"]]
     assert "under-film-2026" in slugs_underscore
-    assert "plain-film-2026" not in slugs_underscore
+    assert "not-under-2026" not in slugs_underscore
+
+
+async def test_search_backslash_is_literal(client, make_film, add_event):
+    """A literal backslash in q round-trips through the escape= wiring at the SQL level."""
+    # "C\\D" has two alphanumerics (C, D) so it clears the gate. _escape_like doubles the
+    # backslash and ILIKE(escape="\\") collapses it back to one literal "\", matching only
+    # the title that actually contains "C\D". A broken escape= would match the wrong row.
+    backslash_film = await make_film(slug="acdc-slash-2026", title="AC\\DC")
+    await add_event(film=backslash_film, summary="s")
+    plain_film = await make_film(slug="acdc-plain-2026", title="ACDC")
+    await add_event(film=plain_film, summary="s")
+
+    r = await client.get("/films/search", params={"q": "C\\D"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "acdc-slash-2026" in slugs
+    assert "acdc-plain-2026" not in slugs

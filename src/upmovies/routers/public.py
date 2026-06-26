@@ -31,6 +31,12 @@ async def search_films(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> FilmIndexResponse:
+    """Search publicly-visible films by title / original title (case-insensitive substring).
+
+    Queries with fewer than two alphanumeric characters (blank, single-character, or
+    all-punctuation, e.g. ``%``) intentionally return an empty page (``items: []``,
+    ``total: 0``) rather than 422 -- they are treated as "no query yet", not an error.
+    """
     return await service.get_film_search(session, q=q, limit=limit, offset=offset)
 
 
