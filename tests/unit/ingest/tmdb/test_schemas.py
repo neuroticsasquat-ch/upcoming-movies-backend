@@ -210,6 +210,69 @@ def test_release_date_entry_with_empty_string_date_parses_as_none():
     assert isinstance(country.release_dates[1].release_date, datetime)
 
 
+# --- alternative_titles DTO tests ---
+
+
+def test_movie_details_parses_nested_alternative_titles():
+    """Parsing a nested alternative_titles payload populates the typed tree."""
+    payload = {
+        "id": 550,
+        "title": "Fight Club",
+        "alternative_titles": {
+            "titles": [
+                {
+                    "iso_3166_1": "DE",
+                    "title": "Fight Club - Der Film",
+                    "type": "",
+                },
+                {
+                    "iso_3166_1": "FR",
+                    "title": "Fight Club FR",
+                    "type": "Dubbed title",
+                },
+            ]
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.alternative_titles is not None
+    assert len(details.alternative_titles.titles) == 2
+    first = details.alternative_titles.titles[0]
+    assert first.iso_3166_1 == "DE"
+    assert first.title == "Fight Club - Der Film"
+    second = details.alternative_titles.titles[1]
+    assert second.iso_3166_1 == "FR"
+    assert second.type == "Dubbed title"
+
+
+def test_movie_details_alternative_titles_absent_is_none():
+    """A film with no alternative_titles key leaves the field None."""
+    details = TMDBMovieDetails.model_validate({"id": 1, "title": "Minimal"})
+    assert details.alternative_titles is None
+
+
+def test_alternative_titles_ignores_unknown_extra_keys():
+    """Extra keys in alternative_titles payload are silently ignored."""
+    payload = {
+        "id": 550,
+        "title": "Fight Club",
+        "alternative_titles": {
+            "titles": [
+                {
+                    "iso_3166_1": "US",
+                    "title": "Fight Club",
+                    "type": None,
+                    "extra_unknown_key": "should be ignored",
+                }
+            ],
+            "id": 550,  # TMDB sometimes embeds the movie id here
+        },
+    }
+    details = TMDBMovieDetails.model_validate(payload)
+    assert details.alternative_titles is not None
+    assert details.alternative_titles.titles[0].iso_3166_1 == "US"
+    assert details.alternative_titles.titles[0].title == "Fight Club"
+
+
 def test_movie_details_release_dates_ignores_unknown_extra_keys():
     payload = {
         "id": 550,

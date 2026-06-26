@@ -105,7 +105,9 @@ class TMDBClient:
         """Fetch full details for a single movie from `/movie/{id}`. Attaches the verbatim
         JSON as `tmdb_raw` so the caller can persist fields we don't model."""
         url = f"{self._base_url}/movie/{tmdb_id}"
-        resp = await self._request("GET", url, params={"append_to_response": "release_dates"})
+        resp = await self._request(
+            "GET", url, params={"append_to_response": "release_dates,alternative_titles"}
+        )
         data = resp.json()
         details = TMDBMovieDetails.model_validate(data)
         details.tmdb_raw = data

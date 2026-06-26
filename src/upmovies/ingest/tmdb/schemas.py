@@ -81,6 +81,20 @@ class TMDBReleaseDates(BaseModel):
     results: list[TMDBReleaseDatesByCountry]
 
 
+class TMDBAlternativeTitle(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    iso_3166_1: str | None = None
+    title: str
+    type: str | None = None
+
+
+class TMDBAlternativeTitles(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    titles: list[TMDBAlternativeTitle] = Field(default_factory=list)
+
+
 class TMDBMovieSummary(BaseModel):
     """A movie as it appears in a `/discover/movie` results list."""
 
@@ -118,6 +132,7 @@ class TMDBMovieDetails(TMDBMovieSummary):
     spoken_languages: list[TMDBSpokenLanguage] = Field(default_factory=list)
     belongs_to_collection: TMDBCollection | None = None
     release_dates: TMDBReleaseDates | None = None
+    alternative_titles: TMDBAlternativeTitles | None = None
     # Populated by the client post-validation with the verbatim /movie/{id} payload, so
     # we can persist fields we don't model and backfill later without re-ingesting.
     tmdb_raw: dict[str, Any] = Field(default_factory=dict)

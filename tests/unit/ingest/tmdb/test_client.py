@@ -178,6 +178,47 @@ async def test_movie_details_sends_append_to_response_with_release_dates():
 
 
 @respx.mock
+async def test_movie_details_sends_append_to_response_with_alternative_titles():
+    """movie_details must issue one request with alternative_titles in append_to_response."""
+    route = respx.get(f"{BASE_URL}/movie/27205").mock(
+        return_value=httpx.Response(200, json=make_details(27205))
+    )
+    async with _client() as c:
+        await c.movie_details(27205)
+
+    assert route.call_count == 1
+    params = route.calls.last.request.url.params
+    atr = params.get("append_to_response", "")
+    assert "alternative_titles" in atr.split(",")
+
+
+@respx.mock
+async def test_movie_details_parses_appended_alternative_titles_block_and_captures_in_raw():
+    """When the response includes an appended alternative_titles block, it must parse into
+    details.alternative_titles and also be present verbatim in details.tmdb_raw."""
+    alternative_titles_block = {
+        "titles": [
+            {
+                "iso_3166_1": "DE",
+                "title": "Inception - Der Film",
+                "type": "",
+            }
+        ]
+    }
+    payload = make_details(27205, alternative_titles=alternative_titles_block)
+    respx.get(f"{BASE_URL}/movie/27205").mock(return_value=httpx.Response(200, json=payload))
+    async with _client() as c:
+        details = await c.movie_details(27205)
+
+    # Parsed into typed DTO
+    assert details.alternative_titles is not None
+    assert details.alternative_titles.titles[0].iso_3166_1 == "DE"
+    assert details.alternative_titles.titles[0].title == "Inception - Der Film"
+    # Also present in raw payload
+    assert details.tmdb_raw["alternative_titles"] == alternative_titles_block
+
+
+@respx.mock
 async def test_movie_details_parses_appended_release_dates_block_and_captures_in_raw():
     """When the response includes an appended release_dates block, it must parse into
     details.release_dates and also be present verbatim in details.tmdb_raw."""
