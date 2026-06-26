@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from upmovies.catalog.models import (
     Collection,
@@ -21,7 +21,7 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
+async def client(test_engine: AsyncEngine) -> AsyncIterator[AsyncClient]:  # noqa: ARG001
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as c:
         yield c
 
