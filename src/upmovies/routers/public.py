@@ -24,6 +24,22 @@ async def list_films(
     return await service.get_film_index(session, limit=limit, offset=offset)
 
 
+@router.get("/films/search", response_model=FilmIndexResponse)
+async def search_films(
+    q: str = Query(..., max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> FilmIndexResponse:
+    """Search publicly-visible films by title / original title (case-insensitive substring).
+
+    Queries with fewer than two alphanumeric characters (blank, single-character, or
+    all-punctuation, e.g. ``%``) intentionally return an empty page (``items: []``,
+    ``total: 0``) rather than 422 -- they are treated as "no query yet", not an error.
+    """
+    return await service.get_film_search(session, q=q, limit=limit, offset=offset)
+
+
 @router.get("/films/{slug}", response_model=FilmDetailResponse)
 async def get_film(
     slug: str,
