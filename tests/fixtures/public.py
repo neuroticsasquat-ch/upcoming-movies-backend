@@ -95,3 +95,32 @@ def add_event(session: AsyncSession):
         return event
 
     return _add
+
+
+@pytest.fixture
+def add_release_date(session: AsyncSession):
+    async def _add(
+        *,
+        film: Film,
+        iso_3166_1: str = "US",
+        release_type: int = 3,
+        release_date: datetime,
+        certification: str | None = None,
+        note: str | None = None,
+        iso_639_1: str | None = None,
+    ) -> None:
+        from upmovies.catalog.models import FilmReleaseDate
+
+        rd = FilmReleaseDate(
+            film_id=film.id,
+            iso_3166_1=iso_3166_1,
+            release_type=release_type,
+            release_date=release_date,
+            certification=certification,
+            note=note,
+            iso_639_1=iso_639_1,
+        )
+        session.add(rd)
+        await session.commit()
+
+    return _add

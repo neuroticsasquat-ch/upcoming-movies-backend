@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import Date, cast, distinct, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film
+from upmovies.catalog.models import Film, FilmReleaseDate
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.public.arc import derive_arc_stage, most_significant_event_type
 from upmovies.public.dto import (
@@ -17,8 +17,10 @@ from upmovies.public.dto import (
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
+    ReleaseDateOut,
     SourceOut,
 )
+from upmovies.public.release import release_type_label
 from upmovies.public.sources import cap_sources, outlet_label
 
 _HIDDEN_EVENT_TYPES = ("other",)
@@ -144,6 +146,41 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         )
         for event, summary in summarized
     ]
+
+    regions: set[str] = {"US"}
+    if film.origin_country:
+        regions.add(film.origin_country[0])
+
+    release_date_rows = (
+        (
+            await session.execute(
+                select(FilmReleaseDate)
+                .where(
+                    FilmReleaseDate.film_id == film.id,
+                    FilmReleaseDate.iso_3166_1.in_(regions),
+                )
+                .order_by(
+                    FilmReleaseDate.release_date.asc(),
+                    FilmReleaseDate.release_type.asc(),
+                    FilmReleaseDate.iso_3166_1.asc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    release_dates = [
+        ReleaseDateOut(
+            country=row.iso_3166_1,
+            release_type=row.release_type,
+            type_label=release_type_label(row.release_type),
+            date=row.release_date,
+            certification=row.certification,
+        )
+        for row in release_date_rows
+    ]
+
     return FilmDetailResponse(
         slug=film.slug,
         title=film.title,
@@ -152,6 +189,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         poster_path=film.poster_path,
         arc_stage=arc_stage,
         events=events,
+        release_dates=release_dates,
     )
 
 
