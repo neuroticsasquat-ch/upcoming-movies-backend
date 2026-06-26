@@ -46,6 +46,7 @@ def make_film(session: AsyncSession):
         original_language: str | None = None,
         backdrop_path: str | None = None,
         collection_id: int | None = None,
+        adult: bool | None = None,
     ) -> Film:
         counter["n"] += 1
         film = Film(
@@ -64,6 +65,7 @@ def make_film(session: AsyncSession):
             original_language=original_language,
             backdrop_path=backdrop_path,
             collection_id=collection_id,
+            adult=adult,
         )
         session.add(film)
         await session.commit()
