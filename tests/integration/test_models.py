@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from upmovies.app.models import User
@@ -94,3 +95,49 @@ async def test_film_slug_nullable_and_unique(session):
     session.add(Film(tmdb_id=4, title="B", slug="dupe-2026"))
     with pytest.raises(IntegrityError):
         await session.flush()
+
+
+async def test_film_alternative_title_roundtrip_and_cascade(session):
+    """FilmAlternativeTitle inserts, reads back, and cascades on film delete."""
+    from upmovies.catalog.models import FilmAlternativeTitle
+
+    film = Film(tmdb_id=99901, title="Original Title")
+    session.add(film)
+    await session.flush()
+
+    alt = FilmAlternativeTitle(
+        film_id=film.id,
+        iso_3166_1="US",
+        title="The US Alt Title",
+        title_type="AKA",
+    )
+    session.add(alt)
+    await session.commit()
+
+    # Read back and assert columns
+    result = await session.execute(
+        select(FilmAlternativeTitle).where(FilmAlternativeTitle.film_id == film.id)
+    )
+    rows = result.scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.iso_3166_1 == "US"
+    assert row.title == "The US Alt Title"
+    assert row.title_type == "AKA"
+    assert row.id is not None  # surrogate PK assigned
+
+    # Nullable fields: iso_3166_1 and title_type can be None
+    alt2 = FilmAlternativeTitle(film_id=film.id, title="Bare title")
+    session.add(alt2)
+    await session.flush()
+    assert alt2.iso_3166_1 is None
+    assert alt2.title_type is None
+
+    # Cascade delete: deleting the film removes its alt-titles
+    await session.delete(film)
+    await session.commit()
+
+    result2 = await session.execute(
+        select(FilmAlternativeTitle).where(FilmAlternativeTitle.film_id == film.id)
+    )
+    assert result2.scalars().all() == []
