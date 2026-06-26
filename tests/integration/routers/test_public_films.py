@@ -779,3 +779,93 @@ async def test_search_backslash_is_literal(client, make_film, add_event):
     slugs = [i["slug"] for i in r.json()["items"]]
     assert "acdc-slash-2026" in slugs
     assert "acdc-plain-2026" not in slugs
+
+
+# ── NEU-406: alt-title search extension ──────────────────────────────────────
+
+
+async def test_search_found_by_aka(client, make_film, add_event, attach_alt_titles):
+    """A film whose primary title does NOT contain the query but has a matching alt-title
+    is returned by the search endpoint."""
+    film = await make_film(slug="aka-match-2026", title="Primary Title Only")
+    await add_event(film=film, summary="A summary.")
+    await attach_alt_titles(film, ["The Known AKA", "Another AKA"])
+
+    r = await client.get("/films/search", params={"q": "Known AKA"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "aka-match-2026" in slugs
+
+
+async def test_search_aka_no_dedup(client, make_film, add_event, attach_alt_titles):
+    """A film matching on BOTH primary title and alt-title appears exactly once."""
+    film = await make_film(slug="dual-match-2026", title="Odyssey Film")
+    await add_event(film=film, summary="A summary.")
+    await attach_alt_titles(film, ["The Odyssey AKA"])  # "Odyssey" in both title and alt-title
+
+    r = await client.get("/films/search", params={"q": "Odyssey"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert slugs.count("dual-match-2026") == 1
+
+
+async def test_search_aka_visibility_parity(client, make_film, add_event, attach_alt_titles):
+    """A film matching via alt-title but with no summarized event / no slug is excluded."""
+    # visible via AKA
+    visible = await make_film(slug="aka-visible-2026", title="Unrelated Title A")
+    await add_event(film=visible, summary="A summary.")
+    await attach_alt_titles(visible, ["Searchable AKA"])
+
+    # hidden: matches alt-title but no summarized event
+    hidden = await make_film(slug="aka-hidden-2026", title="Unrelated Title B")
+    await add_event(film=hidden, summary=None)  # no summary
+    await attach_alt_titles(hidden, ["Searchable AKA"])
+
+    # bare: matches alt-title but no events at all
+    bare = await make_film(slug="aka-bare-2026", title="Unrelated Title C")
+    await attach_alt_titles(bare, ["Searchable AKA"])
+
+    r = await client.get("/films/search", params={"q": "Searchable AKA"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "aka-visible-2026" in slugs
+    assert "aka-hidden-2026" not in slugs
+    assert "aka-bare-2026" not in slugs
+
+
+async def test_search_primary_title_ranks_before_aka(
+    client, make_film, add_event, attach_alt_titles
+):
+    """A film matching on primary title sorts before a film matching only on alt-title.
+
+    We use release dates that would interleave them without the tiebreak:
+    - primary-hit has an earlier release_date (would normally sort second by date desc)
+    - aka-only-hit has a later release_date (would normally sort first by date desc)
+    The primary-first tiebreak must override the date ordering so primary-hit comes first.
+    """
+    from datetime import date
+
+    # AKA-only hit has a *later* release date — without the tiebreak, date-desc puts it first.
+    aka_only = await make_film(
+        slug="aka-only-hit-2026",
+        title="Completely Different",
+        release_date=date(2027, 6, 1),
+    )
+    await add_event(film=aka_only, summary="A summary.")
+    await attach_alt_titles(aka_only, ["Fantastic Journey"])
+
+    # Primary-title hit has an *earlier* release date — date-desc alone would put it second.
+    primary_hit = await make_film(
+        slug="primary-title-hit-2026",
+        title="Fantastic Journey",
+        release_date=date(2026, 1, 1),
+    )
+    await add_event(film=primary_hit, summary="A summary.")
+
+    r = await client.get("/films/search", params={"q": "Fantastic Journey"})
+    assert r.status_code == 200
+    slugs = [i["slug"] for i in r.json()["items"]]
+    assert "primary-title-hit-2026" in slugs
+    assert "aka-only-hit-2026" in slugs
+    # Primary-title match must appear before the AKA-only match.
+    assert slugs.index("primary-title-hit-2026") < slugs.index("aka-only-hit-2026")
