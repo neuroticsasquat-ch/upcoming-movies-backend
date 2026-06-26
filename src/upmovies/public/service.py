@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import (
@@ -31,6 +31,8 @@ from upmovies.catalog.models import (
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.public.arc import derive_arc_stage, most_significant_event_type
 from upmovies.public.dto import (
+    CalendarItem,
+    CalendarResponse,
     CastMemberOut,
     CollectionOut,
     EventOut,
@@ -44,12 +46,14 @@ from upmovies.public.dto import (
     ReleaseDateOut,
     SourceOut,
 )
-from upmovies.public.release import release_type_label
+from upmovies.public.release import _TMDB_TYPE_TO_BUCKET, release_type_label
 from upmovies.public.sources import cap_sources, outlet_label
 
 _HIDDEN_EVENT_TYPES = ("other",)
 
 MIN_QUERY_LEN = 2
+
+CALENDAR_REGION = "US"  # single governing region for v1
 
 
 def _visible_events() -> ColumnElement[bool]:
@@ -520,3 +524,64 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
         for slug, title, poster_path, day_value, event_count, event_types in rows
     ]
     return FeedDayResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
+    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
+    rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
+    surfaced_types = tuple(_TMDB_TYPE_TO_BUCKET)  # (1, 2, 3) — derived, never drifts
+
+    base = (
+        select(
+            Film.slug.label("slug"),
+            Film.title.label("title"),
+            Film.poster_path.label("poster_path"),
+            rel_day.label("release_date"),
+            FilmReleaseDate.release_type.label("release_type"),
+        )
+        .select_from(FilmReleaseDate)
+        .join(Film, Film.id == FilmReleaseDate.film_id)
+        .where(
+            FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
+            FilmReleaseDate.release_type.in_(surfaced_types),
+            FilmReleaseDate.release_date
+            >= datetime(today.year, today.month, today.day, tzinfo=UTC),
+            Film.slug.is_not(None),
+            func.coalesce(Film.adult, False).is_(False),
+        )
+        .group_by(
+            Film.id,
+            Film.slug,
+            Film.title,
+            Film.poster_path,
+            rel_day,
+            FilmReleaseDate.release_type,
+        )
+    )
+
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+
+    rows = (
+        await session.execute(
+            base.order_by(
+                rel_day.asc(),
+                FilmReleaseDate.release_type.asc(),
+                nulls_last(Film.popularity.desc()),
+                Film.slug.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    items = [
+        CalendarItem(
+            film_slug=slug,
+            film_title=title,
+            poster_path=poster_path,
+            release_date=release_date,
+            release_type=_TMDB_TYPE_TO_BUCKET[release_type],
+        )
+        for slug, title, poster_path, release_date, release_type in rows
+    ]
+    return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)

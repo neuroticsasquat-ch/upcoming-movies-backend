@@ -5,6 +5,7 @@ from upmovies.config import get_settings
 from upmovies.deps import get_session
 from upmovies.public import service
 from upmovies.public.dto import (
+    CalendarResponse,
     FeedDayResponse,
     FeedResponse,
     FilmDetailResponse,
@@ -67,6 +68,15 @@ async def get_grouped_feed(
     session: AsyncSession = Depends(get_session),
 ) -> FeedDayResponse:
     return await service.get_feed_grouped(session, limit=limit, offset=offset)
+
+
+@router.get("/calendar", response_model=CalendarResponse)
+async def get_calendar(
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> CalendarResponse:
+    return await service.get_calendar(session, limit=limit, offset=offset)
 
 
 @router.get("/sitemap.xml")

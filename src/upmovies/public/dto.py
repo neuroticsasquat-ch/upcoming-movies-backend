@@ -108,3 +108,18 @@ class FeedDayResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class CalendarItem(BaseModel):
+    film_slug: str
+    film_title: str
+    poster_path: str | None
+    release_date: date  # US release date → "YYYY-MM-DD"
+    release_type: str  # display bucket: "premiere" | "limited" | "wide"
+
+
+class CalendarResponse(BaseModel):
+    items: list[CalendarItem]
+    total: int
+    limit: int
+    offset: int
