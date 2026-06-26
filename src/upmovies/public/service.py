@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import (
     Collection,
     Film,
+    FilmAlternativeTitle,
     FilmGenre,
     FilmProductionCompany,
     FilmReleaseDate,
@@ -289,6 +290,28 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         if col_row is not None:
             collection = CollectionOut(name=col_row.name, poster_path=col_row.poster_path)
 
+    _excluded_titles = {t.lower() for t in [film.title, film.original_title] if t}
+    _alt_title_rows = list(
+        (
+            await session.execute(
+                select(FilmAlternativeTitle.title).where(
+                    FilmAlternativeTitle.film_id == film.id,
+                    func.lower(FilmAlternativeTitle.title).notin_(_excluded_titles),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Deduplicate case-insensitively, order alphabetically, cap at 8.
+    _seen: set[str] = set()
+    _deduped: list[str] = []
+    for _t in _alt_title_rows:
+        if _t.lower() not in _seen:
+            _seen.add(_t.lower())
+            _deduped.append(_t)
+    alternative_titles = sorted(_deduped, key=str.lower)[:8]
+
     return FilmDetailResponse(
         slug=film.slug,
         title=film.title,
@@ -308,6 +331,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         genres=genres,
         production_companies=companies,
         collection=collection,
+        alternative_titles=alternative_titles,
     )
 
 

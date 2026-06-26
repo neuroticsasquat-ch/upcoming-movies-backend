@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import (
     Collection,
     Film,
+    FilmAlternativeTitle,
     FilmGenre,
     FilmProductionCompany,
     Genre,
@@ -189,3 +190,13 @@ def add_release_date(session: AsyncSession):
         await session.commit()
 
     return _add
+
+
+@pytest.fixture
+def attach_alt_titles(session: AsyncSession):
+    async def _attach(film: Film, titles: list[str]) -> None:
+        for title in titles:
+            session.add(FilmAlternativeTitle(film_id=film.id, title=title))
+        await session.commit()
+
+    return _attach

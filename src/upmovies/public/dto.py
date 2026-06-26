@@ -65,6 +65,7 @@ class FilmDetailResponse(BaseModel):
     genres: list[str] = []
     production_companies: list[str] = []
     collection: CollectionOut | None = None
+    alternative_titles: list[str] = []
 
 
 class FeedItem(BaseModel):
