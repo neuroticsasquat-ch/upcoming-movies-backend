@@ -270,3 +270,172 @@ async def test_film_release_date_lookup_index_exists(session):
     )
     index_names = {row[0] for row in result}
     assert "ix_catalog_film_release_date_lookup" in index_names
+
+
+# ---------------------------------------------------------------------------
+# upsert_film → FilmReleaseDate rebuild tests (Task 3 — NEU-404)
+# ---------------------------------------------------------------------------
+
+_RELEASE_DATES_2_COUNTRIES = {
+    "results": [
+        {
+            "iso_3166_1": "US",
+            "release_dates": [
+                {
+                    "certification": "PG-13",
+                    "iso_639_1": "en",
+                    "note": "",
+                    "release_date": "2026-07-16T00:00:00.000Z",
+                    "type": 3,
+                },
+                {
+                    "certification": "PG-13",
+                    "iso_639_1": "en",
+                    "note": "wide",
+                    "release_date": "2026-07-23T00:00:00.000Z",
+                    "type": 4,
+                },
+            ],
+        },
+        {
+            "iso_3166_1": "GB",
+            "release_dates": [
+                {
+                    "certification": "12A",
+                    "iso_639_1": "en",
+                    "note": "",
+                    "release_date": "2026-07-18T00:00:00.000Z",
+                    "type": 3,
+                },
+                {
+                    "certification": "12A",
+                    "iso_639_1": "en",
+                    "note": "nationwide",
+                    "release_date": "2026-07-25T00:00:00.000Z",
+                    "type": 4,
+                },
+            ],
+        },
+    ]
+}
+
+_RELEASE_DATES_CHANGED = {
+    "results": [
+        {
+            "iso_3166_1": "FR",
+            "release_dates": [
+                {
+                    "certification": "U",
+                    "iso_639_1": "fr",
+                    "note": "",
+                    "release_date": "2026-08-01T00:00:00.000Z",
+                    "type": 3,
+                },
+            ],
+        },
+    ]
+}
+
+
+async def _release_dates(session, film_id) -> list[FilmReleaseDate]:
+    result = await session.execute(
+        select(FilmReleaseDate).where(FilmReleaseDate.film_id == film_id),
+        execution_options={"populate_existing": True},
+    )
+    return list(result.scalars().all())
+
+
+async def test_upsert_populates_release_date_rows(session):
+    """upsert_film with a release_dates block inserts one FilmReleaseDate row per entry."""
+    details = TMDBMovieDetails.model_validate(
+        make_details(101, release_dates=_RELEASE_DATES_2_COUNTRIES)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _release_dates(session, film.id)
+    assert len(rows) == 4
+
+    # Spot-check one row from each country
+    us_rows = sorted([r for r in rows if r.iso_3166_1 == "US"], key=lambda r: r.release_type)
+    gb_rows = sorted([r for r in rows if r.iso_3166_1 == "GB"], key=lambda r: r.release_type)
+    assert len(us_rows) == 2
+    assert len(gb_rows) == 2
+
+    assert us_rows[0].release_type == 3
+    assert us_rows[0].certification == "PG-13"
+    assert us_rows[1].release_type == 4
+    assert us_rows[1].note == "wide"
+    assert gb_rows[0].certification == "12A"
+
+
+async def test_upsert_release_dates_idempotent(session):
+    """Re-running upsert_film with same release_dates data produces no duplicate rows."""
+    details = TMDBMovieDetails.model_validate(
+        make_details(102, release_dates=_RELEASE_DATES_2_COUNTRIES)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _release_dates(session, film.id)
+    assert len(rows) == 4
+
+
+async def test_upsert_release_dates_rebuild_on_change(session):
+    """Re-upserting with different release_dates replaces stale rows with the new set."""
+    details_v1 = TMDBMovieDetails.model_validate(
+        make_details(103, release_dates=_RELEASE_DATES_2_COUNTRIES)
+    )
+    await upsert_film(session, details_v1)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows_v1 = await _release_dates(session, film.id)
+    assert len(rows_v1) == 4
+
+    details_v2 = TMDBMovieDetails.model_validate(
+        make_details(103, release_dates=_RELEASE_DATES_CHANGED)
+    )
+    await upsert_film(session, details_v2)
+    await session.commit()
+
+    rows_v2 = await _release_dates(session, film.id)
+    assert len(rows_v2) == 1
+    assert rows_v2[0].iso_3166_1 == "FR"
+    assert rows_v2[0].certification == "U"
+
+
+async def test_upsert_no_release_dates_is_noop(session):
+    """upsert_film without a release_dates key leaves film_release_date empty (no error)."""
+    details = TMDBMovieDetails.model_validate(make_details(104))
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows = await _release_dates(session, film.id)
+    assert rows == []
+
+
+async def test_upsert_release_dates_cascade_delete(session):
+    """Deleting the Film row cascade-deletes its FilmReleaseDate rows."""
+    from sqlalchemy import delete as sa_delete
+
+    details = TMDBMovieDetails.model_validate(
+        make_details(105, release_dates=_RELEASE_DATES_2_COUNTRIES)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    rows_before = await _release_dates(session, film.id)
+    assert len(rows_before) == 4
+
+    await session.execute(sa_delete(Film).where(Film.id == film.id))
+    await session.commit()
+
+    rows_after = await _release_dates(session, film.id)
+    assert rows_after == []
