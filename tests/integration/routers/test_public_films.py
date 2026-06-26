@@ -327,3 +327,108 @@ async def test_detail_includes_origin_country_dates(
     assert "KR" in countries
     assert "JP" not in countries
     assert len(rds) == 2
+
+
+# ── film metadata (genres, companies, collection, scalars) ────────────────────
+
+
+async def test_detail_exposes_film_metadata_all_fields(
+    client, make_film, add_event, make_collection, attach_genres, attach_companies
+):
+    col = await make_collection(
+        id=1, name="The Franchise Collection", poster_path="/collection.jpg"
+    )
+    film = await make_film(
+        slug="meta-full-2026",
+        title="Full Meta Film",
+        overview="A gripping story.",
+        tagline="The tagline.",
+        runtime=120,
+        vote_average=7.5,
+        vote_count=1200,
+        original_language="en",
+        backdrop_path="/backdrop.jpg",
+        collection_id=col.id,
+    )
+    await add_event(film=film, summary="Event.")
+    await attach_genres(film, [(28, "Action"), (12, "Adventure")])
+    await attach_companies(film, [(10, "Zeta Studios"), (5, "Alpha Films")])
+
+    r = await client.get("/films/meta-full-2026")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["overview"] == "A gripping story."
+    assert body["tagline"] == "The tagline."
+    assert body["runtime"] == 120
+    assert body["vote_average"] == 7.5
+    assert body["vote_count"] == 1200
+    assert body["original_language"] == "en"
+    assert body["backdrop_path"] == "/backdrop.jpg"
+    # genres: name-ascending — Action before Adventure
+    assert body["genres"] == ["Action", "Adventure"]
+    # companies: name-ascending — Alpha before Zeta
+    assert body["production_companies"] == ["Alpha Films", "Zeta Studios"]
+    assert body["collection"] == {
+        "name": "The Franchise Collection",
+        "poster_path": "/collection.jpg",
+    }
+
+
+async def test_detail_sparse_film_returns_nulls_and_empty_lists(client, make_film, add_event):
+    film = await make_film(slug="meta-sparse-2026")
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/meta-sparse-2026")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["overview"] is None
+    assert body["tagline"] is None
+    assert body["runtime"] is None
+    assert body["vote_average"] is None
+    assert body["vote_count"] is None
+    assert body["original_language"] is None
+    assert body["backdrop_path"] is None
+    assert body["genres"] == []
+    assert body["production_companies"] == []
+    assert body["collection"] is None
+
+
+async def test_detail_rating_raw_passthrough(client, make_film, add_event):
+    film = await make_film(slug="meta-zero-rating-2026", vote_average=0.0, vote_count=0)
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/meta-zero-rating-2026")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["vote_average"] == 0.0
+    assert body["vote_count"] == 0
+
+
+async def test_detail_metadata_is_scoped_per_film(
+    client, make_film, add_event, make_collection, attach_genres, attach_companies
+):
+    """The genre/company/collection joins filter on film_id — one film's metadata never
+    leaks into another's. Distinct reference ids per film avoid PK collisions."""
+    col_a = await make_collection(id=1, name="Collection A")
+    film_a = await make_film(slug="meta-scope-a-2026", title="Film A", collection_id=col_a.id)
+    await add_event(film=film_a, summary="Event A.")
+    await attach_genres(film_a, [(28, "Action"), (12, "Adventure")])
+    await attach_companies(film_a, [(10, "Zeta Studios"), (5, "Alpha Films")])
+
+    col_b = await make_collection(id=2, name="Collection B")
+    film_b = await make_film(slug="meta-scope-b-2026", title="Film B", collection_id=col_b.id)
+    await add_event(film=film_b, summary="Event B.")
+    await attach_genres(film_b, [(99, "Horror")])
+    await attach_companies(film_b, [(77, "Beta Films")])
+
+    body_a = (await client.get("/films/meta-scope-a-2026")).json()
+    assert body_a["genres"] == ["Action", "Adventure"]
+    assert body_a["production_companies"] == ["Alpha Films", "Zeta Studios"]
+    assert body_a["collection"] == {"name": "Collection A", "poster_path": None}
+
+    body_b = (await client.get("/films/meta-scope-b-2026")).json()
+    assert body_b["genres"] == ["Horror"]
+    assert body_b["production_companies"] == ["Beta Films"]
+    assert body_b["collection"] == {"name": "Collection B", "poster_path": None}

@@ -5,7 +5,14 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film
+from upmovies.catalog.models import (
+    Collection,
+    Film,
+    FilmGenre,
+    FilmProductionCompany,
+    Genre,
+    ProductionCompany,
+)
 from upmovies.main import app
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 
@@ -28,6 +35,14 @@ def make_film(session: AsyncSession):
         release_date: date | None = date(2026, 7, 17),
         poster_path: str | None = "/poster.jpg",
         popularity: float | None = None,
+        overview: str | None = None,
+        tagline: str | None = None,
+        runtime: int | None = None,
+        vote_average: float | None = None,
+        vote_count: int | None = None,
+        original_language: str | None = None,
+        backdrop_path: str | None = None,
+        collection_id: int | None = None,
     ) -> Film:
         counter["n"] += 1
         film = Film(
@@ -38,6 +53,14 @@ def make_film(session: AsyncSession):
             release_date=release_date,
             poster_path=poster_path,
             popularity=popularity,
+            overview=overview,
+            tagline=tagline,
+            runtime=runtime,
+            vote_average=vote_average,
+            vote_count=vote_count,
+            original_language=original_language,
+            backdrop_path=backdrop_path,
+            collection_id=collection_id,
         )
         session.add(film)
         await session.commit()
@@ -45,6 +68,48 @@ def make_film(session: AsyncSession):
         return film
 
     return _make
+
+
+@pytest.fixture
+def make_collection(session: AsyncSession):
+    async def _make(
+        *,
+        id: int,
+        name: str,
+        poster_path: str | None = None,
+    ) -> Collection:
+        col = Collection(id=id, name=name, poster_path=poster_path)
+        session.add(col)
+        await session.commit()
+        return col
+
+    return _make
+
+
+@pytest.fixture
+def attach_genres(session: AsyncSession):
+    async def _attach(film: Film, genres: list[tuple[int, str]]) -> None:
+        for genre_id, genre_name in genres:
+            session.add(Genre(id=genre_id, name=genre_name))
+        await session.flush()
+        for genre_id, _name in genres:
+            session.add(FilmGenre(film_id=film.id, genre_id=genre_id))
+        await session.commit()
+
+    return _attach
+
+
+@pytest.fixture
+def attach_companies(session: AsyncSession):
+    async def _attach(film: Film, companies: list[tuple[int, str]]) -> None:
+        for company_id, company_name in companies:
+            session.add(ProductionCompany(id=company_id, name=company_name))
+        await session.flush()
+        for company_id, _name in companies:
+            session.add(FilmProductionCompany(film_id=film.id, company_id=company_id))
+        await session.commit()
+
+    return _attach
 
 
 @pytest.fixture
