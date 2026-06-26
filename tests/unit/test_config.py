@@ -159,3 +159,17 @@ def test_settings_per_film_title_match_min_ratio_override_from_env(monkeypatch):
     monkeypatch.setenv("PER_FILM_TITLE_MATCH_MIN_RATIO", "0.6")
     s = Settings()  # type: ignore[call-arg]
     assert s.per_film_title_match_min_ratio == 0.6
+
+
+def test_settings_public_base_url_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.public_base_url == "http://localhost:5173"
+
+
+def test_settings_public_base_url_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://backlotter.com")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.public_base_url == "https://backlotter.com"
