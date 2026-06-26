@@ -9,9 +9,11 @@ from upmovies.catalog.models import (
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmCredit,
     FilmGenre,
     FilmProductionCompany,
     Genre,
+    Person,
     ProductionCompany,
 )
 from upmovies.main import app
@@ -197,6 +199,68 @@ def attach_alt_titles(session: AsyncSession):
     async def _attach(film: Film, titles: list[str]) -> None:
         for title in titles:
             session.add(FilmAlternativeTitle(film_id=film.id, title=title))
+        await session.commit()
+
+    return _attach
+
+
+@pytest.fixture
+def attach_credits(session: AsyncSession):
+    async def _attach(
+        film: Film,
+        *,
+        cast: list[dict] | None = None,
+        crew: list[dict] | None = None,
+    ) -> None:
+        """Insert Person + FilmCredit rows for a film.
+
+        cast entries: {id, name, character, credit_order, profile_path}
+        crew entries: {id, name, job}
+        """
+        cast = cast or []
+        crew = crew or []
+
+        # Insert Person rows (avoid duplicates across cast and crew)
+        seen_person_ids: set[int] = set()
+        for entry in cast + crew:
+            person_id = entry["id"]
+            if person_id not in seen_person_ids:
+                seen_person_ids.add(person_id)
+                session.add(
+                    Person(
+                        id=person_id,
+                        name=entry["name"],
+                        profile_path=entry.get("profile_path"),
+                    )
+                )
+        await session.flush()
+
+        # Insert FilmCredit rows for cast members
+        for entry in cast:
+            session.add(
+                FilmCredit(
+                    credit_id=f"cast-{film.id}-{entry['id']}",
+                    film_id=film.id,
+                    person_id=entry["id"],
+                    credit_type="cast",
+                    character=entry.get("character"),
+                    credit_order=entry.get("credit_order"),
+                )
+            )
+
+        # Insert FilmCredit rows for crew members
+        for entry in crew:
+            session.add(
+                FilmCredit(
+                    credit_id=f"crew-{film.id}-{entry['id']}-{entry.get('job', 'unknown')}",
+                    film_id=film.id,
+                    person_id=entry["id"],
+                    credit_type="crew",
+                    job=entry.get("job"),
+                    department=entry.get("department", "Directing"),
+                )
+            )
+
         await session.commit()
 
     return _attach

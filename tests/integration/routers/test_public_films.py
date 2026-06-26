@@ -833,6 +833,92 @@ async def test_search_aka_visibility_parity(client, make_film, add_event, attach
     assert "aka-bare-2026" not in slugs
 
 
+# ── credits: cast and directors exposure ─────────────────────────────────────
+
+
+async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_credits):
+    """Top-billed cast members are returned ordered by credit_order asc nulls last."""
+    film = await make_film(slug="cast-top-2026", title="Cast Film")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(
+        film,
+        cast=[
+            {
+                "id": 1001,
+                "name": "Charlie Actor",
+                "character": "Charlie",
+                "credit_order": 3,
+                "profile_path": "/charlie.jpg",
+            },
+            {
+                "id": 1002,
+                "name": "Alice Actor",
+                "character": "Alice",
+                "credit_order": 1,
+                "profile_path": "/alice.jpg",
+            },
+            {
+                "id": 1003,
+                "name": "Bob Actor",
+                "character": "Bob",
+                "credit_order": 2,
+                "profile_path": None,
+            },
+        ],
+    )
+
+    r = await client.get("/films/cast-top-2026")
+    assert r.status_code == 200
+    body = r.json()
+    cast = body["cast"]
+    assert len(cast) == 3
+    # ordered by credit_order asc: Alice (1), Bob (2), Charlie (3)
+    assert cast[0]["name"] == "Alice Actor"
+    assert cast[0]["character"] == "Alice"
+    assert cast[0]["profile_path"] == "/alice.jpg"
+    assert cast[1]["name"] == "Bob Actor"
+    assert cast[1]["character"] == "Bob"
+    assert cast[1]["profile_path"] is None
+    assert cast[2]["name"] == "Charlie Actor"
+    assert cast[2]["character"] == "Charlie"
+    assert cast[2]["profile_path"] == "/charlie.jpg"
+
+
+async def test_film_detail_directors(client, make_film, add_event, attach_credits):
+    """Director crew credits are returned in the directors field."""
+    film = await make_film(slug="directors-2026", title="Director Film")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 2001, "name": "Alice Director", "job": "Director"},
+            {"id": 2002, "name": "Bob Director", "job": "Director"},
+            {"id": 2003, "name": "Carol Producer", "job": "Producer"},
+        ],
+    )
+
+    r = await client.get("/films/directors-2026")
+    assert r.status_code == 200
+    body = r.json()
+    directors = body["directors"]
+    # Both directors are returned; producer is excluded
+    assert "Alice Director" in directors
+    assert "Bob Director" in directors
+    assert "Carol Producer" not in directors
+
+
+async def test_film_detail_no_credits_graceful(client, make_film, add_event):
+    """A film with no credits returns cast=[] and directors=[] with status 200."""
+    film = await make_film(slug="no-credits-2026", title="No Credits Film")
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/no-credits-2026")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cast"] == []
+    assert body["directors"] == []
+
+
 async def test_search_primary_title_ranks_before_aka(
     client, make_film, add_event, attach_alt_titles
 ):

@@ -7,9 +7,11 @@ from upmovies.catalog.models import (
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmCredit,
     FilmGenre,
     FilmProductionCountry,
     FilmReleaseDate,
+    Person,
 )
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
@@ -618,3 +620,223 @@ async def test_upsert_alternative_titles_cascade_delete(session):
 
     rows_after = await _alt_titles(session, film.id)
     assert rows_after == []
+
+
+# ---------------------------------------------------------------------------
+# upsert_film → Person + FilmCredit rebuild tests (Task 3 — NEU-402)
+# ---------------------------------------------------------------------------
+
+_CREDITS_CAST_AND_CREW = {
+    "cast": [
+        {
+            "id": 6193,
+            "name": "Leonardo DiCaprio",
+            "original_name": "Leonardo DiCaprio",
+            "credit_id": "52fe4250c3a36847f8014a57",
+            "profile_path": "/wo2hJpn04vbtmh0B9utCFdsQhxM.jpg",
+            "known_for_department": "Acting",
+            "gender": 2,
+            "popularity": 29.78,
+            "character": "Dom Cobb",
+            "order": 0,
+        },
+        {
+            "id": 24045,
+            "name": "Joseph Gordon-Levitt",
+            "original_name": "Joseph Gordon-Levitt",
+            "credit_id": "52fe4250c3a36847f8014a5b",
+            "profile_path": "/zSuXCR6xCKIL9E5o5vAEk9BCWCE.jpg",
+            "known_for_department": "Acting",
+            "gender": 2,
+            "popularity": 17.31,
+            "character": "Arthur",
+            "order": 1,
+        },
+    ],
+    "crew": [
+        {
+            "id": 525,
+            "name": "Christopher Nolan",
+            "original_name": "Christopher Nolan",
+            "credit_id": "52fe4250c3a36847f8014a33",
+            "profile_path": "/aEFNFW04MJJcVpuLqbXFPHRnRsq.jpg",
+            "known_for_department": "Directing",
+            "gender": 2,
+            "popularity": 12.51,
+            "department": "Directing",
+            "job": "Director",
+        },
+    ],
+}
+
+# Same person appears in both cast and crew (dedup test)
+_CREDITS_PERSON_IN_CAST_AND_CREW = {
+    "cast": [
+        {
+            "id": 6193,
+            "name": "Leonardo DiCaprio",
+            "original_name": "Leonardo DiCaprio",
+            "credit_id": "cast-credit-001",
+            "profile_path": "/leo.jpg",
+            "known_for_department": "Acting",
+            "gender": 2,
+            "popularity": 29.78,
+            "character": "Dom Cobb",
+            "order": 0,
+        },
+    ],
+    "crew": [
+        {
+            "id": 6193,
+            "name": "Leonardo DiCaprio",
+            "original_name": "Leonardo DiCaprio",
+            "credit_id": "crew-credit-001",
+            "profile_path": "/leo.jpg",
+            "known_for_department": "Acting",
+            "gender": 2,
+            "popularity": 29.78,
+            "department": "Production",
+            "job": "Producer",
+        },
+    ],
+}
+
+_CREDITS_CHANGED = {
+    "cast": [
+        {
+            "id": 99001,
+            "name": "New Actor",
+            "original_name": "New Actor",
+            "credit_id": "new-cast-credit-001",
+            "profile_path": None,
+            "known_for_department": "Acting",
+            "gender": 1,
+            "popularity": 5.0,
+            "character": "New Character",
+            "order": 0,
+        },
+    ],
+    "crew": [],
+}
+
+
+async def _persons(session) -> list[Person]:
+    result = await session.execute(
+        select(Person).order_by(Person.id),
+        execution_options={"populate_existing": True},
+    )
+    return list(result.scalars().all())
+
+
+async def _film_credits(session, film_id) -> list[FilmCredit]:
+    result = await session.execute(
+        select(FilmCredit).where(FilmCredit.film_id == film_id),
+        execution_options={"populate_existing": True},
+    )
+    return list(result.scalars().all())
+
+
+async def test_upsert_credits_populates_persons_and_film_credits(session):
+    """upsert_film with a credits block inserts Person rows (union of cast+crew, deduped)
+    and FilmCredit rows with correct credit_type, job, character, credit_order."""
+    details = TMDBMovieDetails.model_validate(make_details(301, credits=_CREDITS_CAST_AND_CREW))
+    await upsert_film(session, details)
+    await session.commit()
+
+    # 3 distinct people (2 cast + 1 crew, all unique ids)
+    persons = await _persons(session)
+    person_ids = {p.id for p in persons}
+    assert person_ids == {6193, 24045, 525}
+
+    film = (await _films(session))[0]
+    credits = await _film_credits(session, film.id)
+    assert len(credits) == 3
+
+    by_credit_id = {c.credit_id: c for c in credits}
+
+    cast_credit = by_credit_id["52fe4250c3a36847f8014a57"]
+    assert cast_credit.credit_type == "cast"
+    assert cast_credit.person_id == 6193
+    assert cast_credit.character == "Dom Cobb"
+    assert cast_credit.credit_order == 0
+    assert cast_credit.job is None
+    assert cast_credit.department == "Acting"
+
+    crew_credit = by_credit_id["52fe4250c3a36847f8014a33"]
+    assert crew_credit.credit_type == "crew"
+    assert crew_credit.person_id == 525
+    assert crew_credit.job == "Director"
+    assert crew_credit.department == "Directing"
+    assert crew_credit.character is None
+    assert crew_credit.credit_order is None
+
+
+async def test_upsert_credits_dedupes_person_in_cast_and_crew(session):
+    """A person appearing in both cast and crew arrays is stored only once in catalog.person."""
+    details = TMDBMovieDetails.model_validate(
+        make_details(302, credits=_CREDITS_PERSON_IN_CAST_AND_CREW)
+    )
+    await upsert_film(session, details)
+    await session.commit()
+
+    persons = await _persons(session)
+    assert len(persons) == 1
+    assert persons[0].id == 6193
+
+    film = (await _films(session))[0]
+    credits = await _film_credits(session, film.id)
+    # Two separate credits (different credit_ids) even though same person
+    assert len(credits) == 2
+    credit_types = {c.credit_type for c in credits}
+    assert credit_types == {"cast", "crew"}
+
+
+async def test_upsert_credits_idempotent(session):
+    """Re-ingesting the same film with the same credits produces identical rows, no key error."""
+    details = TMDBMovieDetails.model_validate(make_details(303, credits=_CREDITS_CAST_AND_CREW))
+    await upsert_film(session, details)
+    await session.commit()
+    await upsert_film(session, details)
+    await session.commit()
+
+    persons = await _persons(session)
+    assert {p.id for p in persons} == {6193, 24045, 525}
+
+    film = (await _films(session))[0]
+    credits = await _film_credits(session, film.id)
+    assert len(credits) == 3
+
+
+async def test_upsert_credits_removes_stale_credits_on_change(session):
+    """Re-ingesting with a changed cast/crew set removes stale credits and inserts the new ones."""
+    details_v1 = TMDBMovieDetails.model_validate(make_details(304, credits=_CREDITS_CAST_AND_CREW))
+    await upsert_film(session, details_v1)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    credits_v1 = await _film_credits(session, film.id)
+    assert len(credits_v1) == 3
+
+    details_v2 = TMDBMovieDetails.model_validate(make_details(304, credits=_CREDITS_CHANGED))
+    await upsert_film(session, details_v2)
+    await session.commit()
+
+    credits_v2 = await _film_credits(session, film.id)
+    assert len(credits_v2) == 1
+    assert credits_v2[0].credit_id == "new-cast-credit-001"
+    assert credits_v2[0].person_id == 99001
+    assert credits_v2[0].character == "New Character"
+
+
+async def test_upsert_credits_none_is_noop(session):
+    """A film with credits=None writes no Person or FilmCredit rows."""
+    details = TMDBMovieDetails.model_validate(make_details(305))
+    await upsert_film(session, details)
+    await session.commit()
+
+    persons = await _persons(session)
+    assert persons == []
+
+    film = (await _films(session))[0]
+    credits = await _film_credits(session, film.id)
+    assert credits == []

@@ -12,12 +12,14 @@ from upmovies.catalog.models import (
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmCredit,
     FilmGenre,
     FilmProductionCompany,
     FilmProductionCountry,
     FilmReleaseDate,
     FilmSpokenLanguage,
     Genre,
+    Person,
     ProductionCompany,
     ProductionCountry,
     SpokenLanguage,
@@ -37,6 +39,7 @@ async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     await _rebuild_joins(session, film_id, details)
     await _rebuild_release_dates(session, film_id, details)
     await _rebuild_alternative_titles(session, film_id, details)
+    await _upsert_credits(session, film_id, details)
 
 
 async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -> int | None:
@@ -258,3 +261,87 @@ async def _rebuild_alternative_titles(
     ]
     if rows:
         await session.execute(insert(FilmAlternativeTitle).values(rows))
+
+
+async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMovieDetails) -> None:
+    """Upsert people from credits, then rebuild film_credit rows for this film.
+
+    People are upserted (on_conflict_do_update) so that the same person appearing
+    in multiple films only grows the catalog — never raises a duplicate-key error.
+    Film credits are rebuilt (delete-and-reinsert) each run so that a person dropped
+    from the cast/crew between runs is correctly removed.
+    """
+    if not details.credits:
+        return
+
+    # Step 1 — People: union of cast + crew, deduped by TMDB person id.
+    people_by_id: dict[int, dict] = {}
+    for m in details.credits.cast:
+        if m.id not in people_by_id:
+            people_by_id[m.id] = {
+                "id": m.id,
+                "name": m.name,
+                "original_name": m.original_name,
+                "profile_path": m.profile_path,
+                "known_for_department": m.known_for_department,
+                "gender": m.gender,
+                "popularity": m.popularity,
+            }
+    for m in details.credits.crew:
+        if m.id not in people_by_id:
+            people_by_id[m.id] = {
+                "id": m.id,
+                "name": m.name,
+                "original_name": m.original_name,
+                "profile_path": m.profile_path,
+                "known_for_department": m.known_for_department,
+                "gender": m.gender,
+                "popularity": m.popularity,
+            }
+
+    if people_by_id:
+        stmt = insert(Person).values(list(people_by_id.values()))
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[Person.id],
+            set_={
+                "name": stmt.excluded.name,
+                "original_name": stmt.excluded.original_name,
+                "profile_path": stmt.excluded.profile_path,
+                "known_for_department": stmt.excluded.known_for_department,
+                "gender": stmt.excluded.gender,
+                "popularity": stmt.excluded.popularity,
+            },
+        )
+        await session.execute(stmt)
+
+    # Step 2 — Credits rebuild: delete stale rows then reinsert current set.
+    await session.execute(delete(FilmCredit).where(FilmCredit.film_id == film_id))
+
+    credit_rows: dict[str, dict] = {}
+    for m in details.credits.cast:
+        if m.credit_id not in credit_rows:
+            credit_rows[m.credit_id] = {
+                "credit_id": m.credit_id,
+                "film_id": film_id,
+                "person_id": m.id,
+                "credit_type": "cast",
+                "department": "Acting",
+                "job": None,
+                "character": m.character,
+                "credit_order": m.order,
+            }
+    for m in details.credits.crew:
+        if m.credit_id not in credit_rows:
+            credit_rows[m.credit_id] = {
+                "credit_id": m.credit_id,
+                "film_id": film_id,
+                "person_id": m.id,
+                "credit_type": "crew",
+                "department": m.department,
+                "job": m.job,
+                "character": None,
+                "credit_order": None,
+            }
+
+    if credit_rows:
+        await session.execute(insert(FilmCredit).values(list(credit_rows.values())))

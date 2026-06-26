@@ -212,3 +212,42 @@ class FilmAlternativeTitle(Base):
     iso_3166_1: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     title_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Person(Base):
+    """TMDB person reference (natural PK = TMDB's stable person id)."""
+
+    __tablename__ = "person"
+    __table_args__ = {"schema": "catalog"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    original_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profile_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    known_for_department: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gender: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    popularity: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class FilmCredit(Base):
+    """Per-film credit edge linking a Film to a Person (rebuilt each ingest)."""
+
+    __tablename__ = "film_credit"
+    __table_args__ = (
+        Index("ix_catalog_film_credit_film", "film_id"),
+        Index("ix_catalog_film_credit_person", "person_id"),
+        {"schema": "catalog"},
+    )
+
+    credit_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    person_id: Mapped[int] = mapped_column(Integer, ForeignKey("catalog.person.id"), nullable=False)
+    credit_type: Mapped[str] = mapped_column(Text, nullable=False)
+    department: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job: Mapped[str | None] = mapped_column(Text, nullable=True)
+    character: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credit_order: Mapped[int | None] = mapped_column(Integer, nullable=True)

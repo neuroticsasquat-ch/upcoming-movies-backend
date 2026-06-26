@@ -8,14 +8,15 @@ def make_details(
     *,
     release_dates: dict[str, Any] | None = None,
     alternative_titles: dict[str, Any] | None = None,
+    credits: dict[str, Any] | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
     """A `/movie/{id}` details payload with sensible defaults.
 
     Pass ``release_dates`` to include an appended release_dates block (as TMDB returns
     when ``append_to_response=release_dates`` is set). Pass ``alternative_titles`` to
-    include an appended alternative_titles block. All other fields can be overridden
-    via keyword arguments.
+    include an appended alternative_titles block. Pass ``credits`` to include an appended
+    credits block. All other fields can be overridden via keyword arguments.
     """
     payload: dict[str, Any] = {
         "id": tmdb_id,
@@ -51,6 +52,8 @@ def make_details(
         payload["release_dates"] = release_dates
     if alternative_titles is not None:
         payload["alternative_titles"] = alternative_titles
+    if credits is not None:
+        payload["credits"] = credits
     payload.update(overrides)
     return payload
 

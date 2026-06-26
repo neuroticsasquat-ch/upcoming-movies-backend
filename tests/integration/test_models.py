@@ -141,3 +141,115 @@ async def test_film_alternative_title_roundtrip_and_cascade(session):
         select(FilmAlternativeTitle).where(FilmAlternativeTitle.film_id == film.id)
     )
     assert result2.scalars().all() == []
+
+
+async def test_person_and_film_credit_roundtrip_and_cascade(session):
+    """Person + FilmCredit insert, read back, and cascade-delete with Film."""
+    from upmovies.catalog.models import FilmCredit, Person
+
+    # Insert a Person (natural PK = TMDB id)
+    person = Person(
+        id=12345,
+        name="Tom Hanks",
+        original_name="Thomas Jeffrey Hanks",
+        profile_path="/abc123.jpg",
+        known_for_department="Acting",
+        gender=2,
+        popularity=85.4,
+    )
+    session.add(person)
+    await session.flush()
+
+    # Insert a Film to attach credits to
+    film = Film(tmdb_id=99902, title="Cast Away")
+    session.add(film)
+    await session.flush()
+
+    # Insert a cast credit
+    cast_credit = FilmCredit(
+        credit_id="cast-abc-001",
+        film_id=film.id,
+        person_id=person.id,
+        credit_type="cast",
+        department="Acting",
+        job=None,
+        character="Chuck Noland",
+        credit_order=0,
+    )
+    session.add(cast_credit)
+
+    # Insert a crew credit
+    crew_credit = FilmCredit(
+        credit_id="crew-abc-002",
+        film_id=film.id,
+        person_id=person.id,
+        credit_type="crew",
+        department="Directing",
+        job="Director",
+        character=None,
+        credit_order=None,
+    )
+    session.add(crew_credit)
+    await session.commit()
+
+    # Read back Person and assert all columns
+    result = await session.execute(select(Person).where(Person.id == 12345))
+    p = result.scalar_one()
+    assert p.name == "Tom Hanks"
+    assert p.original_name == "Thomas Jeffrey Hanks"
+    assert p.profile_path == "/abc123.jpg"
+    assert p.known_for_department == "Acting"
+    assert p.gender == 2
+    assert p.popularity == 85.4
+
+    # Read back credits and assert columns
+    result2 = await session.execute(
+        select(FilmCredit).where(FilmCredit.film_id == film.id).order_by(FilmCredit.credit_id)
+    )
+    credits = result2.scalars().all()
+    assert len(credits) == 2
+
+    cast = next(c for c in credits if c.credit_type == "cast")
+    assert cast.credit_id == "cast-abc-001"
+    assert cast.person_id == 12345
+    assert cast.department == "Acting"
+    assert cast.job is None
+    assert cast.character == "Chuck Noland"
+    assert cast.credit_order == 0
+
+    crew = next(c for c in credits if c.credit_type == "crew")
+    assert crew.credit_id == "crew-abc-002"
+    assert crew.department == "Directing"
+    assert crew.job == "Director"
+    assert crew.character is None
+    assert crew.credit_order is None
+
+    # Cascade: deleting the film must remove its FilmCredit rows
+    film_id = film.id
+    await session.delete(film)
+    await session.commit()
+
+    result3 = await session.execute(select(FilmCredit).where(FilmCredit.film_id == film_id))
+    assert result3.scalars().all() == []
+
+    # Person row must still exist (only film_credit is cascaded, not person)
+    result4 = await session.execute(select(Person).where(Person.id == 12345))
+    assert result4.scalar_one_or_none() is not None
+
+
+async def test_person_nullable_fields(session):
+    """Person optional fields (original_name, profile_path, etc.) can be None."""
+    from upmovies.catalog.models import Person
+
+    person = Person(id=99999, name="Minimal Person")
+    session.add(person)
+    await session.commit()
+
+    result = await session.execute(select(Person).where(Person.id == 99999))
+    p = result.scalar_one()
+    assert p.name == "Minimal Person"
+    assert p.original_name is None
+    assert p.profile_path is None
+    assert p.known_for_department is None
+    assert p.gender is None
+    assert p.popularity is None
