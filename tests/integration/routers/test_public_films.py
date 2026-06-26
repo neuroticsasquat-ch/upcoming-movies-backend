@@ -60,12 +60,25 @@ async def test_index_rejects_out_of_range_pagination(client):
 async def test_detail_returns_chronological_summarized_events_with_sources(
     client, make_film, add_event
 ):
+    """Events must be ordered by created_at ascending, expose a created_at key, omit occurred_at.
+
+    The fixture sets occurred_at in the *opposite* order from created_at so that any
+    stale sort on occurred_at would produce the wrong order — proving the switch took effect.
+
+    - casting: created_at=Jan (earlier), occurred_at=Mar (later)
+    - trailer:  created_at=Mar (later),  occurred_at=Jan (earlier)
+
+    Expected order by created_at asc: casting first, then trailer.
+    A sort by occurred_at asc would yield the opposite: trailer first.
+    """
     film = await make_film(slug="odyssey-2026", title="The Odyssey", status="In Production")
+    casting_created_at = datetime(2025, 1, 1, tzinfo=UTC)
     await add_event(
         film=film,
         event_type="casting",
         confidence="confirmed",
-        occurred_at=datetime(2025, 3, 1, tzinfo=UTC),
+        occurred_at=datetime(2025, 3, 1, tzinfo=UTC),  # later occurred_at (opposite of created_at)
+        created_at=casting_created_at,  # earlier created_at → should appear first
         summary="Casting announced.",
         sources=(
             {
@@ -76,10 +89,14 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
             },
         ),
     )
+    trailer_created_at = datetime(2025, 3, 1, tzinfo=UTC)
     await add_event(
         film=film,
         event_type="trailer",
-        occurred_at=datetime(2025, 1, 1, tzinfo=UTC),  # earlier
+        occurred_at=datetime(
+            2025, 1, 1, tzinfo=UTC
+        ),  # earlier occurred_at (opposite of created_at)
+        created_at=trailer_created_at,  # later created_at → should appear second
         summary="Trailer dropped.",
     )
 
@@ -91,9 +108,15 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     assert body["release_date"] == "2026-07-17"
     assert body["release_year"] == 2026
     assert body["arc_stage"] == "trailer"  # In Production baseline, trailer event wins
-    # Chronological ascending: the January trailer before the March casting.
-    assert [e["event_type"] for e in body["events"]] == ["trailer", "casting"]
-    casting = body["events"][1]
+    # created_at ascending: casting (Jan created_at) before trailer (Mar created_at).
+    # A stale occurred_at sort would yield the reverse order and fail this assertion.
+    assert [e["event_type"] for e in body["events"]] == ["casting", "trailer"]
+    # Each event must expose created_at and must NOT expose occurred_at (the rename).
+    for event in body["events"]:
+        assert "created_at" in event, "event must expose created_at"
+        assert "occurred_at" not in event, "event must not expose occurred_at after rename"
+    casting = body["events"][0]
+    assert casting["created_at"] == casting_created_at.isoformat().replace("+00:00", "Z")
     assert casting["confidence"] == "confirmed"
     assert casting["summary"] == "Casting announced."
     assert casting["sources"][0]["url"] == "https://deadline.com/a"
