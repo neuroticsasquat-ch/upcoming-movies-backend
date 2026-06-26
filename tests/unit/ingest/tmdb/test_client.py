@@ -173,6 +173,8 @@ async def test_movie_details_sends_append_to_response_with_release_dates():
     params = route.calls.last.request.url.params
     atr = params.get("append_to_response", "")
     assert "release_dates" in atr.split(",")
+    # The request-level append_to_response must not clobber the client's default api_key auth.
+    assert params.get("api_key") == "test-key"
 
 
 @respx.mock

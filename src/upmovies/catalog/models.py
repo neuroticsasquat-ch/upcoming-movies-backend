@@ -174,11 +174,13 @@ class FilmReleaseDate(Base):
     __tablename__ = "film_release_date"
     __table_args__ = (
         Index("ix_catalog_film_release_date_film", "film_id"),
+        # Seeded for the upcoming GET /calendar endpoint (browse by date/type); the current
+        # film-detail query is served by ix_catalog_film_release_date_film.
         Index("ix_catalog_film_release_date_lookup", "release_date", "release_type"),
         {"schema": "catalog"},
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     film_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("catalog.film.id", ondelete="CASCADE"),

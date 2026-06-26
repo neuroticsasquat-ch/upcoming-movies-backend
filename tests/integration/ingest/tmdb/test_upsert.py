@@ -291,7 +291,7 @@ _RELEASE_DATES_2_COUNTRIES = {
                 {
                     "certification": "PG-13",
                     "iso_639_1": "en",
-                    "note": "wide",
+                    "note": "Netflix",
                     "release_date": "2026-07-23T00:00:00.000Z",
                     "type": 4,
                 },
@@ -310,7 +310,7 @@ _RELEASE_DATES_2_COUNTRIES = {
                 {
                     "certification": "12A",
                     "iso_639_1": "en",
-                    "note": "nationwide",
+                    "note": "Disney+",
                     "release_date": "2026-07-25T00:00:00.000Z",
                     "type": 4,
                 },
@@ -366,7 +366,7 @@ async def test_upsert_populates_release_date_rows(session):
     assert us_rows[0].release_type == 3
     assert us_rows[0].certification == "PG-13"
     assert us_rows[1].release_type == 4
-    assert us_rows[1].note == "wide"
+    assert us_rows[1].note == "Netflix"
     assert gb_rows[0].certification == "12A"
 
 
@@ -407,6 +407,26 @@ async def test_upsert_release_dates_rebuild_on_change(session):
     assert len(rows_v2) == 1
     assert rows_v2[0].iso_3166_1 == "FR"
     assert rows_v2[0].certification == "U"
+
+
+async def test_upsert_release_dates_cleared_on_empty_payload(session):
+    """A film whose later ingest omits the release_dates block has its stale rows cleared,
+    matching the delete-then-reinsert rebuild contract used for the other join relations."""
+    details_v1 = TMDBMovieDetails.model_validate(
+        make_details(107, release_dates=_RELEASE_DATES_2_COUNTRIES)
+    )
+    await upsert_film(session, details_v1)
+    await session.commit()
+
+    film = (await _films(session))[0]
+    assert len(await _release_dates(session, film.id)) == 4
+
+    # Re-ingest the same film with no release_dates block at all.
+    details_v2 = TMDBMovieDetails.model_validate(make_details(107))
+    await upsert_film(session, details_v2)
+    await session.commit()
+
+    assert await _release_dates(session, film.id) == []
 
 
 async def test_upsert_no_release_dates_is_noop(session):

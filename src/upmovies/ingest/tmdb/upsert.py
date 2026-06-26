@@ -206,10 +206,13 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
 async def _rebuild_release_dates(
     session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
 ) -> None:
+    # Delete-then-reinsert, mirroring `_rebuild_joins`: a film that drops its release_dates
+    # between runs (empty or absent payload) must have its stale rows cleared, so the delete
+    # is unconditional and only the insert is guarded.
+    await session.execute(delete(FilmReleaseDate).where(FilmReleaseDate.film_id == film_id))
+
     if not details.release_dates or not details.release_dates.results:
         return
-
-    await session.execute(delete(FilmReleaseDate).where(FilmReleaseDate.film_id == film_id))
 
     rows = [
         {
