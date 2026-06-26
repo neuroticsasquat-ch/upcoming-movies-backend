@@ -24,6 +24,16 @@ async def list_films(
     return await service.get_film_index(session, limit=limit, offset=offset)
 
 
+@router.get("/films/search", response_model=FilmIndexResponse)
+async def search_films(
+    q: str = Query(..., max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> FilmIndexResponse:
+    return await service.get_film_search(session, q=q, limit=limit, offset=offset)
+
+
 @router.get("/films/{slug}", response_model=FilmDetailResponse)
 async def get_film(
     slug: str,

@@ -132,7 +132,13 @@ async def get_film_search(
     session: AsyncSession, *, q: str, limit: int, offset: int
 ) -> FilmIndexResponse:
     term = q.strip()
-    if len(term) < MIN_QUERY_LEN:
+    # Count only alphanumeric characters for the length check.
+    # Special characters like % and _ are allowed for literal searches,
+    # but pure alphanumeric queries must be at least MIN_QUERY_LEN.
+    alphanumeric_len = sum(1 for c in term if c.isalnum())
+    if alphanumeric_len > 0 and alphanumeric_len < MIN_QUERY_LEN:
+        return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
+    if len(term) == 0:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
     where = (*_publicly_visible_film(), _title_match(term))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
