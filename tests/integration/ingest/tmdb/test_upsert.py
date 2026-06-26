@@ -1,9 +1,15 @@
-from datetime import date
+from datetime import UTC, date, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from tests.fixtures.tmdb import make_details
-from upmovies.catalog.models import Collection, Film, FilmGenre, FilmProductionCountry
+from upmovies.catalog.models import (
+    Collection,
+    Film,
+    FilmGenre,
+    FilmProductionCountry,
+    FilmReleaseDate,
+)
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
 
@@ -187,3 +193,80 @@ async def test_upsert_disambiguates_slug_collision_with_tmdb_id(session):
     films = await _films(session)  # ordered by tmdb_id ascending
     assert films[0].slug == "dune-2026"
     assert films[1].slug == "dune-2026-2"
+
+
+# ---------------------------------------------------------------------------
+# FilmReleaseDate model tests (Task 1 — NEU-404)
+# ---------------------------------------------------------------------------
+
+
+async def _make_film(session) -> Film:
+    """Insert a minimal Film row and return it (needed to satisfy the FK)."""
+    details = TMDBMovieDetails.model_validate(make_details(99999, title="Test Film"))
+    await upsert_film(session, details)
+    await session.commit()
+    result = await session.execute(
+        select(Film).where(Film.tmdb_id == 99999),
+        execution_options={"populate_existing": True},
+    )
+    return result.scalar_one()
+
+
+async def test_film_release_date_insert_and_read(session):
+    """FilmReleaseDate row can be inserted and queried with all columns correct."""
+    film = await _make_film(session)
+    release_dt = datetime(2026, 7, 16, 0, 0, 0, tzinfo=UTC)
+
+    row = FilmReleaseDate(
+        film_id=film.id,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=release_dt,
+        certification="PG-13",
+        note="wide release",
+        iso_639_1="en",
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+
+    assert row.id is not None
+    assert row.film_id == film.id
+    assert row.iso_3166_1 == "US"
+    assert row.release_type == 3
+    assert row.release_date == release_dt
+    assert row.certification == "PG-13"
+    assert row.note == "wide release"
+    assert row.iso_639_1 == "en"
+
+
+async def test_film_release_date_nullable_columns(session):
+    """FilmReleaseDate nullable columns (certification, note, iso_639_1) accept None."""
+    film = await _make_film(session)
+    release_dt = datetime(2026, 8, 1, 0, 0, 0, tzinfo=UTC)
+
+    row = FilmReleaseDate(
+        film_id=film.id,
+        iso_3166_1="GB",
+        release_type=1,
+        release_date=release_dt,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+
+    assert row.certification is None
+    assert row.note is None
+    assert row.iso_639_1 is None
+
+
+async def test_film_release_date_lookup_index_exists(session):
+    """ix_catalog_film_release_date_lookup index is present in pg_indexes."""
+    result = await session.execute(
+        text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename = 'film_release_date' AND schemaname = 'catalog'"
+        )
+    )
+    index_names = {row[0] for row in result}
+    assert "ix_catalog_film_release_date_lookup" in index_names

@@ -166,3 +166,27 @@ class FilmSpokenLanguage(Base):
     iso_639_1: Mapped[str] = mapped_column(
         Text, ForeignKey("catalog.spoken_language.iso_639_1"), primary_key=True
     )
+
+
+class FilmReleaseDate(Base):
+    """Per-country, per-type TMDB release date for a film."""
+
+    __tablename__ = "film_release_date"
+    __table_args__ = (
+        Index("ix_catalog_film_release_date_film", "film_id"),
+        Index("ix_catalog_film_release_date_lookup", "release_date", "release_type"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    iso_3166_1: Mapped[str] = mapped_column(Text, nullable=False)
+    release_type: Mapped[int] = mapped_column(Integer, nullable=False)
+    release_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    certification: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    iso_639_1: Mapped[str | None] = mapped_column(Text, nullable=True)
