@@ -52,6 +52,12 @@ class CastMemberOut(BaseModel):
     profile_path: str | None
 
 
+class CrewMemberOut(BaseModel):
+    name: str
+    job: str | None
+    department: str | None
+
+
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
@@ -73,7 +79,7 @@ class FilmDetailResponse(BaseModel):
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
     cast: list[CastMemberOut] = []
-    directors: list[str] = []
+    crew: list[CrewMemberOut] = []
 
 
 class FeedItem(BaseModel):

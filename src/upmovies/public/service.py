@@ -37,6 +37,7 @@ from upmovies.public.dto import (
     CalendarResponse,
     CastMemberOut,
     CollectionOut,
+    CrewMemberOut,
     EventOut,
     FeedDayItem,
     FeedDayResponse,
@@ -56,6 +57,36 @@ _HIDDEN_EVENT_TYPES = ("other",)
 MIN_QUERY_LEN = 2
 
 CALENDAR_REGION = "US"  # single governing region for v1
+
+_CREW_DEPARTMENT_ORDER = (
+    "Directing",
+    "Writing",
+    "Production",
+    "Camera",
+    "Editing",
+    "Sound",
+    "Art",
+    "Costume & Make-Up",
+    "Visual Effects",
+    "Lighting",
+    "Crew",
+)
+_DEPT_PRIORITY = {name: i for i, name in enumerate(_CREW_DEPARTMENT_ORDER)}
+_DEPT_UNKNOWN = len(_CREW_DEPARTMENT_ORDER)
+
+
+def _crew_sort_key(row: Any) -> tuple:
+    """Order crew by department priority, then job (alpha), then credit_order (nulls last),
+    then name. Unknown departments sort after all known ones, alphabetically by name."""
+    dept = row.department or ""
+    return (
+        _DEPT_PRIORITY.get(dept, _DEPT_UNKNOWN),
+        dept,
+        row.job or "",
+        row.credit_order is None,
+        0 if row.credit_order is None else row.credit_order,
+        row.name,
+    )
 
 
 def _visible_events() -> ColumnElement[bool]:
@@ -391,19 +422,22 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         for r in cast_rows
     ]
 
-    director_rows = (
+    crew_rows = (
         await session.execute(
-            select(Person.name)
-            .join(FilmCredit, FilmCredit.person_id == Person.id)
-            .where(
-                FilmCredit.film_id == film.id,
-                FilmCredit.credit_type == "crew",
-                FilmCredit.job == "Director",
+            select(
+                Person.name,
+                FilmCredit.job,
+                FilmCredit.department,
+                FilmCredit.credit_order,
             )
-            .order_by(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc())
+            .join(FilmCredit, FilmCredit.person_id == Person.id)
+            .where(FilmCredit.film_id == film.id, FilmCredit.credit_type == "crew")
         )
     ).all()
-    directors_out = [r.name for r in director_rows]
+    crew_out = [
+        CrewMemberOut(name=r.name, job=r.job, department=r.department)
+        for r in sorted(crew_rows, key=_crew_sort_key)
+    ]
 
     return FilmDetailResponse(
         slug=film.slug,
@@ -426,7 +460,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         collection=collection,
         alternative_titles=alternative_titles,
         cast=cast_out,
-        directors=directors_out,
+        crew=crew_out,
     )
 
 
