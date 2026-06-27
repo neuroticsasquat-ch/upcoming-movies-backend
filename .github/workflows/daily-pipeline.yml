@@ -14,9 +14,6 @@ name: Daily pipeline
 #   secret    UPMOVIES_ADMIN_TOKEN     — must match the API's ADMIN_TOKEN
 #   variable  UPMOVIES_API_BASE_URL    — prod API base URL, e.g. https://api.upmovies.example.com
 #                                        (no trailing slash)
-#   secret    SENTRY_CRON_DSN          — optional; the backlotter-backend Sentry DSN. When set,
-#                                        the job reports a cron monitor check-in (slug
-#                                        `daily-pipeline`). Unset → check-ins are skipped.
 
 on:
   schedule:
@@ -34,36 +31,7 @@ jobs:
     env:
       ADMIN_TOKEN: ${{ secrets.UPMOVIES_ADMIN_TOKEN }}
       API_BASE_URL: ${{ vars.UPMOVIES_API_BASE_URL }}
-      # Optional Sentry cron monitor. = the backlotter-backend project DSN. Unset → check-ins skip.
-      SENTRY_DSN: ${{ secrets.SENTRY_CRON_DSN }}
     steps:
-      - name: Sentry monitor check-in (start)
-        env:
-          MONITOR_SLUG: daily-pipeline
-          MONITOR_SCHEDULE: "0 9 * * *"
-          CHECKIN_MARGIN: "30"
-          MAX_RUNTIME: "150"
-        run: |
-          set -uo pipefail
-          if [ -z "${SENTRY_DSN:-}" ]; then
-            echo "SENTRY_CRON_DSN not set; skipping Sentry cron check-in"
-            echo "SENTRY_CHECKIN_SKIP=1" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          # Derive the cron check-in URL from the DSN (https://<key>@<host>/<project_id>).
-          key=$(printf '%s' "$SENTRY_DSN" | sed -E 's#https?://([^@]+)@.*#\1#')
-          host=$(printf '%s' "$SENTRY_DSN" | sed -E 's#https?://[^@]+@([^/]+)/.*#\1#')
-          project=$(printf '%s' "$SENTRY_DSN" | sed -E 's#.*/##')
-          checkin_url="https://${host}/api/${project}/cron/${MONITOR_SLUG}/${key}/"
-          check_in_id=$(tr -d '-' < /proc/sys/kernel/random/uuid)
-          # Upsert the monitor (schedule) and open the run. Never fail the job on a check-in error.
-          curl -sS -m 10 -X POST "$checkin_url" \
-            -H 'Content-Type: application/json' \
-            -d "{\"status\":\"in_progress\",\"check_in_id\":\"${check_in_id}\",\"environment\":\"production\",\"monitor_config\":{\"schedule\":{\"type\":\"crontab\",\"value\":\"${MONITOR_SCHEDULE}\"},\"checkin_margin\":${CHECKIN_MARGIN},\"max_runtime\":${MAX_RUNTIME},\"timezone\":\"UTC\"}}" \
-            >/dev/null || echo "::warning::Sentry in_progress check-in failed (non-fatal)"
-          echo "SENTRY_CHECKIN_URL=${checkin_url}" >> "$GITHUB_ENV"
-          echo "SENTRY_CHECK_IN_ID=${check_in_id}" >> "$GITHUB_ENV"
-
       - name: Trigger and await ingestion pipelines
         run: |
           set -uo pipefail
@@ -136,20 +104,3 @@ jobs:
           trigger_and_wait link || rc=1
           trigger_and_wait synthesize || rc=1
           exit "${rc}"
-
-      - name: Sentry monitor check-in (finish)
-        if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          set -uo pipefail
-          if [ "${SENTRY_CHECKIN_SKIP:-}" = "1" ] || [ -z "${SENTRY_CHECK_IN_ID:-}" ] || [ -z "${SENTRY_CHECKIN_URL:-}" ]; then
-            echo "No Sentry cron check-in to finalize"
-            exit 0
-          fi
-          if [ "$JOB_STATUS" = "success" ]; then sentry_status=ok; else sentry_status=error; fi
-          curl -sS -m 10 -X POST "$SENTRY_CHECKIN_URL" \
-            -H 'Content-Type: application/json' \
-            -d "{\"status\":\"${sentry_status}\",\"check_in_id\":\"${SENTRY_CHECK_IN_ID}\",\"environment\":\"production\"}" \
-            >/dev/null || echo "::warning::Sentry final check-in failed (non-fatal)"
-          echo "Sentry cron check-in finalized: ${sentry_status}"
