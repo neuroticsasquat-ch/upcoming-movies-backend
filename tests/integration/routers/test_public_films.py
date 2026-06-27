@@ -765,7 +765,7 @@ async def test_search_aka_visibility_parity(client, make_film, add_event, attach
     assert "aka-bare-2026" not in slugs
 
 
-# ── credits: cast and directors exposure ─────────────────────────────────────
+# ── credits: cast and crew exposure ──────────────────────────────────────────
 
 
 async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_credits):
@@ -816,31 +816,91 @@ async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_
     assert cast[2]["profile_path"] == "/charlie.jpg"
 
 
-async def test_film_detail_directors(client, make_film, add_event, attach_credits):
-    """Director crew credits are returned in the directors field."""
-    film = await make_film(slug="directors-2026", title="Director Film")
+async def test_film_detail_crew_grouped_orderable(client, make_film, add_event, attach_credits):
+    """The full crew is returned (not just directors), ordered by department priority then job."""
+    film = await make_film(slug="crew-2026", title="Crew Film")
     await add_event(film=film, summary="Event.")
     await attach_credits(
         film,
         crew=[
-            {"id": 2001, "name": "Alice Director", "job": "Director"},
-            {"id": 2002, "name": "Bob Director", "job": "Director"},
-            {"id": 2003, "name": "Carol Producer", "job": "Producer"},
+            {"id": 3001, "name": "Editor Person", "job": "Editor", "department": "Editing"},
+            {"id": 3002, "name": "Writer Person", "job": "Screenplay", "department": "Writing"},
+            {"id": 3003, "name": "Director Person", "job": "Director", "department": "Directing"},
+            {"id": 3004, "name": "Producer Person", "job": "Producer", "department": "Production"},
         ],
     )
 
-    r = await client.get("/films/directors-2026")
+    r = await client.get("/films/crew-2026")
     assert r.status_code == 200
     body = r.json()
-    directors = body["directors"]
-    # Both directors are returned; producer is excluded
-    assert "Alice Director" in directors
-    assert "Bob Director" in directors
-    assert "Carol Producer" not in directors
+    assert "directors" not in body  # replaced by crew
+    crew = body["crew"]
+    # Department priority: Directing → Writing → Production → Editing
+    assert [c["job"] for c in crew] == ["Director", "Screenplay", "Producer", "Editor"]
+    assert crew[0] == {"name": "Director Person", "job": "Director", "department": "Directing"}
+
+
+async def test_film_detail_crew_orders_within_job_by_credit_order(
+    client, make_film, add_event, attach_credits
+):
+    """Within one job, people order by credit_order asc (nulls last), then name."""
+    film = await make_film(slug="crew-order-2026", title="Crew Order Film")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(
+        film,
+        crew=[
+            {
+                "id": 4001,
+                "name": "Bravo Producer",
+                "job": "Producer",
+                "department": "Production",
+                "credit_order": 2,
+            },
+            {
+                "id": 4002,
+                "name": "Alpha Producer",
+                "job": "Producer",
+                "department": "Production",
+                "credit_order": 1,
+            },
+            {
+                "id": 4003,
+                "name": "Zulu Producer",
+                "job": "Producer",
+                "department": "Production",
+                "credit_order": None,
+            },
+        ],
+    )
+
+    crew = (await client.get("/films/crew-order-2026")).json()["crew"]
+    assert [c["name"] for c in crew] == ["Alpha Producer", "Bravo Producer", "Zulu Producer"]
+
+
+async def test_film_detail_crew_orders_jobs_alphabetically_within_department(
+    client, make_film, add_event, attach_credits
+):
+    """Within a department, jobs sort alphabetically before credit_order."""
+    film = await make_film(slug="crew-jobalpha-2026", title="Job Alpha Film")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 5001, "name": "Wendy Wrangler", "job": "Wrangler", "department": "Production"},
+            {
+                "id": 5002,
+                "name": "Annie Accountant",
+                "job": "Accountant",
+                "department": "Production",
+            },
+        ],
+    )
+    crew = (await client.get("/films/crew-jobalpha-2026")).json()["crew"]
+    assert [c["job"] for c in crew] == ["Accountant", "Wrangler"]
 
 
 async def test_film_detail_no_credits_graceful(client, make_film, add_event):
-    """A film with no credits returns cast=[] and directors=[] with status 200."""
+    """A film with no credits returns cast=[] and crew=[] with status 200."""
     film = await make_film(slug="no-credits-2026", title="No Credits Film")
     await add_event(film=film, summary="Event.")
 
@@ -848,7 +908,7 @@ async def test_film_detail_no_credits_graceful(client, make_film, add_event):
     assert r.status_code == 200
     body = r.json()
     assert body["cast"] == []
-    assert body["directors"] == []
+    assert body["crew"] == []
 
 
 async def test_search_primary_title_ranks_before_aka(
