@@ -887,3 +887,28 @@ async def test_search_primary_title_ranks_before_aka(
     assert "aka-only-hit-2026" in slugs
     # Primary-title match must appear before the AKA-only match.
     assert slugs.index("primary-title-hit-2026") < slugs.index("aka-only-hit-2026")
+
+
+# ── external IDs (imdb_id / tmdb_id) ─────────────────────────────────────────
+
+
+async def test_detail_exposes_external_ids(client, make_film, add_event, session):
+    film = await make_film(slug="ext-ids-2026", title="External IDs Film")
+    film.imdb_id = "tt1234567"
+    session.add(film)
+    await session.commit()
+    await add_event(film=film, summary="Event.")
+
+    body = (await client.get("/films/ext-ids-2026")).json()
+    assert body["imdb_id"] == "tt1234567"
+    assert isinstance(body["tmdb_id"], int)
+    assert body["tmdb_id"] > 0
+
+
+async def test_detail_external_ids_null_imdb(client, make_film, add_event):
+    film = await make_film(slug="ext-null-2026", title="No IMDb Film")  # imdb_id defaults to None
+    await add_event(film=film, summary="Event.")
+
+    body = (await client.get("/films/ext-null-2026")).json()
+    assert body["imdb_id"] is None
+    assert isinstance(body["tmdb_id"], int)

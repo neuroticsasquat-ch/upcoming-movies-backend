@@ -408,6 +408,8 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
     return FilmDetailResponse(
         slug=film.slug,
         title=film.title,
+        tmdb_id=film.tmdb_id,
+        imdb_id=film.imdb_id,
         release_date=film.release_date,
         release_year=_release_year(film.release_date),
         poster_path=film.poster_path,
