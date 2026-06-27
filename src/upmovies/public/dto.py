@@ -52,9 +52,17 @@ class CastMemberOut(BaseModel):
     profile_path: str | None
 
 
+class CrewMemberOut(BaseModel):
+    name: str
+    job: str | None
+    department: str | None
+
+
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
+    tmdb_id: int
+    imdb_id: str | None = None
     release_date: date | None
     release_year: int | None
     poster_path: str | None
@@ -73,7 +81,7 @@ class FilmDetailResponse(BaseModel):
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
     cast: list[CastMemberOut] = []
-    directors: list[str] = []
+    crew: list[CrewMemberOut] = []
 
 
 class FeedItem(BaseModel):

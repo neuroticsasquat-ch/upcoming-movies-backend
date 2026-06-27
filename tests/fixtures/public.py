@@ -217,7 +217,7 @@ def attach_credits(session: AsyncSession):
         """Insert Person + FilmCredit rows for a film.
 
         cast entries: {id, name, character, credit_order, profile_path}
-        crew entries: {id, name, job}
+        crew entries: {id, name, job, department, credit_order}
         """
         cast = cast or []
         crew = crew or []
@@ -260,6 +260,7 @@ def attach_credits(session: AsyncSession):
                     credit_type="crew",
                     job=entry.get("job"),
                     department=entry.get("department", "Directing"),
+                    credit_order=entry.get("credit_order"),
                 )
             )
 
