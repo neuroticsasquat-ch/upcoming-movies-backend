@@ -20,6 +20,9 @@ services:
       COOKIE_SAMESITE: "lax"
       ENVIRONMENT: "production"
       SENTRY_DSN: "${SENTRY_DSN:-}"
+      # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
+      # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
+      GIT_SHA: "${SOURCE_COMMIT:-unknown}"
       # Coolify magic var: routes the assigned domain (api.backlotter.com, set in the
       # Coolify UI) to this service on container port 8000.
       SERVICE_FQDN_UPMOVIESBACKEND_8000: "${SERVICE_FQDN_UPMOVIESBACKEND_8000:-}"
