@@ -61,6 +61,8 @@ class CrewMemberOut(BaseModel):
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
+    tmdb_id: int
+    imdb_id: str | None = None
     release_date: date | None
     release_year: int | None
     poster_path: str | None
