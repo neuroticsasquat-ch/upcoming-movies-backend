@@ -1,60 +1,4 @@
-from datetime import UTC, date, datetime
-
-
-async def test_index_lists_only_films_with_a_summarized_event(client, make_film, add_event):
-    shown = await make_film(slug="shown-2026", title="Shown")
-    await add_event(film=shown, event_type="casting", summary="A summary.")
-    hidden = await make_film(slug="hidden-2026", title="Hidden")
-    await add_event(film=hidden, summary=None)  # event but no summary
-    await make_film(slug="bare-2026", title="Bare")  # no events at all
-
-    r = await client.get("/films")
-    assert r.status_code == 200
-    body = r.json()
-    assert [item["slug"] for item in body["items"]] == ["shown-2026"]
-    assert body["total"] == 1
-    assert body["limit"] == 50
-    assert body["offset"] == 0
-    item = body["items"][0]
-    assert item["title"] == "Shown"
-    assert item["release_year"] == 2026
-    assert item["poster_path"] == "/poster.jpg"
-    assert item["arc_stage"] == "cast"  # Planned baseline + casting event
-
-
-async def test_index_orders_by_release_date_desc_nulls_last(client, make_film, add_event):
-    later = await make_film(slug="later-2027", release_date=date(2027, 1, 1))
-    await add_event(film=later, summary="s")
-    earlier = await make_film(slug="earlier-2026", release_date=date(2026, 1, 1))
-    await add_event(film=earlier, summary="s")
-    undated = await make_film(slug="undated", release_date=None)
-    await add_event(film=undated, summary="s")
-
-    r = await client.get("/films")
-    assert [i["slug"] for i in r.json()["items"]] == ["later-2027", "earlier-2026", "undated"]
-
-
-async def test_index_pagination(client, make_film, add_event):
-    for i in range(3):
-        film = await make_film(slug=f"f{i}-2026", release_date=date(2026, 1, 1 + i))
-        await add_event(film=film, summary="s")
-
-    page1 = (await client.get("/films", params={"limit": 2, "offset": 0})).json()
-    assert page1["total"] == 3
-    assert len(page1["items"]) == 2
-    assert page1["limit"] == 2
-    assert page1["offset"] == 0
-
-    page2 = (await client.get("/films", params={"limit": 2, "offset": 2})).json()
-    assert len(page2["items"]) == 1
-    assert page2["total"] == 3
-    assert page2["offset"] == 2
-
-
-async def test_index_rejects_out_of_range_pagination(client):
-    assert (await client.get("/films", params={"limit": 0})).status_code == 422
-    assert (await client.get("/films", params={"limit": 101})).status_code == 422
-    assert (await client.get("/films", params={"offset": -1})).status_code == 422
+from datetime import UTC, datetime
 
 
 async def test_detail_returns_chronological_summarized_events_with_sources(
@@ -216,35 +160,41 @@ async def test_detail_excludes_other_events(client, make_film, add_event):
     assert [e["event_type"] for e in body["events"]] == ["casting"]
 
 
-async def test_index_excludes_film_with_only_other_events(client, make_film, add_event):
-    shown = await make_film(slug="real-2026")
-    await add_event(film=shown, event_type="casting", summary="s")
-    other_only = await make_film(slug="otheronly-2026")
-    await add_event(film=other_only, event_type="other", summary="s")
-
-    slugs = [i["slug"] for i in (await client.get("/films")).json()["items"]]
-    assert slugs == ["real-2026"]
-
-
 # ── release_dates projection tests ───────────────────────────────────────────
 
 
-async def test_detail_exposes_us_release_dates(client, make_film, add_event, add_release_date):
+async def test_detail_exposes_theatrical_release_dates(
+    client, make_film, add_event, add_release_date
+):
+    """Only theatrical-arc dates (limited + wide) surface, labeled like the calendar;
+    premiere (1) and digital (4) are dropped."""
     film = await make_film(slug="rd-us-2026", title="US Dates Film")
     await add_event(film=film, summary="Event.")
     await add_release_date(
         film=film,
         iso_3166_1="US",
-        release_type=3,
+        release_type=3,  # wide
         release_date=datetime(2026, 7, 17, tzinfo=UTC),
         certification="PG-13",
     )
     await add_release_date(
         film=film,
         iso_3166_1="US",
-        release_type=1,
-        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+        release_type=2,  # limited
+        release_date=datetime(2026, 6, 10, tzinfo=UTC),
         certification=None,
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=1,  # premiere — excluded
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=4,  # digital — excluded
+        release_date=datetime(2026, 8, 1, tzinfo=UTC),
     )
 
     r = await client.get("/films/rd-us-2026")
@@ -252,15 +202,14 @@ async def test_detail_exposes_us_release_dates(client, make_film, add_event, add
     body = r.json()
     rds = body["release_dates"]
     assert len(rds) == 2
-    # ordered by release_date asc: June before July
-    assert rds[0]["date"].startswith("2026-06-01")
-    assert rds[0]["release_type"] == 1
-    assert rds[0]["type_label"] == "Premiere"
+    # ordered by release_date asc: limited (June 10) before wide (July 17)
+    assert rds[0]["date"].startswith("2026-06-10")
+    assert rds[0]["release_type"] == 2
+    assert rds[0]["type_label"] == "Limited"
     assert rds[0]["country"] == "US"
-    assert rds[0]["certification"] is None
     assert rds[1]["date"].startswith("2026-07-17")
     assert rds[1]["release_type"] == 3
-    assert rds[1]["type_label"] == "Theatrical"
+    assert rds[1]["type_label"] == "Wide"
     assert rds[1]["certification"] == "PG-13"
 
 
@@ -697,27 +646,22 @@ async def test_search_rejects_out_of_range_pagination(client):
     assert r2.status_code == 422
 
 
-async def test_search_item_shape_parity(client, make_film, add_event):
-    """A search hit carries the same keys as an index item for the same film."""
+async def test_search_item_shape(client, make_film, add_event):
+    """A search hit carries the full public film-index item shape."""
     film = await make_film(slug="shape-2026", title="Shape Film", poster_path="/shape.jpg")
     await add_event(film=film, event_type="casting", summary="A summary.")
 
-    index_r = await client.get("/films")
     search_r = await client.get("/films/search", params={"q": "Shape Film"})
-
     assert search_r.status_code == 200
-    search_items = search_r.json()["items"]
-    assert len(search_items) == 1
-    item = search_items[0]
+    items = search_r.json()["items"]
+    assert len(items) == 1
+    item = items[0]
 
-    index_items = index_r.json()["items"]
-    index_item = next(i for i in index_items if i["slug"] == "shape-2026")
-
-    assert item["slug"] == index_item["slug"]
-    assert item["title"] == index_item["title"]
-    assert item["release_year"] == index_item["release_year"]
-    assert item["poster_path"] == index_item["poster_path"]
-    assert item["arc_stage"] == index_item["arc_stage"]
+    assert item["slug"] == "shape-2026"
+    assert item["title"] == "Shape Film"
+    assert item["release_year"] == 2026
+    assert item["poster_path"] == "/shape.jpg"
+    assert item["arc_stage"] == "cast"  # Planned baseline + casting event
 
 
 async def test_search_subthreshold_q_returns_empty(client):
@@ -735,50 +679,38 @@ async def test_search_subthreshold_q_returns_empty(client):
         assert body["total"] == 0, f"q={q!r}: expected total=0"
 
 
-async def test_search_like_wildcard_is_literal(client, make_film, add_event):
-    """% and _ in q are matched literally, not as LIKE wildcards (queries clear the gate)."""
-    # "50%" has two alphanumerics, so it clears the gate. Escaped, it matches only the
-    # literal "50%"; an unescaped %50%% would also sweep in "5000 Reasons".
-    percent_film = await make_film(slug="percent-film-2026", title="50% Off")
-    await add_event(film=percent_film, summary="s")
-    not_percent = await make_film(slug="not-percent-2026", title="5000 Reasons")
-    await add_event(film=not_percent, summary="s")
+async def test_search_ignores_separators(client, make_film, add_event):
+    """Hyphens, spaces, and punctuation fold away: 'spiderman' / 'spider man' find 'Spider-Man'."""
+    film = await make_film(slug="spider-man-2026", title="Spider-Man: Brand New Day")
+    await add_event(film=film, summary="s")
+    other = await make_film(slug="unrelated-2026", title="Unrelated")
+    await add_event(film=other, summary="s")
 
-    r_percent = await client.get("/films/search", params={"q": "50%"})
-    assert r_percent.status_code == 200
-    slugs_percent = [i["slug"] for i in r_percent.json()["items"]]
-    assert "percent-film-2026" in slugs_percent
-    assert "not-percent-2026" not in slugs_percent
-
-    # "py_Ki" has four alphanumerics. Escaped, the "_" matches a literal underscore, so
-    # only "Spy_Kids" matches; an unescaped "_" wildcard would also match "SpyXKids".
-    underscore_film = await make_film(slug="under-film-2026", title="Spy_Kids")
-    await add_event(film=underscore_film, summary="s")
-    not_underscore = await make_film(slug="not-under-2026", title="SpyXKids")
-    await add_event(film=not_underscore, summary="s")
-
-    r_underscore = await client.get("/films/search", params={"q": "py_Ki"})
-    assert r_underscore.status_code == 200
-    slugs_underscore = [i["slug"] for i in r_underscore.json()["items"]]
-    assert "under-film-2026" in slugs_underscore
-    assert "not-under-2026" not in slugs_underscore
+    for q in ("spiderman", "spider man", "Spider-Man", "spider  man"):
+        r = await client.get("/films/search", params={"q": q})
+        assert r.status_code == 200, f"q={q!r} → {r.status_code}"
+        slugs = [i["slug"] for i in r.json()["items"]]
+        assert "spider-man-2026" in slugs, f"q={q!r}: {slugs}"
+        assert "unrelated-2026" not in slugs, f"q={q!r}: {slugs}"
 
 
-async def test_search_backslash_is_literal(client, make_film, add_event):
-    """A literal backslash in q round-trips through the escape= wiring at the SQL level."""
-    # "C\\D" has two alphanumerics (C, D) so it clears the gate. _escape_like doubles the
-    # backslash and ILIKE(escape="\\") collapses it back to one literal "\", matching only
-    # the title that actually contains "C\D". A broken escape= would match the wrong row.
-    backslash_film = await make_film(slug="acdc-slash-2026", title="AC\\DC")
-    await add_event(film=backslash_film, summary="s")
-    plain_film = await make_film(slug="acdc-plain-2026", title="ACDC")
-    await add_event(film=plain_film, summary="s")
+async def test_search_ignores_diacritics(client, make_film, add_event):
+    """Accents fold to base letters: 'shogun' finds 'Shōgun', 'resume' finds 'Résumé'."""
+    shogun = await make_film(slug="shogun-2026", title="Shōgun")
+    await add_event(film=shogun, summary="s")
+    resume = await make_film(slug="resume-2026", title="Résumé")
+    await add_event(film=resume, summary="s")
 
-    r = await client.get("/films/search", params={"q": "C\\D"})
-    assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "acdc-slash-2026" in slugs
-    assert "acdc-plain-2026" not in slugs
+    shogun_slugs = [
+        i["slug"]
+        for i in (await client.get("/films/search", params={"q": "shogun"})).json()["items"]
+    ]
+    assert "shogun-2026" in shogun_slugs, shogun_slugs
+    resume_slugs = [
+        i["slug"]
+        for i in (await client.get("/films/search", params={"q": "resume"})).json()["items"]
+    ]
+    assert "resume-2026" in resume_slugs, resume_slugs
 
 
 # ── NEU-406: alt-title search extension ──────────────────────────────────────

@@ -24,12 +24,13 @@ async def test_grouped_one_row_per_film_day_with_count_and_top_type(client, make
 
     body = (await client.get("/feed/grouped")).json()
     assert body["total"] == 1
-    assert body["limit"] == 50
+    assert body["limit"] == 10
     assert body["offset"] == 0
     assert len(body["items"]) == 1
     item = body["items"][0]
     assert item["film_slug"] == "film-2026"
     assert item["film_title"] == "A Film"
+    assert item["release_year"] == 2026
     assert item["poster_path"] == "/poster.jpg"
     assert item["day"] == "2026-06-03"
     assert item["event_count"] == 3
@@ -194,6 +195,26 @@ async def test_grouped_pagination(client, make_film, add_event):
     assert page2["total"] == 3
     assert len(page2["items"]) == 1
     assert page2["items"][0]["day"] == "2026-06-01"
+
+
+async def test_grouped_paginates_by_day_not_film_rows(client, make_film, add_event):
+    """limit/offset count distinct days: day A (2 films) + day B (1 film) → total=2 days;
+    a 1-day page returns *all* of that day's films, not a single film row."""
+    a1 = await make_film(slug="a1-2026", popularity=90.0)
+    a2 = await make_film(slug="a2-2026", popularity=10.0)
+    b1 = await make_film(slug="b1-2026")
+    for f in (a1, a2):
+        await add_event(film=f, summary="s", created_at=datetime(2026, 6, 2, 10, tzinfo=UTC))
+    await add_event(film=b1, summary="s", created_at=datetime(2026, 6, 1, 10, tzinfo=UTC))
+
+    page1 = (await client.get("/feed/grouped", params={"limit": 1, "offset": 0})).json()
+    assert page1["total"] == 2  # two distinct days, not three film rows
+    assert [i["day"] for i in page1["items"]] == ["2026-06-02", "2026-06-02"]
+    assert [i["film_slug"] for i in page1["items"]] == ["a1-2026", "a2-2026"]  # popularity order
+
+    page2 = (await client.get("/feed/grouped", params={"limit": 1, "offset": 1})).json()
+    assert page2["total"] == 2
+    assert [i["film_slug"] for i in page2["items"]] == ["b1-2026"]
 
 
 async def test_grouped_rejects_out_of_range_pagination(client):

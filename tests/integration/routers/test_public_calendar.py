@@ -22,7 +22,7 @@ async def test_calendar_empty_db(client):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"items": [], "total": 0, "limit": 100, "offset": 0}
+    assert body == {"items": [], "total": 0, "limit": 20, "offset": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -103,20 +103,21 @@ async def test_calendar_type_mapping(client, make_film, add_release_date):
     body = resp.json()
     items_by_slug = {item["film_slug"]: item for item in body["items"]}
 
-    assert items_by_slug["film-type1"]["release_type"] == "premiere"
     assert items_by_slug["film-type2"]["release_type"] == "limited"
     assert items_by_slug["film-type3"]["release_type"] == "wide"
+    assert items_by_slug["film-type3"]["release_year"] == 2026  # from Film.release_date default
+    assert "film-type1" not in items_by_slug  # premiere excluded
     assert "film-type4" not in items_by_slug
     assert "film-type5" not in items_by_slug
     assert "film-type6" not in items_by_slug
 
 
 # ---------------------------------------------------------------------------
-# Case 5 — Festival collapses into premiere
+# Case 5 — Premiere/festival (type 1) is excluded entirely
 # ---------------------------------------------------------------------------
 
 
-async def test_calendar_festival_becomes_premiere(client, make_film, add_release_date):
+async def test_calendar_excludes_premiere(client, make_film, add_release_date):
     film = await make_film(slug="film-cannes", title="Cannes Film")
     await add_release_date(
         film=film,
@@ -129,7 +130,7 @@ async def test_calendar_festival_becomes_premiere(client, make_film, add_release
     assert resp.status_code == 200
     body = resp.json()
     items_by_slug = {item["film_slug"]: item for item in body["items"]}
-    assert items_by_slug["film-cannes"]["release_type"] == "premiere"
+    assert "film-cannes" not in items_by_slug
 
 
 # ---------------------------------------------------------------------------
@@ -148,13 +149,10 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     film_far_wide = await make_film(slug="zzz-far-wide", title="Far Wide")
     await add_release_date(film=film_far_wide, release_type=3, release_date=far_future)
 
-    # Same date, premiere < limited < wide (type ordering)
+    # Same date, limited < wide (type ordering)
     same_date = datetime(2092, 3, 15, 0, 0, tzinfo=UTC)
     film_same_wide = await make_film(slug="zzz-same-wide", title="Same Wide")
     await add_release_date(film=film_same_wide, release_type=3, release_date=same_date)
-
-    film_same_premiere = await make_film(slug="zzz-same-premiere", title="Same Premiere")
-    await add_release_date(film=film_same_premiere, release_type=1, release_date=same_date)
 
     film_same_limited = await make_film(slug="zzz-same-limited", title="Same Limited")
     await add_release_date(film=film_same_limited, release_type=2, release_date=same_date)
@@ -183,7 +181,6 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     # near_future (2090) < same_date (2092) < tie_date (2093) < slug_date (2094) < far_future (2095)
     idx_near_limited = slugs.index("zzz-near-limited")
     idx_far_wide = slugs.index("zzz-far-wide")
-    idx_same_premiere = slugs.index("zzz-same-premiere")
     idx_same_limited = slugs.index("zzz-same-limited")
     idx_same_wide = slugs.index("zzz-same-wide")
     idx_tie_high = slugs.index("zzz-tie-high")
@@ -192,13 +189,13 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     idx_slug_b = slugs.index("zzz-slug-b")
 
     # Date ordering
-    assert idx_near_limited < idx_same_premiere
-    assert idx_same_premiere < idx_tie_high
+    assert idx_near_limited < idx_same_limited
+    assert idx_same_wide < idx_tie_high
     assert idx_tie_high < idx_slug_a
     assert idx_slug_a < idx_far_wide
 
-    # Type ordering within same date: premiere < limited < wide
-    assert idx_same_premiere < idx_same_limited < idx_same_wide
+    # Type ordering within same date: wide < limited (wide releases listed first)
+    assert idx_same_wide < idx_same_limited
 
     # Popularity tiebreak: higher popularity first
     assert idx_tie_high < idx_tie_low
@@ -321,3 +318,25 @@ async def test_calendar_pagination(client, make_film, add_release_date):
     # offset=-1 → 422
     resp = await client.get("/calendar?offset=-1")
     assert resp.status_code == 422
+
+
+async def test_calendar_paginates_by_date_not_film_rows(client, make_film, add_release_date):
+    """limit/offset count distinct dates: date A (2 films) + date B (1 film) → total=2 dates;
+    a 1-date page returns every film on that date, not a single film row."""
+    a1 = await make_film(slug="cal-a1", title="Cal A1")
+    a2 = await make_film(slug="cal-a2", title="Cal A2")
+    b1 = await make_film(slug="cal-b1", title="Cal B1")
+    for f in (a1, a2):
+        await add_release_date(
+            film=f, release_date=datetime(2099, 1, 1, tzinfo=UTC), release_type=3
+        )
+    await add_release_date(film=b1, release_date=datetime(2099, 2, 1, tzinfo=UTC), release_type=3)
+
+    page1 = (await client.get("/calendar", params={"limit": 1, "offset": 0})).json()
+    assert page1["total"] == 2  # two distinct dates, not three film rows
+    assert {i["film_slug"] for i in page1["items"]} == {"cal-a1", "cal-a2"}
+    assert all(i["release_date"].startswith("2099-01-01") for i in page1["items"])
+
+    page2 = (await client.get("/calendar", params={"limit": 1, "offset": 1})).json()
+    assert page2["total"] == 2
+    assert [i["film_slug"] for i in page2["items"]] == ["cal-b1"]

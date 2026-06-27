@@ -16,15 +16,6 @@ from upmovies.public.sitemap import render_sitemap
 router = APIRouter(tags=["public"])
 
 
-@router.get("/films", response_model=FilmIndexResponse)
-async def list_films(
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Depends(get_session),
-) -> FilmIndexResponse:
-    return await service.get_film_index(session, limit=limit, offset=offset)
-
-
 @router.get("/films/search", response_model=FilmIndexResponse)
 async def search_films(
     q: str = Query(..., max_length=200),
@@ -63,7 +54,8 @@ async def get_feed(
 
 @router.get("/feed/grouped", response_model=FeedDayResponse)
 async def get_grouped_feed(
-    limit: int = Query(default=50, ge=1, le=100),
+    # limit/offset count distinct days (newest first), not film rows.
+    limit: int = Query(default=10, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> FeedDayResponse:
@@ -72,7 +64,8 @@ async def get_grouped_feed(
 
 @router.get("/calendar", response_model=CalendarResponse)
 async def get_calendar(
-    limit: int = Query(default=100, ge=1, le=200),
+    # limit/offset count distinct release dates (soonest first), not film rows.
+    limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> CalendarResponse:

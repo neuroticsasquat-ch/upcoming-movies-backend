@@ -16,6 +16,16 @@ from upmovies.llm.client import BatchRequest, BatchResult, Usage
 _DEK_MAX = 500
 _MAX_TOKENS = 256
 
+# Seed the assistant turn so the model continues a JSON envelope instead of preambling or
+# "thinking out loud" — Haiku occasionally narrates its reasoning when a beat type doesn't
+# match the sources, which (pre-guard) leaked into a stored summary. With this prefill the
+# reply is just the summary value + closing `"}`.
+_PREFILL = '{"summary": "'
+
+# A one/two-sentence blurb is well under this. Anything longer is leaked reasoning / runaway
+# output, not a summary — reject it (the event is skipped, not stored as garbage).
+_SUMMARY_MAX_CHARS = 400
+
 log = logging.getLogger(__name__)
 
 # Permissive recovery for malformed `{"summary": "..."}` envelopes (NEU-366). The greedy
@@ -145,26 +155,41 @@ def _recover_summary(candidate: str) -> str | None:
     return value or None
 
 
-def parse_summary(raw: str) -> str:
-    """Extract the JSON object, read its `summary`, and return it stripped. On malformed JSON
-    (`json.JSONDecodeError`), fall back to a permissive recovery of the `summary` value and log
-    a WARNING; if recovery also fails, the original `JSONDecodeError` propagates. Raises
-    `ValueError` when valid JSON carries a missing/empty `summary`."""
-    candidate = _extract_json_object(raw)
+def _parse_once(text: str) -> str:
+    """Extract the JSON object, read its `summary`, and return it stripped. Raises
+    `json.JSONDecodeError` when no JSON/recovery is possible, or `ValueError` when valid JSON
+    carries a missing/empty `summary`."""
+    candidate = _extract_json_object(text)
     try:
         obj = json.loads(candidate)
     except json.JSONDecodeError:
         recovered = _recover_summary(candidate)
         if recovered:
             log.warning(
-                "parse_summary recovered summary from malformed JSON envelope: %r", raw[:500]
+                "parse_summary recovered summary from malformed JSON envelope: %r", text[:500]
             )
             return recovered
         raise
     summary = obj.get("summary") if isinstance(obj, dict) else None
     if not isinstance(summary, str) or not summary.strip():
-        raise ValueError(f"no usable summary in model output: {raw!r}")
+        raise ValueError(f"no usable summary in model output: {text!r}")
     return summary.strip()
+
+
+def parse_summary(raw: str) -> str:
+    """Read the model's `summary` from its reply and return it stripped. Tolerates a full JSON
+    envelope (possibly prose/markdown-wrapped) AND a prefilled continuation (the reply that
+    continues our seeded `{"summary": "` assistant turn). Rejects runaway output — anything
+    longer than `_SUMMARY_MAX_CHARS` or containing a code fence is leaked reasoning, not a
+    summary, so we raise rather than store garbage (the caller skips the event)."""
+    try:
+        summary = _parse_once(raw)
+    except json.JSONDecodeError:
+        # Likely a prefilled continuation (no leading `{`) — rebuild the envelope and retry.
+        summary = _parse_once(_PREFILL + raw)
+    if len(summary) > _SUMMARY_MAX_CHARS or "```" in summary:
+        raise ValueError(f"summary failed sanity checks (len={len(summary)}): {raw!r}")
+    return summary
 
 
 def build_summary_request(
@@ -173,7 +198,11 @@ def build_summary_request(
     """The plain instructions system block + the JSON event payload — shared by both the
     sequential `complete()` path and the batched `complete_batch()` path. Truncates each dek."""
     system = [{"type": "text", "text": _INSTRUCTIONS}]
-    messages = [{"role": "user", "content": json.dumps(_event_payload(event))}]
+    messages = [
+        {"role": "user", "content": json.dumps(_event_payload(event))},
+        # Assistant prefill: forces a JSON-envelope continuation (no preamble/reasoning).
+        {"role": "assistant", "content": _PREFILL},
+    ]
     return system, messages
 
 

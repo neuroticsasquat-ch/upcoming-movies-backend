@@ -102,6 +102,29 @@ def test_parse_summary_raises_on_malformed():
         parse_summary("not json at all")
 
 
+def test_build_summary_request_seeds_assistant_prefill():
+    # The assistant turn is prefilled so the model continues a JSON envelope (no preamble).
+    _system, messages = build_summary_request(_event())
+    assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}
+
+
+def test_parse_summary_handles_prefilled_continuation():
+    # With the prefill, the model's reply has no leading brace — it continues the envelope.
+    assert parse_summary('A neutral update."}') == "A neutral update."
+
+
+def test_parse_summary_rejects_runaway_reasoning():
+    # Chain-of-thought that slips past the JSON contract is far too long to be a summary.
+    leaked = "Wait, let me reconsider this beat. " * 30  # > 400 chars
+    with pytest.raises(ValueError):
+        parse_summary(f'{{"summary": "{leaked}"}}')
+
+
+def test_parse_summary_rejects_code_fence_leak():
+    with pytest.raises(ValueError):
+        parse_summary('{"summary": "no release date. ``` json {x}"}')
+
+
 async def test_summarize_event_returns_result_with_provenance():
     client = FakeCompleter('{"summary": "The studio confirmed a 2027 release."}')
     event = _event()

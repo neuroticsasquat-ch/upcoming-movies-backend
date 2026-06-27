@@ -97,6 +97,7 @@ class FeedResponse(BaseModel):
 class FeedDayItem(BaseModel):
     film_slug: str
     film_title: str
+    release_year: int | None
     poster_path: str | None
     day: date
     top_event_type: str
@@ -113,6 +114,7 @@ class FeedDayResponse(BaseModel):
 class CalendarItem(BaseModel):
     film_slug: str
     film_title: str
+    release_year: int | None
     poster_path: str | None
     release_date: date  # US release date → "YYYY-MM-DD"
     release_type: str  # display bucket: "premiere" | "limited" | "wide"

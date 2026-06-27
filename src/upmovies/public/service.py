@@ -1,5 +1,7 @@
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -46,7 +48,7 @@ from upmovies.public.dto import (
     ReleaseDateOut,
     SourceOut,
 )
-from upmovies.public.release import _TMDB_TYPE_TO_BUCKET, release_type_label
+from upmovies.public.release import _TMDB_TYPE_TO_BUCKET, release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label
 
 _HIDDEN_EVENT_TYPES = ("other",)
@@ -111,56 +113,79 @@ async def _film_index_items(session: AsyncSession, films: list[Film]) -> list[Fi
     return items
 
 
-def _escape_like(q: str) -> str:
-    """Escape LIKE special characters so user input is treated as a literal substring."""
-    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+def _build_diacritic_maps() -> tuple[str, str]:
+    """Build translate() from/to strings mapping each lowercase Latin letter that carries a
+    diacritic to its base ASCII letter (é→e, ō→o, ñ→n, …). Covers the precomposed singles in
+    Latin-1 Supplement + Latin Extended-A/B; multi-char folds (æ, ß) are left untouched."""
+    frm: list[str] = []
+    to: list[str] = []
+    seen: set[str] = set()
+    for cp in range(0x00C0, 0x0250):
+        ch = chr(cp)
+        if not ch.isalpha():
+            continue
+        base = unicodedata.normalize("NFD", ch)[0]
+        if not (base.isascii() and base.isalpha()) or base == ch:
+            continue
+        low = ch.lower()
+        if len(low) != 1 or low in seen:
+            continue
+        seen.add(low)
+        frm.append(low)
+        to.append(base.lower())
+    return "".join(frm), "".join(to)
 
 
-def _primary_title_match(pattern: str) -> ColumnElement[bool]:
-    """Match q against the film's primary title or original_title (no alt-title)."""
-    return or_(
-        Film.title.ilike(pattern, escape="\\"),
-        Film.original_title.ilike(pattern, escape="\\"),
+_DIACRITIC_FROM, _DIACRITIC_TO = _build_diacritic_maps()
+_PY_DIACRITIC = str.maketrans(_DIACRITIC_FROM, _DIACRITIC_TO)
+
+
+def _normalized_col(col: Any) -> ColumnElement[str]:
+    """SQL-side fold for fuzzy title matching: lowercase, strip diacritics, then drop every
+    non-alphanumeric character — so 'Spider-Man' / 'Shōgun' compare as 'spiderman' / 'shogun'.
+    `[:alnum:]` is Unicode-aware in the UTF-8 DB, so non-Latin titles (e.g. '기생충') survive."""
+    return func.regexp_replace(
+        func.translate(func.lower(col), _DIACRITIC_FROM, _DIACRITIC_TO),
+        "[^[:alnum:]]",
+        "",
+        "g",
     )
 
 
-def _title_match(q: str) -> ColumnElement[bool]:
-    """Return a boolean SQLAlchemy clause that matches q against title/original_title/alt-titles.
+def _normalize_query(q: str) -> str:
+    """Python-side counterpart of _normalized_col, applied to the user's query. Mirrors the
+    SQL fold exactly (same diacritic map + keep-alphanumerics) so both sides agree across
+    scripts."""
+    folded = q.lower().translate(_PY_DIACRITIC)
+    return "".join(c for c in folded if c.isalnum())
+
+
+def _primary_title_match(nq: str) -> ColumnElement[bool]:
+    """Match the normalized query against the film's primary title or original_title."""
+    pattern = f"%{nq}%"
+    return or_(
+        _normalized_col(Film.title).like(pattern),
+        _normalized_col(Film.original_title).like(pattern),
+    )
+
+
+def _title_match(nq: str) -> ColumnElement[bool]:
+    """Boolean clause matching the normalized query against title/original_title/alt-titles.
 
     Alt-title matching uses a correlated EXISTS subquery so each film appears at most once
-    (no DISTINCT needed). The same escaped pattern is reused across all three arms.
-    FUTURE: ILIKE '%term%' is non-sargable -- a pg_trgm GIN index on
-    title/original_title/alt-title would let this skip the sequential scan if search gets hot.
+    (no DISTINCT needed). The fold (lowercase + de-accent + strip non-alphanumerics) is
+    applied to both the query and each column so 'spiderman' / 'spider man' find 'Spider-Man'.
+    FUTURE: the fold is non-sargable; a functional pg_trgm index on _normalized_col would let
+    this skip the sequential scan if search gets hot.
     """
-    pattern = f"%{_escape_like(q)}%"
+    pattern = f"%{nq}%"
     alt_title_match = exists(
         select(1).where(
             FilmAlternativeTitle.film_id == Film.id,
-            FilmAlternativeTitle.title.ilike(pattern, escape="\\"),
+            _normalized_col(FilmAlternativeTitle.title).like(pattern),
         )
     )
-    return or_(_primary_title_match(pattern), alt_title_match)
-
-
-async def get_film_index(session: AsyncSession, *, limit: int, offset: int) -> FilmIndexResponse:
-    total = await session.scalar(
-        select(func.count()).select_from(Film).where(*_publicly_visible_film())
-    )
-    films = (
-        (
-            await session.execute(
-                select(Film)
-                .where(*_publicly_visible_film())
-                .order_by(nulls_last(Film.release_date.desc()), Film.id.asc())
-                .limit(limit)
-                .offset(offset)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    items = await _film_index_items(session, list(films))
-    return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
+    return or_(_primary_title_match(nq), alt_title_match)
 
 
 async def get_film_search(
@@ -177,8 +202,8 @@ async def get_film_search(
     alphanumeric_len = sum(1 for c in term if c.isalnum())
     if alphanumeric_len < MIN_QUERY_LEN:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
-    pattern = f"%{_escape_like(term)}%"
-    where = (*_publicly_visible_film(), _title_match(term))
+    nq = _normalize_query(term)
+    where = (*_publicly_visible_film(), _title_match(nq))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
     films = (
         (
@@ -187,7 +212,7 @@ async def get_film_search(
                 .where(*where)
                 .order_by(
                     # case() avoids NULL from original_title IS NULL sorting first under DESC.
-                    case((_primary_title_match(pattern), 1), else_=0).desc(),
+                    case((_primary_title_match(nq), 1), else_=0).desc(),
                     nulls_last(Film.release_date.desc()),
                     Film.id.asc(),
                 )
@@ -281,15 +306,17 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         .all()
     )
 
+    # Surface only the theatrical arc (wide + limited); premiere/digital/physical/TV are dropped.
     release_dates = [
         ReleaseDateOut(
             country=row.iso_3166_1,
             release_type=row.release_type,
-            type_label=release_type_label(row.release_type),
+            type_label=label,
             date=row.release_date,
             certification=row.certification,
         )
         for row in release_date_rows
+        if (label := release_label_for_tmdb_type(row.release_type)) is not None
     ]
 
     genres = list(
@@ -484,31 +511,41 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
 
 
 async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) -> FeedDayResponse:
+    # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
+    # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
+    # number of distinct days, so the client knows when no more days remain.
     day = cast(func.timezone("UTC", Event.created_at), Date)
+    visible = (Film.slug.is_not(None), _visible_events())
 
-    base = (
-        select(
-            Film.slug.label("slug"),
-            Film.title.label("title"),
-            Film.poster_path.label("poster_path"),
-            day.label("day"),
-            func.count().label("event_count"),
-            func.array_agg(distinct(Event.event_type)).label("event_types"),
-        )
+    distinct_days = (
+        select(day.label("day"))
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None), _visible_events())
-        .group_by(Film.id, Film.slug, Film.title, Film.poster_path, day)
+        .where(*visible)
+        .group_by(day)
     )
+    total_days = await session.scalar(select(func.count()).select_from(distinct_days.subquery()))
 
-    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+    window = distinct_days.order_by(day.desc()).limit(limit).offset(offset).subquery()
 
     rows = (
         await session.execute(
-            base.order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
-            .limit(limit)
-            .offset(offset)
+            select(
+                Film.slug.label("slug"),
+                Film.title.label("title"),
+                Film.release_date.label("release_date"),
+                Film.poster_path.label("poster_path"),
+                day.label("day"),
+                func.count().label("event_count"),
+                func.array_agg(distinct(Event.event_type)).label("event_types"),
+            )
+            .select_from(Event)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .join(Film, Film.id == Event.film_id)
+            .where(*visible, day.in_(select(window.c.day)))
+            .group_by(Film.id, Film.slug, Film.title, Film.release_date, Film.poster_path, day)
+            .order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
         )
     ).all()
 
@@ -516,14 +553,15 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
         FeedDayItem(
             film_slug=slug,
             film_title=title,
+            release_year=_release_year(release_date),
             poster_path=poster_path,
             day=day_value,
             top_event_type=most_significant_event_type(event_types),
             event_count=event_count,
         )
-        for slug, title, poster_path, day_value, event_count, event_types in rows
+        for slug, title, release_date, poster_path, day_value, event_count, event_types in rows
     ]
-    return FeedDayResponse(items=items, total=total or 0, limit=limit, offset=offset)
+    return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
@@ -531,46 +569,57 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
     rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
     surfaced_types = tuple(_TMDB_TYPE_TO_BUCKET)  # (1, 2, 3) — derived, never drifts
 
-    base = (
-        select(
-            Film.slug.label("slug"),
-            Film.title.label("title"),
-            Film.poster_path.label("poster_path"),
-            rel_day.label("release_date"),
-            FilmReleaseDate.release_type.label("release_type"),
-        )
-        .select_from(FilmReleaseDate)
-        .join(Film, Film.id == FilmReleaseDate.film_id)
-        .where(
-            FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
-            FilmReleaseDate.release_type.in_(surfaced_types),
-            FilmReleaseDate.release_date
-            >= datetime(today.year, today.month, today.day, tzinfo=UTC),
-            Film.slug.is_not(None),
-            func.coalesce(Film.adult, False).is_(False),
-        )
-        .group_by(
-            Film.id,
-            Film.slug,
-            Film.title,
-            Film.poster_path,
-            rel_day,
-            FilmReleaseDate.release_type,
-        )
+    # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
+    # film rows — so the UI shows "N dates at a time" with a deterministic "view more".
+    # `total` is the number of distinct upcoming dates.
+    visible = (
+        FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
+        FilmReleaseDate.release_type.in_(surfaced_types),
+        FilmReleaseDate.release_date >= datetime(today.year, today.month, today.day, tzinfo=UTC),
+        Film.slug.is_not(None),
+        func.coalesce(Film.adult, False).is_(False),
     )
 
-    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+    distinct_dates = (
+        select(rel_day.label("d"))
+        .select_from(FilmReleaseDate)
+        .join(Film, Film.id == FilmReleaseDate.film_id)
+        .where(*visible)
+        .group_by(rel_day)
+    )
+    total = await session.scalar(select(func.count()).select_from(distinct_dates.subquery()))
+
+    window = distinct_dates.order_by(rel_day.asc()).limit(limit).offset(offset).subquery()
 
     rows = (
         await session.execute(
-            base.order_by(
+            select(
+                Film.slug.label("slug"),
+                Film.title.label("title"),
+                Film.release_date.label("film_release_date"),
+                Film.poster_path.label("poster_path"),
+                rel_day.label("release_date"),
+                FilmReleaseDate.release_type.label("release_type"),
+            )
+            .select_from(FilmReleaseDate)
+            .join(Film, Film.id == FilmReleaseDate.film_id)
+            .where(*visible, rel_day.in_(select(window.c.d)))
+            .group_by(
+                Film.id,
+                Film.slug,
+                Film.title,
+                Film.release_date,
+                Film.poster_path,
+                rel_day,
+                FilmReleaseDate.release_type,
+            )
+            # Within a date, wide (3) before limited (2) → release_type DESC.
+            .order_by(
                 rel_day.asc(),
-                FilmReleaseDate.release_type.asc(),
+                FilmReleaseDate.release_type.desc(),
                 nulls_last(Film.popularity.desc()),
                 Film.slug.asc(),
             )
-            .limit(limit)
-            .offset(offset)
         )
     ).all()
 
@@ -578,10 +627,11 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         CalendarItem(
             film_slug=slug,
             film_title=title,
+            release_year=_release_year(film_release_date),
             poster_path=poster_path,
             release_date=release_date,
             release_type=_TMDB_TYPE_TO_BUCKET[release_type],
         )
-        for slug, title, poster_path, release_date, release_type in rows
+        for slug, title, film_release_date, poster_path, release_date, release_type in rows
     ]
     return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)
