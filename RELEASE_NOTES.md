@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.1.1] - 2026-06-27
+
+### Build System
+
+- **deps:** Update pytest requirement from >=9.0.3 to >=9.1.1 ([#74](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/74))
+- **deps:** Update pytest-asyncio requirement from >=0.25 to >=1.4.0 ([#75](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/75))
+- **deps:** Update respx requirement from >=0.22 to >=0.23.1 ([#76](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/76))
+- **deps:** Update pyright requirement from >=1.1 to >=1.1.411 ([#77](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/77))
+- **deps:** Update pydantic-settings requirement from >=2.7 to >=2.14.2 ([#78](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/78))
+
+### CI
+
+- Match tvbf dependency-automation setup (commit prefixes + merge workflow)
+- **deps:** Bump actions/setup-python from 5 to 6 ([#72](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/72))
+- **deps:** Bump actions/checkout from 6 to 7 ([#73](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/73))
+- Add Sentry release tag and ingestion cron monitors
+- Remove Sentry cron-monitor check-ins (exceeds free quota)
+
 ## [0.1.0] - 2026-06-27
 
 ### Features
