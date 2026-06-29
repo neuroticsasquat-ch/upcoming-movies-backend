@@ -126,6 +126,9 @@ class CalendarItem(BaseModel):
     poster_path: str | None
     release_date: date  # US release date → "YYYY-MM-DD"
     release_type: str  # display bucket: "premiere" | "limited" | "wide"
+    director: str | None  # credited director(s), joined with ", "; null when none
+    stars: list[str]  # first 3 billed cast names
+    genres: list[str]  # up to 3 genre names, ordered by name
 
 
 class CalendarResponse(BaseModel):

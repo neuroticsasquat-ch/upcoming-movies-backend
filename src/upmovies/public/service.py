@@ -600,6 +600,83 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 
+async def _calendar_directors(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, str]:
+    """Director name(s) per film, ordered by billing, joined with ', '. Films with none omitted."""
+    if not film_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(FilmCredit.film_id, Person.name)
+            .join(Person, Person.id == FilmCredit.person_id)
+            .where(
+                FilmCredit.film_id.in_(film_ids),
+                FilmCredit.credit_type == "crew",
+                FilmCredit.job == "Director",
+            )
+            .order_by(
+                FilmCredit.film_id,
+                nulls_last(FilmCredit.credit_order.asc()),
+                Person.name.asc(),
+            )
+        )
+    ).all()
+    names_by_film: dict[UUID, list[str]] = {}
+    for film_id, name in rows:
+        names_by_film.setdefault(film_id, []).append(name)
+    return {film_id: ", ".join(names) for film_id, names in names_by_film.items()}
+
+
+async def _calendar_stars(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
+    """First 3 billed cast names per film (credit_order asc, nulls last, then name)."""
+    if not film_ids:
+        return {}
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=FilmCredit.film_id,
+            order_by=(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc()),
+        )
+        .label("rn")
+    )
+    ranked = (
+        select(FilmCredit.film_id.label("film_id"), Person.name.label("name"), rn)
+        .join(Person, Person.id == FilmCredit.person_id)
+        .where(FilmCredit.film_id.in_(film_ids), FilmCredit.credit_type == "cast")
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(ranked.c.film_id, ranked.c.name)
+            .where(ranked.c.rn <= 3)
+            .order_by(ranked.c.film_id, ranked.c.rn)
+        )
+    ).all()
+    stars_by_film: dict[UUID, list[str]] = {}
+    for film_id, name in rows:
+        stars_by_film.setdefault(film_id, []).append(name)
+    return stars_by_film
+
+
+async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
+    """Up to 3 genre names per film, ordered by name."""
+    if not film_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(FilmGenre.film_id, Genre.name)
+            .join(Genre, Genre.id == FilmGenre.genre_id)
+            .where(FilmGenre.film_id.in_(film_ids))
+            .order_by(FilmGenre.film_id, Genre.name.asc(), Genre.id.asc())
+        )
+    ).all()
+    genres_by_film: dict[UUID, list[str]] = {}
+    for film_id, name in rows:
+        bucket = genres_by_film.setdefault(film_id, [])
+        if len(bucket) < 3:
+            bucket.append(name)
+    return genres_by_film
+
+
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
@@ -630,6 +707,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
     rows = (
         await session.execute(
             select(
+                Film.id.label("film_id"),
                 Film.slug.label("slug"),
                 Film.title.label("title"),
                 Film.release_date.label("film_release_date"),
@@ -659,15 +737,23 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         )
     ).all()
 
+    film_ids = {row.film_id for row in rows}
+    directors_by_film = await _calendar_directors(session, film_ids)
+    stars_by_film = await _calendar_stars(session, film_ids)
+    genres_by_film = await _calendar_genres(session, film_ids)
+
     items = [
         CalendarItem(
-            film_slug=slug,
-            film_title=title,
-            release_year=_release_year(film_release_date),
-            poster_path=poster_path,
-            release_date=release_date,
-            release_type=_TMDB_TYPE_TO_BUCKET[release_type],
+            film_slug=row.slug,
+            film_title=row.title,
+            release_year=_release_year(row.film_release_date),
+            poster_path=row.poster_path,
+            release_date=row.release_date,
+            release_type=_TMDB_TYPE_TO_BUCKET[row.release_type],
+            director=directors_by_film.get(row.film_id),
+            stars=stars_by_film.get(row.film_id, []),
+            genres=genres_by_film.get(row.film_id, []),
         )
-        for slug, title, film_release_date, poster_path, release_date, release_type in rows
+        for row in rows
     ]
     return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)
