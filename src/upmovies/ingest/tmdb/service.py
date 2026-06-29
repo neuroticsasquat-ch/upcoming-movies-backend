@@ -7,9 +7,10 @@ fetch. The caller supplies the window/filter bounds and a session factory so the
 stays decoupled from Settings and easy to drive in tests."""
 
 import logging
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import finalize_run, record_progress
 from upmovies.ingest.tmdb.client import TMDBClient
+from upmovies.ingest.tmdb.filters import classify_skip
 from upmovies.ingest.tmdb.upsert import upsert_film
 
 log = logging.getLogger(__name__)
@@ -33,6 +35,15 @@ class IngestResult:
     films_processed: int
     films_failed: int
     films_skipped: int = 0
+    skipped_by_reason: dict[str, int] = field(default_factory=dict)
+
+
+def _format_skip_detail(skip_counts: Counter[str]) -> str:
+    total = sum(skip_counts.values())
+    if not skip_counts:
+        return f"skipped {total}"
+    breakdown = ", ".join(f"{reason}={n}" for reason, n in sorted(skip_counts.items()))
+    return f"skipped {total} ({breakdown})"
 
 
 @asynccontextmanager
@@ -83,6 +94,7 @@ async def run_tmdb_ingest(
     min_popularity: float,
     failure_threshold: int = 10,
     excluded_statuses: frozenset[str] = frozenset(),
+    min_runtime: int = 0,
 ) -> IngestResult:
     candidate_ids = await _discover_candidate_ids(
         client=client,
@@ -93,14 +105,17 @@ async def run_tmdb_ingest(
 
     processed = 0
     failed = 0
-    skipped = 0
+    skip_counts: Counter[str] = Counter()
     consecutive_failures = 0
 
     for tmdb_id in candidate_ids:
         try:
             details = await client.movie_details(tmdb_id)
-            if details.status in excluded_statuses:
-                skipped += 1
+            reason = classify_skip(
+                details, excluded_statuses=excluded_statuses, min_runtime=min_runtime
+            )
+            if reason is not None:
+                skip_counts[reason] += 1
                 consecutive_failures = 0
                 continue
             async with _owned_session(session_factory) as s:
@@ -129,14 +144,14 @@ async def run_tmdb_ingest(
                     error=f"aborted after {consecutive_failures} consecutive failures",
                 )
                 await s.commit()
-            return IngestResult(processed, failed, skipped)
+            return IngestResult(processed, failed, sum(skip_counts.values()), dict(skip_counts))
 
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,
             run_id,
             status="succeeded",
-            detail=f"upserted {processed}, skipped {skipped} (excluded status)",
+            detail=f"upserted {processed}, {_format_skip_detail(skip_counts)}",
         )
         await s.commit()
-    return IngestResult(processed, failed, skipped)
+    return IngestResult(processed, failed, sum(skip_counts.values()), dict(skip_counts))
