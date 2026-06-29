@@ -173,3 +173,17 @@ def test_settings_public_base_url_override_from_env(monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://backlotter.com")
     s = Settings()  # type: ignore[call-arg]
     assert s.public_base_url == "https://backlotter.com"
+
+
+def test_settings_min_runtime_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("TMDB_MIN_RUNTIME", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.tmdb_min_runtime == 60
+
+
+def test_settings_min_runtime_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("TMDB_MIN_RUNTIME", "0")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.tmdb_min_runtime == 0
