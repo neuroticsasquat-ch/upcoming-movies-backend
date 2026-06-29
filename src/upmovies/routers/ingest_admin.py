@@ -57,6 +57,7 @@ async def _background_tmdb(run_id: UUID, settings: Settings) -> None:
                 min_popularity=settings.tmdb_min_popularity,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
                 excluded_statuses=settings.tmdb_excluded_statuses,
+                min_runtime=settings.tmdb_min_runtime,
             )
     except Exception as e:
         log.exception("background tmdb ingest crashed")
