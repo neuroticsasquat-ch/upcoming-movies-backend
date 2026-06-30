@@ -500,6 +500,80 @@ async def test_apply_rejects_stale_stage_new_event(session):
     assert refreshed.link_note == "stale-stage:casting"
 
 
+async def test_apply_rejects_stale_production_wrap_new_event(session):
+    film = Film(tmdb_id=1, title="Brand New Day", status="Post Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/wrap")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="Post Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_wrap",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+    assert (await session.execute(select(EventStory))).scalars().all() == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.film_id is None
+    assert refreshed.link_confidence is None
+    assert refreshed.link_note == "stale-stage:production_wrap"
+
+
+async def test_apply_keeps_production_wrap_on_in_production_film(session):
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/wrap")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="In Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_wrap",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1 and result.stories_rejected == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1 and events[0].event_type == "production_wrap"
+
+
 async def test_apply_keeps_late_stage_event_on_wrapped_film(session):
     film = Film(tmdb_id=1, title="Starfighter", status="Post Production")
     session.add(film)
