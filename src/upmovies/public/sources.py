@@ -3,6 +3,12 @@ from upmovies.news.models import Story
 SOURCE_CAP = 3
 
 
+def source_url(story: Story) -> str:
+    """The best link for a source: the resolved publisher URL when present
+    (Google News rows that decoded), otherwise the original stored `url`."""
+    return story.resolved_url or story.url
+
+
 def outlet_label(story: Story) -> str:
     """Display label for a source: the resolved publisher when present (Google News
     rows), otherwise the stored `source` (trade feeds, or unresolved rows)."""

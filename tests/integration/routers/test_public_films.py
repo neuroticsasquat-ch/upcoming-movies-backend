@@ -111,6 +111,53 @@ async def test_film_detail_source_label_uses_resolved_outlet(client, make_film, 
     assert body["events"][0]["sources"][0]["source"] == "Variety"
 
 
+async def test_film_detail_source_url_uses_resolved_url(client, make_film, add_event):
+    """When a Google News story has a resolved_url, the public API must return it as the
+    source url. When resolved_url is NULL, the original Google URL is returned as fallback."""
+    film = await make_film(slug="resolve-url-film-2026")
+    await add_event(
+        film=film,
+        summary="Casting.",
+        sources=(
+            {
+                "url": "https://news.google.com/rss/articles/xyz",
+                "source": "Google News: per-film",
+                "title": "Director Set - Variety",
+                "outlet": "Variety",
+                "resolved_url": "https://variety.com/real-article",
+            },
+        ),
+    )
+
+    body = (await client.get(f"/films/{film.slug}")).json()
+    source = body["events"][0]["sources"][0]
+    # resolved_url takes precedence over the raw Google URL
+    assert source["url"] == "https://variety.com/real-article"
+
+
+async def test_film_detail_source_url_falls_back_when_resolved_url_null(
+    client, make_film, add_event
+):
+    """When resolved_url is NULL, the API returns the original stored url."""
+    film = await make_film(slug="resolve-url-fallback-2026")
+    await add_event(
+        film=film,
+        summary="Casting.",
+        sources=(
+            {
+                "url": "https://news.google.com/rss/articles/abc",
+                "source": "Google News: per-film",
+                "title": "Some Headline",
+            },
+        ),
+    )
+
+    body = (await client.get(f"/films/{film.slug}")).json()
+    source = body["events"][0]["sources"][0]
+    # no resolved_url → fall back to the original Google URL
+    assert source["url"] == "https://news.google.com/rss/articles/abc"
+
+
 async def test_film_detail_caps_sources_at_three_distinct_outlets_newest_first(
     client, make_film, add_event
 ):
