@@ -51,3 +51,14 @@ def test_parse_cluster_groups_drops_out_of_range_and_dupes():
 
 def test_parse_cluster_groups_unparseable_returns_none():
     assert parse_cluster_groups('{"events": [trunc', n_stories=3) is None
+
+
+def test_instructions_state_primary_beat_precedence():
+    """NEU-445: the cluster prompt must tell the model to classify by the dominant
+    (headline) beat and ignore incidental mentions, so a trailer/first-look that names
+    cast is not mislabeled 'casting'."""
+    text = _INSTRUCTIONS.lower()
+    assert "dominant" in text
+    assert "incidental" in text
+    # The worked direction the rule exists to fix is spelled out.
+    assert "trailer" in text and "casting" in text

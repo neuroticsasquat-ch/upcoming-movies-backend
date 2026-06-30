@@ -61,6 +61,12 @@ logged) or assign it to a new event (a beat not yet logged). Group new stories t
 the SAME beat into ONE new event; split different beats into separate events. Five outlets \
 reporting the same casting is one event.
 
+Classify each new event by the story's DOMINANT, headline beat — the development the coverage \
+is really about. Incidental details never change the type: a trailer, teaser, or first-look \
+footage release that also names cast is a "trailer", not "casting"; a release date mentioned \
+in passing inside a casting story stays "casting". Split only when a story genuinely reports \
+two co-equal beats.
+
 New events carry:
 - "type": one of announced, casting, production_start, production_wrap, release_date, \
 trailer, other
