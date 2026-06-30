@@ -3034,5 +3034,35 @@
     "event_group": null,
     "is_production_news": false,
     "exclusion_category": "interview-quote"
+  },
+  {
+    "url": "https://people.com/walker-scobell-and-emma-myers-play-red-s-children-in-angry-birds-3-first-look-exclusive-12005126",
+    "source": "People",
+    "title": "Walker Scobell and Emma Myers Play Red's Children in 'Angry Birds 3' First Look (Exclusive)",
+    "summary": "The Angry Birds Movie 3 debuts a first look at its teenage characters, with Walker Scobell and Emma Myers voicing the children of Red and Silver.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1300926,
+    "event_type": "trailer",
+    "event_group": "angry-birds-3-first-look"
+  },
+  {
+    "url": "https://tribune.com.pk/story/2614930/the-angry-birds-movie-3-reveals-walker-scobell-emma-myers-as-red-and-silvers-teenage-children",
+    "source": "Tribune",
+    "title": "The Angry Birds Movie 3 reveals Walker Scobell, Emma Myers as Red and Silver's teenage children",
+    "summary": "A new first look at The Angry Birds Movie 3 reveals its teenage characters, voiced by Walker Scobell and Emma Myers as the children of Red and Silver.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1300926,
+    "event_type": "trailer",
+    "event_group": "angry-birds-3-first-look"
+  },
+  {
+    "url": "https://www.aol.com/lifestyle/angry-birds-movie-3-report-123500096.html",
+    "source": "AOL",
+    "title": "Angry Birds Movie 3 first look reveals teenage characters voiced by Walker Scobell and Emma Myers",
+    "summary": "The Angry Birds Movie 3 shares a first look at its new teenage characters, with Walker Scobell and Emma Myers joining the voice cast as the children of Red and Silver.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1300926,
+    "event_type": "trailer",
+    "event_group": "angry-birds-3-first-look"
   }
 ]
