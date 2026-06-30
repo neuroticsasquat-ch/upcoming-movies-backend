@@ -61,6 +61,19 @@ logged) or assign it to a new event (a beat not yet logged). Group new stories t
 the SAME beat into ONE new event; split different beats into separate events. Five outlets \
 reporting the same casting is one event.
 
+Classify each new event by the story's DOMINANT, headline beat — the development the coverage \
+is really about. Incidental details never change the type:
+
+- A trailer, teaser, or footage release that also names cast is "trailer", not "casting".
+- A first-look article revealing IN-FILM content — animated or CGI character designs, \
+concept art, or actual footage — is "trailer", not "casting", even when voice cast or \
+character names appear prominently. The character design IS the in-film product reveal.
+- A promotional still of a live-action actor in costume (revealing the talent's look rather \
+than in-film footage) is "other", not "trailer".
+- A bare role announcement with no imagery or footage is "casting".
+- A release date mentioned in passing inside a casting story stays "casting".
+Split only when a story genuinely reports two co-equal beats.
+
 New events carry:
 - "type": one of announced, casting, production_start, production_wrap, release_date, \
 trailer, other
