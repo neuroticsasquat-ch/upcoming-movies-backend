@@ -39,7 +39,14 @@ headlines where a cast member "teases", "reacts to", or "opens up on" the film, 
 "everything we know so far" roundups and aggregators with no new information; talent \
 comments on plot points that are not a formal announcement; streaming-platform or \
 catalogue moves of an existing title; and any story whose news value is entirely \
-downstream of an earlier beat.
+downstream of an earlier beat. Aspirational or "wishlist" casting is also not-news: a \
+story where talent expresses a desire, hope, or campaign for a role they do not currently \
+hold — they "want to play", "would love to play", "hope to play", are "gunning for", \
+"eyeing", or "fan-cast" in a part — reports no production fact and is not-news (category \
+"interview-quote") EVEN WHEN it names the exact film and character. A real casting beat \
+reports that a deal closed or the studio/filmmakers confirmed the actor ("has been cast", \
+"joins the cast", "has signed on", or trade-reported "in talks") — an actor merely saying \
+they want the role is not that.
 - "mention": the film is only referenced in passing (an aside, a list, a comparison, or \
 an actor's other project). Mentions are NOT links.
 - "no-match": the story is not about any tracked film. Most stories are no-match — \

@@ -3022,5 +3022,17 @@
     "summary": "",
     "relation": "none",
     "untracked_film": true
+  },
+  {
+    "url": "https://www.joblo.com/madeline-petsch-poison-ivy-the-batman-2/",
+    "source": "JoBlo",
+    "title": "Madeline Petsch wants to devour men and save the planet as Poison Ivy in The Batman Part II",
+    "summary": "Now that James Gunn's DCU is officially underway, it's no surprise that actors want to get in on the action. Madeline Petsch has made clear she'd love to play Poison Ivy in The Batman Part II, even dressing as the character on Halloween \"just to get their attention.\" She concedes nothing is decided: \"They haven't made the movie yet, so who knows?\"",
+    "relation": "about",
+    "expected_film_tmdb_id": 806704,
+    "event_type": "other",
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "interview-quote"
   }
 ]

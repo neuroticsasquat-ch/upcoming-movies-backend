@@ -123,3 +123,15 @@ def test_fixture_has_neu367_interview_reaction_rows():
         assert it.relation == "about"
         assert it.is_production_news is False
         assert it.exclusion_category in {"interview-quote", "reaction"}
+
+
+def test_fixture_has_neu443_aspirational_casting_row():
+    items = load_validation_set(_FIXTURE)
+    by_url = {it.url: it for it in items}
+    url = "https://www.joblo.com/madeline-petsch-poison-ivy-the-batman-2/"
+    assert url in by_url, f"missing curated row {url}"
+    it = by_url[url]
+    assert it.relation == "about"
+    assert it.expected_film_tmdb_id == 806704
+    assert it.is_production_news is False
+    assert it.exclusion_category == "interview-quote"

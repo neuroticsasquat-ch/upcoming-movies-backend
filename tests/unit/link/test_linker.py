@@ -187,3 +187,5 @@ def test_instructions_warn_against_interview_enthusiasm_headlines():
     assert "teases" in lowered
     assert "reacts to" in lowered
     assert "no new production fact" in lowered
+    assert "wishlist" in lowered
+    assert "do not currently hold" in lowered
