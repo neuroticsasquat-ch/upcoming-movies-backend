@@ -297,6 +297,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
 
     events = [
         EventOut(
+            event_id=event.id,
             event_type=event.event_type,
             confidence=event.confidence,
             created_at=event.created_at,

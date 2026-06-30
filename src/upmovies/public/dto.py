@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -11,6 +12,7 @@ class SourceOut(BaseModel):
 
 
 class EventOut(BaseModel):
+    event_id: UUID
     event_type: str
     confidence: str
     created_at: datetime
