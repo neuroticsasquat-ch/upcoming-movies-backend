@@ -90,6 +90,7 @@ class Event(Base):
     )
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

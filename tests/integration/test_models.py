@@ -253,3 +253,35 @@ async def test_person_nullable_fields(session):
     assert p.known_for_department is None
     assert p.gender is None
     assert p.popularity is None
+
+
+async def test_event_region_defaults_none_and_persists(session):
+    from datetime import UTC, datetime
+
+    from upmovies.catalog.models import Film
+    from upmovies.news.models import Event
+
+    film = Film(tmdb_id=920001, title="Region Model Film")
+    session.add(film)
+    await session.flush()
+
+    tagged = Event(
+        film_id=film.id,
+        event_type="release_date",
+        confidence="confirmed",
+        occurred_at=datetime(2026, 7, 1, tzinfo=UTC),
+        region="IN",
+    )
+    untagged = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=datetime(2026, 7, 1, tzinfo=UTC),
+    )
+    session.add_all([tagged, untagged])
+    await session.commit()
+    await session.refresh(tagged)
+    await session.refresh(untagged)
+
+    assert tagged.region == "IN"
+    assert untagged.region is None
