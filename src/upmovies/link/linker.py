@@ -50,6 +50,14 @@ Be strict about same-titled / substring traps: the tracked film "Runner" is not 
 "showrunner" or "Blade Runner". Use the year, original title, genres, and overview to \
 disambiguate.
 
+Be strict about franchise-generic casting/announcement traps: a story that refers to a \
+franchise only generically — "the next Batman", "a new Spider-Man", "the next James Bond" — \
+is NOT necessarily about the tracked film that happens to share that franchise. Studios run \
+multiple films per franchise, and many are not tracked here. Link such a story only when it \
+unambiguously identifies the exact roster film (its distinct subtitle, year, or director). \
+When the only roster candidate is a DIFFERENT entry in the same franchise, return no-match — \
+do not force a nearest-match.
+
 Return ONLY a JSON array — no prose, no markdown — one object per input story, using the \
 story's id:
 [{"id": "<story id>", "film": <roster index or null>, "confidence": <0.0-1.0>, "reason": \
