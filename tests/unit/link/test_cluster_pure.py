@@ -62,3 +62,33 @@ def test_instructions_state_primary_beat_precedence():
     assert "incidental" in text
     # The worked direction the rule exists to fix is spelled out.
     assert "trailer" in text and "casting" in text
+
+
+def test_parse_cluster_groups_extracts_region_uppercased():
+    raw = (
+        '{"events": [{"existing": null, "type": "release_date", "confidence": "confirmed",'
+        ' "region": "in", "stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None
+    assert groups[0].region == "IN"
+
+
+def test_parse_cluster_groups_region_missing_or_invalid_is_none():
+    raw = (
+        '{"events": ['
+        '{"existing": null, "type": "casting", "confidence": "confirmed", "stories": [1]},'
+        '{"existing": null, "type": "release_date", "confidence": "confirmed",'
+        ' "region": "India", "stories": [2]}'
+        "]}"
+    )
+    groups = parse_cluster_groups(raw, n_stories=2)
+    assert groups is not None
+    assert groups[0].region is None  # key absent
+    assert groups[1].region is None  # full country name rejected (not alpha-2)
+
+
+def test_instructions_describe_region_alpha2():
+    text = _INSTRUCTIONS.lower()
+    assert "region" in text
+    assert "alpha-2" in text or "iso 3166" in text

@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import (
     ColumnElement,
     Date,
+    any_,
     case,
     cast,
     distinct,
@@ -95,6 +96,18 @@ def _visible_events() -> ColumnElement[bool]:
     `other` is the uncategorized catch-all where residual hype lands (NEU-367); it is
     hidden from users but kept in the table (reversible)."""
     return Event.event_type.notin_(_HIDDEN_EVENT_TYPES)
+
+
+def _region_visible() -> ColumnElement[bool]:
+    """SQL predicate: a release_date event reaches the public surface only when its region is
+    global (NULL) or in the film's primary set — US plus the film's origin countries. Other
+    event types are never region-filtered. Requires Film to be present in the query (NEU-446)."""
+    return or_(
+        Event.event_type != "release_date",
+        Event.region.is_(None),
+        Event.region == "US",
+        Event.region == any_(Film.origin_country),
+    )
 
 
 def _release_year(release_date: date | None) -> int | None:
@@ -276,7 +289,8 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         await session.execute(
             select(Event, EventSummary.summary)
             .join(EventSummary, EventSummary.event_id == Event.id)
-            .where(Event.film_id == film.id, _visible_events())
+            .join(Film, Film.id == Event.film_id)
+            .where(Event.film_id == film.id, _visible_events(), _region_visible())
             .order_by(Event.created_at.asc(), Event.id.asc())
         )
     ).all()
@@ -479,7 +493,7 @@ async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
             select(Film.slug, func.max(Event.created_at))
             .join(Event, Event.film_id == Film.id)
             .join(EventSummary, EventSummary.event_id == Event.id)
-            .where(_visible_events())
+            .where(_visible_events(), _region_visible())
             .group_by(Film.id, Film.slug)
             .order_by(Film.slug.asc())
         )
@@ -493,14 +507,14 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None), _visible_events())
+        .where(Film.slug.is_not(None), _visible_events(), _region_visible())
     )
     rows = (
         await session.execute(
             select(Event, EventSummary.summary, Film.slug, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Film.slug.is_not(None), _visible_events())
+            .where(Film.slug.is_not(None), _visible_events(), _region_visible())
             .order_by(Event.created_at.desc(), Event.id.asc())
             .limit(limit)
             .offset(offset)
@@ -552,7 +566,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
     # number of distinct days, so the client knows when no more days remain.
     day = cast(func.timezone("UTC", Event.created_at), Date)
-    visible = (Film.slug.is_not(None), _visible_events())
+    visible = (Film.slug.is_not(None), _visible_events(), _region_visible())
 
     distinct_days = (
         select(day.label("day"))

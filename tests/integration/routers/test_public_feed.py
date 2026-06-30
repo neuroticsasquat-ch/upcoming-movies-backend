@@ -202,3 +202,15 @@ async def test_feed_excludes_other_events(client, make_film, add_event):
     body = (await client.get("/feed")).json()
     assert body["total"] == 1
     assert [i["event_type"] for i in body["items"]] == ["casting"]
+
+
+async def test_feed_quiets_non_primary_country_release_date(client, make_film, add_event):
+    film = await make_film(slug="feed-moana-2026", title="Moana", origin_country=["US"])
+    await add_event(film=film, event_type="release_date", summary="Dated in India.", region="IN")
+    await add_event(film=film, event_type="release_date", summary="US date set.", region="US")
+
+    r = await client.get("/feed")
+    assert r.status_code == 200
+    summaries = {i["summary"] for i in r.json()["items"]}
+    assert "US date set." in summaries
+    assert "Dated in India." not in summaries
