@@ -5,6 +5,7 @@ backstop. The caller owns the session/commit."""
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -78,10 +79,14 @@ New events carry:
 - "type": one of announced, casting, production_start, production_wrap, release_date, \
 trailer, other
 - "confidence": "confirmed" if reported as fact, "rumored" if speculation/unconfirmed.
+- "region": for a "release_date" event ONLY, the ISO 3166-1 alpha-2 code (e.g. "IN" for \
+India, "US" for the United States) of the country the date applies to; null when the date is \
+worldwide/global or no country is named. For every non-release_date event, null.
 
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
-"confidence": "confirmed" | "rumored" | null, "stories": [<story number n>, ...]}]}
+"confidence": "confirmed" | "rumored" | null, "region": <ISO 3166-1 alpha-2 or null>, \
+"stories": [<story number n>, ...]}]}
 
 When "existing" is a number, attach its "stories" to that event ("type"/"confidence" may \
 be null). Otherwise it is a new event and "type"/"confidence" are required. "existing" \
@@ -110,6 +115,7 @@ class ClusterGroup:
     event_type: str | None
     confidence: str | None
     story_indices: list[int]
+    region: str | None = None
 
 
 def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | None:
@@ -133,12 +139,19 @@ def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | No
             seen.add(n)
             indices.append(n)
         existing = group.get("existing")
+        region_raw = group.get("region")
+        region = (
+            region_raw.upper()
+            if isinstance(region_raw, str) and re.fullmatch(r"[A-Za-z]{2}", region_raw)
+            else None
+        )
         groups.append(
             ClusterGroup(
                 existing=existing if isinstance(existing, int) else None,
                 event_type=group.get("type"),
                 confidence=group.get("confidence"),
                 story_indices=indices,
+                region=region,
             )
         )
     return groups
