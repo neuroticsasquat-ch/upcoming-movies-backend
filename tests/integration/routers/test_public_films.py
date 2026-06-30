@@ -1054,3 +1054,23 @@ async def test_detail_surfaces_release_date_for_origin_country(client, make_film
     r = await client.get("/films/rrr-2026")
     assert r.status_code == 200
     assert [e["summary"] for e in r.json()["events"]] == ["India theatrical date."]
+
+
+async def test_detail_quiets_foreign_release_date_when_no_origin_country(
+    client, make_film, add_event
+):
+    """A film with no origin_country surfaces US/global dates, omits foreign release_date events.
+
+    Exercises the region = ANY(NULL) → NULL → false SQL semantic, the trickiest edge case
+    in _region_visible().
+    """
+    film = await make_film(slug="world-film-2026", title="World Film", origin_country=None)
+    await add_event(film=film, event_type="release_date", summary="India only date.", region="IN")
+    await add_event(film=film, event_type="release_date", summary="US date.", region="US")
+    await add_event(film=film, event_type="release_date", summary="Global date.", region=None)
+
+    r = await client.get("/films/world-film-2026")
+    assert r.status_code == 200
+    summaries = {e["summary"] for e in r.json()["events"]}
+    assert summaries == {"US date.", "Global date."}
+    assert "India only date." not in summaries
