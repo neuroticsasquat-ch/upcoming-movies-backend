@@ -972,3 +972,13 @@ async def test_detail_external_ids_null_imdb(client, make_film, add_event):
     body = (await client.get("/films/ext-null-2026")).json()
     assert body["imdb_id"] is None
     assert isinstance(body["tmdb_id"], int)
+
+
+async def test_detail_event_exposes_event_id(client, make_film, add_event):
+    film = await make_film(slug="ids-2026")
+    event = await add_event(film=film, event_type="casting", summary="Cast announced.")
+
+    r = await client.get("/films/ids-2026")
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert events[0]["event_id"] == str(event.id)
