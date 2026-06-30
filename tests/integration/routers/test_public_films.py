@@ -1029,3 +1029,28 @@ async def test_detail_event_exposes_event_id(client, make_film, add_event):
     assert r.status_code == 200
     events = r.json()["events"]
     assert events[0]["event_id"] == str(event.id)
+
+
+async def test_detail_quiets_non_primary_country_release_date(client, make_film, add_event):
+    film = await make_film(slug="moana-2026", title="Moana", origin_country=["US"])
+    await add_event(film=film, event_type="release_date", summary="Dated in India.", region="IN")
+    await add_event(film=film, event_type="release_date", summary="US date set.", region="US")
+    await add_event(film=film, event_type="release_date", summary="Pushed worldwide.", region=None)
+    await add_event(film=film, event_type="casting", summary="Cast set.", region=None)
+
+    r = await client.get("/films/moana-2026")
+    assert r.status_code == 200
+    summaries = {e["summary"] for e in r.json()["events"]}
+    assert summaries == {"US date set.", "Pushed worldwide.", "Cast set."}
+    assert "Dated in India." not in summaries
+
+
+async def test_detail_surfaces_release_date_for_origin_country(client, make_film, add_event):
+    film = await make_film(slug="rrr-2026", title="RRR2", origin_country=["IN"])
+    await add_event(
+        film=film, event_type="release_date", summary="India theatrical date.", region="IN"
+    )
+
+    r = await client.get("/films/rrr-2026")
+    assert r.status_code == 200
+    assert [e["summary"] for e in r.json()["events"]] == ["India theatrical date."]
