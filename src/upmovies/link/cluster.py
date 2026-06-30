@@ -34,14 +34,16 @@ _VALID_TYPES = {
     "trailer",
     "other",
 }
-_STALE_EVENT_TYPES = {"announced", "casting", "production_start"}
+_STALE_EVENT_TYPES = {"announced", "casting", "production_start", "production_wrap"}
 _WRAPPED_STATUSES = {"Post Production", "Released"}
 
 
 def is_stale_stage(event_type: str, film_status: str | None) -> bool:
-    """A new event is 'stale-stage' when an early-production beat (casting/announced/
-    production_start) is reported for a film that has already wrapped or released. Such
-    events are dropped at clustering (NEU-367). NULL/unknown status is never stale."""
+    """A new event is 'stale-stage' when an early-or-mid production beat (casting/announced/
+    production_start/production_wrap) is reported for a film that has already wrapped or
+    released. A film in Post Production has by definition already wrapped, so a fresh
+    production_wrap event for it is stale (NEU-444, extending NEU-367). Such events are
+    dropped at clustering. NULL/unknown status is never stale."""
     return event_type in _STALE_EVENT_TYPES and film_status in _WRAPPED_STATUSES
 
 
