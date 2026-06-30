@@ -50,7 +50,7 @@ from upmovies.public.dto import (
     SourceOut,
 )
 from upmovies.public.release import _TMDB_TYPE_TO_BUCKET, release_label_for_tmdb_type
-from upmovies.public.sources import cap_sources, outlet_label
+from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 _HIDDEN_EVENT_TYPES = ("other",)
 
@@ -304,7 +304,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             summary=summary,
             sources=[
                 SourceOut(
-                    url=story.url,
+                    url=source_url(story),
                     source=outlet_label(story),
                     title=story.title,
                     published_at=story.published_at,
@@ -535,7 +535,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
                 summary=summary,
                 sources=[
                     SourceOut(
-                        url=story.url,
+                        url=source_url(story),
                         source=outlet_label(story),
                         title=story.title,
                         published_at=story.published_at,

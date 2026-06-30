@@ -27,6 +27,7 @@ from upmovies.synthesize.summarizer import (
     parse_summary,
     summarize_event,
 )
+from upmovies.synthesize.url_resolution import ResolveResult, run_url_resolution
 
 log = logging.getLogger(__name__)
 
@@ -255,6 +256,15 @@ async def run_synthesize_ingest(
         )
         await s.commit()
 
+    event_ids = [pe.event_id for pe in pending]
+    try:
+        resolve_result = await run_url_resolution(
+            session_factory=session_factory, event_ids=event_ids
+        )
+    except Exception:
+        log.exception("url-resolution stage failed")
+        resolve_result = ResolveResult(resolved=0, failed=0, pending=0)
+
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,
@@ -262,6 +272,8 @@ async def run_synthesize_ingest(
             status="succeeded",
             detail=(
                 f"summarized {new + refreshed} ({new} new, {refreshed} refreshed); {failed} failed"
+                f"; urls resolved {resolve_result.resolved}, failed {resolve_result.failed},"
+                f" pending {resolve_result.pending}"
             ),
         )
         await s.commit()

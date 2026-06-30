@@ -7,6 +7,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     Text,
     UniqueConstraint,
     text,
@@ -30,6 +31,10 @@ class Story(Base):
             "link_status IN ('pending', 'linked', 'rejected')",
             name="ck_story_link_status",
         ),
+        CheckConstraint(
+            "resolve_state IN ('none', 'pending', 'resolved', 'failed')",
+            name="ck_story_resolve_state",
+        ),
         {"schema": "news"},
     )
 
@@ -52,6 +57,9 @@ class Story(Base):
     linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     link_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    resolved_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolve_state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'none'"))
+    resolve_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
