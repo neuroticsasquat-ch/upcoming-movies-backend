@@ -351,7 +351,11 @@ async def apply_cluster_decisions(
                 continue
             occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids)
             event = Event(
-                film_id=plan.film_id, event_type=etype, confidence=conf, occurred_at=occurred
+                film_id=plan.film_id,
+                event_type=etype,
+                confidence=conf,
+                occurred_at=occurred,
+                region=group.region if etype == "release_date" else None,
             )
             session.add(event)
             await session.flush()

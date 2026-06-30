@@ -795,3 +795,65 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
     refreshed = (await session.execute(select(Event).where(Event.id == event.id))).scalar_one()
     assert refreshed.occurred_at == old  # unchanged — timeline stays anchored
     assert refreshed.updated_at > old  # attach bumped updated_at
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — region persistence on release_date events
+# ---------------------------------------------------------------------------
+
+
+async def test_release_date_event_persists_region(session):
+    film = Film(tmdb_id=2, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/region-1")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release_date",
+                    "confidence": "confirmed",
+                    "region": "IN",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    await cluster_film_events(session, client=client, model="m", film_id=film.id, attach_limit=45)
+    await session.commit()
+
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
+    assert event.event_type == "release_date"
+    assert event.region == "IN"
+
+
+async def test_non_release_date_event_ignores_region(session):
+    film = Film(tmdb_id=3, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/region-2")
+    await session.commit()
+
+    # A model that wrongly returns a region on a casting event must not persist it.
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "region": "IN",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    await cluster_film_events(session, client=client, model="m", film_id=film.id, attach_limit=45)
+    await session.commit()
+
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
+    assert event.event_type == "casting"
+    assert event.region is None
