@@ -2998,5 +2998,29 @@
     "event_group": null,
     "is_production_news": false,
     "exclusion_category": "interview-quote"
+  },
+  {
+    "url": "https://screenrant.com/dc-next-batman-actor-anson-mount-knightall-movie/",
+    "source": "ScreenRant",
+    "title": "Warner Bros. Officially Casts The Next Batman",
+    "summary": "Warner Bros. has officially cast its new Batman for one of its most exciting upcoming projects, which is on the path to being a huge success.",
+    "relation": "none",
+    "untracked_film": true
+  },
+  {
+    "url": "https://news.google.com/rss/articles/CBMi0wJBVV95cUxPS1plZUhMVHdTSm1VLUk5X1duVFlSUkhGUkdpTG5PVFM2Rmp6SmtKbmhfUGRWcEJDNFdNdGVHWUJMZnBoV25Jbk16Q21nX2FEWHN4Q0VjaDJHRGMtZ3VfVUt0SHJsN0M4ZzM4VWo0UkJXT2FvSmpFWUR5eFFTc2tyMTZUU0JZSFRoU0YzeW5Pa2FpaE9Vc1kzUHJIalRTQkxuOUJvYnZySGt1cWV6LU9oSmgzQ210R2hXNlZNUU0zb2FlUk5wZzFUVDVGRVd6TlFhR1JHZ3JzcDgzQVFkb2dlNUVwNnRrckFZaEN1UEpOTTVHTlBJMEUxc3ROUGRGN3cxVk10UUhIYWlMU29IOW96NlA3SUhMMXlHOFpYbFFLcllBVWxsRkZTbV9BQm5FaXZLbVg2QjJ3ZzNqbGFsTUZMaG5vZWRETXdiVnFyX1NTQ3NhSWc?oc=5",
+    "source": "Google News: per-film",
+    "title": "Next Batman movie officially revealed in first trailer for 2026 release - MSN",
+    "summary": "",
+    "relation": "none",
+    "untracked_film": true
+  },
+  {
+    "url": "https://news.google.com/rss/articles/CBMinAFBVV95cUxQYXBGeEhfRlI2NER3VFV5T2tSaXB4X2c2TjJtX05Ma2pWWF9WLURWV3R2aFFZTGRJQ0U0WmFUbnhRRlVKS1NhWGxHc2tyVW1DRnZucVlaZ1NCZUY5emhrVzF2SmF3MUFwdEladkJET1oySThCWXc3TmN0aHlfN2dsZEFUaS1IT0YxYlRKY3NYV19pMHVvT3JJQl9yTEI?oc=5",
+    "source": "Google News: trailer",
+    "title": "Warner Bros. Animation Reveals Trailer for 'Batman: Knightfall' - Cinelinx",
+    "summary": "",
+    "relation": "none",
+    "untracked_film": true
   }
 ]
