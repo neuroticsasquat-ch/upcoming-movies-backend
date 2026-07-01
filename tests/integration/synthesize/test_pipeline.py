@@ -12,7 +12,7 @@ from upmovies.llm.client import BatchResult, Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.synthesize.pipeline import _select_pending, _upsert_summary, run_synthesize_ingest
 from upmovies.synthesize.summarizer import SummaryResult
-from upmovies.synthesize.url_resolution import ResolveResult, mark_eligible
+from upmovies.synthesize.url_resolution import ResolveResult, mark_displayed_eligible
 
 
 async def test_synthesize_is_a_valid_ingest_kind(session):
@@ -240,7 +240,8 @@ async def test_sequential_summarizes_new_event_and_finalizes(session):
     assert run.status == "succeeded"
     assert (
         run.detail
-        == "summarized 1 (1 new, 0 refreshed); 0 failed; urls resolved 0, failed 0, pending 0"
+        == "summarized 1 (1 new, 0 refreshed); 0 failed; "
+        "urls marked 0, resolved 0, failed 0, pending 0"
     )
 
 
@@ -452,20 +453,20 @@ async def test_synthesize_invokes_url_resolution_for_run_events(session, monkeyp
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    seen = {}
+    called = {}
 
-    async def fake_resolution(*, session_factory, event_ids):
-        seen["event_ids"] = list(event_ids)
+    async def fake_resolution(*, session_factory, **kwargs):
+        called["invoked"] = True
         async with session_factory() as s:
-            await mark_eligible(s, event_ids)
+            await mark_displayed_eligible(s)
             await s.commit()
-        return ResolveResult(resolved=0, failed=0, pending=1)
+        return ResolveResult(marked=1, resolved=0, failed=0, pending=1)
 
     monkeypatch.setattr(pipeline_mod, "run_url_resolution", fake_resolution)
 
     await _run(session, run_id)
 
-    assert event.id in seen["event_ids"]
+    assert called.get("invoked")
     story = (
         await session.execute(
             select(Story)
@@ -484,7 +485,7 @@ async def test_synthesize_resolution_crash_keeps_summary(session, monkeypatch):
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    async def boom(*, session_factory, event_ids):
+    async def boom(*, session_factory, **kwargs):
         raise RuntimeError("decode blew up")
 
     monkeypatch.setattr(pipeline_mod, "run_url_resolution", boom)
@@ -504,3 +505,50 @@ async def test_synthesize_resolution_crash_keeps_summary(session, monkeypatch):
         )
     ).scalar_one()
     assert run.status == "succeeded"  # resolution crash did not fail the run
+
+
+async def test_detail_reports_marked_google_news_story(session):
+    film = await _film(session)
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=datetime.now(UTC),
+    )
+    session.add(event)
+    await session.flush()
+    story = Story(
+        source="Google News: per-film",
+        url="https://news.google.com/rss/articles/CBMipipe",
+        title="Star cast.",
+        published_at=datetime.now(UTC),
+    )
+    session.add(story)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=story.id))
+    await session.commit()
+
+    run_id = await _create_run(session, kind="synthesize")
+    await session.commit()
+
+    async def fake_resolver(client, url):
+        return "https://variety.com/real"
+
+    await run_synthesize_ingest(
+        session_factory=lambda: session,
+        client=FakeSummaryClient(),
+        run_id=run_id,
+        model="claude-haiku-4-5",
+        prompt_version="1",
+        use_batches=False,
+        url_resolve_delay_seconds=0.0,
+        url_resolve_resolver=fake_resolver,
+    )
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert "urls marked 1, resolved 1" in run.detail

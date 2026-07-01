@@ -1,14 +1,13 @@
 """URL-resolution stage for the synthesize pipeline. Marks Google News stories on
-freshly-synthesized events eligible (`none` -> `pending`), then decodes pending
-stories to publisher URLs with capped retry and a per-run cap. Decoupled from
-summarization: a failure here never affects committed summaries."""
+displayed events eligible (`none` -> `pending`), then decodes pending stories to
+publisher URLs with capped retry and a per-run cap. Decoupled from summarization:
+a failure here never affects committed summaries."""
 
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from uuid import UUID
 
 import httpx
 from sqlalchemy import func, select, update
@@ -25,13 +24,10 @@ log = logging.getLogger(__name__)
 SessionFactory = Callable[[], AsyncSession]
 Resolver = Callable[[httpx.AsyncClient, str], Awaitable[str | None]]
 
-MAX_ATTEMPTS = 3
-RESOLVE_PER_RUN = 50
-POLITENESS_DELAY_SECONDS = 1.0
-
 
 @dataclass
 class ResolveResult:
+    marked: int
     resolved: int
     failed: int
     pending: int
@@ -43,17 +39,17 @@ async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[Async
         yield s
 
 
-async def mark_eligible(session: AsyncSession, event_ids: list[UUID]) -> int:
-    """Flip Google News stories on the given events from 'none' to 'pending'. Scoped
-    to event_ids so events synthesized before this feature stay 'none'. Caller commits."""
-    if not event_ids:
-        return 0
+async def mark_displayed_eligible(session: AsyncSession) -> int:
+    """Flip every DISPLAYED Google News story still in 'none' to 'pending'. 'displayed'
+    = attached to an event via news.event_story. Idempotent: only touches 'none' rows,
+    so 'resolved'/'failed' stay terminal. Caller commits."""
     rows = (
         (
             await session.execute(
                 select(Story)
                 .join(EventStory, EventStory.story_id == Story.id)
-                .where(EventStory.event_id.in_(event_ids), Story.resolve_state == "none")
+                .where(Story.resolve_state == "none")
+                .distinct()
             )
         )
         .scalars()
@@ -71,13 +67,13 @@ async def mark_eligible(session: AsyncSession, event_ids: list[UUID]) -> int:
 async def run_url_resolution(
     *,
     session_factory: SessionFactory,
-    event_ids: list[UUID],
     resolver: Resolver = resolve_google_news_url,
-    per_run: int = RESOLVE_PER_RUN,
-    delay_seconds: float = POLITENESS_DELAY_SECONDS,
+    per_run: int = 500,
+    max_attempts: int = 3,
+    delay_seconds: float = 1.0,
 ) -> ResolveResult:
     async with _owned_session(session_factory) as s:
-        await mark_eligible(s, event_ids)
+        marked = await mark_displayed_eligible(s)
         await s.commit()
 
     async with _owned_session(session_factory) as s:
@@ -111,7 +107,7 @@ async def run_url_resolution(
                     story.resolved_url = real
                     story.resolve_state = "resolved"
                     resolved += 1
-                elif story.resolve_attempts >= MAX_ATTEMPTS:
+                elif story.resolve_attempts >= max_attempts:
                     story.resolve_state = "failed"
                     failed += 1
                 await s.commit()
@@ -124,4 +120,4 @@ async def run_url_resolution(
                 select(func.count()).select_from(Story).where(Story.resolve_state == "pending")
             )
         ).scalar_one()
-    return ResolveResult(resolved=resolved, failed=failed, pending=still)
+    return ResolveResult(marked=marked, resolved=resolved, failed=failed, pending=still)

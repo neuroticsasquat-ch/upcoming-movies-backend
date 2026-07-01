@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
     summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
     summary_prompt_version: str = Field(default="4", alias="SUMMARY_PROMPT_VERSION")
+    url_resolve_per_run: int = Field(default=500, alias="URL_RESOLVE_PER_RUN")
+    url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")
+    url_resolve_delay_seconds: float = Field(default=1.0, alias="URL_RESOLVE_DELAY_SECONDS")
     feed_recency_days: int = Field(default=3, alias="FEED_RECENCY_DAYS")
     feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
     feeds_per_film_throttle_seconds: float = Field(

@@ -18,6 +18,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
 from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
+from upmovies.news.resolve import resolve_google_news_url
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
@@ -27,7 +28,7 @@ from upmovies.synthesize.summarizer import (
     parse_summary,
     summarize_event,
 )
-from upmovies.synthesize.url_resolution import ResolveResult, run_url_resolution
+from upmovies.synthesize.url_resolution import Resolver, ResolveResult, run_url_resolution
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +238,10 @@ async def run_synthesize_ingest(
     model: str,
     prompt_version: str,
     use_batches: bool = True,
+    url_resolve_per_run: int = 500,
+    url_resolve_max_attempts: int = 3,
+    url_resolve_delay_seconds: float = 1.0,
+    url_resolve_resolver: Resolver = resolve_google_news_url,
 ) -> SynthesizeResult:
     async with _owned_session(session_factory) as s:
         pending = await _select_pending(s, prompt_version=prompt_version)
@@ -256,14 +261,17 @@ async def run_synthesize_ingest(
         )
         await s.commit()
 
-    event_ids = [pe.event_id for pe in pending]
     try:
         resolve_result = await run_url_resolution(
-            session_factory=session_factory, event_ids=event_ids
+            session_factory=session_factory,
+            resolver=url_resolve_resolver,
+            per_run=url_resolve_per_run,
+            max_attempts=url_resolve_max_attempts,
+            delay_seconds=url_resolve_delay_seconds,
         )
     except Exception:
         log.exception("url-resolution stage failed")
-        resolve_result = ResolveResult(resolved=0, failed=0, pending=0)
+        resolve_result = ResolveResult(marked=0, resolved=0, failed=0, pending=0)
 
     async with _owned_session(session_factory) as s:
         await finalize_run(
@@ -272,8 +280,8 @@ async def run_synthesize_ingest(
             status="succeeded",
             detail=(
                 f"summarized {new + refreshed} ({new} new, {refreshed} refreshed); {failed} failed"
-                f"; urls resolved {resolve_result.resolved}, failed {resolve_result.failed},"
-                f" pending {resolve_result.pending}"
+                f"; urls marked {resolve_result.marked}, resolved {resolve_result.resolved},"
+                f" failed {resolve_result.failed}, pending {resolve_result.pending}"
             ),
         )
         await s.commit()

@@ -4,14 +4,14 @@ from sqlalchemy import func, select
 
 from upmovies.catalog.models import Film
 from upmovies.news.models import Event, EventStory, Story
-from upmovies.synthesize.url_resolution import mark_eligible, run_url_resolution
+from upmovies.synthesize.url_resolution import mark_displayed_eligible, run_url_resolution
 
 _FILM_SEQ = 0
 
 
 async def _google_story(session, *, url, event=None):
-    """Create a Story at `url`. If `event` is None, also create a Film+Event and
-    attach; otherwise attach to the given event. Returns (event, story)."""
+    """Create a Story at `url` attached to an event (creating a Film+Event if none given).
+    Returns (event, story)."""
     global _FILM_SEQ
     if event is None:
         _FILM_SEQ += 1
@@ -36,33 +36,53 @@ async def _google_story(session, *, url, event=None):
     return event, story
 
 
-async def test_mark_eligible_flips_google_news_stories(session):
-    event, gn_story = await _google_story(
-        session, url="https://news.google.com/rss/articles/CBMiabc"
+async def _unattached_story(session, *, url):
+    """A Story with NO EventStory row (not displayed)."""
+    story = Story(
+        source="Google News: per-film", url=url, title="Headline", published_at=datetime.now(UTC)
     )
-    n = await mark_eligible(session, [event.id])
+    session.add(story)
+    await session.flush()
+    return story
+
+
+async def test_mark_displayed_eligible_flips_all_displayed_google_news(session):
+    _, s1 = await _google_story(session, url="https://news.google.com/rss/articles/CBMiaaa")
+    _, s2 = await _google_story(session, url="https://news.google.com/rss/articles/CBMibbb")
+    n = await mark_displayed_eligible(session)
     await session.commit()
-    refreshed = await session.get(Story, gn_story.id, execution_options={"populate_existing": True})
-    assert n == 1
-    assert refreshed.resolve_state == "pending"
+    r1 = await session.get(Story, s1.id, execution_options={"populate_existing": True})
+    r2 = await session.get(Story, s2.id, execution_options={"populate_existing": True})
+    assert n == 2
+    assert r1.resolve_state == "pending"
+    assert r2.resolve_state == "pending"
 
 
-async def test_mark_eligible_skips_non_google_and_out_of_scope_events(session):
-    event_a, trade_story = await _google_story(session, url="https://variety.com/2026/film/x")
-    event_b, gn_story = await _google_story(
-        session, url="https://news.google.com/rss/articles/CBMidef"
+async def test_mark_displayed_eligible_skips_non_displayed_and_non_google(session):
+    _, trade_story = await _google_story(session, url="https://variety.com/2026/film/x")
+    undisplayed = await _unattached_story(
+        session, url="https://news.google.com/rss/articles/CBMiundisplayed"
     )
-    n = await mark_eligible(session, [event_a.id])  # only event_a in scope
+    await session.commit()
+    n = await mark_displayed_eligible(session)
     await session.commit()
     trade = await session.get(Story, trade_story.id, execution_options={"populate_existing": True})
-    gn = await session.get(Story, gn_story.id, execution_options={"populate_existing": True})
-    assert n == 0  # trade story is not a Google News URL
-    assert trade.resolve_state == "none"
-    assert gn.resolve_state == "none"  # event_b out of scope → untouched (leave-as-is)
+    und = await session.get(Story, undisplayed.id, execution_options={"populate_existing": True})
+    assert n == 0
+    assert trade.resolve_state == "none"  # displayed but not a Google News URL
+    assert und.resolve_state == "none"  # Google News URL but not displayed
 
 
-async def test_run_resolution_success_sets_resolved_url(session):
-    event, gn_story = await _google_story(
+async def test_mark_displayed_eligible_is_idempotent(session):
+    await _google_story(session, url="https://news.google.com/rss/articles/CBMiidem")
+    assert await mark_displayed_eligible(session) == 1
+    await session.commit()
+    assert await mark_displayed_eligible(session) == 0  # already pending → nothing to mark
+    await session.commit()
+
+
+async def test_run_resolution_marks_then_resolves(session):
+    _, gn_story = await _google_story(
         session, url="https://news.google.com/rss/articles/CBMisuccess"
     )
     await session.commit()
@@ -72,12 +92,12 @@ async def test_run_resolution_success_sets_resolved_url(session):
 
     result = await run_url_resolution(
         session_factory=lambda: session,
-        event_ids=[event.id],
         resolver=fake_resolver,
         delay_seconds=0.0,
     )
 
     refreshed = await session.get(Story, gn_story.id, execution_options={"populate_existing": True})
+    assert result.marked == 1
     assert result.resolved == 1
     assert result.failed == 0
     assert result.pending == 0
@@ -87,9 +107,7 @@ async def test_run_resolution_success_sets_resolved_url(session):
 
 
 async def test_run_resolution_caps_retries_then_fails(session):
-    event, gn_story = await _google_story(
-        session, url="https://news.google.com/rss/articles/CBMifail"
-    )
+    _, gn_story = await _google_story(session, url="https://news.google.com/rss/articles/CBMifail")
     await session.commit()
 
     async def always_none(client, url):
@@ -98,7 +116,6 @@ async def test_run_resolution_caps_retries_then_fails(session):
     for _ in range(3):
         await run_url_resolution(
             session_factory=lambda: session,
-            event_ids=[event.id],
             resolver=always_none,
             delay_seconds=0.0,
         )
@@ -119,17 +136,34 @@ async def test_run_resolution_per_run_cap_leaves_remainder_pending(session):
 
     result = await run_url_resolution(
         session_factory=lambda: session,
-        event_ids=[event.id],
         resolver=always_none,
         per_run=2,
         delay_seconds=0.0,
     )
-    assert (
-        result.pending == 3
-    )  # all 3 still pending; 2 were attempted this run (per_run cap), 1 not selected
+    assert result.marked == 3  # all 3 displayed Google News stories marked eligible
+    assert result.pending == 3  # none resolved; all remain pending
     attempted = (
         await session.execute(
             select(func.count()).select_from(Story).where(Story.resolve_attempts == 1)
         )
     ).scalar_one()
     assert attempted == 2  # exactly 2 attempted this run (per_run cap)
+
+
+async def test_run_resolution_honors_custom_max_attempts(session):
+    _, gn_story = await _google_story(session, url="https://news.google.com/rss/articles/CBMimax1")
+    await session.commit()
+
+    async def always_none(client, url):
+        return None
+
+    result = await run_url_resolution(
+        session_factory=lambda: session,
+        resolver=always_none,
+        max_attempts=1,
+        delay_seconds=0.0,
+    )
+    refreshed = await session.get(Story, gn_story.id, execution_options={"populate_existing": True})
+    assert result.failed == 1
+    assert refreshed.resolve_state == "failed"  # cap of 1 → failed after a single miss
+    assert refreshed.resolve_attempts == 1
