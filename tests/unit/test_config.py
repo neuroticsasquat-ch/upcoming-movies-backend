@@ -187,3 +187,28 @@ def test_settings_min_runtime_override_from_env(monkeypatch):
     monkeypatch.setenv("TMDB_MIN_RUNTIME", "0")
     s = Settings()  # type: ignore[call-arg]
     assert s.tmdb_min_runtime == 0
+
+
+def test_settings_has_url_resolve_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    for key in (
+        "URL_RESOLVE_PER_RUN",
+        "URL_RESOLVE_MAX_ATTEMPTS",
+        "URL_RESOLVE_DELAY_SECONDS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.url_resolve_per_run == 500
+    assert s.url_resolve_max_attempts == 3
+    assert s.url_resolve_delay_seconds == 1.0
+
+
+def test_settings_reads_url_resolve_overrides(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("URL_RESOLVE_PER_RUN", "120")
+    monkeypatch.setenv("URL_RESOLVE_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("URL_RESOLVE_DELAY_SECONDS", "0.25")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.url_resolve_per_run == 120
+    assert s.url_resolve_max_attempts == 5
+    assert s.url_resolve_delay_seconds == 0.25

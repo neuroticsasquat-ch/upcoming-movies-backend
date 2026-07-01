@@ -150,6 +150,9 @@ async def _background_synth(run_id: UUID, settings: Settings) -> None:
                 model=settings.summary_model,
                 prompt_version=settings.summary_prompt_version,
                 use_batches=settings.summary_use_batches,
+                url_resolve_per_run=settings.url_resolve_per_run,
+                url_resolve_max_attempts=settings.url_resolve_max_attempts,
+                url_resolve_delay_seconds=settings.url_resolve_delay_seconds,
             )
     except Exception as e:
         log.exception("background synthesize ingest crashed")
