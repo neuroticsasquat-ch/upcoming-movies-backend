@@ -51,7 +51,7 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     assert body["title"] == "The Odyssey"
     assert body["release_date"] == "2026-07-17"
     assert body["release_year"] == 2026
-    assert body["arc_stage"] == "trailer"  # In Production baseline, trailer event wins
+    assert body["arc_stage"] == "shooting"  # arc_stage tracks TMDB status only (NEU-452)
     # created_at ascending: casting (Jan created_at) before trailer (Mar created_at).
     # A stale occurred_at sort would yield the reverse order and fail this assertion.
     assert [e["event_type"] for e in body["events"]] == ["casting", "trailer"]
@@ -708,7 +708,7 @@ async def test_search_item_shape(client, make_film, add_event):
     assert item["title"] == "Shape Film"
     assert item["release_year"] == 2026
     assert item["poster_path"] == "/shape.jpg"
-    assert item["arc_stage"] == "cast"  # Planned baseline + casting event
+    assert item["arc_stage"] == "announced"  # Planned TMDB status → announced (NEU-452)
 
 
 async def test_search_subthreshold_q_returns_empty(client):
@@ -1074,3 +1074,23 @@ async def test_detail_quiets_foreign_release_date_when_no_origin_country(
     summaries = {e["summary"] for e in r.json()["events"]}
     assert summaries == {"US date.", "Global date."}
     assert "India only date." not in summaries
+
+
+async def test_arc_stage_ignores_events_and_tracks_tmdb_status(client, make_film, add_event):
+    """NEU-452: a fabricated/low-trust trailer must not shift production status.
+
+    A film TMDB-reported as "In Production" stays at arc_stage "shooting" regardless of
+    trailer events — whether rumored (the Mshale case after NEU-454's source downgrade)
+    or confirmed. Production status derives solely from TMDB `status`.
+    """
+    film = await make_film(slug="mshale-2027", title="M", status="In Production")
+    await add_event(
+        film=film, event_type="trailer", confidence="rumored", summary="Trailer (rumored)."
+    )
+    await add_event(
+        film=film, event_type="trailer", confidence="confirmed", summary="Trailer (confirmed)."
+    )
+
+    r = await client.get("/films/mshale-2027")
+    assert r.status_code == 200
+    assert r.json()["arc_stage"] == "shooting"
