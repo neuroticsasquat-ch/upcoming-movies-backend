@@ -64,7 +64,10 @@ class RunLLMUsage(Base):
 
     __tablename__ = "run_llm_usage"
     __table_args__ = (
-        CheckConstraint("stage IN ('link', 'cluster', 'summarize')", name="ck_run_llm_usage_stage"),
+        CheckConstraint(
+            "stage IN ('link', 'cluster', 'summarize', 'source_judge')",
+            name="ck_run_llm_usage_stage",
+        ),
         UniqueConstraint("run_id", "stage", name="uq_run_llm_usage_run_stage"),
         {"schema": "ingest"},
     )

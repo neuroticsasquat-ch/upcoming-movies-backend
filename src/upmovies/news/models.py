@@ -136,3 +136,35 @@ class EventSummary(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class SourceDomain(Base):
+    """Per-publisher-domain trust tier for the source-quality gate. `llm_tier` is assigned
+    once by the LLM judge on first sighting and cached; `admin_override` (set from the admin
+    UI) always wins over it. Keyed by the normalized registrable domain (e.g. `mshale.com`)."""
+
+    __tablename__ = "source_domain"
+    __table_args__ = (
+        CheckConstraint(
+            "llm_tier IS NULL OR llm_tier IN ('trusted', 'acceptable', 'low')",
+            name="ck_source_domain_tier",
+        ),
+        CheckConstraint(
+            "admin_override IN ('none', 'block', 'allow', 'trust')",
+            name="ck_source_domain_override",
+        ),
+        {"schema": "news"},
+    )
+
+    domain: Mapped[str] = mapped_column(Text, primary_key=True)
+    llm_tier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admin_override: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'none'"))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    judged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

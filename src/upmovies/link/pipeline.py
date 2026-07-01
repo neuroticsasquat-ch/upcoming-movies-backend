@@ -29,6 +29,7 @@ from upmovies.link.linker import (
     link_story_batch,
 )
 from upmovies.link.roster import Roster, build_roster
+from upmovies.link.source_stage import run_source_quality_stage
 from upmovies.llm.client import BatchRequest, Usage
 from upmovies.news.models import EventStory, Story
 
@@ -169,6 +170,7 @@ async def _cluster_stage_sequential(
     film_ids: Sequence[UUID],
     attach_limit: int,
     cluster_max_tokens: int,
+    unresolved_tier: str = "acceptable",
 ) -> tuple[int, int, int, Usage]:
     events_created = stories_clustered = stories_rejected = 0
     total_usage = Usage()
@@ -182,6 +184,7 @@ async def _cluster_stage_sequential(
                     film_id=film_id,
                     attach_limit=attach_limit,
                     max_tokens=cluster_max_tokens,
+                    unresolved_tier=unresolved_tier,
                 )
                 await s.commit()
             events_created += cluster.events_created
@@ -205,6 +208,7 @@ async def _cluster_stage_batched(
     film_ids: Sequence[UUID],
     attach_limit: int,
     cluster_max_tokens: int,
+    unresolved_tier: str = "acceptable",
 ) -> tuple[int, int, int, Usage]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
     # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
@@ -247,7 +251,9 @@ async def _cluster_stage_batched(
                 detail = result.error_type if result else "missing"
                 raise RuntimeError(f"cluster film {custom_id} unavailable: {detail}")
             async with _owned_session(session_factory) as s:
-                applied = await apply_cluster_decisions(s, plan=plan, raw=result.text)
+                applied = await apply_cluster_decisions(
+                    s, plan=plan, raw=result.text, unresolved_tier=unresolved_tier
+                )
                 await s.commit()
             events_created += applied.events_created
             stories_clustered += applied.stories_clustered
@@ -277,6 +283,9 @@ async def run_link_ingest(
     use_batches: bool = False,
     cluster_use_batches: bool = False,
     cluster_max_tokens: int = 4096,
+    unresolved_tier: str = "acceptable",
+    source_gate_enabled: bool = False,
+    source_judge_model: str = "claude-haiku-4-5",
 ) -> LinkIngestResult:
     async with _owned_session(session_factory) as s:
         roster = await build_roster(s)
@@ -308,6 +317,31 @@ async def run_link_ingest(
         )
         await s.commit()
 
+    # --- Source-quality sub-stage: resolve domains, judge unknowns, drop admin-blocked ---
+    if source_gate_enabled:
+        source_result, source_usage = await run_source_quality_stage(
+            session_factory=session_factory,
+            client=client,
+            judge_model=source_judge_model,
+            unresolved_tier=unresolved_tier,
+        )
+        async with _owned_session(session_factory) as s:
+            await record_llm_usage(
+                s,
+                run_id,
+                stage="source_judge",
+                model=source_judge_model,
+                batched=False,
+                usage=source_usage,
+            )
+            await s.commit()
+        log.info(
+            "source-gate: resolved %d, judged %d, blocked %d",
+            source_result.resolved,
+            source_result.judged,
+            source_result.blocked,
+        )
+
     # --- Stage 2: cluster + classify, per film with unclustered linked stories ---
     async with _owned_session(session_factory) as s:
         clustered = exists().where(EventStory.story_id == Story.id)
@@ -338,6 +372,7 @@ async def run_link_ingest(
         film_ids=film_ids,
         attach_limit=attach_limit,
         cluster_max_tokens=cluster_max_tokens,
+        unresolved_tier=unresolved_tier,
     )
     async with _owned_session(session_factory) as s:
         await record_llm_usage(
