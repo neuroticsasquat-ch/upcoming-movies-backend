@@ -241,3 +241,19 @@ async def test_grouped_other_only_day_is_hidden(client, make_film, add_event):
     body = (await client.get("/feed/grouped")).json()
     assert body["items"] == []
     assert body["total"] == 0
+
+
+async def test_grouped_first_look_is_visible_with_its_top_type(client, make_film, add_event):
+    # NEU-447: first_look is NOT hidden (unlike "other") and is the top type for a day
+    # where it is the only beat.
+    film = await make_film(slug="dynamic-duo-2028", title="Dynamic Duo")
+    await add_event(
+        film=film,
+        event_type="first_look",
+        summary="first footage screened at the event",
+        created_at=datetime(2026, 6, 3, 12, tzinfo=UTC),
+    )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert body["total"] == 1
+    assert body["items"][0]["top_event_type"] == "first_look"

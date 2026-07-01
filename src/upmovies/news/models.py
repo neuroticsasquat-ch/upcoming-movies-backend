@@ -74,7 +74,7 @@ class Event(Base):
     __table_args__ = (
         CheckConstraint(
             "event_type IN ('announced', 'casting', 'production_start', "
-            "'production_wrap', 'release_date', 'trailer', 'other')",
+            "'production_wrap', 'release_date', 'trailer', 'first_look', 'other')",
             name="ck_event_type",
         ),
         CheckConstraint("confidence IN ('confirmed', 'rumored')", name="ck_event_confidence"),
