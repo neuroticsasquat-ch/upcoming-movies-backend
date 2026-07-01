@@ -114,20 +114,6 @@ def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
 
 
-async def _event_types_by_film(
-    session: AsyncSession, film_ids: list[UUID]
-) -> dict[UUID, list[str]]:
-    if not film_ids:
-        return {}
-    rows = await session.execute(
-        select(Event.film_id, Event.event_type).where(Event.film_id.in_(film_ids)).distinct()
-    )
-    result: dict[UUID, list[str]] = {}
-    for film_id, event_type in rows:
-        result.setdefault(film_id, []).append(event_type)
-    return result
-
-
 def _publicly_visible_film() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     """Return a tuple of WHERE clauses that restrict a Film query to publicly visible films."""
     has_summary = (
@@ -139,9 +125,8 @@ def _publicly_visible_film() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     return Film.slug.is_not(None), has_summary
 
 
-async def _film_index_items(session: AsyncSession, films: list[Film]) -> list[FilmIndexItem]:
+def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
     """Build FilmIndexItem list for a page of Film rows."""
-    event_types = await _event_types_by_film(session, [film.id for film in films])
     items: list[FilmIndexItem] = []
     for film in films:
         assert film.slug is not None
@@ -151,7 +136,7 @@ async def _film_index_items(session: AsyncSession, films: list[Film]) -> list[Fi
                 title=film.title,
                 release_year=_release_year(film.release_date),
                 poster_path=film.poster_path,
-                arc_stage=derive_arc_stage(film.status, event_types.get(film.id, [])),
+                arc_stage=derive_arc_stage(film.status),
             )
         )
     return items
@@ -267,7 +252,7 @@ async def get_film_search(
         .scalars()
         .all()
     )
-    items = await _film_index_items(session, list(films))
+    items = _film_index_items(list(films))
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
@@ -277,13 +262,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         return None
     assert film.slug is not None
 
-    all_event_types = [
-        event_type
-        for (event_type,) in await session.execute(
-            select(Event.event_type).where(Event.film_id == film.id).distinct()
-        )
-    ]
-    arc_stage = derive_arc_stage(film.status, all_event_types)
+    arc_stage = derive_arc_stage(film.status)
 
     summarized = (
         await session.execute(
