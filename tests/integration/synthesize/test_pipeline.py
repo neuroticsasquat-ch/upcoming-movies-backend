@@ -239,8 +239,7 @@ async def test_sequential_summarizes_new_event_and_finalizes(session):
     ).scalar_one()
     assert run.status == "succeeded"
     assert (
-        run.detail
-        == "summarized 1 (1 new, 0 refreshed); 0 failed; "
+        run.detail == "summarized 1 (1 new, 0 refreshed); 0 failed; "
         "urls marked 0, resolved 0, failed 0, pending 0"
     )
 

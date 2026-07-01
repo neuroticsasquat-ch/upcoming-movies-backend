@@ -18,6 +18,13 @@ from upmovies.catalog.models import Film
 from upmovies.link.linker import Completer
 from upmovies.llm.client import BatchRequest, Usage
 from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.source_quality import (
+    best_tier,
+    domain_for_story,
+    downgrade_confidence,
+    effective_tier,
+    get_source_domains,
+)
 
 log = logging.getLogger(__name__)
 
@@ -296,6 +303,7 @@ async def apply_cluster_decisions(
     *,
     plan: ClusterPlan,
     raw: str,
+    unresolved_tier: str = "acceptable",
 ) -> ClusterResult:
     """Write half: re-load events/stories from the plan, parse the LLM JSON, and
     create/attach events. The caller owns the session/commit."""
@@ -308,6 +316,22 @@ async def apply_cluster_decisions(
     )
     by_id = {s.id: s for s in stories}
     story_ids = plan.unclustered_story_ids  # n (1-based) -> story_ids[n - 1]
+
+    # Source-quality tiers for the stories in this plan (NEU-454). One query; the gate reads
+    # `resolved_url or url` and skips unresolved Google redirects (neutral default).
+    domain_by_sid = {
+        s.id: domain_for_story(url=s.url, resolved_url=s.resolved_url) for s in stories
+    }
+    tier_rows = await get_source_domains(session, [d for d in domain_by_sid.values() if d])
+
+    def _tier_for(sid: UUID) -> str:
+        domain = domain_by_sid.get(sid)
+        row = tier_rows.get(domain) if domain else None
+        return effective_tier(
+            llm_tier=row.llm_tier if row else None,
+            admin_override=row.admin_override if row else "none",
+            unresolved_default=unresolved_tier,
+        )
 
     groups = parse_cluster_groups(raw, n_stories=len(story_ids))
     if groups is None:
@@ -350,6 +374,9 @@ async def apply_cluster_decisions(
                     assigned.add(sid)
                     stories_rejected += 1
                 continue
+            conf = downgrade_confidence(
+                conf, best_tier((_tier_for(sid) for sid in group_sids), default=unresolved_tier)
+            )
             occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids)
             event = Event(
                 film_id=plan.film_id,
@@ -403,6 +430,7 @@ async def cluster_film_events(
     film_id: UUID,
     attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
+    unresolved_tier: str = "acceptable",
 ) -> tuple[ClusterResult, Usage]:
     built = await build_cluster_request(session, film_id=film_id, attach_limit=attach_limit)
     if built is None:
@@ -414,4 +442,6 @@ async def cluster_film_events(
         messages=messages,
         max_tokens=max_tokens,
     )
-    return await apply_cluster_decisions(session, plan=plan, raw=raw), usage
+    return await apply_cluster_decisions(
+        session, plan=plan, raw=raw, unresolved_tier=unresolved_tier
+    ), usage
