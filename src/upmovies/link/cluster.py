@@ -33,6 +33,7 @@ _VALID_TYPES = {
     "production_wrap",
     "release_date",
     "trailer",
+    "first_look",
     "other",
 }
 _STALE_EVENT_TYPES = {"announced", "casting", "production_start", "production_wrap"}
@@ -65,19 +66,19 @@ reporting the same casting is one event.
 Classify each new event by the story's DOMINANT, headline beat — the development the coverage \
 is really about. Incidental details never change the type:
 
-- A trailer, teaser, or footage release that also names cast is "trailer", not "casting".
-- A first-look article revealing IN-FILM content — animated or CGI character designs, \
-concept art, or actual footage — is "trailer", not "casting", even when voice cast or \
-character names appear prominently. The character design IS the in-film product reveal.
-- A promotional still of a live-action actor in costume (revealing the talent's look rather \
-than in-film footage) is "other", not "trailer".
+- "trailer" means a promotional VIDEO that has been RELEASED for the public to watch (a \
+trailer or teaser the audience can view now). Naming cast does not change this.
+- "first_look" is any OTHER visual reveal that is NOT a released video: footage screened or \
+described at an event or presentation, concept art, animated or CGI character designs, \
+first-look photos, or a promotional still of an actor in costume. Naming cast does not \
+change this.
 - A bare role announcement with no imagery or footage is "casting".
 - A release date mentioned in passing inside a casting story stays "casting".
 Split only when a story genuinely reports two co-equal beats.
 
 New events carry:
 - "type": one of announced, casting, production_start, production_wrap, release_date, \
-trailer, other
+trailer, first_look, other
 - "confidence": "confirmed" if reported as fact, "rumored" if speculation/unconfirmed.
 - "region": for a "release_date" event ONLY, the ISO 3166-1 alpha-2 code (e.g. "IN" for \
 India, "US" for the United States) of the country the date applies to; null when the date is \

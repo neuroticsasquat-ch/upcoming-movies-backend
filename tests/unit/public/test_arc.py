@@ -54,3 +54,15 @@ def test_most_significant_other_ranks_below_announced():
 def test_most_significant_other_only():
     assert most_significant_event_type(["other"]) == "other"
     assert most_significant_event_type(["other", "other"]) == "other"
+
+
+def test_first_look_contributes_nothing_to_arc():
+    # NEU-447: first_look is a visible beat but OFF the arc — like "other" it never advances.
+    assert derive_arc_stage("Planned", ["first_look"]) == "announced"
+    assert derive_arc_stage("In Production", ["first_look"]) == "shooting"
+
+
+def test_most_significant_first_look_ranks_below_arc_types():
+    # first_look ranks like other (-1): loses to any arc-stage type, wins when alone.
+    assert most_significant_event_type(["casting", "first_look"]) == "casting"
+    assert most_significant_event_type(["first_look"]) == "first_look"

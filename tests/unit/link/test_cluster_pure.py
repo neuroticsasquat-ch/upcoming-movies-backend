@@ -92,3 +92,28 @@ def test_instructions_describe_region_alpha2():
     text = _INSTRUCTIONS.lower()
     assert "region" in text
     assert "alpha-2" in text or "iso 3166" in text
+
+
+def test_first_look_is_a_valid_type():
+    from upmovies.link.cluster import _VALID_TYPES
+
+    assert "first_look" in _VALID_TYPES
+
+
+def test_parse_cluster_groups_first_look_type():
+    raw = (
+        '{"events": [{"existing": null, "type": "first_look", "confidence": "confirmed",'
+        ' "stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None
+    assert groups[0].event_type == "first_look"
+
+
+def test_instructions_distinguish_released_video_from_first_look():
+    """NEU-447: a trailer is a RELEASED video the public can watch; footage merely
+    screened/described, concept art, character designs, and first-look photos are
+    'first_look', not 'trailer'."""
+    text = _INSTRUCTIONS.lower()
+    assert "first_look" in text
+    assert "released" in text  # the trailer boundary hinges on a publicly released video

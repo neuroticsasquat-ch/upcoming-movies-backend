@@ -72,3 +72,16 @@ async def test_valid_event_and_link_persist(session):
     session.add(EventStory(event_id=event.id, story_id=story.id))
     await session.commit()  # must not raise
     assert event.created_at is not None
+
+
+async def test_event_accepts_first_look_type(session):
+    film, _ = await _film_and_story(session)
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="first_look",
+            confidence="confirmed",
+            occurred_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()  # must not raise IntegrityError
