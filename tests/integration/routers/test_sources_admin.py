@@ -37,6 +37,25 @@ async def test_list_returns_domains(admin_authed_client, session):
     assert any(d["domain"] == "mshale.com" and d["llm_tier"] == "low" for d in body)
 
 
+async def test_list_does_not_require_csrf_header(admin_authed_client, session):
+    # The frontend omits X-CSRF-Token on GETs (safe methods); the list must still work.
+    await _seed(session, "mshale.com", "low")
+    del admin_authed_client.headers["X-CSRF-Token"]
+    r = await admin_authed_client.get("/admin/sources")
+    assert r.status_code == 200
+    assert any(d["domain"] == "mshale.com" for d in r.json())
+
+
+async def test_set_override_requires_csrf(admin_authed_client, session):
+    # The state-changing override endpoint must still reject requests without CSRF.
+    await _seed(session, "mshale.com", "low")
+    del admin_authed_client.headers["X-CSRF-Token"]
+    r = await admin_authed_client.post(
+        "/admin/sources/mshale.com/override", json={"override": "block"}
+    )
+    assert r.status_code == 403
+
+
 async def test_set_override_roundtrip(admin_authed_client, session):
     await _seed(session, "mshale.com", "low")
     r = await admin_authed_client.post(
