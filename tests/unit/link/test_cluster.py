@@ -42,3 +42,11 @@ def test_early_stage_on_unwrapped_upcoming_film_is_not_stale(event_type, status)
 def test_non_early_stage_types_are_never_stale(event_type):
     assert is_stale_stage(event_type, "Released", PAST, AS_OF) is False
     assert is_stale_stage(event_type, "In Production", FUTURE, AS_OF) is False
+
+
+def test_instructions_name_sibling_spinoff_as_off_topic():
+    from upmovies.link.cluster import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "spin-off" in lowered
+    assert "off_topic" in lowered  # the sentinel is already documented; keep it asserted

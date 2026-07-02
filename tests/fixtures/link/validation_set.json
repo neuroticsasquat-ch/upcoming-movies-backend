@@ -3118,5 +3118,25 @@
     "event_group": null,
     "is_production_news": false,
     "exclusion_category": "roundup"
+  },
+  {
+    "url": "https://www.msn.com/en-us/movies/news/shrek-spin-off-movie-finally-sets-release-date-with-major-star-returning/ar-AA26yGBk",
+    "source": "MSN",
+    "title": "Shrek spin-off movie finally sets release date with major star returning",
+    "summary": "Universal Pictures has officially announced the release date for its next Shrek spin-off movie. Per Deadline, the studio confirmed a Donkey origin film will arrive in June 2028, following Shrek 5's June 2027 release.",
+    "relation": "none",
+    "expected_film_tmdb_id": null,
+    "event_type": null,
+    "event_group": null
+  },
+  {
+    "url": "https://example.com/donkey-origin-movie-june-2028",
+    "source": "Deadline",
+    "title": "Donkey origin movie sets June 2028 release, Eddie Murphy returning",
+    "summary": "The Shrek franchise's Donkey spin-off has locked a June 2028 theatrical date, DreamWorks confirmed, expanding the world beyond the main Shrek films.",
+    "relation": "none",
+    "expected_film_tmdb_id": null,
+    "event_type": null,
+    "event_group": null
   }
 ]

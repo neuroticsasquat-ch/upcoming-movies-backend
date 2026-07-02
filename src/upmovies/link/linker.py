@@ -74,7 +74,13 @@ is NOT necessarily about the tracked film that happens to share that franchise. 
 multiple films per franchise, and many are not tracked here. Link such a story only when it \
 unambiguously identifies the exact roster film (its distinct subtitle, year, or director). \
 When the only roster candidate is a DIFFERENT entry in the same franchise, return no-match — \
-do not force a nearest-match.
+do not force a nearest-match. \
+This includes a distinct, NAMED sibling film — a spin-off, sequel, prequel, or origin/\
+companion film ("a Shrek spin-off", "the Donkey origin movie", "an untitled sequel") — that \
+is a DIFFERENT entry in a tracked film's franchise and is not itself tracked in the roster. \
+Return no-match for it EVEN WHEN the story states a release date: a spin-off's or sequel's \
+own date is not the tracked film's date. Link only when the story unambiguously identifies \
+the exact roster film (its distinct subtitle, year, or director).
 
 Be strict about other-film developments that only name a tracked film as context: a story \
 whose actual subject is a DIFFERENT film — its release-date move, casting, delay, or \

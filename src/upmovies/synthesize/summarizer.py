@@ -76,8 +76,9 @@ dates right — do not describe something that happened on or before this date a
 the future.
 - Date the beat by its OWN date, never by another date that merely appears in the sources. A \
 film's release date, a scheduled premiere, or another event's date mentioned alongside this \
-beat is context, not the date of THIS beat. If the sources do not make this beat's own date \
-clear, state no date for it.
+beat is context, not the date of THIS beat. A DIFFERENT film's release date — a spin-off, \
+sequel, or prequel named in the same story — is likewise context and is NEVER this film's \
+date. If the sources do not make this beat's own date clear, state no date for it.
 - A beat reported now has already happened (a trailer that dropped, a casting that closed); \
 never state it as occurring on a date AFTER `as_of_date`. A date after `as_of_date` is a \
 future/scheduled date (e.g. the film's release), not when this beat took place.
