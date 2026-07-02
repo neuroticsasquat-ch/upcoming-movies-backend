@@ -1009,3 +1009,220 @@ async def test_non_release_date_event_ignores_region(session):
     event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
     assert event.event_type == "casting"
     assert event.region is None
+
+
+# ---------------------------------------------------------------------------
+# NEU-448 — deterministic windowed dedup guardrail
+# ---------------------------------------------------------------------------
+
+
+async def _existing_event(session, film, *, event_type, occurred_at, url):
+    ev = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="confirmed",
+        occurred_at=occurred_at,
+    )
+    session.add(ev)
+    await session.flush()
+    seed = Story(
+        source="X",
+        url=url,
+        title=f"seed {event_type}",
+        link_status="linked",
+        film_id=film.id,
+        published_at=occurred_at,
+        raw={"summary": ""},
+    )
+    session.add(seed)
+    await session.flush()
+    session.add(EventStory(event_id=ev.id, story_id=seed.id))
+    await session.flush()
+    return ev
+
+
+async def test_new_trailer_merges_into_recent_existing_trailer(session):
+    film = Film(tmdb_id=201, title="FF")
+    session.add(film)
+    await session.flush()
+    ev = await _existing_event(
+        session,
+        film,
+        event_type="trailer",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed",
+    )
+    await _linked_story(session, film, "https://e/new", title="trailer released")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1
+    links = (
+        (await session.execute(select(EventStory).where(EventStory.event_id == ev.id)))
+        .scalars()
+        .all()
+    )
+    assert len(links) == 2
+
+
+async def test_new_trailer_outside_window_stays_separate(session):
+    film = Film(tmdb_id=202, title="FF2")
+    session.add(film)
+    await session.flush()
+    await _existing_event(
+        session,
+        film,
+        event_type="trailer",
+        occurred_at=datetime(2025, 11, 1, tzinfo=UTC),
+        url="https://e/seed2",
+    )
+    await _linked_story(session, film, "https://e/new2", title="trailer released")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 2
+
+
+async def test_new_first_look_merges_into_recent_existing_first_look(session):
+    film = Film(tmdb_id=203, title="FF3")
+    session.add(film)
+    await session.flush()
+    await _existing_event(
+        session,
+        film,
+        event_type="first_look",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed3",
+    )
+    await _linked_story(session, film, "https://e/new3", title="concept art")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "first_look", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+
+
+async def test_duplicate_casting_within_window_not_merged(session):
+    film = Film(tmdb_id=204, title="FF4")
+    session.add(film)
+    await session.flush()
+    await _existing_event(
+        session,
+        film,
+        event_type="casting",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed4",
+    )
+    await _linked_story(session, film, "https://e/new4", title="new actor joins")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 2
+
+
+async def test_two_new_trailer_groups_collapse_in_one_pass(session):
+    film = Film(tmdb_id=205, title="FF5")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/a", title="trailer surfaced")
+    await _linked_story(session, film, "https://e/b", title="trailer released")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]},
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [2]},
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    assert result.stories_clustered == 2
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1

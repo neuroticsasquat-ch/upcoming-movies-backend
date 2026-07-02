@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +44,7 @@ _VALID_TYPES = {
     "other",
 }
 _STALE_EVENT_TYPES = {"announced", "casting", "production_start", "production_wrap"}
+_SINGULAR_BEAT_TYPES = {"trailer", "first_look"}
 _WRAPPED_STATUSES = {"Post Production", "Released"}
 
 
@@ -80,13 +81,17 @@ stories to place (each with an integer id "n").
 For each new story, either attach it to an existing event (it continues a beat already \
 logged) or assign it to a new event (a beat not yet logged). Group new stories that report \
 the SAME beat into ONE new event; split different beats into separate events. Five outlets \
-reporting the same casting is one event.
+reporting the same casting is one event. A single trailer or first-look reveal reported \
+across several days by many outlets is ONE event — attach later stories to the existing \
+event rather than opening a new one.
 
 Classify each new event by the story's DOMINANT, headline beat — the development the coverage \
 is really about. Incidental details never change the type:
 
-- "trailer" means a promotional VIDEO that has been RELEASED for the public to watch (a \
-trailer or teaser the audience can view now). Naming cast does not change this.
+- "trailer" means a promotional VIDEO that has been RELEASED for the public to watch right \
+now (a trailer or teaser the audience can view today). Naming cast does not change this. \
+Coverage that a trailer is merely COMING — "expected to arrive", "will drop", "teased", \
+"coming soon", with no watchable video yet — is NOT a trailer; classify it as "other".
 - "first_look" is any OTHER visual reveal that is NOT a released video: footage screened or \
 described at an event or presentation, concept art, animated or CGI character designs, \
 first-look photos, or a promotional still of an actor in costume. Naming cast does not \
@@ -346,6 +351,7 @@ async def apply_cluster_decisions(
     plan: ClusterPlan,
     raw: str,
     unresolved_tier: str = "acceptable",
+    dedup_days: int = 14,
 ) -> ClusterResult:
     """Write half: re-load events/stories from the plan, parse the LLM JSON, and
     create/attach events. The caller owns the session/commit."""
@@ -381,6 +387,13 @@ async def apply_cluster_decisions(
 
     now = datetime.now(UTC)
     as_of_date = plan.run_date or now.date()
+    window_floor = as_of_date - timedelta(days=dedup_days)
+    dedup_targets: dict[str, Event] = {}
+    for ev in existing_events:
+        if ev.event_type in _SINGULAR_BEAT_TYPES and ev.occurred_at.date() >= window_floor:
+            prev = dedup_targets.get(ev.event_type)
+            if prev is None or ev.occurred_at > prev.occurred_at:
+                dedup_targets[ev.event_type] = ev
     assigned: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
@@ -430,20 +443,29 @@ async def apply_cluster_decisions(
                     assigned.add(sid)
                     stories_rejected += 1
                 continue
-            conf = downgrade_confidence(
-                conf, best_tier((_tier_for(sid) for sid in group_sids), default=unresolved_tier)
-            )
-            occurred = min((by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids)
-            event = Event(
-                film_id=plan.film_id,
-                event_type=etype,
-                confidence=conf,
-                occurred_at=occurred,
-                region=group.region if etype == "release_date" else None,
-            )
-            session.add(event)
-            await session.flush()
-            events_created += 1
+            target = dedup_targets.get(etype) if etype in _SINGULAR_BEAT_TYPES else None
+            if target is not None:
+                event = target
+                event.updated_at = now
+            else:
+                conf = downgrade_confidence(
+                    conf, best_tier((_tier_for(sid) for sid in group_sids), default=unresolved_tier)
+                )
+                occurred = min(
+                    (by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids
+                )
+                event = Event(
+                    film_id=plan.film_id,
+                    event_type=etype,
+                    confidence=conf,
+                    occurred_at=occurred,
+                    region=group.region if etype == "release_date" else None,
+                )
+                session.add(event)
+                await session.flush()
+                events_created += 1
+                if etype in _SINGULAR_BEAT_TYPES:
+                    dedup_targets[etype] = event
         for sid in group_sids:
             session.add(EventStory(event_id=event.id, story_id=sid))
             assigned.add(sid)
@@ -490,6 +512,7 @@ async def cluster_film_events(
     attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     unresolved_tier: str = "acceptable",
+    dedup_days: int = 14,
     run_date: date,
 ) -> tuple[ClusterResult, Usage]:
     built = await build_cluster_request(
@@ -505,5 +528,5 @@ async def cluster_film_events(
         max_tokens=max_tokens,
     )
     return await apply_cluster_decisions(
-        session, plan=plan, raw=raw, unresolved_tier=unresolved_tier
+        session, plan=plan, raw=raw, unresolved_tier=unresolved_tier, dedup_days=dedup_days
     ), usage

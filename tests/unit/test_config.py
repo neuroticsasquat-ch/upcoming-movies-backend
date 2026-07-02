@@ -212,3 +212,17 @@ def test_settings_reads_url_resolve_overrides(monkeypatch):
     assert s.url_resolve_per_run == 120
     assert s.url_resolve_max_attempts == 5
     assert s.url_resolve_delay_seconds == 0.25
+
+
+def test_settings_link_singular_dedup_days_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("LINK_SINGULAR_DEDUP_DAYS", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_singular_dedup_days == 14
+
+
+def test_settings_link_singular_dedup_days_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_SINGULAR_DEDUP_DAYS", "7")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_singular_dedup_days == 7

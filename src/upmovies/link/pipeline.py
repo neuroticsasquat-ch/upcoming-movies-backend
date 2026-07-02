@@ -182,6 +182,7 @@ async def _cluster_stage_sequential(
     attach_limit: int,
     cluster_max_tokens: int,
     unresolved_tier: str = "acceptable",
+    dedup_days: int = 14,
     run_date: date,
 ) -> tuple[int, int, int, Usage]:
     events_created = stories_clustered = stories_rejected = 0
@@ -197,6 +198,7 @@ async def _cluster_stage_sequential(
                     attach_limit=attach_limit,
                     max_tokens=cluster_max_tokens,
                     unresolved_tier=unresolved_tier,
+                    dedup_days=dedup_days,
                     run_date=run_date,
                 )
                 await s.commit()
@@ -222,6 +224,7 @@ async def _cluster_stage_batched(
     attach_limit: int,
     cluster_max_tokens: int,
     unresolved_tier: str = "acceptable",
+    dedup_days: int = 14,
     run_date: date,
 ) -> tuple[int, int, int, Usage]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
@@ -267,7 +270,11 @@ async def _cluster_stage_batched(
                 raise RuntimeError(f"cluster film {custom_id} unavailable: {detail}")
             async with _owned_session(session_factory) as s:
                 applied = await apply_cluster_decisions(
-                    s, plan=plan, raw=result.text, unresolved_tier=unresolved_tier
+                    s,
+                    plan=plan,
+                    raw=result.text,
+                    unresolved_tier=unresolved_tier,
+                    dedup_days=dedup_days,
                 )
                 await s.commit()
             events_created += applied.events_created
@@ -299,6 +306,7 @@ async def run_link_ingest(
     cluster_use_batches: bool = False,
     cluster_max_tokens: int = 4096,
     unresolved_tier: str = "acceptable",
+    dedup_days: int = 14,
     source_gate_enabled: bool = False,
     source_judge_model: str = "claude-haiku-4-5",
 ) -> LinkIngestResult:
@@ -390,6 +398,7 @@ async def run_link_ingest(
         attach_limit=attach_limit,
         cluster_max_tokens=cluster_max_tokens,
         unresolved_tier=unresolved_tier,
+        dedup_days=dedup_days,
         run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
