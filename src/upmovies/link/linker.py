@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from upmovies.link.roster import Roster
@@ -64,6 +64,10 @@ multiple films per franchise, and many are not tracked here. Link such a story o
 unambiguously identifies the exact roster film (its distinct subtitle, year, or director). \
 When the only roster candidate is a DIFFERENT entry in the same franchise, return no-match — \
 do not force a nearest-match.
+
+The input is a JSON object `{"as_of_date": <YYYY-MM-DD>, "stories": [...]}`. `as_of_date` is \
+the date this run executed (UTC); treat it as "today" when judging how recent or stale a \
+story is. Classify every story in `stories`.
 
 Return ONLY a JSON array — no prose, no markdown — one object per input story, using the \
 story's id:
@@ -126,23 +130,24 @@ def _extract_json_array(text: str) -> str:
 
 
 def build_link_request(
-    roster: Roster, stories: Sequence[Story]
+    roster: Roster, stories: Sequence[Story], run_date: date
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The cached roster system block + the JSON story payload — shared by both the
     sequential `complete()` path and the batched `complete_batch()` path."""
     # `instructions + roster` prefix = ~15 193 tok — clears Haiku 4.5's 4096-tok cache floor.
     # Verified 2026-06-24: call 1 cache_creation=15 193, call 2 cache_read=15 193 (NEU-377).
     system = [cached_system_block(f"{_INSTRUCTIONS}\n\nROSTER:\n{roster.text}")]
-    messages = [{"role": "user", "content": json.dumps(_story_payload(stories))}]
+    payload = {"as_of_date": run_date.isoformat(), "stories": _story_payload(stories)}
+    messages = [{"role": "user", "content": json.dumps(payload)}]
     return system, messages
 
 
 def build_batch_request(
-    *, custom_id: str, model: str, roster: Roster, stories: Sequence[Story]
+    *, custom_id: str, model: str, roster: Roster, stories: Sequence[Story], run_date: date
 ) -> BatchRequest:
     """One Message-Batch request for a story chunk. `max_tokens` matches the sequential
     path's `_MAX_TOKENS` so the two paths are token-identical."""
-    system, messages = build_link_request(roster, stories)
+    system, messages = build_link_request(roster, stories, run_date)
     return BatchRequest(
         custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )
@@ -215,10 +220,11 @@ async def link_story_batch(
     roster: Roster,
     stories: Sequence[Story],
     floor: float,
+    run_date: date,
 ) -> tuple[BatchLinkResult, Usage]:
     if not stories:
         return BatchLinkResult(0, 0), Usage()
-    system, messages = build_link_request(roster, stories)
+    system, messages = build_link_request(roster, stories, run_date)
     raw, usage = await client.complete_with_usage(
         model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )

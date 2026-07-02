@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 
 from upmovies.llm.client import BatchRequest, BatchResult, Usage
@@ -71,6 +71,9 @@ more — e.g. "{Star} has joined the cast", "{Star} has been cast as {Character}
 optional), "{Star} will reprise their role", "{Star} will make their acting debut".
 - ONE sentence. Add a second only if it carries a distinct production fact (not a trailer \
 like "Composer X has discussed the process").
+- The payload includes `as_of_date`, today's date (UTC). Use it to get tense and relative \
+dates right — do not describe something that happened on or before this date as if it were in \
+the future.
 
 Return ONLY a JSON object, no prose or markdown:
 {"summary": "<your one-sentence update>"}"""
@@ -123,8 +126,9 @@ class BatchCompleter(Protocol):
 class SummaryClient(Completer, BatchCompleter, Protocol): ...
 
 
-def _event_payload(event: EventInput) -> dict[str, Any]:
+def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
     return {
+        "as_of_date": run_date.isoformat(),
         "film": event.film_title,
         "event_type": event.event_type,
         "stories": [
@@ -193,35 +197,37 @@ def parse_summary(raw: str) -> str:
 
 
 def build_summary_request(
-    event: EventInput,
+    event: EventInput, run_date: date
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The plain instructions system block + the JSON event payload — shared by both the
     sequential `complete()` path and the batched `complete_batch()` path. Truncates each dek."""
     system = [{"type": "text", "text": _INSTRUCTIONS}]
     messages = [
-        {"role": "user", "content": json.dumps(_event_payload(event))},
+        {"role": "user", "content": json.dumps(_event_payload(event, run_date))},
         # Assistant prefill: forces a JSON-envelope continuation (no preamble/reasoning).
         {"role": "assistant", "content": _PREFILL},
     ]
     return system, messages
 
 
-def build_summary_batch_request(*, custom_id: str, model: str, event: EventInput) -> BatchRequest:
+def build_summary_batch_request(
+    *, custom_id: str, model: str, event: EventInput, run_date: date
+) -> BatchRequest:
     """One Message-Batch request for one event. `custom_id` is the event id (the caller
     supplies it). `max_tokens` matches the sequential path's `_MAX_TOKENS` for parity."""
-    system, messages = build_summary_request(event)
+    system, messages = build_summary_request(event, run_date)
     return BatchRequest(
         custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )
 
 
 async def summarize_event(
-    *, client: Completer, model: str, prompt_version: str, event: EventInput
+    *, client: Completer, model: str, prompt_version: str, event: EventInput, run_date: date
 ) -> tuple[SummaryResult, Usage]:
     """Sequential path: build the request, call `complete_with_usage` (max_tokens pinned to
     `_MAX_TOKENS` for parity with the batched path), parse the JSON envelope, and bundle the
     provenance the caller persists into `event_summary` alongside the call's token `Usage`."""
-    system, messages = build_summary_request(event)
+    system, messages = build_summary_request(event, run_date)
     raw, usage = await client.complete_with_usage(
         model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )

@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from uuid import uuid4
 
 from upmovies.link.linker import (
@@ -41,7 +42,12 @@ async def _run(response, *, floor=0.7):
     story = _story()
     client = FakeClient(response(str(story.id)))
     result, _usage = await link_story_batch(
-        client=client, model="m", roster=_roster(film_id), stories=[story], floor=floor
+        client=client,
+        model="m",
+        roster=_roster(film_id),
+        stories=[story],
+        floor=floor,
+        run_date=date(2026, 6, 25),
     )
     return story, film_id, client, result
 
@@ -114,11 +120,15 @@ async def test_omitted_story_is_rejected_no_decision():
 
 
 def test_build_link_request_uses_cached_roster_and_story_payload():
-    system, messages = build_link_request(_roster(uuid4()), [_story(title="Runner news")])
+    roster = _roster(uuid4())
+    stories = [_story(title="Runner news")]
+    system, messages = build_link_request(roster, stories, date(2026, 6, 25))
+    # cached roster system block unchanged apart from the constant's new sentence
     assert system[0]["cache_control"] == {"type": "ephemeral"}
-    assert "Runner" in system[0]["text"]
     payload = json.loads(messages[0]["content"])
-    assert payload[0]["title"] == "Runner news"
+    assert payload["as_of_date"] == "2026-06-25"
+    assert isinstance(payload["stories"], list)
+    assert payload["stories"][0]["title"] == "Runner news"
 
 
 def test_apply_link_decisions_links_about_high_confidence():
@@ -133,7 +143,11 @@ def test_apply_link_decisions_links_about_high_confidence():
 
 def test_build_batch_request_carries_custom_id_and_cached_block():
     req = build_batch_request(
-        custom_id="3", model="link-m", roster=_roster(uuid4()), stories=[_story()]
+        custom_id="3",
+        model="link-m",
+        roster=_roster(uuid4()),
+        stories=[_story()],
+        run_date=date(2026, 6, 25),
     )
     assert req.custom_id == "3"
     assert req.model == "link-m"

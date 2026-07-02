@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -47,7 +47,8 @@ class FakeClient:
 
     def _decide(self, system, messages) -> str:
         if "entity-linking classifier" in system[0]["text"]:
-            stories = json.loads(messages[0]["content"])
+            payload = json.loads(messages[0]["content"])
+            stories = payload["stories"]
             return json.dumps(
                 [{"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"} for s in stories]
             )
@@ -219,7 +220,8 @@ class _TaggedFailBatchClient(FakeClient):
         self.batch_requests = reqs
         out = {}
         for r in reqs:
-            stories = json.loads(r.messages[0]["content"])
+            payload = json.loads(r.messages[0]["content"])
+            stories = payload["stories"]
             tainted = any(st["title"].startswith("FAIL") for st in stories)
             if tainted and not self._unparseable:
                 out[r.custom_id] = BatchResult(
@@ -580,6 +582,7 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
         film_ids=[ok_film.id, fail_film.id],
         attach_limit=45,
         cluster_max_tokens=4096,
+        run_date=date(2026, 1, 1),
     )
 
     assert events_created == 1
@@ -627,6 +630,7 @@ async def test_cluster_parse_failure_surfaces_as_failed_sequential(session):
         film_ids=[film.id],
         attach_limit=45,
         cluster_max_tokens=4096,
+        run_date=date(2026, 1, 1),
     )
 
     assert events_created == 0
@@ -682,6 +686,7 @@ async def test_cluster_parse_failure_surfaces_as_failed_batched(session):
         film_ids=[film.id],
         attach_limit=45,
         cluster_max_tokens=4096,
+        run_date=date(2026, 1, 1),
     )
 
     assert events_created == 0
