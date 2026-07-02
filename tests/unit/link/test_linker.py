@@ -247,3 +247,13 @@ def test_instructions_cover_sibling_spinoff_trap():
     # existing "the next Batman" generic-reference rule.
     assert "spin-off" in lowered
     assert "not itself tracked" in lowered
+
+
+def test_instructions_cover_original_to_sequel_trap():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # The sibling trap must run BOTH directions: a story about the original/earlier film
+    # is not its tracked sequel merely because they share a title stem.
+    assert "title stem" in lowered
+    assert "both directions" in lowered

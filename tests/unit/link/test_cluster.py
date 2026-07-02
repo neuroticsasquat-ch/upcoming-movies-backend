@@ -50,3 +50,13 @@ def test_instructions_name_sibling_spinoff_as_off_topic():
     lowered = _INSTRUCTIONS.lower()
     assert "spin-off" in lowered
     assert "off_topic" in lowered  # the sentinel is already documented; keep it asserted
+
+
+def test_instructions_name_original_film_as_off_topic():
+    from upmovies.link.cluster import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # A story about the ORIGINAL/earlier film reaching a tracked sequel's page must be
+    # off_topic, not recorded as the sequel's event.
+    assert "title stem" in lowered
+    assert "off_topic" in lowered
