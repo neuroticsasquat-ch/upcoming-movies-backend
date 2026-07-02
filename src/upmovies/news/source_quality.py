@@ -4,6 +4,7 @@ source is low-trust. Pure functions here have no DB or LLM dependency; the judge
 I/O live lower in this module. The caller owns any transaction."""
 
 import json
+import logging
 from collections.abc import Collection, Iterable
 from datetime import datetime
 from typing import Any
@@ -14,12 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.link.linker import Completer
 from upmovies.llm.client import Usage
-from upmovies.news.models import SourceDomain
+from upmovies.news.models import SourceDomain, Story
 from upmovies.news.resolve import is_google_news_url
 
 # Disable the network suffix-list fetch; rely on tldextract's bundled snapshot so this is
 # deterministic and never hits the network (test rule + offline container safety).
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=())
+
+log = logging.getLogger(__name__)
 
 TIER_RANK: dict[str, int] = {"low": 0, "acceptable": 1, "trusted": 2}
 VALID_TIERS: frozenset[str] = frozenset({"trusted", "acceptable", "low"})
@@ -44,6 +47,17 @@ def domain_for_story(*, url: str, resolved_url: str | None) -> str | None:
     if is_google_news_url(target):
         return None
     return normalize_domain(target)
+
+
+def collect_domain_samples(stories: Iterable[Story]) -> dict[str, str]:
+    """Map each story's gate domain to a sample headline (first seen wins). Stories whose
+    domain is None (an unresolved Google-News redirect) are skipped."""
+    out: dict[str, str] = {}
+    for st in stories:
+        domain = domain_for_story(url=st.url, resolved_url=st.resolved_url)
+        if domain and domain not in out:
+            out[domain] = st.title
+    return out
 
 
 def effective_tier(*, llm_tier: str | None, admin_override: str, unresolved_default: str) -> str:
@@ -149,7 +163,10 @@ async def set_override(
 # LLM domain judge
 # ---------------------------------------------------------------------------
 
-_JUDGE_MAX_TOKENS = 1024
+_JUDGE_MAX_TOKENS = 4096
+# Judge a bounded number of domains per call so the JSON response never overruns the output
+# cap (NEU-460: a single all-domains call truncated, failed to parse, and inserted nothing).
+_JUDGE_BATCH_SIZE = 25
 _JUDGE_INSTRUCTIONS = """You are a source-quality rater for an upcoming-movies news tracker. \
 You are given a JSON array of news source domains, each with one sample headline seen from \
 that domain. Rate each domain's reliability for *movie/entertainment production news* into \
@@ -209,13 +226,30 @@ def parse_judge_verdicts(raw: str, *, domains: set[str]) -> dict[str, tuple[str,
 async def judge_domains(
     *, client: Completer, model: str, items: list[dict[str, str]]
 ) -> tuple[dict[str, tuple[str, str]], Usage]:
-    """Judge a batch of unknown domains in one LLM call. Returns `{domain: (tier, reason)}`
-    plus token usage. No-op (`{}`, empty Usage) for empty input."""
+    """Judge unknown domains in bounded chunks (`_JUDGE_BATCH_SIZE`) so a large batch never
+    overruns the output cap and truncates into unparseable JSON. Returns `{domain: (tier,
+    reason)}` merged across chunks plus summed token usage. A chunk that yields no verdicts
+    is logged (not silently dropped) and the remaining chunks still run. No-op (`{}`, empty
+    Usage) for empty input."""
     if not items:
         return {}, Usage()
-    system, messages = build_judge_request(items)
-    raw, usage = await client.complete_with_usage(
-        model=model, system=system, messages=messages, max_tokens=_JUDGE_MAX_TOKENS
-    )
-    domains = {item["domain"] for item in items}
-    return parse_judge_verdicts(raw, domains=domains), usage
+    verdicts: dict[str, tuple[str, str]] = {}
+    usage = Usage()
+    for start in range(0, len(items), _JUDGE_BATCH_SIZE):
+        chunk = items[start : start + _JUDGE_BATCH_SIZE]
+        system, messages = build_judge_request(chunk)
+        raw, chunk_usage = await client.complete_with_usage(
+            model=model, system=system, messages=messages, max_tokens=_JUDGE_MAX_TOKENS
+        )
+        usage = usage + chunk_usage
+        domains = {item["domain"] for item in chunk}
+        chunk_verdicts = parse_judge_verdicts(raw, domains=domains)
+        if not chunk_verdicts:
+            log.warning(
+                "source-judge: chunk of %d domains produced no verdicts "
+                "(unparseable/empty response; raw prefix: %r)",
+                len(chunk),
+                raw[:200],
+            )
+        verdicts.update(chunk_verdicts)
+    return verdicts, usage
