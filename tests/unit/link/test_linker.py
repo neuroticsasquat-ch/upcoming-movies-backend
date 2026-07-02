@@ -203,3 +203,24 @@ def test_instructions_warn_against_interview_enthusiasm_headlines():
     assert "no new production fact" in lowered
     assert "wishlist" in lowered
     assert "do not currently hold" in lowered
+
+
+async def test_not_news_downstream_recirculation_is_rejected():
+    film_id = uuid4()
+    story = _story(title="Kim Kardashian's son Psalm makes acting debut in Angry Birds Movie 3")
+    raw = (
+        '[{"id": "' + str(story.id) + '", "film": 1, "confidence": 0.0, '
+        '"reason": "not-news", "category": "downstream"}]'
+    )
+    result = apply_link_decisions(raw=raw, stories=[story], roster=_roster(film_id), floor=0.7)
+    assert result.linked == 0
+    assert story.link_status == "rejected"
+    assert story.link_note == "not-news:downstream"
+
+
+def test_instructions_flag_recirculated_old_news():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    text = _INSTRUCTIONS.lower()
+    assert "recirculat" in text or "re-report" in text or "already-known" in text
+    assert "publication date does not make it new" in text or "fresh publication date" in text
