@@ -23,6 +23,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
+from upmovies.catalog.queries import active_film_clause
+from upmovies.config import get_settings
 from upmovies.ingest.runs import finalize_run, record_progress
 from upmovies.news.feeds import (
     FeedSource,
@@ -122,9 +124,16 @@ def drop_stale(entries: Sequence[StoryEntry], *, cutoff: datetime) -> list[Story
 
 async def _film_titles(session_factory: SessionFactory) -> list[str]:
     """Lightweight roster read for per-film queries — the deliberate news→catalog
-    coupling. Title column only (not link.roster.build_roster's heavier rows)."""
+    coupling. Title column only (not link.roster.build_roster's heavier rows).
+    Released/canceled films are excluded so we stop searching news for them (NEU-286)."""
+    excluded = get_settings().tmdb_excluded_statuses
+    today = datetime.now(UTC).date()
     async with _owned_session(session_factory) as s:
-        rows = await s.execute(select(Film.title).order_by(Film.title))
+        rows = await s.execute(
+            select(Film.title)
+            .where(active_film_clause(today=today, excluded_statuses=excluded))
+            .order_by(Film.title)
+        )
         return list(rows.scalars().all())
 
 
