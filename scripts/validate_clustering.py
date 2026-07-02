@@ -83,6 +83,7 @@ async def main(path: str) -> None:
             system, messages = assemble_cluster_payload(
                 film_title=film.title,
                 film_year=film.release_date.year if film.release_date else None,
+                film_release_date=film.release_date,
                 existing_payload=[],
                 new_payload=new_payload,
                 run_date=datetime.now(UTC).date(),

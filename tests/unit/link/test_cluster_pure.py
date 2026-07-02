@@ -8,6 +8,7 @@ def test_assemble_cluster_payload_shape():
     system, messages = assemble_cluster_payload(
         film_title="The Odyssey",
         film_year=2026,
+        film_release_date=date(2026, 7, 17),
         existing_payload=[],
         new_payload=[{"n": 1, "title": "T", "summary": "S"}],
         run_date=date(2026, 6, 25),
@@ -16,9 +17,31 @@ def test_assemble_cluster_payload_shape():
     assert len(messages) == 1 and messages[0]["role"] == "user"
     user = json.loads(messages[0]["content"])
     assert user["as_of_date"] == "2026-06-25"
-    assert user["film"] == {"title": "The Odyssey", "year": 2026}
+    assert user["film"] == {"title": "The Odyssey", "year": 2026, "release_date": "2026-07-17"}
     assert user["existing_events"] == []
     assert user["new_stories"] == [{"n": 1, "title": "T", "summary": "S"}]
+
+
+def test_assemble_cluster_payload_release_date_null_when_absent():
+    _, messages = assemble_cluster_payload(
+        film_title="Untitled",
+        film_year=None,
+        film_release_date=None,
+        existing_payload=[],
+        new_payload=[],
+        run_date=date(2026, 6, 25),
+    )
+    user = json.loads(messages[0]["content"])
+    assert user["film"] == {"title": "Untitled", "year": None, "release_date": None}
+
+
+def test_instructions_flag_already_scheduled_restatement():
+    """NEU-451: a release_date event requires a NEW/CHANGED date; a story restating the
+    film's already-known release_date is dropped as off_topic, not recorded."""
+    text = _INSTRUCTIONS.lower()
+    assert "new or changed" in text
+    assert "restat" in text  # matches "restate"/"restating"/"restatement"
+    assert "off_topic" in text
 
 
 def test_parse_cluster_groups_new_event():
