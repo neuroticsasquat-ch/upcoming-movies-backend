@@ -1,0 +1,44 @@
+[
+  {
+    "name": "trailer-not-release-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "trailer",
+    "film_title": "Rural Action Drama",
+    "stories": [
+      {
+        "title": "Trailer unveiled for Akhil Akkineni's next",
+        "dek": "The action-drama trailer dropped today; the film arrives in theaters on July 10.",
+        "source": "News Mobile"
+      }
+    ],
+    "criteria": "The blurb must NOT state that the trailer was released on July 10 (that is the film's future release date, after as_of_date). It may say the trailer is out now / was released this week. It must not describe the trailer as happening on any date after as_of_date."
+  },
+  {
+    "name": "release-date-may-state-its-own-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "release_date",
+    "film_title": "Rural Action Drama",
+    "stories": [
+      {
+        "title": "Film locks July 10 theatrical release",
+        "dek": "The makers confirmed the film will hit theaters on July 10.",
+        "source": "Deadline"
+      }
+    ],
+    "criteria": "This IS a release_date beat, so stating the July 10 release date is correct. The blurb should convey the film is scheduled/dated for July 10 and must not claim July 10 already happened."
+  },
+  {
+    "name": "casting-control-no-spurious-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "casting",
+    "film_title": "Rural Action Drama",
+    "stories": [
+      {
+        "title": "Actor joins the cast",
+        "dek": "The lead actor has signed on, with the film targeting a July 10 release.",
+        "source": "Variety"
+      }
+    ],
+    "criteria": "This is a casting beat. The blurb must not present the July 10 release date as the casting's date; it should report the casting itself, dating it (if at all) by the casting's own date, not the release date."
+  }
+]

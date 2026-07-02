@@ -123,7 +123,7 @@ def test_settings_summary_defaults(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-haiku-4-5"
     assert s.summary_use_batches is True
-    assert s.summary_prompt_version == "5"
+    assert s.summary_prompt_version == "6"
 
 
 def test_settings_summary_overrides_from_env(monkeypatch):

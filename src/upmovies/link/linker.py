@@ -65,6 +65,13 @@ unambiguously identifies the exact roster film (its distinct subtitle, year, or 
 When the only roster candidate is a DIFFERENT entry in the same franchise, return no-match — \
 do not force a nearest-match.
 
+Be strict about other-film developments that only name a tracked film as context: a story \
+whose actual subject is a DIFFERENT film — its release-date move, casting, delay, or \
+box-office plan — is NOT "about" a tracked film merely because that film is named as a \
+scheduling comparison or reference point (e.g. "Film X shifted its release to avoid clashing \
+with [tracked film]" is about Film X). Return "mention" for the tracked film. Classify \
+"about" only when the NEW development belongs to the tracked film itself.
+
 The input is a JSON object `{"as_of_date": <YYYY-MM-DD>, "stories": [...]}`. `as_of_date` is \
 the date this run executed (UTC); treat it as "today" when judging how recent or stale a \
 story is. Classify every story in `stories`.

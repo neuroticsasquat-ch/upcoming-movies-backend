@@ -62,6 +62,9 @@ def test_build_summary_request_plain_block_and_payload():
     assert "cache_control" not in system[0]
     assert "paraphrase" in system[0]["text"].lower()
     assert "as_of_date" in system[0]["text"]  # instructions point at the field
+    # NEU-453: the beat is dated by its own date, not another date in the sources.
+    # (verbatim substring of the new rule — case-sensitive)
+    assert "OWN date" in system[0]["text"]
     payload = json.loads(messages[0]["content"])
     assert payload["as_of_date"] == "2026-06-25"
     assert payload["film"] == "Runner"

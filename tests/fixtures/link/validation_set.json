@@ -3064,5 +3064,12 @@
     "expected_film_tmdb_id": 1300926,
     "event_type": "trailer",
     "event_group": "angry-birds-3-first-look"
+  },
+  {
+    "url": "https://www.telugucinema.com/neu-453-other-film-postpone",
+    "source": "telugucinema.com",
+    "title": "Telugu film postponed to avoid clashing with Akhil Akkineni's release",
+    "summary": "The makers of the rival film pushed their date to steer clear of the July 10 release it would otherwise have shared.",
+    "relation": "mention"
   }
 ]
