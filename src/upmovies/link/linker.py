@@ -82,6 +82,17 @@ Return no-match for it EVEN WHEN the story states a release date: a spin-off's o
 own date is not the tracked film's date. Link only when the story unambiguously identifies \
 the exact roster film (its distinct subtitle, year, or director).
 
+This franchise trap runs in BOTH directions. A story about an EARLIER or ORIGINAL film in a \
+franchise — the first film, when only its sequel or continuation is tracked here — is NOT \
+about the tracked sequel merely because they share a title stem (a story about "The \
+Housemaid" is not about the tracked "The Housemaid's Secret") or share a lead actor. A \
+trailer, review, or release for the original film is that film's own beat, not the sequel's. \
+Link to the tracked sequel only when the story unambiguously identifies IT — its distinct \
+subtitle, its year, or a detail unique to it; a shared franchise title stem plus a shared \
+star is NOT enough. When the story's real subject is the original/parent film and only the \
+sequel is tracked, return no-match (or "mention" if the tracked sequel is named only in \
+passing).
+
 Be strict about other-film developments that only name a tracked film as context: a story \
 whose actual subject is a DIFFERENT film — its release-date move, casting, delay, or \
 box-office plan — is NOT "about" a tracked film merely because that film is named as a \

@@ -100,11 +100,13 @@ change this.
 - A release date mentioned in passing inside a casting story stays "casting".
 
 Every event must be a beat in THIS film's own life. If a new story's actual subject is a \
-DIFFERENT film — even a spin-off, sequel, or prequel of this film's franchise, or one that \
-names this film only as context or a scheduling comparison (e.g. "another film moved its date \
-to avoid clashing with this one", or "a spin-off sets its own release date") — do not log it \
-as this film's event: put it in its own group with "type": "off_topic" and "confidence": null \
-so it is dropped rather than recorded.
+DIFFERENT film — even a spin-off, sequel, or prequel of this film's franchise, the ORIGINAL \
+or EARLIER film that this one continues (a story about "The Housemaid" is not an event for \
+the tracked "The Housemaid's Secret" merely because they share a title stem or a lead actor), \
+or one that names this film only as context or a scheduling comparison (e.g. "another film \
+moved its date to avoid clashing with this one", or "a spin-off sets its own release date") — \
+do not log it as this film's event: put it in its own group with "type": "off_topic" and \
+"confidence": null so it is dropped rather than recorded.
 
 Split only when a story genuinely reports two co-equal beats.
 
