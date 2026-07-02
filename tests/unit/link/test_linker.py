@@ -224,3 +224,15 @@ def test_instructions_flag_recirculated_old_news():
     text = _INSTRUCTIONS.lower()
     assert "recirculat" in text or "re-report" in text or "already-known" in text
     assert "publication date does not make it new" in text or "fresh publication date" in text
+
+
+def test_instructions_flag_release_calendar_listicles():
+    """NEU-451: weekly/monthly release-calendar listicles (a multi-film list where the
+    tracked film is one entry among many) are not-news:roundup even when they state a
+    release date — a calendar restating a scheduled date is not an announcement."""
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    text = _INSTRUCTIONS.lower()
+    assert "listicle" in text
+    assert "one entry among many" in text
+    assert "release-date announcement" in text

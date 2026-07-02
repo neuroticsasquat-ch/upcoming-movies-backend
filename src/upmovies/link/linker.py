@@ -52,6 +52,12 @@ milestone, "debut", celebrity-family, or human-interest angle — adding no NEW 
 development — is also not-news (category "downstream"): a fresh publication date does not make \
 it new. Use `as_of_date` to reason about whether a beat is genuinely recent or re-circulated \
 old news.
+A periodic release-calendar listicle — a "This Week's" / "This Month's" (OTT &) movie \
+releases post, an "Upcoming <month> releases" roundup, or any multi-film list where a \
+tracked film appears as one entry among many — is not-news (category "roundup") EVEN WHEN \
+it states a release date: a calendar listicle restating a film's already-scheduled date is \
+not a release-date announcement. Use `as_of_date` — a date the film already holds, at or \
+near today, is not a new development.
 - "mention": the film is only referenced in passing (an aside, a list, a comparison, or \
 an actor's other project). Mentions are NOT links.
 - "no-match": the story is not about any tracked film. Most stories are no-match — \

@@ -113,6 +113,12 @@ worldwide/global or no country is named. For every non-release_date event, null.
 The payload includes `as_of_date`, today's date (UTC). Use it to reason about whether an \
 event is recent, upcoming, or already past.
 
+A "release_date" event requires a story announcing a NEW or CHANGED release date. A story \
+that merely restates the film's already-known release date (given as `film.release_date` in \
+the payload), or lists it in a calendar / roundup context, is NOT a new release_date beat — \
+put it in its own group with "type": "off_topic" and "confidence": null so it is dropped \
+rather than recorded.
+
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
 "confidence": "confirmed" | "rumored" | null, "region": <ISO 3166-1 alpha-2 or null>, \
@@ -201,6 +207,7 @@ def assemble_cluster_payload(
     *,
     film_title: str,
     film_year: int | None,
+    film_release_date: date | None,
     existing_payload: list[dict[str, Any]],
     new_payload: list[dict[str, Any]],
     run_date: date,
@@ -210,7 +217,11 @@ def assemble_cluster_payload(
     instructions are below Sonnet's 2048-token cache floor, so no cache_control)."""
     user: dict[str, Any] = {
         "as_of_date": run_date.isoformat(),
-        "film": {"title": film_title, "year": film_year},
+        "film": {
+            "title": film_title,
+            "year": film_year,
+            "release_date": film_release_date.isoformat() if film_release_date else None,
+        },
         "existing_events": existing_payload,
         "new_stories": new_payload,
     }
@@ -303,6 +314,7 @@ async def build_cluster_request(
     system, messages = assemble_cluster_payload(
         film_title=film.title,
         film_year=film.release_date.year if film.release_date else None,
+        film_release_date=film.release_date,
         existing_payload=existing_payload,
         new_payload=new_payload,
         run_date=run_date,

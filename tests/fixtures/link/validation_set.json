@@ -3082,5 +3082,41 @@
     "event_type": "casting",
     "is_production_news": false,
     "exclusion_category": "downstream"
+  },
+  {
+    "url": "https://www.esquireindia.co.in/entertainment/at-the-movies/alpha-movie-release-date-budget-cast-runtime-advance-booking-collection-alia-bhatt-hrithik-roshan-shah-rukh-khan",
+    "source": "Esquire India",
+    "title": "Alpha Movie: Release Date, Budget, Cast, Runtime, Advance Booking Collection And More",
+    "summary": "The seventh film in the YRF Spy Universe series, Alpha is all set to release in theatres this Friday. Directed by debutant Shiv Rawail, the film stars Alia Bhatt and Sharvari.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1122030,
+    "event_type": "release_date",
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "roundup"
+  },
+  {
+    "url": "https://www.filmibeat.com/top-listing/this-weeks-ott-and-movie-releases-in-india-july-3-2026-alpha-dhamaal-4-nagabandham-rao-bahadur-super-subbu-and-more-7-8542.html",
+    "source": "Filmibeat",
+    "title": "This Week's OTT & Movie Releases in India (July 2-3, 2026): Alpha, Nagabandham, Super Subbu & More",
+    "summary": "Explore the complete list of this week's OTT and theatrical releases in India (July 2-3, 2026), including Alpha, Dhamaal 4, Nagabandham, Rao Bahadur, Super Subbu, Isakapatnam, Mollywood Times, Hangman, and many more across Bollywood, Telugu, Tamil, Kannada, Malayalam, and Hollywood.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1122030,
+    "event_type": "release_date",
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "roundup"
+  },
+  {
+    "url": "https://www.msn.com/en-in/entertainment/bollywood/upcoming-bollywood-movie-releases-in-july-2026-alia-bhatt-sharvaris-alpha-ajay-devgns-dhamaal-4-and-more/ar-AA26hHWT",
+    "source": "MSN",
+    "title": "Upcoming Bollywood movie releases in July 2026: Alia Bhatt-Sharvari's Alpha, Ajay Devgn's Dhamaal 4 and more",
+    "summary": "From action thrillers to comedies, July 2026 theatrical releases kick off the second half of the year with films such as Alpha and Dhamaal 4 among many others.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1122030,
+    "event_type": "release_date",
+    "event_group": null,
+    "is_production_news": false,
+    "exclusion_category": "roundup"
   }
 ]
