@@ -19,6 +19,7 @@ from upmovies.llm.client import Usage
 from upmovies.news.models import EventStory, Story
 from upmovies.news.resolve import is_google_news_url, resolve_google_news_url
 from upmovies.news.source_quality import (
+    collect_domain_samples,
     domain_for_story,
     effective_tier,
     get_source_domains,
@@ -107,14 +108,7 @@ async def run_source_quality_stage(
     # 2. Re-read the batch (now with resolved_urls), compute domains, judge unknowns.
     async with _owned_session(session_factory) as s:
         stories = await _linked_unclustered(s)
-        domain_by_sid = {
-            st.id: domain_for_story(url=st.url, resolved_url=st.resolved_url) for st in stories
-        }
-        sample_by_domain: dict[str, str] = {}
-        for st in stories:
-            d = domain_by_sid[st.id]
-            if d and d not in sample_by_domain:
-                sample_by_domain[d] = st.title
+        sample_by_domain = collect_domain_samples(stories)
         all_domains = set(sample_by_domain)
         known = await get_source_domains(s, all_domains)
         unknown = sorted(all_domains - set(known))
@@ -155,3 +149,29 @@ async def run_source_quality_stage(
         await s.commit()
 
     return SourceQualityResult(resolved=resolved, judged=judged, blocked=blocked), usage
+
+
+async def backfill_source_domains(
+    *,
+    session_factory: SessionFactory,
+    client: Completer,
+    judge_model: str,
+) -> int:
+    """One-off: judge every already-resolved publisher domain that has no source_domain row
+    yet, so the admin Sources page is populated without waiting for domains to re-resolve
+    during future ingest runs (NEU-460). Idempotent — judges only still-unknown domains.
+    Returns the number of new rows inserted."""
+    async with _owned_session(session_factory) as s:
+        stories = list((await s.execute(select(Story))).scalars().all())
+        sample_by_domain = collect_domain_samples(stories)
+        known = await get_source_domains(s, set(sample_by_domain))
+        unknown = sorted(set(sample_by_domain) - set(known))
+
+    if not unknown:
+        return 0
+    items = [{"domain": d, "sample_headline": sample_by_domain[d]} for d in unknown]
+    verdicts, _usage = await judge_domains(client=client, model=judge_model, items=items)
+    async with _owned_session(session_factory) as s:
+        judged = await upsert_judgements(s, verdicts, model=judge_model, now=datetime.now(UTC))
+        await s.commit()
+    return judged

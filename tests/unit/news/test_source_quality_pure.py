@@ -1,5 +1,9 @@
+from uuid import uuid4
+
+from upmovies.news.models import Story
 from upmovies.news.source_quality import (
     best_tier,
+    collect_domain_samples,
     domain_for_story,
     downgrade_confidence,
     effective_tier,
@@ -77,3 +81,18 @@ def test_downgrade_confidence_only_when_all_low():
     assert downgrade_confidence("confirmed", "low") == "rumored"
     assert downgrade_confidence("confirmed", "acceptable") == "confirmed"
     assert downgrade_confidence("rumored", "trusted") == "rumored"
+
+
+def _story(url, resolved_url, title):
+    return Story(id=uuid4(), source="X", url=url, resolved_url=resolved_url, title=title, raw={})
+
+
+def test_collect_domain_samples_maps_domain_to_first_headline():
+    stories = [
+        _story("https://news.google.com/rss/x", "https://www.variety.com/a", "Variety one"),
+        _story("https://news.google.com/rss/y", "https://variety.com/b", "Variety two"),
+        _story("https://www.mshale.com/z", None, "Mshale one"),
+        _story("https://news.google.com/rss/articles/unresolved", None, "no domain"),
+    ]
+    out = collect_domain_samples(stories)
+    assert out == {"variety.com": "Variety one", "mshale.com": "Mshale one"}

@@ -122,3 +122,80 @@ async def test_empty_when_nothing_linked(session_factory):
     )
     assert result == type(result)(resolved=0, judged=0, blocked=0)
     assert client.calls == 0
+
+
+async def test_backfill_judges_all_resolved_domains(session_factory, session):
+    from uuid import uuid4
+
+    from upmovies.link.source_stage import backfill_source_domains
+    from upmovies.news.models import Story
+    from upmovies.news.source_quality import list_source_domains
+
+    # Two resolved stories + one direct trade-feed story (resolve_state='none')
+    # + one unresolved (no domain -> skipped).
+    session.add_all(
+        [
+            Story(
+                id=uuid4(),
+                source="X",
+                url="https://news.google.com/rss/1",
+                resolved_url="https://www.variety.com/a",
+                resolve_state="resolved",
+                title="Variety story",
+            ),
+            Story(
+                id=uuid4(),
+                source="X",
+                url="https://www.mshale.com/b",
+                resolved_url="https://www.mshale.com/b",
+                resolve_state="resolved",
+                title="Mshale story",
+            ),
+            Story(
+                id=uuid4(),
+                source="X",
+                url="https://deadline.com/article/123",
+                resolved_url="https://deadline.com/article/123",
+                resolve_state="none",
+                title="Direct trade-feed story",
+            ),
+            Story(
+                id=uuid4(),
+                source="X",
+                url="https://news.google.com/rss/2",
+                resolved_url=None,
+                resolve_state="pending",
+                title="unresolved",
+            ),
+        ]
+    )
+    await session.commit()
+
+    class _Client:
+        async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+            import json
+
+            from upmovies.llm.client import Usage
+
+            items = json.loads(messages[0]["content"])
+            arr = [{"domain": it["domain"], "tier": "acceptable", "reason": "ok"} for it in items]
+            return json.dumps(arr), Usage(output_tokens=3)
+
+    judged = await backfill_source_domains(
+        session_factory=session_factory, client=_Client(), judge_model="claude-haiku-4-5"
+    )
+    rows = await list_source_domains(session)
+    domains = {r.domain for r in rows}
+    # After removing the resolve_state filter, the backfill now includes direct trade-feed
+    # stories (resolve_state='none'), so deadline.com should be judged.
+    assert "deadline.com" in domains, f"deadline.com not in {domains}"
+    assert "variety.com" in domains, f"variety.com not in {domains}"
+    assert "mshale.com" in domains, f"mshale.com not in {domains}"
+    # Verify the count matches what we actually got
+    assert judged == len(domains), f"judged={judged} but {len(domains)} rows created: {domains}"
+
+    # Idempotent: a second run judges nothing new.
+    again = await backfill_source_domains(
+        session_factory=session_factory, client=_Client(), judge_model="claude-haiku-4-5"
+    )
+    assert again == 0
