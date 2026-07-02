@@ -890,6 +890,41 @@ async def test_release_date_event_persists_region(session):
     assert event.region == "IN"
 
 
+# ---------------------------------------------------------------------------
+# NEU-453 — off_topic cluster backstop
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_drops_off_topic_new_event(session):
+    """A story whose real subject is a different film is assigned type 'off_topic' and
+    dropped (rejected, no event), mirroring the stale-stage reject path."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {"events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}]}
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 0
+    assert result.stories_rejected == 1
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+    assert (await session.execute(select(EventStory))).scalars().all() == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.film_id is None
+    assert refreshed.link_confidence is None
+    assert refreshed.link_note == "off-topic"
+
+
 async def test_non_release_date_event_ignores_region(session):
     film = Film(tmdb_id=3, title="Runner")
     session.add(film)

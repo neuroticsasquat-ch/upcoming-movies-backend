@@ -81,11 +81,18 @@ first-look photos, or a promotional still of an actor in costume. Naming cast do
 change this.
 - A bare role announcement with no imagery or footage is "casting".
 - A release date mentioned in passing inside a casting story stays "casting".
+
+Every event must be a beat in THIS film's own life. If a new story's actual subject is a \
+DIFFERENT film — even one that names this film only as context or a scheduling comparison \
+(e.g. "another film moved its date to avoid clashing with this one") — do not log it as this \
+film's event: put it in its own group with "type": "off_topic" and "confidence": null so it \
+is dropped rather than recorded.
+
 Split only when a story genuinely reports two co-equal beats.
 
 New events carry:
 - "type": one of announced, casting, production_start, production_wrap, release_date, \
-trailer, first_look, other
+trailer, first_look, other, off_topic
 - "confidence": "confirmed" if reported as fact, "rumored" if speculation/unconfirmed.
 - "region": for a "release_date" event ONLY, the ISO 3166-1 alpha-2 code (e.g. "IN" for \
 India, "US" for the United States) of the country the date applies to; null when the date is \
@@ -363,6 +370,19 @@ async def apply_cluster_decisions(
         else:
             etype = group.event_type
             conf = group.confidence
+            if etype == "off_topic":
+                # Backstop for cross-film mis-attribution (NEU-453): a story whose real
+                # subject is a different film reaches clustering only if LINK mis-linked it.
+                # Drop it rather than record it as this film's event (mirrors is_stale_stage).
+                for sid in group_sids:
+                    story = by_id[sid]
+                    story.link_status = "rejected"
+                    story.film_id = None
+                    story.link_confidence = None
+                    story.link_note = "off-topic"
+                    assigned.add(sid)
+                    stories_rejected += 1
+                continue
             if etype not in _VALID_TYPES or conf not in ("confirmed", "rumored"):
                 log.warning(
                     "cluster: invalid new event for film %s: type=%r confidence=%r",
