@@ -40,5 +40,19 @@
       }
     ],
     "criteria": "This is a casting beat. The blurb must not present the July 10 release date as the casting's date; it should report the casting itself, dating it (if at all) by the casting's own date, not the release date."
+  },
+  {
+    "name": "sibling-spinoff-date-is-not-this-films-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "release_date",
+    "film_title": "Shrek 5",
+    "stories": [
+      {
+        "title": "Shrek 5 set for June 2027 as franchise revival begins",
+        "dek": "Shrek 5 arrives June 30, 2027. A Donkey origin spin-off film will follow in June 2028, expanding the franchise.",
+        "source": "MSN"
+      }
+    ],
+    "criteria": "This is Shrek 5's own release_date beat, so stating June 2027 (or June 30, 2027) is correct. The blurb must NOT state June 2028 or attribute the Donkey spin-off's 2028 date to Shrek 5. It may state no date, but if it states a date it must be Shrek 5's own 2027 date."
   }
 ]

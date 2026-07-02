@@ -236,3 +236,14 @@ def test_instructions_flag_release_calendar_listicles():
     assert "listicle" in text
     assert "one entry among many" in text
     assert "release-date announcement" in text
+
+
+def test_instructions_cover_sibling_spinoff_trap():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # A distinct, identified sibling film (spin-off/sequel/prequel) that is not
+    # itself in the roster must be named as a no-match trap, distinct from the
+    # existing "the next Batman" generic-reference rule.
+    assert "spin-off" in lowered
+    assert "not itself tracked" in lowered

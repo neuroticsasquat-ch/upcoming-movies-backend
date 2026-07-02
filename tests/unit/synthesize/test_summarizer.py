@@ -224,3 +224,13 @@ def test_parse_summary_happy_path_does_not_warn(caplog):
     with caplog.at_level("WARNING"):
         assert parse_summary('{"summary": "A clean update."}') == "A clean update."
     assert "recovered summary from malformed" not in caplog.text
+
+
+def test_instructions_reject_a_different_films_date():
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # Mode 2: a spin-off/sequel/prequel's date co-mentioned in the sources is
+    # context, never this film's release-date beat.
+    assert "different film" in lowered
+    assert "spin-off" in lowered
