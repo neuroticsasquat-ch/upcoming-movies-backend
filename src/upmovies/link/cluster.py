@@ -47,13 +47,25 @@ _STALE_EVENT_TYPES = {"announced", "casting", "production_start", "production_wr
 _WRAPPED_STATUSES = {"Post Production", "Released"}
 
 
-def is_stale_stage(event_type: str, film_status: str | None) -> bool:
+def is_stale_stage(
+    event_type: str,
+    film_status: str | None,
+    release_date: date | None,
+    as_of_date: date,
+) -> bool:
     """A new event is 'stale-stage' when an early-or-mid production beat (casting/announced/
-    production_start/production_wrap) is reported for a film that has already wrapped or
-    released. A film in Post Production has by definition already wrapped, so a fresh
-    production_wrap event for it is stale (NEU-444, extending NEU-367). Such events are
-    dropped at clustering. NULL/unknown status is never stale."""
-    return event_type in _STALE_EVENT_TYPES and film_status in _WRAPPED_STATUSES
+    production_start/production_wrap) is reported for a film that has already wrapped, released,
+    or whose release date has already passed as of the run date. A film in Post Production has
+    by definition already wrapped, so a fresh production_wrap event for it is stale (NEU-444,
+    extending NEU-367). A film whose release_date is in the past is already out even if TMDB's
+    status string lags, so early-production beats for it are re-circulated old news (NEU-449).
+    Such events are dropped at clustering. NULL/unknown status with no past release date is
+    never stale."""
+    if event_type not in _STALE_EVENT_TYPES:
+        return False
+    if film_status in _WRAPPED_STATUSES:
+        return True
+    return release_date is not None and release_date < as_of_date
 
 
 _SUMMARY_MAX = 500
@@ -125,6 +137,8 @@ class ClusterPlan:
     existing_event_ids: list[UUID]
     unclustered_story_ids: list[UUID]
     film_status: str | None = None
+    film_release_date: date | None = None
+    run_date: date | None = None
 
 
 @dataclass
@@ -298,6 +312,8 @@ async def build_cluster_request(
         existing_event_ids=[e.id for e in existing_events],
         unclustered_story_ids=[s.id for s in unclustered],
         film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=run_date,
     )
     return system, messages, plan
 
@@ -352,6 +368,7 @@ async def apply_cluster_decisions(
         raise ClusterParseError(f"unparseable cluster response for film {plan.film_id}")
 
     now = datetime.now(UTC)
+    as_of_date = plan.run_date or now.date()
     assigned: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
@@ -391,7 +408,7 @@ async def apply_cluster_decisions(
                     conf,
                 )
                 continue
-            if is_stale_stage(etype, plan.film_status):
+            if is_stale_stage(etype, plan.film_status, plan.film_release_date, as_of_date):
                 for sid in group_sids:
                     story = by_id[sid]
                     story.link_status = "rejected"

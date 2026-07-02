@@ -925,6 +925,56 @@ async def test_apply_drops_off_topic_new_event(session):
     assert refreshed.link_note == "off-topic"
 
 
+# ---------------------------------------------------------------------------
+# NEU-449 — release-date staleness backstop
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_rejects_casting_for_already_released_film(session):
+    import datetime as _dt
+
+    film = Film(
+        tmdb_id=4242,
+        title="Angry Birds Movie 3",
+        status="In Production",
+        release_date=_dt.date(2026, 1, 1),
+    )
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(
+        session, film, "https://example.com/psalm", title="Psalm's acting debut"
+    )
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="In Production",
+        film_release_date=_dt.date(2026, 1, 1),
+        run_date=_dt.date(2026, 7, 1),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    no_events = (
+        (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    )
+    assert no_events == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.link_note == "stale-stage:casting"
+
+
 async def test_non_release_date_event_ignores_region(session):
     film = Film(tmdb_id=3, title="Runner")
     session.add(film)

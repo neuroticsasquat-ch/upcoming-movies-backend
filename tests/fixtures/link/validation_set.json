@@ -3071,5 +3071,16 @@
     "title": "Telugu film postponed to avoid clashing with Akhil Akkineni's release",
     "summary": "The makers of the rival film pushed their date to steer clear of the July 10 release it would otherwise have shared.",
     "relation": "mention"
+  },
+  {
+    "url": "https://www.hola.com/us/entertainment/20260630910275/kim-kardashian-son-psalm-debut-actor-angry-birds-movie-3/",
+    "source": "HOLA! USA",
+    "title": "Kim Kardashian's son Psalm debut as an actor in upcoming 'Angry Birds Movie 3'",
+    "summary": "A proud parenting milestone: Psalm West is making his acting debut, with Kim Kardashian celebrating the family moment. No new casting deal is announced — the role has been known for some time.",
+    "relation": "about",
+    "expected_film_tmdb_id": 1300926,
+    "event_type": "casting",
+    "is_production_news": false,
+    "exclusion_category": "downstream"
   }
 ]

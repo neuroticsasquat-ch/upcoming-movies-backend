@@ -46,7 +46,12 @@ hold — they "want to play", "would love to play", "hope to play", are "gunning
 "interview-quote") EVEN WHEN it names the exact film and character. A real casting beat \
 reports that a deal closed or the studio/filmmakers confirmed the actor ("has been cast", \
 "joins the cast", "has signed on", or trade-reported "in talks") — an actor merely saying \
-they want the role is not that.
+they want the role is not that. \
+A story that re-reports an already-known casting, role, or other prior beat through a \
+milestone, "debut", celebrity-family, or human-interest angle — adding no NEW trade-confirmed \
+development — is also not-news (category "downstream"): a fresh publication date does not make \
+it new. Use `as_of_date` to reason about whether a beat is genuinely recent or re-circulated \
+old news.
 - "mention": the film is only referenced in passing (an aside, a list, a comparison, or \
 an actor's other project). Mentions are NOT links.
 - "no-match": the story is not about any tracked film. Most stories are no-match — \
