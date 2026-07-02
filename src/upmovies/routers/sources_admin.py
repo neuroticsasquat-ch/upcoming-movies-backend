@@ -16,7 +16,7 @@ from upmovies.news.models import SourceDomain
 router = APIRouter(
     prefix="/admin/sources",
     tags=["admin"],
-    dependencies=[Depends(require_current_admin), Depends(require_csrf)],
+    dependencies=[Depends(require_current_admin)],
 )
 
 
@@ -48,7 +48,11 @@ async def list_sources(db: AsyncSession = Depends(get_session)) -> list[SourceDo
     return [_to_out(r) for r in rows]
 
 
-@router.post("/{domain}/override", response_model=SourceDomainOut)
+@router.post(
+    "/{domain}/override",
+    response_model=SourceDomainOut,
+    dependencies=[Depends(require_csrf)],
+)
 async def set_source_override(
     domain: str, body: OverrideBody, db: AsyncSession = Depends(get_session)
 ) -> SourceDomainOut:
