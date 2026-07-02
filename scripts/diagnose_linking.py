@@ -8,6 +8,7 @@ precision/recall sweep across candidate floors.
 
 import asyncio
 import sys
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -54,6 +55,7 @@ async def main(path: str) -> None:
                 roster=roster,
                 stories=stories[i : i + settings.link_batch_size],
                 floor=0.0,
+                run_date=datetime.now(UTC).date(),
             )
 
     floor = settings.link_confidence_floor

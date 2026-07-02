@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import select
@@ -65,7 +65,12 @@ async def test_creates_new_event_for_unclustered_stories(session):
         }
     )
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=45
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     await session.commit()
 
@@ -95,7 +100,12 @@ async def test_attaches_to_existing_event(session):
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=45
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     await session.commit()
 
@@ -122,7 +132,12 @@ async def test_noop_when_nothing_unclustered(session):
 
     client = FakeClient({"events": []})
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=45
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     assert result == result.__class__(0, 0)
     assert client.calls == []  # short-circuits before calling the model
@@ -138,11 +153,21 @@ async def test_build_cluster_request_returns_none_when_no_unclustered(session):
     session.add(film)
     await session.flush()
     await session.commit()
-    assert await build_cluster_request(session, film_id=film.id, attach_limit=45) is None
+    assert (
+        await build_cluster_request(
+            session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+        )
+        is None
+    )
 
 
 async def test_build_cluster_request_returns_none_for_missing_film(session):
-    assert await build_cluster_request(session, film_id=uuid.uuid4(), attach_limit=45) is None
+    assert (
+        await build_cluster_request(
+            session, film_id=uuid.uuid4(), attach_limit=45, run_date=date(2026, 1, 1)
+        )
+        is None
+    )
 
 
 async def test_build_cluster_request_builds_payload_and_plan(session):
@@ -153,7 +178,9 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
     s2 = await _linked_story(session, film, "https://e/2", title="B")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=45)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     system, messages, plan = built
 
@@ -293,7 +320,9 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
     s2 = await _linked_story(session, film, "https://e/s2")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=3650)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=3650, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, _messages, plan = built
     assert plan.existing_event_ids == [e1.id, e2.id]  # ordered by occurred_at at build time
@@ -352,7 +381,12 @@ async def test_build_cluster_batch_request_wraps_into_batch_request(session):
     await session.commit()
 
     built = await build_cluster_batch_request(
-        session, custom_id=str(film.id), model="cluster-m", film_id=film.id, attach_limit=45
+        session,
+        custom_id=str(film.id),
+        model="cluster-m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     assert built is not None
     req, plan = built
@@ -379,6 +413,7 @@ async def test_build_cluster_batch_request_honours_max_tokens(session):
         film_id=film.id,
         attach_limit=45,
         max_tokens=9999,
+        run_date=date(2026, 1, 1),
     )
     assert built is not None
     req, _plan = built
@@ -392,7 +427,12 @@ async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session)
     await session.commit()
     assert (
         await build_cluster_batch_request(
-            session, custom_id=str(film.id), model="cluster-m", film_id=film.id, attach_limit=45
+            session,
+            custom_id=str(film.id),
+            model="cluster-m",
+            film_id=film.id,
+            attach_limit=45,
+            run_date=date(2026, 1, 1),
         )
         is None
     )
@@ -457,7 +497,9 @@ async def test_build_cluster_request_captures_film_status(session):
     await _linked_story(session, film, "https://e/1")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=45)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, _messages, plan = built
     assert plan.film_status == "Post Production"
@@ -683,7 +725,9 @@ async def test_build_cluster_request_includes_event_older_than_recency_window(se
     await _linked_story(session, film, "https://e/new", title="Re-report")  # unclustered
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=25)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, messages, plan = built
     payload = json.loads(messages[0]["content"])
@@ -713,7 +757,9 @@ async def test_build_cluster_request_caps_existing_events_to_attach_limit(sessio
     await _linked_story(session, film, "https://e/new")  # unclustered -> request is built
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=2)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=2, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, messages, plan = built
     payload = json.loads(messages[0]["content"])
@@ -751,7 +797,9 @@ async def test_build_cluster_request_caps_headlines_per_event(session):
     await _linked_story(session, film, "https://e/new")  # unclustered -> request is built
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=25)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, messages, _plan = built
     payload = json.loads(messages[0]["content"])
@@ -782,7 +830,12 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=25
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=25,
+        run_date=date(2026, 1, 1),
     )
     await session.commit()
 
@@ -822,7 +875,14 @@ async def test_release_date_event_persists_region(session):
             ]
         }
     )
-    await cluster_film_events(session, client=client, model="m", film_id=film.id, attach_limit=45)
+    await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
     await session.commit()
 
     event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
@@ -851,7 +911,14 @@ async def test_non_release_date_event_ignores_region(session):
             ]
         }
     )
-    await cluster_film_events(session, client=client, model="m", film_id=film.id, attach_limit=45)
+    await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
     await session.commit()
 
     event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()

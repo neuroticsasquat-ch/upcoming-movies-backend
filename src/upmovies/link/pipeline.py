@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import exists, func, select
@@ -64,6 +64,7 @@ async def _link_stage_sequential(
     pending_ids: Sequence[UUID],
     batch_size: int,
     floor: float,
+    run_date: date,
 ) -> tuple[int, int, Usage]:
     linked = rejected = 0
     total_usage = Usage()
@@ -74,7 +75,12 @@ async def _link_stage_sequential(
                     (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
                 )
                 batch, usage = await link_story_batch(
-                    client=client, model=model, roster=roster, stories=list(stories), floor=floor
+                    client=client,
+                    model=model,
+                    roster=roster,
+                    stories=list(stories),
+                    floor=floor,
+                    run_date=run_date,
                 )
                 await record_progress(s, run_id, processed_delta=batch.linked + batch.rejected)
                 await s.commit()
@@ -99,6 +105,7 @@ async def _link_stage_batched(
     pending_ids: Sequence[UUID],
     batch_size: int,
     floor: float,
+    run_date: date,
 ) -> tuple[int, int, Usage]:
     chunks = _chunks(pending_ids, batch_size)
 
@@ -112,7 +119,11 @@ async def _link_stage_batched(
             )
             requests.append(
                 build_batch_request(
-                    custom_id=str(i), model=model, roster=roster, stories=list(stories)
+                    custom_id=str(i),
+                    model=model,
+                    roster=roster,
+                    stories=list(stories),
+                    run_date=run_date,
                 )
             )
 
@@ -171,6 +182,7 @@ async def _cluster_stage_sequential(
     attach_limit: int,
     cluster_max_tokens: int,
     unresolved_tier: str = "acceptable",
+    run_date: date,
 ) -> tuple[int, int, int, Usage]:
     events_created = stories_clustered = stories_rejected = 0
     total_usage = Usage()
@@ -185,6 +197,7 @@ async def _cluster_stage_sequential(
                     attach_limit=attach_limit,
                     max_tokens=cluster_max_tokens,
                     unresolved_tier=unresolved_tier,
+                    run_date=run_date,
                 )
                 await s.commit()
             events_created += cluster.events_created
@@ -209,6 +222,7 @@ async def _cluster_stage_batched(
     attach_limit: int,
     cluster_max_tokens: int,
     unresolved_tier: str = "acceptable",
+    run_date: date,
 ) -> tuple[int, int, int, Usage]:
     # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
     # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
@@ -223,6 +237,7 @@ async def _cluster_stage_batched(
                 film_id=film_id,
                 attach_limit=attach_limit,
                 max_tokens=cluster_max_tokens,
+                run_date=run_date,
             )
             if built is None:
                 continue
@@ -290,6 +305,7 @@ async def run_link_ingest(
     async with _owned_session(session_factory) as s:
         roster = await build_roster(s)
 
+    run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
     async with _owned_session(session_factory) as s:
         result = await s.execute(
@@ -310,6 +326,7 @@ async def run_link_ingest(
         pending_ids=pending_ids,
         batch_size=batch_size,
         floor=floor,
+        run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
         await record_llm_usage(
@@ -373,6 +390,7 @@ async def run_link_ingest(
         attach_limit=attach_limit,
         cluster_max_tokens=cluster_max_tokens,
         unresolved_tier=unresolved_tier,
+        run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
         await record_llm_usage(

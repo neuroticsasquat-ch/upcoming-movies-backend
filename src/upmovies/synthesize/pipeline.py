@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import func, nulls_last, select
@@ -144,13 +145,18 @@ async def _summary_stage_sequential(
     model: str,
     prompt_version: str,
     pending: list[_PendingEvent],
+    run_date: date,
 ) -> tuple[int, int, int, Usage]:
     new = refreshed = failed = 0
     total_usage = Usage()
     for pe in pending:
         try:
             result, usage = await summarize_event(
-                client=client, model=model, prompt_version=prompt_version, event=pe.event_input
+                client=client,
+                model=model,
+                prompt_version=prompt_version,
+                event=pe.event_input,
+                run_date=run_date,
             )
             async with _owned_session(session_factory) as s:
                 await _upsert_summary(s, pe.event_id, result)
@@ -178,13 +184,16 @@ async def _summary_stage_batched(
     model: str,
     prompt_version: str,
     pending: list[_PendingEvent],
+    run_date: date,
 ) -> tuple[int, int, int, Usage]:
     if not pending:
         return 0, 0, 0, Usage()
 
     by_id = {str(pe.event_id): pe for pe in pending}
     requests = [
-        build_summary_batch_request(custom_id=str(pe.event_id), model=model, event=pe.event_input)
+        build_summary_batch_request(
+            custom_id=str(pe.event_id), model=model, event=pe.event_input, run_date=run_date
+        )
         for pe in pending
     ]
 
@@ -246,6 +255,7 @@ async def run_synthesize_ingest(
     async with _owned_session(session_factory) as s:
         pending = await _select_pending(s, prompt_version=prompt_version)
 
+    run_date = datetime.now(UTC).date()
     stage = _summary_stage_batched if use_batches else _summary_stage_sequential
     new, refreshed, failed, summary_usage = await stage(
         session_factory=session_factory,
@@ -254,6 +264,7 @@ async def run_synthesize_ingest(
         model=model,
         prompt_version=prompt_version,
         pending=pending,
+        run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
         await record_llm_usage(

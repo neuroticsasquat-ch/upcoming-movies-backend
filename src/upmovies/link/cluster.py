@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -90,6 +90,9 @@ trailer, first_look, other
 - "region": for a "release_date" event ONLY, the ISO 3166-1 alpha-2 code (e.g. "IN" for \
 India, "US" for the United States) of the country the date applies to; null when the date is \
 worldwide/global or no country is named. For every non-release_date event, null.
+
+The payload includes `as_of_date`, today's date (UTC). Use it to reason about whether an \
+event is recent, upcoming, or already past.
 
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
@@ -179,11 +182,13 @@ def assemble_cluster_payload(
     film_year: int | None,
     existing_payload: list[dict[str, Any]],
     new_payload: list[dict[str, Any]],
+    run_date: date,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Pure prompt assembly shared by build_cluster_request (production) and the
     validate_clustering harness. No DB, no LLM. NEU-377: plain system block (cluster
     instructions are below Sonnet's 2048-token cache floor, so no cache_control)."""
     user: dict[str, Any] = {
+        "as_of_date": run_date.isoformat(),
         "film": {"title": film_title, "year": film_year},
         "existing_events": existing_payload,
         "new_stories": new_payload,
@@ -198,6 +203,7 @@ async def build_cluster_request(
     *,
     film_id: UUID,
     attach_limit: int,
+    run_date: date,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], ClusterPlan] | None:
     """Read half: load unclustered stories and recent events, build the system + messages
     payload and a ClusterPlan. Returns None when there is nothing to cluster (no film or
@@ -278,6 +284,7 @@ async def build_cluster_request(
         film_year=film.release_date.year if film.release_date else None,
         existing_payload=existing_payload,
         new_payload=new_payload,
+        run_date=run_date,
     )
     plan = ClusterPlan(
         film_id=film_id,
@@ -404,9 +411,12 @@ async def build_cluster_batch_request(
     film_id: UUID,
     attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
+    run_date: date,
 ) -> tuple[BatchRequest, ClusterPlan] | None:
     """Wrap build_cluster_request into a BatchRequest ready for the Anthropic Batch API."""
-    built = await build_cluster_request(session, film_id=film_id, attach_limit=attach_limit)
+    built = await build_cluster_request(
+        session, film_id=film_id, attach_limit=attach_limit, run_date=run_date
+    )
     if built is None:
         return None
     system, messages, plan = built
@@ -431,8 +441,11 @@ async def cluster_film_events(
     attach_limit: int,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     unresolved_tier: str = "acceptable",
+    run_date: date,
 ) -> tuple[ClusterResult, Usage]:
-    built = await build_cluster_request(session, film_id=film_id, attach_limit=attach_limit)
+    built = await build_cluster_request(
+        session, film_id=film_id, attach_limit=attach_limit, run_date=run_date
+    )
     if built is None:
         return ClusterResult(0, 0), Usage()
     system, messages, plan = built

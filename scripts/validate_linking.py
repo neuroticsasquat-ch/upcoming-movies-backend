@@ -9,6 +9,7 @@ numbers in the design spec."""
 
 import asyncio
 import sys
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -72,6 +73,7 @@ async def main(path: str) -> None:
             await link_story_batch(
                 client=client, model=settings.link_model, roster=roster,
                 stories=batch, floor=settings.link_confidence_floor,
+                run_date=datetime.now(UTC).date(),
             )
 
     # Non-'about' items have expected_film_tmdb_id=None; correct rejections count as TN
