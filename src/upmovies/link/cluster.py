@@ -85,6 +85,11 @@ reporting the same casting is one event. A single trailer or first-look reveal r
 across several days by many outlets is ONE event — attach later stories to the existing \
 event rather than opening a new one.
 
+The same applies to casting: when a new story names a performer who already appears in an \
+EXISTING casting event — alone or alongside others — attach it there. A fuller cast list, an \
+additional outlet, or a repeat report of the same signing is a continuation of that casting \
+beat, not a new one. Open a new casting event only for a genuinely different performer or role.
+
 Classify each new event by the story's DOMINANT, headline beat — the development the coverage \
 is really about. Incidental details never change the type:
 
@@ -98,6 +103,11 @@ first-look photos, or a promotional still of an actor in costume. Naming cast do
 change this.
 - A bare role announcement with no imagery or footage is "casting".
 - A release date mentioned in passing inside a casting story stays "casting".
+- A "casting" event requires an actual performer's name. A story that reports a role or \
+character joining without naming who plays them, or that says casting is "expected", \
+"forthcoming", "yet to be announced", or otherwise teases future announcements with nobody \
+confirmed, is not a casting beat — classify it "other" (or "off_topic" if it reports no fact \
+about this film at all).
 
 Every event must be a beat in THIS film's own life. If a new story's actual subject is a \
 DIFFERENT film — even a spin-off, sequel, or prequel of this film's franchise, the ORIGINAL \
@@ -121,11 +131,19 @@ worldwide/global or no country is named. For every non-release_date event, null.
 The payload includes `as_of_date`, today's date (UTC). Use it to reason about whether an \
 event is recent, upcoming, or already past.
 
-A "release_date" event requires a story announcing a NEW or CHANGED release date. A story \
+A "release_date" event requires a story announcing a NEW or CHANGED release date. A \
+"release_date" event is about the FILM's own theatrical, streaming, or home-video release — \
+never a tie-in or companion product (a video game, soundtrack, book, or other merchandise \
+release) even when the story uses the word "release" or ties its timing to the film's release \
+date. Such tie-in news, if newsworthy at all, is "other" — never "release_date". A story \
 that merely restates the film's already-known release date (given as `film.release_date` in \
 the payload), or lists it in a calendar / roundup context, is NOT a new release_date beat — \
 put it in its own group with "type": "off_topic" and "confidence": null so it is dropped \
-rather than recorded.
+rather than recorded. Compare the story's claimed date against `film.release_date` in the \
+payload: if the story frames the date as new, changed, or "moved" but the date given matches \
+the film's already-known release_date, this is not a new beat regardless of how the headline \
+frames it — put it in its own group with "type": "off_topic" and "confidence": null, same as a \
+plain restatement.
 
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \

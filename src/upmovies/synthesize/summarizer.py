@@ -58,14 +58,20 @@ redundant. Use "the film" only if a reference is grammatically necessary.
 - Name only the people party to THIS beat — e.g. the cast member for a casting beat. Omit \
 the director and other crew unless the beat is itself about them (e.g. an "X to direct" \
 announcement).
+- Always name them by their actual name — do not substitute a vague descriptor ("the lead \
+actor," "his character") for a name the sources provide. Reproducing a person's name or \
+character name is not a paraphrase violation; the "strict paraphrase" rule is about sentence \
+construction, not about omitting names.
 - No relational or biographical framing — don't add who someone is related to, married to, \
 or reuniting with ("daughter of …", "reuniting with his father").
 - Report only the production fact. State who / what / when and stop. Exclude: fan, audience, \
 or social-media reactions; whether the news "generated discussion" or "circulated on social \
 media"; the talent's stated feelings about their role or the project; "ahead of" / "in \
-advance of" / "approaches release" framing that adds no fact; and any meta-commentary about \
-the announcement itself. If the summary could be replaced by the headline with nothing lost, \
-it has too much filler — cut it back.
+advance of" / "approaches release" framing that adds no fact; any meta-commentary about the \
+announcement itself; a genre label ("in an action thriller," "in a horror film") unless the \
+genre itself is the news; and unrelated history about the film — e.g. a prior title change — \
+unless it is itself the beat being reported. If the summary could be replaced by the headline \
+with nothing lost, it has too much filler — cut it back.
 - Prefer the canonical shape: state the beat in the film's already-known context and nothing \
 more — e.g. "{Star} has joined the cast", "{Star} has been cast as {Character}" (character \
 optional), "{Star} will reprise their role", "{Star} will make their acting debut".
@@ -82,6 +88,9 @@ date. If the sources do not make this beat's own date clear, state no date for i
 - A beat reported now has already happened (a trailer that dropped, a casting that closed); \
 never state it as occurring on a date AFTER `as_of_date`. A date after `as_of_date` is a \
 future/scheduled date (e.g. the film's release), not when this beat took place.
+- For a "release_date" beat, state the actual date (or an unambiguous relative time, e.g. "in \
+two weeks") plainly. Never describe the announcement only in relational terms — e.g. "a date \
+that was announced alongside confirmation of X" — without giving the date itself.
 
 Return ONLY a JSON object, no prose or markdown:
 {"summary": "<your one-sentence update>"}"""
