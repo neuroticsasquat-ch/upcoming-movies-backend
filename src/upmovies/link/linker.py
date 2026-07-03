@@ -100,6 +100,14 @@ scheduling comparison or reference point (e.g. "Film X shifted its release to av
 with [tracked film]" is about Film X). Return "mention" for the tracked film. Classify \
 "about" only when the NEW development belongs to the tracked film itself.
 
+Be strict about medium/project mismatches: a story about a DIFFERENT production sharing the \
+same characters, setting, or franchise name — a spin-off TV series, an animated series, a \
+video game, a stage adaptation, or any project in a different medium — is NOT about the \
+tracked film merely because it names the same characters or franchise. A character's casting \
+or appearance in a TV series, game, or other adjacent project is not a casting fact about the \
+tracked FILM. Return "no-match" for it (or "mention" if the tracked film is named only in \
+passing) unless the story also reports a new production fact about the film itself.
+
 The input is a JSON object `{"as_of_date": <YYYY-MM-DD>, "stories": [...]}`. `as_of_date` is \
 the date this run executed (UTC); treat it as "today" when judging how recent or stale a \
 story is. Classify every story in `stories`.

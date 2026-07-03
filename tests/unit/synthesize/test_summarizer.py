@@ -234,3 +234,33 @@ def test_instructions_reject_a_different_films_date():
     # context, never this film's release-date beat.
     assert "different film" in lowered
     assert "spin-off" in lowered
+
+
+def test_instructions_require_stating_actual_release_date():
+    """NEU-483 #4: a release_date beat must state the actual date, not describe the
+    announcement only in relational terms."""
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "state the actual date" in lowered
+    assert "without giving the date itself" in lowered
+
+
+def test_instructions_allow_naming_people_not_descriptors():
+    """NEU-483 #6: naming an actor/character is a fact, not a paraphrase violation —
+    don't substitute "the lead actor" / "his character" for the actual name."""
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "not a paraphrase violation" in lowered
+    assert "vague descriptor" in lowered
+
+
+def test_instructions_forbid_genre_label_and_unrelated_history_filler():
+    """NEU-483 #10, #11: no genre-label tack-ons unless the genre itself is the news,
+    and no unrelated history (e.g. a prior title change) bleeding into the beat."""
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "genre label" in lowered
+    assert "prior title change" in lowered

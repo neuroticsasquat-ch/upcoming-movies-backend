@@ -143,3 +143,35 @@ def test_instructions_distinguish_released_video_from_first_look():
     text = _INSTRUCTIONS.lower()
     assert "first_look" in text
     assert "released" in text  # the trailer boundary hinges on a publicly released video
+
+
+def test_instructions_state_casting_consolidation_rule():
+    """NEU-483 #7, #9: a new casting story naming a performer already in an existing
+    casting event must attach there instead of opening a duplicate event."""
+    text = _INSTRUCTIONS.lower()
+    assert "already appears in an existing casting event" in text
+    assert "continuation of that casting beat" in text
+
+
+def test_instructions_require_named_performer_for_casting():
+    """NEU-483 #5, #8: no performer named (or casting only 'forthcoming') is not a
+    casting beat."""
+    text = _INSTRUCTIONS.lower()
+    assert "requires an actual performer's name" in text
+    assert "forthcoming" in text
+
+
+def test_instructions_exclude_tie_in_products_from_release_date():
+    """NEU-483 #2: a companion video game/merchandise launch is never the film's own
+    release_date beat, even when the story says "release"."""
+    text = _INSTRUCTIONS.lower()
+    assert "companion product" in text
+    assert "tie-in" in text
+
+
+def test_instructions_flag_fake_date_move_matching_known_release_date():
+    """NEU-483 #3, #4: a story framing a date as "moved" when it matches
+    film.release_date is a restatement, not a new beat, regardless of headline framing."""
+    text = _INSTRUCTIONS.lower()
+    assert "regardless of how the headline frames it" in text
+    assert "already-known release_date" in text

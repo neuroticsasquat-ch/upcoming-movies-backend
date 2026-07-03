@@ -257,3 +257,14 @@ def test_instructions_cover_original_to_sequel_trap():
     # is not its tracked sequel merely because they share a title stem.
     assert "title stem" in lowered
     assert "both directions" in lowered
+
+
+def test_instructions_cover_medium_mismatch_trap():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # NEU-483 #5: a story about a same-franchise TV series/game is not "about" the
+    # tracked film merely because it shares characters — that's a different production.
+    assert "different medium" in lowered
+    assert "tv series" in lowered
+    assert "video game" in lowered
