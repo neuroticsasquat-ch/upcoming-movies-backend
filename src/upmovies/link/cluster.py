@@ -6,6 +6,7 @@ backstop. The caller owns the session/commit."""
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -70,6 +71,14 @@ def is_stale_stage(
     return release_date is not None and release_date < as_of_date
 
 
+def _normalize_name(name: str) -> str:
+    """Deterministic casting-identity key: NFKC-fold, casefold, collapse whitespace.
+    String-based (not TMDB-person-id) — imperfect on aliases/typos, but stable and
+    dependency-free, which fits breaking-cast news where TMDB credits lag."""
+    folded = unicodedata.normalize("NFKC", name).casefold().strip()
+    return " ".join(folded.split())
+
+
 _SUMMARY_MAX = 500
 _DEFAULT_MAX_TOKENS = 4096
 _HEADLINES_PER_EVENT = 3
@@ -109,6 +118,8 @@ character joining without naming who plays them, or that says casting is "expect
 "forthcoming", "yet to be announced", or otherwise teases future announcements with nobody \
 confirmed, is not a casting beat — classify it "other" (or "off_topic" if it reports no fact \
 about this film at all).
+- For a "casting" event, list in "cast" the exact performer name(s) the story reports as \
+joining THIS film — the people actually cast, not the director or characters.
 
 Every event must be a beat in THIS film's own life. If a new story's actual subject is a \
 DIFFERENT film — even a spin-off, sequel, or prequel of this film's franchise, the ORIGINAL \
@@ -152,6 +163,7 @@ YYYY-MM-DD (null if the story gives no concrete date). For every non-release_dat
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
 "confidence": "confirmed" | "rumored" | null, "region": <ISO 3166-1 alpha-2 or null>, \
+"cast": [<performer name>, ...] for a casting event, else null, \
 "claimed_date": <YYYY-MM-DD or null>, \
 "stories": [<story number n>, ...]}]}
 
@@ -187,6 +199,7 @@ class ClusterGroup:
     story_indices: list[int]
     region: str | None = None
     claimed_date: date | None = None
+    cast: list[str] | None = None
 
 
 def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | None:
@@ -223,6 +236,12 @@ def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | No
                 claimed_date = date.fromisoformat(claimed_raw)
             except ValueError:
                 claimed_date = None
+        cast_raw = group.get("cast")
+        cast = (
+            [c for c in cast_raw if isinstance(c, str) and c.strip()]
+            if isinstance(cast_raw, list)
+            else None
+        )
         groups.append(
             ClusterGroup(
                 existing=existing if isinstance(existing, int) else None,
@@ -231,6 +250,7 @@ def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | No
                 story_indices=indices,
                 region=region,
                 claimed_date=claimed_date,
+                cast=cast,
             )
         )
     return groups
@@ -382,6 +402,28 @@ async def _load_events_in_order(session: AsyncSession, event_ids: list[UUID]) ->
     return [by_id[eid] for eid in event_ids if eid in by_id]
 
 
+async def _recorded_cast_names(session: AsyncSession, film_id: UUID) -> set[str]:
+    """All normalized performer names already represented by this film's casting events
+    (dedicated query — not limited to the attach-window candidate set)."""
+    rows = (
+        (
+            await session.execute(
+                select(Event.subject_key).where(
+                    Event.film_id == film_id,
+                    Event.event_type == "casting",
+                    Event.subject_key.isnot(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    names: set[str] = set()
+    for key in rows:
+        names.update(key or [])
+    return names
+
+
 async def apply_cluster_decisions(
     session: AsyncSession,
     *,
@@ -432,6 +474,7 @@ async def apply_cluster_decisions(
             prev = dedup_targets.get(ev.event_type)
             if prev is None or ev.occurred_at > prev.occurred_at:
                 dedup_targets[ev.event_type] = ev
+    recorded_cast = await _recorded_cast_names(session, plan.film_id)
     assigned: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
@@ -481,6 +524,26 @@ async def apply_cluster_decisions(
                     assigned.add(sid)
                     stories_rejected += 1
                 continue
+            new_cast: list[str] | None = None
+            if etype == "casting":
+                names = list(
+                    dict.fromkeys(
+                        _normalize_name(c)
+                        for c in (group.cast or [])
+                        if isinstance(c, str) and _normalize_name(c)
+                    )
+                )
+                new_cast = [n for n in names if n not in recorded_cast]
+                if not new_cast:
+                    for sid in group_sids:
+                        story = by_id[sid]
+                        story.link_status = "rejected"
+                        story.film_id = None
+                        story.link_confidence = None
+                        story.link_note = "casting-recorded"
+                        assigned.add(sid)
+                        stories_rejected += 1
+                    continue
             if (
                 etype == "release_date"
                 and group.claimed_date is not None
@@ -519,12 +582,15 @@ async def apply_cluster_decisions(
                     confidence=conf,
                     occurred_at=occurred,
                     region=group.region if etype == "release_date" else None,
+                    subject_key=new_cast if etype == "casting" else None,
                 )
                 session.add(event)
                 await session.flush()
                 events_created += 1
                 if etype in _SINGULAR_BEAT_TYPES:
                     dedup_targets[etype] = event
+                if etype == "casting" and new_cast:
+                    recorded_cast.update(new_cast)
         for sid in group_sids:
             session.add(EventStory(event_id=event.id, story_id=sid))
             assigned.add(sid)

@@ -341,6 +341,7 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
                     "existing": None,
                     "type": "casting",
                     "confidence": "rumored",
+                    "cast": ["Test Performer"],
                     "stories": [n_s2],
                 },
             ]
@@ -660,7 +661,13 @@ async def test_apply_keeps_early_stage_event_on_unwrapped_film(session):
     raw = json.dumps(
         {
             "events": [
-                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["Test Performer"],
+                    "stories": [1],
+                }
             ]
         }
     )
@@ -991,6 +998,7 @@ async def test_non_release_date_event_ignores_region(session):
                     "type": "casting",
                     "confidence": "confirmed",
                     "region": "IN",
+                    "cast": ["Test Performer"],
                     "stories": [1],
                 }
             ]
@@ -1175,7 +1183,13 @@ async def test_duplicate_casting_within_window_not_merged(session):
     client = FakeClient(
         {
             "events": [
-                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["New Actor"],
+                    "stories": [1],
+                }
             ]
         }
     )
@@ -1340,4 +1354,149 @@ async def test_release_date_uses_field_changed_at_over_created_at(session):
         run_date=date(2026, 7, 4),
     )
     assert result.events_created == 0  # established 33 days ago per field_changed_at → drop
+    assert result.stories_rejected == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — deterministic casting routing (NEU-492)
+# ---------------------------------------------------------------------------
+
+
+async def _casting_event(session, film, names, *, url):
+    story = await _linked_story(session, film, url, title="prior casting")
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=datetime.now(UTC),
+        subject_key=names,
+    )
+    session.add(event)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=story.id))
+    return event
+
+
+async def test_casting_new_performer_creates_scoped_event(session):
+    film = Film(tmdb_id=1, title="Oceans")
+    session.add(film)
+    await session.flush()
+    await _casting_event(session, film, ["monica barbaro"], url="https://e/prior")
+    await _linked_story(session, film, "https://e/new", title="Monica + John cast")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["Monica Barbaro", "John Doe"],
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result, _ = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    events = (
+        (
+            await session.execute(
+                select(Event).where(Event.film_id == film.id, Event.event_type == "casting")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    keys = sorted((e.subject_key or []) for e in events)
+    assert keys == [["john doe"], ["monica barbaro"]]  # original untouched, new scoped to John
+
+
+async def test_casting_no_new_performer_drops(session):
+    film = Film(tmdb_id=1, title="Oceans")
+    session.add(film)
+    await session.flush()
+    await _casting_event(session, film, ["monica barbaro"], url="https://e/prior")
+    await _linked_story(session, film, "https://e/new", title="Monica restated")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["Monica Barbaro"],
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result, _ = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    story = (await session.execute(select(Story).where(Story.url == "https://e/new"))).scalar_one()
+    assert story.link_status == "rejected"
+    assert story.link_note == "casting-recorded"
+
+
+async def test_casting_in_pass_dedup(session):
+    film = Film(tmdb_id=1, title="Oceans")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/a", title="John cast (outlet A)")
+    await _linked_story(session, film, "https://e/b", title="John cast (outlet B)")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["John Doe"],
+                    "stories": [1],
+                },
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["John Doe"],
+                    "stories": [2],
+                },
+            ]
+        }
+    )
+    result, _ = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1  # second John group is a same-pass duplicate → dropped
     assert result.stories_rejected == 1

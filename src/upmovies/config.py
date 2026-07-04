@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
     summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
-    summary_prompt_version: str = Field(default="8", alias="SUMMARY_PROMPT_VERSION")
+    summary_prompt_version: str = Field(default="9", alias="SUMMARY_PROMPT_VERSION")
     url_resolve_per_run: int = Field(default=500, alias="URL_RESOLVE_PER_RUN")
     url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")
     url_resolve_delay_seconds: float = Field(default=1.0, alias="URL_RESOLVE_DELAY_SECONDS")
