@@ -4,18 +4,18 @@ version = "0.1.0"
 description = "Upcoming Movies Tracker backend"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.136.1",
-    "uvicorn[standard]>=0.32",
+    "fastapi>=0.139.0",
+    "uvicorn[standard]>=0.50.0",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30",
-    "alembic>=1.18.4",
+    "alembic>=1.18.5",
     "pydantic>=2.10",
     "pydantic-settings>=2.14.2",
-    "httpx>=0.28",
+    "httpx>=0.28.1",
     "feedparser>=6.0.11",
     "argon2-cffi>=25.1.0",
     "email-validator>=2.0.0",
-    "sentry-sdk[fastapi]>=2.0.0",
+    "sentry-sdk[fastapi]>=2.64.0",
     "anthropic>=0.49",
     "python-slugify>=8.0",
     "tldextract>=5.1",
@@ -29,7 +29,7 @@ dev = [
     "respx>=0.23.1",
     "ruff>=0.9",
     "pyright>=1.1.411",
-    "httpx>=0.28",
+    "httpx>=0.28.1",
     "types-python-slugify>=1.1",
 ]
 
