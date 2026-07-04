@@ -58,6 +58,8 @@ redundant. Use "the film" only if a reference is grammatically necessary.
 - Name only the people party to THIS beat — e.g. the cast member for a casting beat. Omit \
 the director and other crew unless the beat is itself about them (e.g. an "X to direct" \
 announcement).
+- If the payload includes a "subjects" list, this beat concerns ONLY those named \
+performers — name only them and ignore any other performers the stories mention.
 - Always name them by their actual name — do not substitute a vague descriptor ("the lead \
 actor," "his character") for a name the sources provide. Reproducing a person's name or \
 character name is not a paraphrase violation; the "strict paraphrase" rule is about sentence \
@@ -109,6 +111,7 @@ class EventInput:
     film_title: str
     source_updated_at: datetime
     stories: Sequence[StoryInput]
+    subjects: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -144,7 +147,7 @@ class SummaryClient(Completer, BatchCompleter, Protocol): ...
 
 
 def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "as_of_date": run_date.isoformat(),
         "film": event.film_title,
         "event_type": event.event_type,
@@ -152,6 +155,9 @@ def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
             {"title": s.title, "dek": s.dek[:_DEK_MAX], "source": s.source} for s in event.stories
         ],
     }
+    if event.subjects:
+        payload["subjects"] = list(event.subjects)
+    return payload
 
 
 def _extract_json_object(text: str) -> str:

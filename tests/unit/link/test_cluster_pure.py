@@ -199,3 +199,35 @@ def test_parse_bad_claimed_date_is_none():
     )
     groups = parse_cluster_groups(raw, n_stories=1)
     assert groups is not None and groups[0].claimed_date is None
+
+
+def test_normalize_name_folds_case_and_whitespace():
+    from upmovies.link.cluster import _normalize_name
+
+    assert _normalize_name("Alain  Chabat") == "alain chabat"
+    assert _normalize_name("  Monica Barbaro ") == "monica barbaro"
+    assert _normalize_name("JOHN DOE") == "john doe"
+    assert _normalize_name("") == ""
+
+
+def test_parse_reads_cast_for_casting_events():
+    from upmovies.link.cluster import parse_cluster_groups
+
+    raw = (
+        '{"events": [{"existing": null, "type": "casting", "confidence": "confirmed", '
+        '"cast": ["Monica Barbaro", "John Doe"], "stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None and len(groups) == 1
+    assert groups[0].cast == ["Monica Barbaro", "John Doe"]
+
+
+def test_parse_cast_absent_is_none():
+    from upmovies.link.cluster import parse_cluster_groups
+
+    raw = (
+        '{"events": [{"existing": null, "type": "trailer", "confidence": "confirmed", '
+        '"stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None and groups[0].cast is None

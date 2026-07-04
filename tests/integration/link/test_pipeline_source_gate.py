@@ -20,7 +20,7 @@ class _StubClient:
         # Cluster call -> one confirmed casting event over story n=1.
         cluster_resp = (
             '{"events": [{"existing": null, "type": "casting",'
-            ' "confidence": "confirmed", "stories": [1]}]}'
+            ' "confidence": "confirmed", "cast": ["Test Performer"], "stories": [1]}]}'
         )
         return cluster_resp, Usage()
 

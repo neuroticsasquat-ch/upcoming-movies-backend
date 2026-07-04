@@ -108,6 +108,7 @@ async def _select_pending(session: AsyncSession, *, prompt_version: str) -> list
                     film_title=film_title,
                     source_updated_at=event.updated_at,
                     stories=story_inputs,
+                    subjects=event.subject_key,
                 ),
             )
         )

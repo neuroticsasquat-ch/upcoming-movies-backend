@@ -264,3 +264,27 @@ def test_instructions_forbid_genre_label_and_unrelated_history_filler():
     lowered = _INSTRUCTIONS.lower()
     assert "genre label" in lowered
     assert "prior title change" in lowered
+
+
+def test_event_payload_includes_subjects_when_present():
+    from datetime import UTC, date, datetime
+
+    from upmovies.synthesize.summarizer import EventInput, StoryInput, _event_payload
+
+    event = EventInput(
+        event_type="casting",
+        film_title="Oceans",
+        source_updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        stories=[StoryInput(title="t", dek="d", source="s")],
+        subjects=["john doe"],
+    )
+    payload = _event_payload(event, date(2026, 1, 1))
+    assert payload["subjects"] == ["john doe"]
+
+
+def test_instructions_scope_summary_to_subjects():
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "subjects" in lowered
+    assert "name only them" in lowered
