@@ -1,10 +1,12 @@
 """Shared query predicates over `catalog.film`."""
 
-from datetime import date
+from datetime import date, datetime
+from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, or_
+from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film
+from upmovies.catalog.models import Film, FilmFieldChange
 
 
 def active_film_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnElement[bool]:
@@ -19,3 +21,16 @@ def active_film_clause(*, today: date, excluded_statuses: frozenset[str]) -> Col
         or_(Film.release_date.is_(None), Film.release_date >= today),
         or_(Film.status.is_(None), Film.status.not_in(excluded_statuses)),
     )
+
+
+async def field_changed_at(session: AsyncSession, film_id: UUID, field: str) -> datetime | None:
+    """The most recent time `field` changed on this film, or None if it has never
+    changed since insert (the trigger is UPDATE-only). Callers treat None as
+    'known since at least `film.created_at`'."""
+    stmt = (
+        select(FilmFieldChange.changed_at)
+        .where(FilmFieldChange.film_id == film_id, FilmFieldChange.field == field)
+        .order_by(FilmFieldChange.changed_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
