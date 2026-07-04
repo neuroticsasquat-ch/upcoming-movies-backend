@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Upcoming Movies Tracker backend"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.136.1",
+    "fastapi>=0.139.0",
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30",
