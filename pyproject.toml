@@ -11,7 +11,7 @@ dependencies = [
     "alembic>=1.18.5",
     "pydantic>=2.10",
     "pydantic-settings>=2.14.2",
-    "httpx>=0.28",
+    "httpx>=0.28.1",
     "feedparser>=6.0.11",
     "argon2-cffi>=25.1.0",
     "email-validator>=2.0.0",
@@ -29,7 +29,7 @@ dev = [
     "respx>=0.23.1",
     "ruff>=0.9",
     "pyright>=1.1.411",
-    "httpx>=0.28",
+    "httpx>=0.28.1",
     "types-python-slugify>=1.1",
 ]
 
