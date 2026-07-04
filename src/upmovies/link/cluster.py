@@ -15,6 +15,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
+from upmovies.catalog.queries import field_changed_at
 from upmovies.link.linker import Completer
 from upmovies.llm.client import BatchRequest, Usage
 from upmovies.news.models import Event, EventStory, Story
@@ -145,9 +146,13 @@ the film's already-known release_date, this is not a new beat regardless of how 
 frames it — put it in its own group with "type": "off_topic" and "confidence": null, same as a \
 plain restatement.
 
+For a "release_date" event, put the exact date the story asserts in "claimed_date" as \
+YYYY-MM-DD (null if the story gives no concrete date). For every non-release_date event, null.
+
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
 "confidence": "confirmed" | "rumored" | null, "region": <ISO 3166-1 alpha-2 or null>, \
+"claimed_date": <YYYY-MM-DD or null>, \
 "stories": [<story number n>, ...]}]}
 
 When "existing" is a number, attach its "stories" to that event ("type"/"confidence" may \
@@ -171,6 +176,7 @@ class ClusterPlan:
     film_status: str | None = None
     film_release_date: date | None = None
     run_date: date | None = None
+    film_created_at: datetime | None = None
 
 
 @dataclass
@@ -180,6 +186,7 @@ class ClusterGroup:
     confidence: str | None
     story_indices: list[int]
     region: str | None = None
+    claimed_date: date | None = None
 
 
 def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | None:
@@ -209,6 +216,13 @@ def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | No
             if isinstance(region_raw, str) and re.fullmatch(r"[A-Za-z]{2}", region_raw)
             else None
         )
+        claimed_raw = group.get("claimed_date")
+        claimed_date = None
+        if isinstance(claimed_raw, str):
+            try:
+                claimed_date = date.fromisoformat(claimed_raw)
+            except ValueError:
+                claimed_date = None
         groups.append(
             ClusterGroup(
                 existing=existing if isinstance(existing, int) else None,
@@ -216,6 +230,7 @@ def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | No
                 confidence=group.get("confidence"),
                 story_indices=indices,
                 region=region,
+                claimed_date=claimed_date,
             )
         )
     return groups
@@ -352,6 +367,7 @@ async def build_cluster_request(
         film_status=film.status,
         film_release_date=film.release_date,
         run_date=run_date,
+        film_created_at=film.created_at,
     )
     return system, messages, plan
 
@@ -373,6 +389,7 @@ async def apply_cluster_decisions(
     raw: str,
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
+    release_restate_days: int = 7,
 ) -> ClusterResult:
     """Write half: re-load events/stories from the plan, parse the LLM JSON, and
     create/attach events. The caller owns the session/commit."""
@@ -464,6 +481,27 @@ async def apply_cluster_decisions(
                     assigned.add(sid)
                     stories_rejected += 1
                 continue
+            if (
+                etype == "release_date"
+                and group.claimed_date is not None
+                and plan.film_release_date is not None
+                and group.claimed_date == plan.film_release_date
+            ):
+                established = await field_changed_at(session, plan.film_id, "release_date")
+                baseline = established or plan.film_created_at
+                if (
+                    baseline is not None
+                    and (as_of_date - baseline.date()).days > release_restate_days
+                ):
+                    for sid in group_sids:
+                        story = by_id[sid]
+                        story.link_status = "rejected"
+                        story.film_id = None
+                        story.link_confidence = None
+                        story.link_note = "release-date-restated"
+                        assigned.add(sid)
+                        stories_rejected += 1
+                    continue
             target = dedup_targets.get(etype) if etype in _SINGULAR_BEAT_TYPES else None
             if target is not None:
                 event = target
@@ -534,6 +572,7 @@ async def cluster_film_events(
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
+    release_restate_days: int = 7,
     run_date: date,
 ) -> tuple[ClusterResult, Usage]:
     built = await build_cluster_request(
@@ -549,5 +588,10 @@ async def cluster_film_events(
         max_tokens=max_tokens,
     )
     return await apply_cluster_decisions(
-        session, plan=plan, raw=raw, unresolved_tier=unresolved_tier, dedup_days=dedup_days
+        session,
+        plan=plan,
+        raw=raw,
+        unresolved_tier=unresolved_tier,
+        dedup_days=dedup_days,
+        release_restate_days=release_restate_days,
     ), usage
