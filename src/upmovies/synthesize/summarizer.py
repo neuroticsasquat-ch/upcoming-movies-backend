@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 
 from upmovies.llm.client import BatchRequest, BatchResult, Usage
@@ -58,19 +58,39 @@ redundant. Use "the film" only if a reference is grammatically necessary.
 - Name only the people party to THIS beat — e.g. the cast member for a casting beat. Omit \
 the director and other crew unless the beat is itself about them (e.g. an "X to direct" \
 announcement).
+- Always name them by their actual name — do not substitute a vague descriptor ("the lead \
+actor," "his character") for a name the sources provide. Reproducing a person's name or \
+character name is not a paraphrase violation; the "strict paraphrase" rule is about sentence \
+construction, not about omitting names.
 - No relational or biographical framing — don't add who someone is related to, married to, \
 or reuniting with ("daughter of …", "reuniting with his father").
 - Report only the production fact. State who / what / when and stop. Exclude: fan, audience, \
 or social-media reactions; whether the news "generated discussion" or "circulated on social \
 media"; the talent's stated feelings about their role or the project; "ahead of" / "in \
-advance of" / "approaches release" framing that adds no fact; and any meta-commentary about \
-the announcement itself. If the summary could be replaced by the headline with nothing lost, \
-it has too much filler — cut it back.
+advance of" / "approaches release" framing that adds no fact; any meta-commentary about the \
+announcement itself; a genre label ("in an action thriller," "in a horror film") unless the \
+genre itself is the news; and unrelated history about the film — e.g. a prior title change — \
+unless it is itself the beat being reported. If the summary could be replaced by the headline \
+with nothing lost, it has too much filler — cut it back.
 - Prefer the canonical shape: state the beat in the film's already-known context and nothing \
 more — e.g. "{Star} has joined the cast", "{Star} has been cast as {Character}" (character \
 optional), "{Star} will reprise their role", "{Star} will make their acting debut".
 - ONE sentence. Add a second only if it carries a distinct production fact (not a trailer \
 like "Composer X has discussed the process").
+- The payload includes `as_of_date`, today's date (UTC). Use it to get tense and relative \
+dates right — do not describe something that happened on or before this date as if it were in \
+the future.
+- Date the beat by its OWN date, never by another date that merely appears in the sources. A \
+film's release date, a scheduled premiere, or another event's date mentioned alongside this \
+beat is context, not the date of THIS beat. A DIFFERENT film's release date — a spin-off, \
+sequel, or prequel named in the same story — is likewise context and is NEVER this film's \
+date. If the sources do not make this beat's own date clear, state no date for it.
+- A beat reported now has already happened (a trailer that dropped, a casting that closed); \
+never state it as occurring on a date AFTER `as_of_date`. A date after `as_of_date` is a \
+future/scheduled date (e.g. the film's release), not when this beat took place.
+- For a "release_date" beat, state the actual date (or an unambiguous relative time, e.g. "in \
+two weeks") plainly. Never describe the announcement only in relational terms — e.g. "a date \
+that was announced alongside confirmation of X" — without giving the date itself.
 
 Return ONLY a JSON object, no prose or markdown:
 {"summary": "<your one-sentence update>"}"""
@@ -123,8 +143,9 @@ class BatchCompleter(Protocol):
 class SummaryClient(Completer, BatchCompleter, Protocol): ...
 
 
-def _event_payload(event: EventInput) -> dict[str, Any]:
+def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
     return {
+        "as_of_date": run_date.isoformat(),
         "film": event.film_title,
         "event_type": event.event_type,
         "stories": [
@@ -193,35 +214,37 @@ def parse_summary(raw: str) -> str:
 
 
 def build_summary_request(
-    event: EventInput,
+    event: EventInput, run_date: date
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The plain instructions system block + the JSON event payload — shared by both the
     sequential `complete()` path and the batched `complete_batch()` path. Truncates each dek."""
     system = [{"type": "text", "text": _INSTRUCTIONS}]
     messages = [
-        {"role": "user", "content": json.dumps(_event_payload(event))},
+        {"role": "user", "content": json.dumps(_event_payload(event, run_date))},
         # Assistant prefill: forces a JSON-envelope continuation (no preamble/reasoning).
         {"role": "assistant", "content": _PREFILL},
     ]
     return system, messages
 
 
-def build_summary_batch_request(*, custom_id: str, model: str, event: EventInput) -> BatchRequest:
+def build_summary_batch_request(
+    *, custom_id: str, model: str, event: EventInput, run_date: date
+) -> BatchRequest:
     """One Message-Batch request for one event. `custom_id` is the event id (the caller
     supplies it). `max_tokens` matches the sequential path's `_MAX_TOKENS` for parity."""
-    system, messages = build_summary_request(event)
+    system, messages = build_summary_request(event, run_date)
     return BatchRequest(
         custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )
 
 
 async def summarize_event(
-    *, client: Completer, model: str, prompt_version: str, event: EventInput
+    *, client: Completer, model: str, prompt_version: str, event: EventInput, run_date: date
 ) -> tuple[SummaryResult, Usage]:
     """Sequential path: build the request, call `complete_with_usage` (max_tokens pinned to
     `_MAX_TOKENS` for parity with the batched path), parse the JSON envelope, and bundle the
     provenance the caller persists into `event_summary` alongside the call's token `Usage`."""
-    system, messages = build_summary_request(event)
+    system, messages = build_summary_request(event, run_date)
     raw, usage = await client.complete_with_usage(
         model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
     )

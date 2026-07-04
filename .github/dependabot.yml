@@ -8,6 +8,9 @@ updates:
       time: "09:00"
       timezone: America/New_York
     target-branch: updates/dependencies
+    commit-message:
+      prefix: ci
+      include: scope
     groups:
       minor-and-patch:
         update-types:
@@ -22,6 +25,10 @@ updates:
       time: "09:00"
       timezone: America/New_York
     target-branch: updates/dependencies
+    commit-message:
+      prefix: build
+      prefix-development: build
+      include: scope
     groups:
       minor-and-patch:
         update-types:

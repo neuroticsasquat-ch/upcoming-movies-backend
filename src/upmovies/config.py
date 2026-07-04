@@ -23,6 +23,7 @@ class Settings(BaseSettings):
         default=1095, alias="TMDB_RELEASE_WINDOW_FUTURE_DAYS"
     )
     tmdb_min_popularity: float = Field(default=1.0, alias="TMDB_MIN_POPULARITY")
+    tmdb_min_runtime: int = Field(default=60, alias="TMDB_MIN_RUNTIME")
     tmdb_excluded_statuses_raw: str = Field(
         default="Released,Canceled", alias="TMDB_EXCLUDED_STATUSES"
     )
@@ -37,9 +38,16 @@ class Settings(BaseSettings):
     cluster_use_batches: bool = Field(default=True, alias="CLUSTER_USE_BATCHES")
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
     link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
+    link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
+    source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
+    source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
+    source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
     summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
-    summary_prompt_version: str = Field(default="4", alias="SUMMARY_PROMPT_VERSION")
+    summary_prompt_version: str = Field(default="8", alias="SUMMARY_PROMPT_VERSION")
+    url_resolve_per_run: int = Field(default=500, alias="URL_RESOLVE_PER_RUN")
+    url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")
+    url_resolve_delay_seconds: float = Field(default=1.0, alias="URL_RESOLVE_DELAY_SECONDS")
     feed_recency_days: int = Field(default=3, alias="FEED_RECENCY_DAYS")
     feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
     feeds_per_film_throttle_seconds: float = Field(

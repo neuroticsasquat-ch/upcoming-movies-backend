@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -11,6 +12,7 @@ class SourceOut(BaseModel):
 
 
 class EventOut(BaseModel):
+    event_id: UUID
     event_type: str
     confidence: str
     created_at: datetime
@@ -52,9 +54,17 @@ class CastMemberOut(BaseModel):
     profile_path: str | None
 
 
+class CrewMemberOut(BaseModel):
+    name: str
+    job: str | None
+    department: str | None
+
+
 class FilmDetailResponse(BaseModel):
     slug: str
     title: str
+    tmdb_id: int
+    imdb_id: str | None = None
     release_date: date | None
     release_year: int | None
     poster_path: str | None
@@ -73,7 +83,7 @@ class FilmDetailResponse(BaseModel):
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
     cast: list[CastMemberOut] = []
-    directors: list[str] = []
+    crew: list[CrewMemberOut] = []
 
 
 class FeedItem(BaseModel):
@@ -118,6 +128,9 @@ class CalendarItem(BaseModel):
     poster_path: str | None
     release_date: date  # US release date → "YYYY-MM-DD"
     release_type: str  # display bucket: "premiere" | "limited" | "wide"
+    director: str | None  # credited director(s), joined with ", "; null when none
+    stars: list[str]  # first 3 billed cast names
+    genres: list[str]  # up to 3 genre names, ordered by name
 
 
 class CalendarResponse(BaseModel):

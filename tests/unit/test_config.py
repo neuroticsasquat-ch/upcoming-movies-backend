@@ -123,7 +123,7 @@ def test_settings_summary_defaults(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-haiku-4-5"
     assert s.summary_use_batches is True
-    assert s.summary_prompt_version == "4"
+    assert s.summary_prompt_version == "8"
 
 
 def test_settings_summary_overrides_from_env(monkeypatch):
@@ -173,3 +173,56 @@ def test_settings_public_base_url_override_from_env(monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://backlotter.com")
     s = Settings()  # type: ignore[call-arg]
     assert s.public_base_url == "https://backlotter.com"
+
+
+def test_settings_min_runtime_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("TMDB_MIN_RUNTIME", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.tmdb_min_runtime == 60
+
+
+def test_settings_min_runtime_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("TMDB_MIN_RUNTIME", "0")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.tmdb_min_runtime == 0
+
+
+def test_settings_has_url_resolve_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    for key in (
+        "URL_RESOLVE_PER_RUN",
+        "URL_RESOLVE_MAX_ATTEMPTS",
+        "URL_RESOLVE_DELAY_SECONDS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.url_resolve_per_run == 500
+    assert s.url_resolve_max_attempts == 3
+    assert s.url_resolve_delay_seconds == 1.0
+
+
+def test_settings_reads_url_resolve_overrides(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("URL_RESOLVE_PER_RUN", "120")
+    monkeypatch.setenv("URL_RESOLVE_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("URL_RESOLVE_DELAY_SECONDS", "0.25")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.url_resolve_per_run == 120
+    assert s.url_resolve_max_attempts == 5
+    assert s.url_resolve_delay_seconds == 0.25
+
+
+def test_settings_link_singular_dedup_days_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("LINK_SINGULAR_DEDUP_DAYS", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_singular_dedup_days == 14
+
+
+def test_settings_link_singular_dedup_days_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_SINGULAR_DEDUP_DAYS", "7")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_singular_dedup_days == 7

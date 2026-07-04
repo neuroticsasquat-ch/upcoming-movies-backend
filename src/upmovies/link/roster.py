@@ -4,12 +4,15 @@ maps the index back to a film_id."""
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmGenre, Genre
+from upmovies.catalog.queries import active_film_clause
+from upmovies.config import get_settings
 
 _OVERVIEW_MAX = 120
 
@@ -53,7 +56,19 @@ def _render(entries: list[RosterEntry]) -> str:
 
 
 async def build_roster(session: AsyncSession) -> Roster:
-    films = (await session.execute(select(Film).order_by(Film.title))).scalars().all()
+    excluded = get_settings().tmdb_excluded_statuses
+    today = datetime.now(UTC).date()
+    films = (
+        (
+            await session.execute(
+                select(Film)
+                .where(active_film_clause(today=today, excluded_statuses=excluded))
+                .order_by(Film.title)
+            )
+        )
+        .scalars()
+        .all()
+    )
     genre_rows = (
         await session.execute(
             select(FilmGenre.film_id, Genre.name).join(Genre, Genre.id == FilmGenre.genre_id)

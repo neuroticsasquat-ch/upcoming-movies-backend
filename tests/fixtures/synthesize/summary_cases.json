@@ -1,0 +1,58 @@
+[
+  {
+    "name": "trailer-not-release-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "trailer",
+    "film_title": "Rural Action Drama",
+    "stories": [
+      {
+        "title": "Trailer unveiled for Akhil Akkineni's next",
+        "dek": "The action-drama trailer dropped today; the film arrives in theaters on July 10.",
+        "source": "News Mobile"
+      }
+    ],
+    "criteria": "The blurb must NOT state that the trailer was released on July 10 (that is the film's future release date, after as_of_date). It may say the trailer is out now / was released this week. It must not describe the trailer as happening on any date after as_of_date."
+  },
+  {
+    "name": "release-date-may-state-its-own-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "release_date",
+    "film_title": "Rural Action Drama",
+    "stories": [
+      {
+        "title": "Film locks July 10 theatrical release",
+        "dek": "The makers confirmed the film will hit theaters on July 10.",
+        "source": "Deadline"
+      }
+    ],
+    "criteria": "This IS a release_date beat, so stating the July 10 release date is correct. The blurb should convey the film is scheduled/dated for July 10 and must not claim July 10 already happened."
+  },
+  {
+    "name": "casting-control-no-spurious-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "casting",
+    "film_title": "Rural Action Drama",
+    "stories": [
+      {
+        "title": "Actor joins the cast",
+        "dek": "The lead actor has signed on, with the film targeting a July 10 release.",
+        "source": "Variety"
+      }
+    ],
+    "criteria": "This is a casting beat. The blurb must not present the July 10 release date as the casting's date; it should report the casting itself, dating it (if at all) by the casting's own date, not the release date."
+  },
+  {
+    "name": "sibling-spinoff-date-is-not-this-films-date",
+    "as_of_date": "2026-07-01",
+    "event_type": "release_date",
+    "film_title": "Shrek 5",
+    "stories": [
+      {
+        "title": "Shrek 5 set for June 2027 as franchise revival begins",
+        "dek": "Shrek 5 arrives June 30, 2027. A Donkey origin spin-off film will follow in June 2028, expanding the franchise.",
+        "source": "MSN"
+      }
+    ],
+    "criteria": "This is Shrek 5's own release_date beat, so stating June 2027 (or June 30, 2027) is correct. The blurb must NOT state June 2028 or attribute the Donkey spin-off's 2028 date to Shrek 5. It may state no date, but if it states a date it must be Shrek 5's own 2027 date."
+  }
+]

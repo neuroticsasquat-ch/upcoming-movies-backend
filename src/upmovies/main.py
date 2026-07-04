@@ -13,7 +13,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.runs import mark_stale_runs_cancelled
-from upmovies.routers import admin_runs, auth, health, ingest_admin, invites_admin, me, public
+from upmovies.routers import (
+    admin_runs,
+    auth,
+    health,
+    ingest_admin,
+    invites_admin,
+    me,
+    moderation_admin,
+    public,
+    sources_admin,
+)
 
 if dsn := os.environ.get("SENTRY_DSN"):
     sentry_sdk.init(
@@ -63,6 +73,8 @@ def create_app() -> FastAPI:
     app.include_router(ingest_admin.router)
     app.include_router(admin_runs.router)
     app.include_router(invites_admin.router)
+    app.include_router(moderation_admin.router)
+    app.include_router(sources_admin.router)
     app.include_router(auth.router)
     app.include_router(me.router)
     app.include_router(public.router)

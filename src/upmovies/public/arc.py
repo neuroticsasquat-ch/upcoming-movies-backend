@@ -30,14 +30,13 @@ _EVENT_STAGE: dict[str, str] = {
 }
 
 
-def derive_arc_stage(status: str | None, event_types: Iterable[str]) -> str:
-    """Return a film's current arc stage."""
-    best = _RANK[_STATUS_BASELINE.get(status or "", "announced")]
-    for event_type in event_types:
-        stage = _EVENT_STAGE.get(event_type)
-        if stage is not None:
-            best = max(best, _RANK[stage])
-    return ARC_STAGES[best]
+def derive_arc_stage(status: str | None) -> str:
+    """Return a film's current arc stage, derived solely from its TMDB status.
+
+    News events never influence production status (NEU-452): a low-trust or fabricated
+    beat must not shift a film's stage. Only `film.status` (from TMDB) maps to a stage.
+    """
+    return ARC_STAGES[_RANK[_STATUS_BASELINE.get(status or "", "announced")]]
 
 
 def most_significant_event_type(event_types: Iterable[str]) -> str:

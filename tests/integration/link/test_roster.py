@@ -57,3 +57,20 @@ async def test_overview_is_capped_but_disambiguation_fields_survive(session):
     assert "(2026)" in roster.text  # year
     assert "[orig: Coureur]" in roster.text  # original title
     assert "genres: Drama" in roster.text  # genres
+
+
+async def test_build_roster_excludes_released_and_canceled_films(session):
+    session.add_all(
+        [
+            Film(
+                tmdb_id=10, title="Active", release_date=date(2026, 12, 1), status="Post Production"
+            ),
+            Film(tmdb_id=11, title="Released", release_date=date(2026, 1, 1), status="Released"),
+            Film(tmdb_id=12, title="Canceled", release_date=date(2027, 1, 1), status="Canceled"),
+        ]
+    )
+    await session.commit()
+
+    roster = await build_roster(session)
+
+    assert [e.title for e in roster.entries] == ["Active"]

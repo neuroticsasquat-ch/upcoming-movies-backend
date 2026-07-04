@@ -86,9 +86,10 @@ async def measure_sequential(
 ) -> Usage:
     """Drive the sequential Stage-1 shape: one `complete_with_usage` per chunk, reusing the
     production request builder. Cache warms naturally over calls 2..N (same `roster`)."""
+    run_date = datetime.now(UTC).date()
     total = Usage()
     for chunk in chunks:
-        system, messages = build_link_request(roster, chunk)
+        system, messages = build_link_request(roster, chunk, run_date)
         _, usage = await client.complete_with_usage(
             model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
         )
@@ -101,8 +102,9 @@ async def measure_batched(
 ) -> Usage:
     """Drive the batched Stage-1 shape: N `build_batch_request`s submitted as one batch.
     Sums usage over succeeded chunks; logs and skips any failed chunk."""
+    run_date = datetime.now(UTC).date()
     requests = [
-        build_batch_request(custom_id=str(i), model=model, roster=roster, stories=chunk)
+        build_batch_request(custom_id=str(i), model=model, roster=roster, stories=chunk, run_date=run_date)
         for i, chunk in enumerate(chunks)
     ]
     results = await client.complete_batch(requests)

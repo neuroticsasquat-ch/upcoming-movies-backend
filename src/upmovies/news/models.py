@@ -7,6 +7,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     Text,
     UniqueConstraint,
     text,
@@ -30,6 +31,10 @@ class Story(Base):
             "link_status IN ('pending', 'linked', 'rejected')",
             name="ck_story_link_status",
         ),
+        CheckConstraint(
+            "resolve_state IN ('none', 'pending', 'resolved', 'failed')",
+            name="ck_story_resolve_state",
+        ),
         {"schema": "news"},
     )
 
@@ -52,6 +57,9 @@ class Story(Base):
     linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     link_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    resolved_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolve_state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'none'"))
+    resolve_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -66,7 +74,7 @@ class Event(Base):
     __table_args__ = (
         CheckConstraint(
             "event_type IN ('announced', 'casting', 'production_start', "
-            "'production_wrap', 'release_date', 'trailer', 'other')",
+            "'production_wrap', 'release_date', 'trailer', 'first_look', 'other')",
             name="ck_event_type",
         ),
         CheckConstraint("confidence IN ('confirmed', 'rumored')", name="ck_event_confidence"),
@@ -82,6 +90,7 @@ class Event(Base):
     )
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
@@ -125,5 +134,37 @@ class EventSummary(Base):
     prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
     source_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class SourceDomain(Base):
+    """Per-publisher-domain trust tier for the source-quality gate. `llm_tier` is assigned
+    once by the LLM judge on first sighting and cached; `admin_override` (set from the admin
+    UI) always wins over it. Keyed by the normalized registrable domain (e.g. `mshale.com`)."""
+
+    __tablename__ = "source_domain"
+    __table_args__ = (
+        CheckConstraint(
+            "llm_tier IS NULL OR llm_tier IN ('trusted', 'acceptable', 'low')",
+            name="ck_source_domain_tier",
+        ),
+        CheckConstraint(
+            "admin_override IN ('none', 'block', 'allow', 'trust')",
+            name="ck_source_domain_override",
+        ),
+        {"schema": "news"},
+    )
+
+    domain: Mapped[str] = mapped_column(Text, primary_key=True)
+    llm_tier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admin_override: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'none'"))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    judged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

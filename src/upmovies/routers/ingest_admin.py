@@ -57,6 +57,7 @@ async def _background_tmdb(run_id: UUID, settings: Settings) -> None:
                 min_popularity=settings.tmdb_min_popularity,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
                 excluded_statuses=settings.tmdb_excluded_statuses,
+                min_runtime=settings.tmdb_min_runtime,
             )
     except Exception as e:
         log.exception("background tmdb ingest crashed")
@@ -99,6 +100,10 @@ async def _background_link(run_id: UUID, settings: Settings) -> None:
                 use_batches=settings.link_use_batches,
                 cluster_use_batches=settings.cluster_use_batches,
                 cluster_max_tokens=settings.link_cluster_max_tokens,
+                source_gate_enabled=settings.source_gate_enabled,
+                source_judge_model=settings.source_judge_model,
+                unresolved_tier=settings.source_unresolved_tier,
+                dedup_days=settings.link_singular_dedup_days,
             )
     except Exception as e:
         log.exception("background link ingest crashed")
@@ -149,6 +154,9 @@ async def _background_synth(run_id: UUID, settings: Settings) -> None:
                 model=settings.summary_model,
                 prompt_version=settings.summary_prompt_version,
                 use_batches=settings.summary_use_batches,
+                url_resolve_per_run=settings.url_resolve_per_run,
+                url_resolve_max_attempts=settings.url_resolve_max_attempts,
+                url_resolve_delay_seconds=settings.url_resolve_delay_seconds,
             )
     except Exception as e:
         log.exception("background synthesize ingest crashed")

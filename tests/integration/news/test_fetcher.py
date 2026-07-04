@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from email.utils import format_datetime
 
 import httpx
@@ -15,7 +15,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
 from upmovies.news.feeds import FeedSource, per_film_google_sources
-from upmovies.news.fetcher import run_feeds_ingest
+from upmovies.news.fetcher import _film_titles, run_feeds_ingest
 from upmovies.news.models import Story
 
 RSS_URL = "https://deadline.com/feed"
@@ -386,3 +386,33 @@ async def test_per_film_title_filter_drops_off_topic_and_leaves_trades(session):
     assert "https://news.example/bakery" not in urls  # off-topic per-film dropped
     assert "https://deadline.com/x" in urls  # trade feed NOT filtered
     assert result.stories_filtered == 1
+
+
+async def test_film_titles_excludes_released_and_canceled(session):
+    session.add_all(
+        [
+            Film(
+                tmdb_id=101,
+                title="Active Future",
+                release_date=date(2026, 12, 1),
+                status="Post Production",
+            ),
+            Film(
+                tmdb_id=102,
+                title="Released Past",
+                release_date=date(2026, 1, 1),
+                status="Released",
+            ),
+            Film(
+                tmdb_id=103,
+                title="Canceled Later",
+                release_date=date(2027, 1, 1),
+                status="Canceled",
+            ),
+        ]
+    )
+    await session.commit()
+
+    titles = await _film_titles(lambda: session)
+
+    assert titles == ["Active Future"]

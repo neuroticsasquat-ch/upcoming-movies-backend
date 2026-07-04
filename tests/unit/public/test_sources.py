@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from upmovies.news.models import Story
-from upmovies.public.sources import SOURCE_CAP, cap_sources, outlet_label
+from upmovies.public.sources import SOURCE_CAP, cap_sources, outlet_label, source_url
 
 
 def _dt(day: int) -> datetime:
@@ -112,3 +112,20 @@ def test_cap_sources_normalizes_outlet_for_dedupe():
     # casefold + "the " strip + whitespace-collapse make these one outlet;
     # the verbatim label of the most-recent kept story is displayed.
     assert [outlet_label(s) for s in result] == ["The Hollywood Reporter", "Variety"]
+
+
+def test_source_url_prefers_resolved():
+    s = Story(
+        source="Google News: per-film",
+        url="https://news.google.com/rss/articles/X",
+        title="t",
+        resolved_url="https://variety.com/real",
+    )
+    assert source_url(s) == "https://variety.com/real"
+
+
+def test_source_url_falls_back_to_google_when_unresolved():
+    s = Story(
+        source="Google News: per-film", url="https://news.google.com/rss/articles/X", title="t"
+    )
+    assert source_url(s) == "https://news.google.com/rss/articles/X"

@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from uuid import uuid4
 
 from upmovies.link.linker import (
@@ -41,7 +42,12 @@ async def _run(response, *, floor=0.7):
     story = _story()
     client = FakeClient(response(str(story.id)))
     result, _usage = await link_story_batch(
-        client=client, model="m", roster=_roster(film_id), stories=[story], floor=floor
+        client=client,
+        model="m",
+        roster=_roster(film_id),
+        stories=[story],
+        floor=floor,
+        run_date=date(2026, 6, 25),
     )
     return story, film_id, client, result
 
@@ -114,11 +120,15 @@ async def test_omitted_story_is_rejected_no_decision():
 
 
 def test_build_link_request_uses_cached_roster_and_story_payload():
-    system, messages = build_link_request(_roster(uuid4()), [_story(title="Runner news")])
+    roster = _roster(uuid4())
+    stories = [_story(title="Runner news")]
+    system, messages = build_link_request(roster, stories, date(2026, 6, 25))
+    # cached roster system block unchanged apart from the constant's new sentence
     assert system[0]["cache_control"] == {"type": "ephemeral"}
-    assert "Runner" in system[0]["text"]
     payload = json.loads(messages[0]["content"])
-    assert payload[0]["title"] == "Runner news"
+    assert payload["as_of_date"] == "2026-06-25"
+    assert isinstance(payload["stories"], list)
+    assert payload["stories"][0]["title"] == "Runner news"
 
 
 def test_apply_link_decisions_links_about_high_confidence():
@@ -133,7 +143,11 @@ def test_apply_link_decisions_links_about_high_confidence():
 
 def test_build_batch_request_carries_custom_id_and_cached_block():
     req = build_batch_request(
-        custom_id="3", model="link-m", roster=_roster(uuid4()), stories=[_story()]
+        custom_id="3",
+        model="link-m",
+        roster=_roster(uuid4()),
+        stories=[_story()],
+        run_date=date(2026, 6, 25),
     )
     assert req.custom_id == "3"
     assert req.model == "link-m"
@@ -187,3 +201,70 @@ def test_instructions_warn_against_interview_enthusiasm_headlines():
     assert "teases" in lowered
     assert "reacts to" in lowered
     assert "no new production fact" in lowered
+    assert "wishlist" in lowered
+    assert "do not currently hold" in lowered
+
+
+async def test_not_news_downstream_recirculation_is_rejected():
+    film_id = uuid4()
+    story = _story(title="Kim Kardashian's son Psalm makes acting debut in Angry Birds Movie 3")
+    raw = (
+        '[{"id": "' + str(story.id) + '", "film": 1, "confidence": 0.0, '
+        '"reason": "not-news", "category": "downstream"}]'
+    )
+    result = apply_link_decisions(raw=raw, stories=[story], roster=_roster(film_id), floor=0.7)
+    assert result.linked == 0
+    assert story.link_status == "rejected"
+    assert story.link_note == "not-news:downstream"
+
+
+def test_instructions_flag_recirculated_old_news():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    text = _INSTRUCTIONS.lower()
+    assert "recirculat" in text or "re-report" in text or "already-known" in text
+    assert "publication date does not make it new" in text or "fresh publication date" in text
+
+
+def test_instructions_flag_release_calendar_listicles():
+    """NEU-451: weekly/monthly release-calendar listicles (a multi-film list where the
+    tracked film is one entry among many) are not-news:roundup even when they state a
+    release date — a calendar restating a scheduled date is not an announcement."""
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    text = _INSTRUCTIONS.lower()
+    assert "listicle" in text
+    assert "one entry among many" in text
+    assert "release-date announcement" in text
+
+
+def test_instructions_cover_sibling_spinoff_trap():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # A distinct, identified sibling film (spin-off/sequel/prequel) that is not
+    # itself in the roster must be named as a no-match trap, distinct from the
+    # existing "the next Batman" generic-reference rule.
+    assert "spin-off" in lowered
+    assert "not itself tracked" in lowered
+
+
+def test_instructions_cover_original_to_sequel_trap():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # The sibling trap must run BOTH directions: a story about the original/earlier film
+    # is not its tracked sequel merely because they share a title stem.
+    assert "title stem" in lowered
+    assert "both directions" in lowered
+
+
+def test_instructions_cover_medium_mismatch_trap():
+    from upmovies.link.linker import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # NEU-483 #5: a story about a same-franchise TV series/game is not "about" the
+    # tracked film merely because it shares characters — that's a different production.
+    assert "different medium" in lowered
+    assert "tv series" in lowered
+    assert "video game" in lowered

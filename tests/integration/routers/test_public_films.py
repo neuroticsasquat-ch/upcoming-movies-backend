@@ -51,7 +51,7 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     assert body["title"] == "The Odyssey"
     assert body["release_date"] == "2026-07-17"
     assert body["release_year"] == 2026
-    assert body["arc_stage"] == "trailer"  # In Production baseline, trailer event wins
+    assert body["arc_stage"] == "shooting"  # arc_stage tracks TMDB status only (NEU-452)
     # created_at ascending: casting (Jan created_at) before trailer (Mar created_at).
     # A stale occurred_at sort would yield the reverse order and fail this assertion.
     assert [e["event_type"] for e in body["events"]] == ["casting", "trailer"]
@@ -109,6 +109,53 @@ async def test_film_detail_source_label_uses_resolved_outlet(client, make_film, 
 
     body = (await client.get(f"/films/{film.slug}")).json()
     assert body["events"][0]["sources"][0]["source"] == "Variety"
+
+
+async def test_film_detail_source_url_uses_resolved_url(client, make_film, add_event):
+    """When a Google News story has a resolved_url, the public API must return it as the
+    source url. When resolved_url is NULL, the original Google URL is returned as fallback."""
+    film = await make_film(slug="resolve-url-film-2026")
+    await add_event(
+        film=film,
+        summary="Casting.",
+        sources=(
+            {
+                "url": "https://news.google.com/rss/articles/xyz",
+                "source": "Google News: per-film",
+                "title": "Director Set - Variety",
+                "outlet": "Variety",
+                "resolved_url": "https://variety.com/real-article",
+            },
+        ),
+    )
+
+    body = (await client.get(f"/films/{film.slug}")).json()
+    source = body["events"][0]["sources"][0]
+    # resolved_url takes precedence over the raw Google URL
+    assert source["url"] == "https://variety.com/real-article"
+
+
+async def test_film_detail_source_url_falls_back_when_resolved_url_null(
+    client, make_film, add_event
+):
+    """When resolved_url is NULL, the API returns the original stored url."""
+    film = await make_film(slug="resolve-url-fallback-2026")
+    await add_event(
+        film=film,
+        summary="Casting.",
+        sources=(
+            {
+                "url": "https://news.google.com/rss/articles/abc",
+                "source": "Google News: per-film",
+                "title": "Some Headline",
+            },
+        ),
+    )
+
+    body = (await client.get(f"/films/{film.slug}")).json()
+    source = body["events"][0]["sources"][0]
+    # no resolved_url → fall back to the original Google URL
+    assert source["url"] == "https://news.google.com/rss/articles/abc"
 
 
 async def test_film_detail_caps_sources_at_three_distinct_outlets_newest_first(
@@ -661,7 +708,7 @@ async def test_search_item_shape(client, make_film, add_event):
     assert item["title"] == "Shape Film"
     assert item["release_year"] == 2026
     assert item["poster_path"] == "/shape.jpg"
-    assert item["arc_stage"] == "cast"  # Planned baseline + casting event
+    assert item["arc_stage"] == "announced"  # Planned TMDB status → announced (NEU-452)
 
 
 async def test_search_subthreshold_q_returns_empty(client):
@@ -765,7 +812,7 @@ async def test_search_aka_visibility_parity(client, make_film, add_event, attach
     assert "aka-bare-2026" not in slugs
 
 
-# ── credits: cast and directors exposure ─────────────────────────────────────
+# ── credits: cast and crew exposure ──────────────────────────────────────────
 
 
 async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_credits):
@@ -816,31 +863,91 @@ async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_
     assert cast[2]["profile_path"] == "/charlie.jpg"
 
 
-async def test_film_detail_directors(client, make_film, add_event, attach_credits):
-    """Director crew credits are returned in the directors field."""
-    film = await make_film(slug="directors-2026", title="Director Film")
+async def test_film_detail_crew_grouped_orderable(client, make_film, add_event, attach_credits):
+    """The full crew is returned (not just directors), ordered by department priority then job."""
+    film = await make_film(slug="crew-2026", title="Crew Film")
     await add_event(film=film, summary="Event.")
     await attach_credits(
         film,
         crew=[
-            {"id": 2001, "name": "Alice Director", "job": "Director"},
-            {"id": 2002, "name": "Bob Director", "job": "Director"},
-            {"id": 2003, "name": "Carol Producer", "job": "Producer"},
+            {"id": 3001, "name": "Editor Person", "job": "Editor", "department": "Editing"},
+            {"id": 3002, "name": "Writer Person", "job": "Screenplay", "department": "Writing"},
+            {"id": 3003, "name": "Director Person", "job": "Director", "department": "Directing"},
+            {"id": 3004, "name": "Producer Person", "job": "Producer", "department": "Production"},
         ],
     )
 
-    r = await client.get("/films/directors-2026")
+    r = await client.get("/films/crew-2026")
     assert r.status_code == 200
     body = r.json()
-    directors = body["directors"]
-    # Both directors are returned; producer is excluded
-    assert "Alice Director" in directors
-    assert "Bob Director" in directors
-    assert "Carol Producer" not in directors
+    assert "directors" not in body  # replaced by crew
+    crew = body["crew"]
+    # Department priority: Directing → Writing → Production → Editing
+    assert [c["job"] for c in crew] == ["Director", "Screenplay", "Producer", "Editor"]
+    assert crew[0] == {"name": "Director Person", "job": "Director", "department": "Directing"}
+
+
+async def test_film_detail_crew_orders_within_job_by_credit_order(
+    client, make_film, add_event, attach_credits
+):
+    """Within one job, people order by credit_order asc (nulls last), then name."""
+    film = await make_film(slug="crew-order-2026", title="Crew Order Film")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(
+        film,
+        crew=[
+            {
+                "id": 4001,
+                "name": "Bravo Producer",
+                "job": "Producer",
+                "department": "Production",
+                "credit_order": 2,
+            },
+            {
+                "id": 4002,
+                "name": "Alpha Producer",
+                "job": "Producer",
+                "department": "Production",
+                "credit_order": 1,
+            },
+            {
+                "id": 4003,
+                "name": "Zulu Producer",
+                "job": "Producer",
+                "department": "Production",
+                "credit_order": None,
+            },
+        ],
+    )
+
+    crew = (await client.get("/films/crew-order-2026")).json()["crew"]
+    assert [c["name"] for c in crew] == ["Alpha Producer", "Bravo Producer", "Zulu Producer"]
+
+
+async def test_film_detail_crew_orders_jobs_alphabetically_within_department(
+    client, make_film, add_event, attach_credits
+):
+    """Within a department, jobs sort alphabetically before credit_order."""
+    film = await make_film(slug="crew-jobalpha-2026", title="Job Alpha Film")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 5001, "name": "Wendy Wrangler", "job": "Wrangler", "department": "Production"},
+            {
+                "id": 5002,
+                "name": "Annie Accountant",
+                "job": "Accountant",
+                "department": "Production",
+            },
+        ],
+    )
+    crew = (await client.get("/films/crew-jobalpha-2026")).json()["crew"]
+    assert [c["job"] for c in crew] == ["Accountant", "Wrangler"]
 
 
 async def test_film_detail_no_credits_graceful(client, make_film, add_event):
-    """A film with no credits returns cast=[] and directors=[] with status 200."""
+    """A film with no credits returns cast=[] and crew=[] with status 200."""
     film = await make_film(slug="no-credits-2026", title="No Credits Film")
     await add_event(film=film, summary="Event.")
 
@@ -848,7 +955,7 @@ async def test_film_detail_no_credits_graceful(client, make_film, add_event):
     assert r.status_code == 200
     body = r.json()
     assert body["cast"] == []
-    assert body["directors"] == []
+    assert body["crew"] == []
 
 
 async def test_search_primary_title_ranks_before_aka(
@@ -887,3 +994,103 @@ async def test_search_primary_title_ranks_before_aka(
     assert "aka-only-hit-2026" in slugs
     # Primary-title match must appear before the AKA-only match.
     assert slugs.index("primary-title-hit-2026") < slugs.index("aka-only-hit-2026")
+
+
+# ── external IDs (imdb_id / tmdb_id) ─────────────────────────────────────────
+
+
+async def test_detail_exposes_external_ids(client, make_film, add_event, session):
+    film = await make_film(slug="ext-ids-2026", title="External IDs Film")
+    film.imdb_id = "tt1234567"
+    session.add(film)
+    await session.commit()
+    await add_event(film=film, summary="Event.")
+
+    body = (await client.get("/films/ext-ids-2026")).json()
+    assert body["imdb_id"] == "tt1234567"
+    assert isinstance(body["tmdb_id"], int)
+    assert body["tmdb_id"] > 0
+
+
+async def test_detail_external_ids_null_imdb(client, make_film, add_event):
+    film = await make_film(slug="ext-null-2026", title="No IMDb Film")  # imdb_id defaults to None
+    await add_event(film=film, summary="Event.")
+
+    body = (await client.get("/films/ext-null-2026")).json()
+    assert body["imdb_id"] is None
+    assert isinstance(body["tmdb_id"], int)
+
+
+async def test_detail_event_exposes_event_id(client, make_film, add_event):
+    film = await make_film(slug="ids-2026")
+    event = await add_event(film=film, event_type="casting", summary="Cast announced.")
+
+    r = await client.get("/films/ids-2026")
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert events[0]["event_id"] == str(event.id)
+
+
+async def test_detail_quiets_non_primary_country_release_date(client, make_film, add_event):
+    film = await make_film(slug="moana-2026", title="Moana", origin_country=["US"])
+    await add_event(film=film, event_type="release_date", summary="Dated in India.", region="IN")
+    await add_event(film=film, event_type="release_date", summary="US date set.", region="US")
+    await add_event(film=film, event_type="release_date", summary="Pushed worldwide.", region=None)
+    await add_event(film=film, event_type="casting", summary="Cast set.", region=None)
+
+    r = await client.get("/films/moana-2026")
+    assert r.status_code == 200
+    summaries = {e["summary"] for e in r.json()["events"]}
+    assert summaries == {"US date set.", "Pushed worldwide.", "Cast set."}
+    assert "Dated in India." not in summaries
+
+
+async def test_detail_surfaces_release_date_for_origin_country(client, make_film, add_event):
+    film = await make_film(slug="rrr-2026", title="RRR2", origin_country=["IN"])
+    await add_event(
+        film=film, event_type="release_date", summary="India theatrical date.", region="IN"
+    )
+
+    r = await client.get("/films/rrr-2026")
+    assert r.status_code == 200
+    assert [e["summary"] for e in r.json()["events"]] == ["India theatrical date."]
+
+
+async def test_detail_quiets_foreign_release_date_when_no_origin_country(
+    client, make_film, add_event
+):
+    """A film with no origin_country surfaces US/global dates, omits foreign release_date events.
+
+    Exercises the region = ANY(NULL) → NULL → false SQL semantic, the trickiest edge case
+    in _region_visible().
+    """
+    film = await make_film(slug="world-film-2026", title="World Film", origin_country=None)
+    await add_event(film=film, event_type="release_date", summary="India only date.", region="IN")
+    await add_event(film=film, event_type="release_date", summary="US date.", region="US")
+    await add_event(film=film, event_type="release_date", summary="Global date.", region=None)
+
+    r = await client.get("/films/world-film-2026")
+    assert r.status_code == 200
+    summaries = {e["summary"] for e in r.json()["events"]}
+    assert summaries == {"US date.", "Global date."}
+    assert "India only date." not in summaries
+
+
+async def test_arc_stage_ignores_events_and_tracks_tmdb_status(client, make_film, add_event):
+    """NEU-452: a fabricated/low-trust trailer must not shift production status.
+
+    A film TMDB-reported as "In Production" stays at arc_stage "shooting" regardless of
+    trailer events — whether rumored (the Mshale case after NEU-454's source downgrade)
+    or confirmed. Production status derives solely from TMDB `status`.
+    """
+    film = await make_film(slug="mshale-2027", title="M", status="In Production")
+    await add_event(
+        film=film, event_type="trailer", confidence="rumored", summary="Trailer (rumored)."
+    )
+    await add_event(
+        film=film, event_type="trailer", confidence="confirmed", summary="Trailer (confirmed)."
+    )
+
+    r = await client.get("/films/mshale-2027")
+    assert r.status_code == 200
+    assert r.json()["arc_stage"] == "shooting"

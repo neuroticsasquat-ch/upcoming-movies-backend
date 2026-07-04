@@ -41,6 +41,7 @@ async def _run(
     min_popularity: float = 10.0,
     failure_threshold: int = 10,
     excluded_statuses: frozenset[str] = frozenset(),
+    min_runtime: int = 0,
 ):
     run_id = await create_run(session, kind="tmdb")
     await session.commit()
@@ -54,6 +55,7 @@ async def _run(
             min_popularity=min_popularity,
             failure_threshold=failure_threshold,
             excluded_statuses=excluded_statuses,
+            min_runtime=min_runtime,
         )
     return run_id, result
 
@@ -308,3 +310,74 @@ async def test_ingest_skip_resets_consecutive_failure_counter(session):
 
     assert (result.films_processed, result.films_failed, result.films_skipped) == (1, 2, 1)
     assert {f.tmdb_id for f in await _films(session)} == {4}
+
+
+@respx.mock
+async def test_ingest_skips_shorts(session):
+    _discover(page="1").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_discover_page(
+                page=1, total_pages=1, results=[make_summary(1), make_summary(2)]
+            ),
+        )
+    )
+    _details(1).mock(
+        return_value=httpx.Response(200, json=make_details(1, runtime=7, status="Planned"))
+    )
+    _details(2).mock(
+        return_value=httpx.Response(200, json=make_details(2, runtime=120, status="Planned"))
+    )
+
+    _, result = await _run(session, min_runtime=60)
+
+    assert result.films_processed == 1
+    assert result.films_skipped == 1
+    assert result.skipped_by_reason == {"short": 1}
+    assert {f.tmdb_id for f in await _films(session)} == {2}
+
+
+@respx.mock
+async def test_ingest_keeps_unknown_runtime(session):
+    # runtime 0 == unfinished/unknown, must be kept even with the shorts rule on.
+    _discover(page="1").mock(
+        return_value=httpx.Response(
+            200, json=make_discover_page(page=1, total_pages=1, results=[make_summary(1)])
+        )
+    )
+    _details(1).mock(
+        return_value=httpx.Response(200, json=make_details(1, runtime=0, status="Planned"))
+    )
+
+    _, result = await _run(session, min_runtime=60)
+
+    assert result.films_processed == 1
+    assert result.films_skipped == 0
+    assert {f.tmdb_id for f in await _films(session)} == {1}
+
+
+@respx.mock
+async def test_ingest_reports_skip_reasons_breakdown(session):
+    _discover(page="1").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_discover_page(
+                page=1, total_pages=1, results=[make_summary(1), make_summary(2), make_summary(3)]
+            ),
+        )
+    )
+    _details(1).mock(
+        return_value=httpx.Response(200, json=make_details(1, runtime=7, status="Planned"))
+    )
+    _details(2).mock(
+        return_value=httpx.Response(200, json=make_details(2, runtime=120, status="Released"))
+    )
+    _details(3).mock(
+        return_value=httpx.Response(200, json=make_details(3, runtime=120, status="Planned"))
+    )
+
+    _, result = await _run(session, min_runtime=60, excluded_statuses=frozenset({"Released"}))
+
+    assert result.films_processed == 1
+    assert result.skipped_by_reason == {"short": 1, "excluded_status": 1}
+    assert {f.tmdb_id for f in await _films(session)} == {3}

@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -57,11 +57,16 @@ def test_build_summary_request_plain_block_and_payload():
             StoryInput(title="More", dek="Another report.", source="THR"),
         ]
     )
-    system, messages = build_summary_request(event)
+    system, messages = build_summary_request(event, date(2026, 6, 25))
     # plain block — NO caching (short prompt, sub-minimum cacheable size)
     assert "cache_control" not in system[0]
     assert "paraphrase" in system[0]["text"].lower()
+    assert "as_of_date" in system[0]["text"]  # instructions point at the field
+    # NEU-453: the beat is dated by its own date, not another date in the sources.
+    # (verbatim substring of the new rule — case-sensitive)
+    assert "OWN date" in system[0]["text"]
     payload = json.loads(messages[0]["content"])
+    assert payload["as_of_date"] == "2026-06-25"
     assert payload["film"] == "Runner"
     assert payload["event_type"] == "casting"
     assert [s["source"] for s in payload["stories"]] == ["Variety", "THR"]
@@ -69,10 +74,20 @@ def test_build_summary_request_plain_block_and_payload():
     assert payload["stories"][0]["dek"] == "Star joins the film."
 
 
+def test_build_summary_batch_request_carries_as_of_date():
+    system, messages = build_summary_request(_event(), date(2026, 6, 25))
+    assert json.loads(messages[0]["content"])["as_of_date"] == "2026-06-25"
+    req = build_summary_batch_request(
+        custom_id="e1", model="m", event=_event(), run_date=date(2026, 6, 25)
+    )
+    assert json.loads(req.messages[0]["content"])["as_of_date"] == "2026-06-25"
+
+
 def test_build_summary_request_truncates_dek():
     long_dek = "x" * 1000
     _system, messages = build_summary_request(
-        _event(stories=[StoryInput(title="t", dek=long_dek, source="Deadline")])
+        _event(stories=[StoryInput(title="t", dek=long_dek, source="Deadline")]),
+        date(2026, 6, 25),
     )
     payload = json.loads(messages[0]["content"])
     assert len(payload["stories"][0]["dek"]) == 500
@@ -104,7 +119,7 @@ def test_parse_summary_raises_on_malformed():
 
 def test_build_summary_request_seeds_assistant_prefill():
     # The assistant turn is prefilled so the model continues a JSON envelope (no preamble).
-    _system, messages = build_summary_request(_event())
+    _system, messages = build_summary_request(_event(), date(2026, 6, 25))
     assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}
 
 
@@ -129,7 +144,11 @@ async def test_summarize_event_returns_result_with_provenance():
     client = FakeCompleter('{"summary": "The studio confirmed a 2027 release."}')
     event = _event()
     result, _usage = await summarize_event(
-        client=client, model="claude-haiku-4-5", prompt_version="1", event=event
+        client=client,
+        model="claude-haiku-4-5",
+        prompt_version="1",
+        event=event,
+        run_date=date(2026, 6, 25),
     )
     assert result.summary == "The studio confirmed a 2027 release."
     assert result.model == "claude-haiku-4-5"
@@ -148,7 +167,9 @@ async def test_summarize_event_prompt_includes_every_member_story():
             StoryInput(title="C", dek="dc", source="THR"),
         ]
     )
-    await summarize_event(client=client, model="m", prompt_version="1", event=event)
+    await summarize_event(
+        client=client, model="m", prompt_version="1", event=event, run_date=date(2026, 6, 25)
+    )
     payload = json.loads(client.calls[0]["messages"][0]["content"])
     assert [s["title"] for s in payload["stories"]] == ["A", "B", "C"]
     assert [s["source"] for s in payload["stories"]] == ["Deadline", "Variety", "THR"]
@@ -159,12 +180,14 @@ async def test_batched_path_round_trips_to_same_summary():
     envelope = '{"summary": "Principal photography has begun."}'
     client = FakeBatchCompleter(envelope)
 
-    req = build_summary_batch_request(custom_id="evt-9", model="m", event=event)
+    req = build_summary_batch_request(
+        custom_id="evt-9", model="m", event=event, run_date=date(2026, 6, 25)
+    )
     assert req.custom_id == "evt-9"
     assert req.model == "m"
     assert req.max_tokens == 256
     # parity: same system + messages the sequential builder produces
-    system, messages = build_summary_request(event)
+    system, messages = build_summary_request(event, date(2026, 6, 25))
     assert req.system == system
     assert req.messages == messages
     assert "cache_control" not in req.system[0]
@@ -201,3 +224,43 @@ def test_parse_summary_happy_path_does_not_warn(caplog):
     with caplog.at_level("WARNING"):
         assert parse_summary('{"summary": "A clean update."}') == "A clean update."
     assert "recovered summary from malformed" not in caplog.text
+
+
+def test_instructions_reject_a_different_films_date():
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    # Mode 2: a spin-off/sequel/prequel's date co-mentioned in the sources is
+    # context, never this film's release-date beat.
+    assert "different film" in lowered
+    assert "spin-off" in lowered
+
+
+def test_instructions_require_stating_actual_release_date():
+    """NEU-483 #4: a release_date beat must state the actual date, not describe the
+    announcement only in relational terms."""
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "state the actual date" in lowered
+    assert "without giving the date itself" in lowered
+
+
+def test_instructions_allow_naming_people_not_descriptors():
+    """NEU-483 #6: naming an actor/character is a fact, not a paraphrase violation —
+    don't substitute "the lead actor" / "his character" for the actual name."""
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "not a paraphrase violation" in lowered
+    assert "vague descriptor" in lowered
+
+
+def test_instructions_forbid_genre_label_and_unrelated_history_filler():
+    """NEU-483 #10, #11: no genre-label tack-ons unless the genre itself is the news,
+    and no unrelated history (e.g. a prior title change) bleeding into the beat."""
+    from upmovies.synthesize.summarizer import _INSTRUCTIONS
+
+    lowered = _INSTRUCTIONS.lower()
+    assert "genre label" in lowered
+    assert "prior title change" in lowered

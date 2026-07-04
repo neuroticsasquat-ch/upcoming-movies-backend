@@ -34,7 +34,8 @@ class UsageFakeClient:
 
     def _decide(self, system, messages) -> str:
         if "entity-linking classifier" in system[0]["text"]:
-            stories = json.loads(messages[0]["content"])
+            payload = json.loads(messages[0]["content"])
+            stories = payload["stories"]
             return json.dumps(
                 [{"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"} for s in stories]
             )

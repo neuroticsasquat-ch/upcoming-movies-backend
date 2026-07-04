@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import itertools
 import json
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, exists, select
@@ -56,7 +57,10 @@ async def run_model(model: str, attach_limit: int, max_tokens: int, limit: int |
         if limit is not None:
             film_ids = film_ids[:limit]
         for fid in film_ids:
-            built = await build_cluster_request(s, film_id=fid, attach_limit=attach_limit)
+            built = await build_cluster_request(
+                s, film_id=fid, attach_limit=attach_limit,
+                run_date=datetime.now(UTC).date(),
+            )
             if built is None:
                 continue
             system, messages, plan = built

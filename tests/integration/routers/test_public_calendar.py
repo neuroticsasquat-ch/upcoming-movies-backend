@@ -340,3 +340,67 @@ async def test_calendar_paginates_by_date_not_film_rows(client, make_film, add_r
     page2 = (await client.get("/calendar", params={"limit": 1, "offset": 1})).json()
     assert page2["total"] == 2
     assert [i["film_slug"] for i in page2["items"]] == ["cal-b1"]
+
+
+# ---------------------------------------------------------------------------
+# Case 10 — Director, stars (≤3), and genres (≤3) on each row
+# ---------------------------------------------------------------------------
+
+
+async def test_calendar_includes_director_stars_genres(
+    client, make_film, add_release_date, attach_credits, attach_genres
+):
+    film = await make_film(slug="film-enriched", title="Enriched Film")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+    await attach_credits(
+        film,
+        cast=[
+            {"id": 1, "name": "First Star", "credit_order": 0},
+            {"id": 2, "name": "Second Star", "credit_order": 1},
+            {"id": 3, "name": "Third Star", "credit_order": 2},
+            {"id": 4, "name": "Fourth Star", "credit_order": 3},
+        ],
+        crew=[
+            {"id": 5, "name": "The Director", "job": "Director", "department": "Directing"},
+            {"id": 6, "name": "A Producer", "job": "Producer", "department": "Production"},
+        ],
+    )
+    await attach_genres(film, [(28, "Action"), (18, "Drama"), (12, "Adventure"), (35, "Comedy")])
+
+    resp = await client.get("/calendar")
+    assert resp.status_code == 200
+    item = next(i for i in resp.json()["items"] if i["film_slug"] == "film-enriched")
+
+    assert item["director"] == "The Director"  # job=Director only; Producer excluded
+    assert item["stars"] == ["First Star", "Second Star", "Third Star"]  # capped at 3, in order
+    assert len(item["genres"]) == 3  # capped at 3
+    assert item["genres"] == ["Action", "Adventure", "Comedy"]  # ordered by name
+
+
+async def test_calendar_joins_co_directors(client, make_film, add_release_date, attach_credits):
+    film = await make_film(slug="film-codir", title="Co-Directed Film")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 10, "name": "Bob Director", "job": "Director", "credit_order": 1},
+            {"id": 11, "name": "Ann Director", "job": "Director", "credit_order": 0},
+        ],
+    )
+
+    item = next(
+        i for i in (await client.get("/calendar")).json()["items"] if i["film_slug"] == "film-codir"
+    )
+    assert item["director"] == "Ann Director, Bob Director"  # credit_order asc → Ann first
+
+
+async def test_calendar_defaults_when_no_metadata(client, make_film, add_release_date):
+    film = await make_film(slug="film-bare", title="Bare Film")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+
+    item = next(
+        i for i in (await client.get("/calendar")).json()["items"] if i["film_slug"] == "film-bare"
+    )
+    assert item["director"] is None
+    assert item["stars"] == []
+    assert item["genres"] == []

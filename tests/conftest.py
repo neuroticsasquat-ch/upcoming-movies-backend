@@ -45,6 +45,13 @@ async def test_engine():
     await engine.dispose()
 
 
+@pytest.fixture(scope="session")
+def session_factory(test_engine):
+    """Async sessionmaker bound to the test engine. Used by source-stage and other
+    integration tests that need a real factory (not a bare session lambda)."""
+    return async_sessionmaker(test_engine, expire_on_commit=False)
+
+
 @pytest.fixture
 async def session(test_engine) -> AsyncIterator[AsyncSession]:
     maker = async_sessionmaker(test_engine, expire_on_commit=False)

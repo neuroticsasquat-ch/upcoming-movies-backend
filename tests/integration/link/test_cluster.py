@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import select
@@ -65,7 +65,12 @@ async def test_creates_new_event_for_unclustered_stories(session):
         }
     )
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=45
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     await session.commit()
 
@@ -95,7 +100,12 @@ async def test_attaches_to_existing_event(session):
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=45
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     await session.commit()
 
@@ -122,7 +132,12 @@ async def test_noop_when_nothing_unclustered(session):
 
     client = FakeClient({"events": []})
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=45
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     assert result == result.__class__(0, 0)
     assert client.calls == []  # short-circuits before calling the model
@@ -138,11 +153,21 @@ async def test_build_cluster_request_returns_none_when_no_unclustered(session):
     session.add(film)
     await session.flush()
     await session.commit()
-    assert await build_cluster_request(session, film_id=film.id, attach_limit=45) is None
+    assert (
+        await build_cluster_request(
+            session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+        )
+        is None
+    )
 
 
 async def test_build_cluster_request_returns_none_for_missing_film(session):
-    assert await build_cluster_request(session, film_id=uuid.uuid4(), attach_limit=45) is None
+    assert (
+        await build_cluster_request(
+            session, film_id=uuid.uuid4(), attach_limit=45, run_date=date(2026, 1, 1)
+        )
+        is None
+    )
 
 
 async def test_build_cluster_request_builds_payload_and_plan(session):
@@ -153,7 +178,9 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
     s2 = await _linked_story(session, film, "https://e/2", title="B")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=45)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     system, messages, plan = built
 
@@ -293,7 +320,9 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
     s2 = await _linked_story(session, film, "https://e/s2")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=3650)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=3650, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, _messages, plan = built
     assert plan.existing_event_ids == [e1.id, e2.id]  # ordered by occurred_at at build time
@@ -352,7 +381,12 @@ async def test_build_cluster_batch_request_wraps_into_batch_request(session):
     await session.commit()
 
     built = await build_cluster_batch_request(
-        session, custom_id=str(film.id), model="cluster-m", film_id=film.id, attach_limit=45
+        session,
+        custom_id=str(film.id),
+        model="cluster-m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
     )
     assert built is not None
     req, plan = built
@@ -379,6 +413,7 @@ async def test_build_cluster_batch_request_honours_max_tokens(session):
         film_id=film.id,
         attach_limit=45,
         max_tokens=9999,
+        run_date=date(2026, 1, 1),
     )
     assert built is not None
     req, _plan = built
@@ -392,7 +427,12 @@ async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session)
     await session.commit()
     assert (
         await build_cluster_batch_request(
-            session, custom_id=str(film.id), model="cluster-m", film_id=film.id, attach_limit=45
+            session,
+            custom_id=str(film.id),
+            model="cluster-m",
+            film_id=film.id,
+            attach_limit=45,
+            run_date=date(2026, 1, 1),
         )
         is None
     )
@@ -457,7 +497,9 @@ async def test_build_cluster_request_captures_film_status(session):
     await _linked_story(session, film, "https://e/1")
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=45)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, _messages, plan = built
     assert plan.film_status == "Post Production"
@@ -498,6 +540,80 @@ async def test_apply_rejects_stale_stage_new_event(session):
     assert refreshed.film_id is None
     assert refreshed.link_confidence is None
     assert refreshed.link_note == "stale-stage:casting"
+
+
+async def test_apply_rejects_stale_production_wrap_new_event(session):
+    film = Film(tmdb_id=1, title="Brand New Day", status="Post Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/wrap")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="Post Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_wrap",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+    assert (await session.execute(select(EventStory))).scalars().all() == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.film_id is None
+    assert refreshed.link_confidence is None
+    assert refreshed.link_note == "stale-stage:production_wrap"
+
+
+async def test_apply_keeps_production_wrap_on_in_production_film(session):
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/wrap")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="In Production",
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_wrap",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1 and result.stories_rejected == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1 and events[0].event_type == "production_wrap"
 
 
 async def test_apply_keeps_late_stage_event_on_wrapped_film(session):
@@ -609,7 +725,9 @@ async def test_build_cluster_request_includes_event_older_than_recency_window(se
     await _linked_story(session, film, "https://e/new", title="Re-report")  # unclustered
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=25)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, messages, plan = built
     payload = json.loads(messages[0]["content"])
@@ -639,7 +757,9 @@ async def test_build_cluster_request_caps_existing_events_to_attach_limit(sessio
     await _linked_story(session, film, "https://e/new")  # unclustered -> request is built
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=2)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=2, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, messages, plan = built
     payload = json.loads(messages[0]["content"])
@@ -677,7 +797,9 @@ async def test_build_cluster_request_caps_headlines_per_event(session):
     await _linked_story(session, film, "https://e/new")  # unclustered -> request is built
     await session.commit()
 
-    built = await build_cluster_request(session, film_id=film.id, attach_limit=25)
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
+    )
     assert built is not None
     _system, messages, _plan = built
     payload = json.loads(messages[0]["content"])
@@ -708,7 +830,12 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
     result, _usage = await cluster_film_events(
-        session, client=client, model="m", film_id=film.id, attach_limit=25
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=25,
+        run_date=date(2026, 1, 1),
     )
     await session.commit()
 
@@ -721,3 +848,381 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
     refreshed = (await session.execute(select(Event).where(Event.id == event.id))).scalar_one()
     assert refreshed.occurred_at == old  # unchanged — timeline stays anchored
     assert refreshed.updated_at > old  # attach bumped updated_at
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — region persistence on release_date events
+# ---------------------------------------------------------------------------
+
+
+async def test_release_date_event_persists_region(session):
+    film = Film(tmdb_id=2, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/region-1")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release_date",
+                    "confidence": "confirmed",
+                    "region": "IN",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
+    assert event.event_type == "release_date"
+    assert event.region == "IN"
+
+
+# ---------------------------------------------------------------------------
+# NEU-453 — off_topic cluster backstop
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_drops_off_topic_new_event(session):
+    """A story whose real subject is a different film is assigned type 'off_topic' and
+    dropped (rejected, no event), mirroring the stale-stage reject path."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {"events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}]}
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 0
+    assert result.stories_rejected == 1
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+    assert (await session.execute(select(EventStory))).scalars().all() == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.film_id is None
+    assert refreshed.link_confidence is None
+    assert refreshed.link_note == "off-topic"
+
+
+# ---------------------------------------------------------------------------
+# NEU-449 — release-date staleness backstop
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_rejects_casting_for_already_released_film(session):
+    import datetime as _dt
+
+    film = Film(
+        tmdb_id=4242,
+        title="Angry Birds Movie 3",
+        status="In Production",
+        release_date=_dt.date(2026, 1, 1),
+    )
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(
+        session, film, "https://example.com/psalm", title="Psalm's acting debut"
+    )
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[s1.id],
+        film_status="In Production",
+        film_release_date=_dt.date(2026, 1, 1),
+        run_date=_dt.date(2026, 7, 1),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    no_events = (
+        (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    )
+    assert no_events == []
+    refreshed = (await session.execute(select(Story).where(Story.id == s1.id))).scalar_one()
+    assert refreshed.link_status == "rejected"
+    assert refreshed.link_note == "stale-stage:casting"
+
+
+async def test_non_release_date_event_ignores_region(session):
+    film = Film(tmdb_id=3, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/region-2")
+    await session.commit()
+
+    # A model that wrongly returns a region on a casting event must not persist it.
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "region": "IN",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
+    assert event.event_type == "casting"
+    assert event.region is None
+
+
+# ---------------------------------------------------------------------------
+# NEU-448 — deterministic windowed dedup guardrail
+# ---------------------------------------------------------------------------
+
+
+async def _existing_event(session, film, *, event_type, occurred_at, url):
+    ev = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="confirmed",
+        occurred_at=occurred_at,
+    )
+    session.add(ev)
+    await session.flush()
+    seed = Story(
+        source="X",
+        url=url,
+        title=f"seed {event_type}",
+        link_status="linked",
+        film_id=film.id,
+        published_at=occurred_at,
+        raw={"summary": ""},
+    )
+    session.add(seed)
+    await session.flush()
+    session.add(EventStory(event_id=ev.id, story_id=seed.id))
+    await session.flush()
+    return ev
+
+
+async def test_new_trailer_merges_into_recent_existing_trailer(session):
+    film = Film(tmdb_id=201, title="FF")
+    session.add(film)
+    await session.flush()
+    ev = await _existing_event(
+        session,
+        film,
+        event_type="trailer",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed",
+    )
+    await _linked_story(session, film, "https://e/new", title="trailer released")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1
+    links = (
+        (await session.execute(select(EventStory).where(EventStory.event_id == ev.id)))
+        .scalars()
+        .all()
+    )
+    assert len(links) == 2
+
+
+async def test_new_trailer_outside_window_stays_separate(session):
+    film = Film(tmdb_id=202, title="FF2")
+    session.add(film)
+    await session.flush()
+    await _existing_event(
+        session,
+        film,
+        event_type="trailer",
+        occurred_at=datetime(2025, 11, 1, tzinfo=UTC),
+        url="https://e/seed2",
+    )
+    await _linked_story(session, film, "https://e/new2", title="trailer released")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 2
+
+
+async def test_new_first_look_merges_into_recent_existing_first_look(session):
+    film = Film(tmdb_id=203, title="FF3")
+    session.add(film)
+    await session.flush()
+    await _existing_event(
+        session,
+        film,
+        event_type="first_look",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed3",
+    )
+    await _linked_story(session, film, "https://e/new3", title="concept art")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "first_look", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+
+
+async def test_duplicate_casting_within_window_not_merged(session):
+    film = Film(tmdb_id=204, title="FF4")
+    session.add(film)
+    await session.flush()
+    await _existing_event(
+        session,
+        film,
+        event_type="casting",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed4",
+    )
+    await _linked_story(session, film, "https://e/new4", title="new actor joins")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 2
+
+
+async def test_two_new_trailer_groups_collapse_in_one_pass(session):
+    film = Film(tmdb_id=205, title="FF5")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/a", title="trailer surfaced")
+    await _linked_story(session, film, "https://e/b", title="trailer released")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]},
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [2]},
+            ]
+        }
+    )
+    result, _usage = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        dedup_days=14,
+        run_date=date(2026, 1, 1),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    assert result.stories_clustered == 2
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert len(events) == 1

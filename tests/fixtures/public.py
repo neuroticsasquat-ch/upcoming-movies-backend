@@ -47,6 +47,7 @@ def make_film(session: AsyncSession):
         backdrop_path: str | None = None,
         collection_id: int | None = None,
         adult: bool | None = None,
+        origin_country: list[str] | None = None,
     ) -> Film:
         counter["n"] += 1
         film = Film(
@@ -66,6 +67,7 @@ def make_film(session: AsyncSession):
             backdrop_path=backdrop_path,
             collection_id=collection_id,
             adult=adult,
+            origin_country=origin_country,
         )
         session.add(film)
         await session.commit()
@@ -128,12 +130,14 @@ def add_event(session: AsyncSession):
         created_at: datetime | None = None,
         summary: str | None = "A neutral summary.",
         sources: tuple[dict, ...] = (),
+        region: str | None = None,
     ) -> Event:
         event = Event(
             film_id=film.id,
             event_type=event_type,
             confidence=confidence,
             occurred_at=occurred_at,
+            region=region,
         )
         if created_at is not None:
             event.created_at = created_at
@@ -156,6 +160,7 @@ def add_event(session: AsyncSession):
                 title=src.get("title", "Story title"),
                 published_at=src.get("published_at"),
                 outlet=src.get("outlet"),
+                resolved_url=src.get("resolved_url"),
             )
             session.add(story)
             await session.flush()  # populate story.id
@@ -217,7 +222,7 @@ def attach_credits(session: AsyncSession):
         """Insert Person + FilmCredit rows for a film.
 
         cast entries: {id, name, character, credit_order, profile_path}
-        crew entries: {id, name, job}
+        crew entries: {id, name, job, department, credit_order}
         """
         cast = cast or []
         crew = crew or []
@@ -260,6 +265,7 @@ def attach_credits(session: AsyncSession):
                     credit_type="crew",
                     job=entry.get("job"),
                     department=entry.get("department", "Directing"),
+                    credit_order=entry.get("credit_order"),
                 )
             )
 
