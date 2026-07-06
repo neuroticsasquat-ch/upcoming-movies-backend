@@ -63,3 +63,17 @@ Use `/commit-msg` for commit messages and `/pr-desc` for PR descriptions, post-p
 - **Commits:** Conventional Commits subject (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, …). **No** Linear ID in the subject (optional `Refs NEU-123.` in the body); **no** `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`.
 - **PR title:** Conventional Commits + trailing Linear ID parenthetical: `feat: add X (NEU-123)`. The `🤖 Generated with Claude Code` footer is fine in the PR **body** only.
 - The GitHub↔Linear connector moves ticket status automatically — don't touch it. Branch per ticket (Linear gives the branch name).
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live in **Linear** (team Neuroticsasquatch, initiative "Upcoming Movies Tracker", `NEU-###` tickets) via the Linear MCP; a GitHub↔Linear connector moves workflow state automatically. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles map to same-named **Linear labels** (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), applied on top of workflow state. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+**Single-context**: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
