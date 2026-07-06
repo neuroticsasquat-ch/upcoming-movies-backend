@@ -137,6 +137,14 @@ class EventSummary(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # Human-edit marker: NULL edited_at = machine-generated; non-NULL = an admin edited the text
+    # (edited_by is the editing user, nulled if that account is deleted). Not a selection guard —
+    # write-once (_select_pending) already keeps summaries frozen; these drive the summary_edited
+    # DTO flag and gate the reset-to-AI action.
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    edited_by: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class SourceDomain(Base):

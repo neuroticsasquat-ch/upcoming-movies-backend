@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from upmovies.app.models import User
 from upmovies.catalog.models import Film
 from upmovies.news.models import Event, EventSummary
 
@@ -86,6 +87,85 @@ async def test_event_summary_cascade_delete(session):
     session.expunge_all()
     assert await session.get(Event, event_id) is None
     assert await session.get(EventSummary, event_id) is None
+
+
+async def test_event_summary_edited_columns_round_trip(session):
+    """edited_at/edited_by persist and default to NULL (machine-generated) when unset."""
+    film, event = await _film_and_event(session)
+    user = User(email="editor@example.com", password_hash="x", display_name="Editor")
+    session.add(user)
+    await session.flush()
+
+    edited_at = datetime.now(UTC)
+    summary_obj = EventSummary(
+        event_id=event.id,
+        summary="Edited summary.",
+        model="gpt-4",
+        prompt_version="v1.0",
+        source_updated_at=datetime.now(UTC),
+        edited_at=edited_at,
+        edited_by=user.id,
+    )
+    session.add(summary_obj)
+    await session.commit()
+
+    result = await session.get(
+        EventSummary, event.id, execution_options={"populate_existing": True}
+    )
+    assert result is not None
+    assert result.edited_at == edited_at
+    assert result.edited_by == user.id
+
+
+async def test_event_summary_edited_columns_default_null(session):
+    """A summary written without the edit marker has NULL edited_at/edited_by."""
+    film, event = await _film_and_event(session)
+    summary_obj = EventSummary(
+        event_id=event.id,
+        summary="Machine summary.",
+        model="gpt-4",
+        prompt_version="v1.0",
+        source_updated_at=datetime.now(UTC),
+    )
+    session.add(summary_obj)
+    await session.commit()
+
+    result = await session.get(
+        EventSummary, event.id, execution_options={"populate_existing": True}
+    )
+    assert result is not None
+    assert result.edited_at is None
+    assert result.edited_by is None
+
+
+async def test_event_summary_edited_by_set_null_on_user_delete(session):
+    """Deleting the editing user nulls edited_by (ON DELETE SET NULL), keeping the summary."""
+    film, event = await _film_and_event(session)
+    user = User(email="gone@example.com", password_hash="x", display_name="Gone")
+    session.add(user)
+    await session.flush()
+
+    summary_obj = EventSummary(
+        event_id=event.id,
+        summary="Edited summary.",
+        model="gpt-4",
+        prompt_version="v1.0",
+        source_updated_at=datetime.now(UTC),
+        edited_at=datetime.now(UTC),
+        edited_by=user.id,
+    )
+    session.add(summary_obj)
+    await session.commit()
+
+    await session.delete(user)
+    await session.commit()
+
+    # The FK SET NULL is a DB-level action the ORM doesn't observe; expunge to force a re-read.
+    session.expunge_all()
+    result = await session.get(EventSummary, event.id)
+    assert result is not None
+    assert result.edited_by is None
+    assert result.edited_at is not None  # the edit marker timestamp survives
 
 
 async def test_event_summary_pk_uniqueness(session):

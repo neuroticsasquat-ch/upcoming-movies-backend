@@ -18,11 +18,15 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 
 
 class EventNotFound(Exception):
-    """No event with the given id."""
+    """No event with the given id (or no summary row for it)."""
 
 
 class StoryNotInEvent(Exception):
     """No story with the given url is attached to the given event."""
+
+
+class SummaryNotEdited(Exception):
+    """The event's summary is machine-generated (edited_at IS NULL); reset does not apply."""
 
 
 @dataclass
@@ -78,6 +82,35 @@ async def delink_story(session: AsyncSession, *, event_id: UUID, url: str) -> De
     if summary is not None:
         await session.delete(summary)
     return DelinkResult(delinked=1, event_removed=False, resummarize_queued=True)
+
+
+async def edit_summary(
+    session: AsyncSession, *, event_id: UUID, summary: str, user_id: UUID
+) -> EventSummary:
+    """Overwrite an event's summary with admin-authored text and stamp the human-edit marker
+    (edited_at/edited_by). The summary row must already exist — synthesize creates it, and an
+    event only reaches the public surface once it does. Returns the updated row so the caller
+    can build its response. Caller owns the commit."""
+    row = await session.get(EventSummary, event_id)
+    if row is None:
+        raise EventNotFound(str(event_id))
+    row.summary = summary
+    row.edited_at = datetime.now(UTC)
+    row.edited_by = user_id
+    await session.flush()
+    return row
+
+
+async def reset_summary(session: AsyncSession, *, event_id: UUID) -> None:
+    """Reset a human-edited summary back to AI by deleting the row: under write-once the event
+    then has no summary, so the next synthesize run re-summarizes it fresh with the current
+    prompt. Only applies to edited summaries (edited_at IS NOT NULL). Caller owns the commit."""
+    row = await session.get(EventSummary, event_id)
+    if row is None:
+        raise EventNotFound(str(event_id))
+    if row.edited_at is None:
+        raise SummaryNotEdited(str(event_id))
+    await session.delete(row)
 
 
 async def delete_event(session: AsyncSession, *, event_id: UUID) -> DelinkResult:
