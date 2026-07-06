@@ -1,7 +1,9 @@
 """Admin moderation of story↔film links: reverse a bad link decision. Reject the affected
 stories and detach them from their event so neither the link stage (touches only `pending`)
 nor the cluster stage (touches only `linked` + unclustered) reprocesses them; drop events that
-become empty, and bump `updated_at` on surviving events so synthesize re-summarizes them.
+become empty, and delete the `event_summary` row on surviving events so synthesize regenerates
+a fresh summary next run (bumping `updated_at` alone no longer triggers reselection — summaries
+are write-once).
 
 Pure DB I/O — the caller owns the commit."""
 
@@ -12,7 +14,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.models import Event, EventStory, EventSummary, Story
 
 
 class EventNotFound(Exception):
@@ -72,6 +74,9 @@ async def delink_story(session: AsyncSession, *, event_id: UUID, url: str) -> De
         await session.delete(event)  # event_summary cascades
         return DelinkResult(delinked=1, event_removed=True, resummarize_queued=False)
     event.updated_at = now
+    summary = await session.get(EventSummary, event_id)
+    if summary is not None:
+        await session.delete(summary)
     return DelinkResult(delinked=1, event_removed=False, resummarize_queued=True)
 
 

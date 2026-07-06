@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from upmovies.catalog.models import Film
 from upmovies.link.blocked_cleanup import cleanup_blocked_sources
-from upmovies.news.models import Event, EventStory, SourceDomain, Story
+from upmovies.news.models import Event, EventStory, EventSummary, SourceDomain, Story
 
 
 async def _film(session, slug):
@@ -83,6 +83,16 @@ async def test_keeps_mixed_event_and_detaches_blocked_story(session):
     s_blocked = await _linked_story(session, film.id, "https://blocked.com/a")
     s_ok = await _linked_story(session, film.id, "https://variety.com/b")
     ev = await _event(session, film.id, [s_blocked.id, s_ok.id], confidence="confirmed")
+    session.add(
+        EventSummary(
+            event_id=ev.id,
+            summary="A neutral summary.",
+            model="claude-haiku-4-5",
+            prompt_version="1",
+            source_updated_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
     await _block(session, "blocked.com")
 
     report = await cleanup_blocked_sources(session, apply=True)
@@ -108,6 +118,10 @@ async def test_keeps_mixed_event_and_detaches_blocked_story(session):
         )
     ).scalar_one()
     assert ok_story.link_status == "linked"
+    summary = (
+        await session.execute(select(EventSummary).where(EventSummary.event_id == ev.id))
+    ).scalar_one_or_none()
+    assert summary is None  # summary deleted → synthesize regenerates fresh next run
 
 
 async def test_dry_run_reports_but_changes_nothing(session):

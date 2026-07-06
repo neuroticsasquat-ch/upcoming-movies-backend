@@ -4,8 +4,9 @@ The live source-quality gate (link/source_stage.py) only hard-drops blocked stor
 still unclustered on the *next* ingest run; a story already clustered into an event before its
 domain was blocked is never revisited. This closes that gap: it rejects every linked story
 whose effective tier is `blocked`, detaches it from its event, deletes events left with no
-remaining sources, and bumps `updated_at` on surviving events so synthesize re-summarizes them
-(their `confidence` is left unchanged — a survivor still has a non-blocked source).
+remaining sources, and deletes the `event_summary` row on surviving events so synthesize
+regenerates a fresh summary next run (their `confidence` is left unchanged — a survivor still
+has a non-blocked source).
 
 Pure DB I/O — the caller owns the commit. Nothing is written when `apply=False`; the returned
 report reflects what *would* change.
@@ -19,7 +20,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.source_quality import domain_for_story, effective_tier, get_source_domains
 
 log = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ async def cleanup_blocked_sources(
             ).all()
         }
     # An event whose only sources were blocked is left empty → delete it; a mixed event keeps
-    # its surviving sources and is re-summarized.
+    # its surviving sources and has its summary deleted so it gets a fresh one next run.
     events_to_delete = {
         eid for eid, blocked in blocked_per_event.items() if total_per_event.get(eid, 0) == blocked
     }
@@ -119,5 +120,8 @@ async def cleanup_blocked_sources(
         event = await session.get(Event, eid)
         if event is not None:
             event.updated_at = now
+        summary = await session.get(EventSummary, eid)
+        if summary is not None:
+            await session.delete(summary)
     await session.flush()
     return report
