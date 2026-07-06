@@ -95,3 +95,74 @@ async def test_delink_url_not_in_event_raises(session, make_film, add_event):
     )
     with pytest.raises(moderation.StoryNotInEvent):
         await moderation.delink_story(session, event_id=event.id, url="https://x.test/nope")
+
+
+# --- edit_summary ---
+
+
+async def test_edit_summary_sets_text_and_marker(session, make_film, add_event, make_user):
+    film = await make_film(slug="es-1")
+    event = await add_event(film=film, summary="AI text.")
+    user = await make_user(email="ed1@example.com")
+
+    result = await moderation.edit_summary(
+        session, event_id=event.id, summary="Human text.", user_id=user.id
+    )
+    await session.commit()
+
+    assert result.summary == "Human text."
+    assert result.edited_at is not None
+    assert result.edited_by == user.id
+    row = await session.get(EventSummary, event.id, execution_options={"populate_existing": True})
+    assert row is not None
+    assert row.summary == "Human text."
+    assert row.edited_at is not None and row.edited_by == user.id
+
+
+async def test_edit_summary_unknown_event_raises(session, make_user):
+    from uuid import uuid4
+
+    user = await make_user(email="ed2@example.com")
+    with pytest.raises(moderation.EventNotFound):
+        await moderation.edit_summary(session, event_id=uuid4(), summary="x", user_id=user.id)
+
+
+# --- reset_summary ---
+
+
+async def test_reset_summary_deletes_edited_row(session, make_film, add_event, make_user):
+    film = await make_film(slug="rs-1")
+    event = await add_event(film=film, summary="AI text.")
+    user = await make_user(email="rs1@example.com")
+    await moderation.edit_summary(
+        session, event_id=event.id, summary="Human text.", user_id=user.id
+    )
+    await session.flush()
+
+    await moderation.reset_summary(session, event_id=event.id)
+    await session.commit()
+
+    summary = (
+        await session.execute(select(EventSummary).where(EventSummary.event_id == event.id))
+    ).scalar_one_or_none()
+    assert summary is None  # deleted → synthesize re-selects the event (no summary row)
+
+
+async def test_reset_summary_unknown_event_raises(session):
+    from uuid import uuid4
+
+    with pytest.raises(moderation.EventNotFound):
+        await moderation.reset_summary(session, event_id=uuid4())
+
+
+async def test_reset_summary_not_edited_raises(session, make_film, add_event):
+    film = await make_film(slug="rs-2")
+    event = await add_event(film=film, summary="AI text.")  # machine summary, edited_at IS NULL
+
+    with pytest.raises(moderation.SummaryNotEdited):
+        await moderation.reset_summary(session, event_id=event.id)
+    # untouched
+    summary = (
+        await session.execute(select(EventSummary).where(EventSummary.event_id == event.id))
+    ).scalar_one_or_none()
+    assert summary is not None

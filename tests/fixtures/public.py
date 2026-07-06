@@ -131,6 +131,7 @@ def add_event(session: AsyncSession):
         summary: str | None = "A neutral summary.",
         sources: tuple[dict, ...] = (),
         region: str | None = None,
+        edited_at: datetime | None = None,
     ) -> Event:
         event = Event(
             film_id=film.id,
@@ -151,6 +152,7 @@ def add_event(session: AsyncSession):
                     model="claude-haiku-4-5",
                     prompt_version="1",
                     source_updated_at=occurred_at,
+                    edited_at=edited_at,
                 )
             )
         for src in sources:

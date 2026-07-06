@@ -88,6 +88,22 @@ async def test_detail_empty_log_film_returns_200_with_derived_arc(client, make_f
     assert body["arc_stage"] == "shooting"  # In Production / production_start
 
 
+async def test_detail_event_summary_edited_flag(client, make_film, add_event):
+    film = await make_film(slug="edited-2026")
+    await add_event(film=film, event_type="casting", summary="Machine text.")  # not edited
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="Human text.",
+        edited_at=datetime(2025, 5, 1, tzinfo=UTC),
+    )
+
+    body = (await client.get("/films/edited-2026")).json()
+    by_type = {e["event_type"]: e for e in body["events"]}
+    assert by_type["casting"]["summary_edited"] is False
+    assert by_type["trailer"]["summary_edited"] is True
+
+
 async def test_detail_unknown_slug_returns_404(client):
     assert (await client.get("/films/does-not-exist")).status_code == 404
 
