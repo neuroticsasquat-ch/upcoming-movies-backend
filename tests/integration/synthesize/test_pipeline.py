@@ -59,7 +59,7 @@ async def test_select_pending_includes_new_event_and_maps_input(session):
     event = await _event_with_story(session, film, event_type="trailer", dek="Trailer dropped.")
     await session.commit()
 
-    pending = await _select_pending(session, prompt_version="1")
+    pending = await _select_pending(session)
 
     assert len(pending) == 1
     pe = pending[0]
@@ -86,11 +86,11 @@ async def test_select_pending_skips_up_to_date_event(session):
     )
     await session.commit()
 
-    pending = await _select_pending(session, prompt_version="1")
+    pending = await _select_pending(session)
     assert pending == []
 
 
-async def test_select_pending_includes_stale_event(session):
+async def test_select_pending_skips_stale_event(session):
     film = await _film(session)
     event = await _event_with_story(session, film)
     # summary built against an OLDER updated_at than the event now has
@@ -105,12 +105,11 @@ async def test_select_pending_includes_stale_event(session):
     )
     await session.commit()
 
-    pending = await _select_pending(session, prompt_version="1")
-    assert len(pending) == 1
-    assert pending[0].is_new is False
+    pending = await _select_pending(session)
+    assert pending == []
 
 
-async def test_select_pending_includes_prompt_version_mismatch(session):
+async def test_select_pending_skips_prompt_version_mismatch(session):
     film = await _film(session)
     event = await _event_with_story(session, film)
     session.add(
@@ -124,9 +123,8 @@ async def test_select_pending_includes_prompt_version_mismatch(session):
     )
     await session.commit()
 
-    pending = await _select_pending(session, prompt_version="2")
-    assert len(pending) == 1
-    assert pending[0].is_new is False
+    pending = await _select_pending(session)
+    assert pending == []
 
 
 async def test_upsert_summary_inserts_then_updates_idempotently(session):
@@ -259,7 +257,7 @@ async def test_rerun_is_noop_when_nothing_pending(session):
     assert (result.new, result.refreshed, result.failed) == (0, 0, 0)
 
 
-async def test_prompt_version_bump_refreshes(session):
+async def test_prompt_version_bump_does_not_refresh_existing(session):
     film = await _film(session)
     event = await _event_with_story(session, film)
     await session.commit()
@@ -271,14 +269,14 @@ async def test_prompt_version_bump_refreshes(session):
     await session.commit()
     result = await _run(session, run_id2, use_batches=False, prompt_version="2")
 
-    assert (result.new, result.refreshed, result.failed) == (0, 1, 0)
+    assert (result.new, result.refreshed, result.failed) == (0, 0, 0)
     row = (
         await session.execute(
             select(EventSummary).where(EventSummary.event_id == event.id),
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
-    assert row.prompt_version == "2"
+    assert row.prompt_version == "1"
 
 
 class _FailOneCompleter(FakeSummaryClient):

@@ -25,7 +25,7 @@ async def test_delink_only_source_removes_event(session, make_film, add_event):
     assert story.link_note == "manual-unlink"
 
 
-async def test_delink_one_of_two_keeps_event_and_marks_stale(session, make_film, add_event):
+async def test_delink_one_of_two_keeps_event_and_clears_summary(session, make_film, add_event):
     film = await make_film(slug="dl-2")
     event = await add_event(
         film=film,
@@ -50,8 +50,8 @@ async def test_delink_one_of_two_keeps_event_and_marks_stale(session, make_film,
     assert remaining == 1
     summary = (
         await session.execute(select(EventSummary).where(EventSummary.event_id == event.id))
-    ).scalar_one()
-    assert kept.updated_at > summary.source_updated_at  # stale → synthesize re-summarizes
+    ).scalar_one_or_none()
+    assert summary is None  # summary deleted → synthesize regenerates fresh next run
 
 
 async def test_delete_event_rejects_all_and_cascades(session, make_film, add_event):
