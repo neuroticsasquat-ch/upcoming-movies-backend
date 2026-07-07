@@ -686,6 +686,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         FilmReleaseDate.release_date >= datetime(today.year, today.month, today.day, tzinfo=UTC),
         Film.slug.is_not(None),
         func.coalesce(Film.adult, False).is_(False),
+        Film.popularity >= 1.6
     )
 
     distinct_dates = (
