@@ -1,8 +1,21 @@
 from datetime import UTC, datetime
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def make_film(make_film):
+    """Override: default popularity above the calendar's visibility floor (> 1.5), since
+    most tests in this file aren't exercising the popularity gate itself."""
+
+    async def _make(*, popularity: float | None = 10.0, **kwargs):
+        return await make_film(popularity=popularity, **kwargs)
+
+    return _make
 
 _FUTURE = datetime(2099, 7, 4, 0, 0, tzinfo=UTC)
 _PAST = datetime(2000, 1, 1, 0, 0, tzinfo=UTC)
