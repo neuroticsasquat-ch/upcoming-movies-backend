@@ -266,7 +266,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
 
     summarized = (
         await session.execute(
-            select(Event, EventSummary.summary)
+            select(Event, EventSummary.summary, EventSummary.edited_at)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(Event.film_id == film.id, _visible_events(), _region_visible())
@@ -274,7 +274,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         )
     ).all()
 
-    event_ids = [event.id for event, _ in summarized]
+    event_ids = [event.id for event, _summary, _edited_at in summarized]
     sources_by_event: dict[UUID, list[Story]] = {}
     if event_ids:
         source_rows = (
@@ -295,6 +295,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             confidence=event.confidence,
             created_at=event.created_at,
             summary=summary,
+            summary_edited=edited_at is not None,
             sources=[
                 SourceOut(
                     url=source_url(story),
@@ -305,7 +306,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
                 for story in cap_sources(sources_by_event.get(event.id, []))
             ],
         )
-        for event, summary in summarized
+        for event, summary, edited_at in summarized
     ]
 
     regions: set[str] = {"US"}
@@ -685,6 +686,8 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         FilmReleaseDate.release_date >= datetime(today.year, today.month, today.day, tzinfo=UTC),
         Film.slug.is_not(None),
         func.coalesce(Film.adult, False).is_(False),
+        or_(Film.runtime.is_(None), Film.runtime == 0, Film.runtime >= 75),
+        Film.popularity > 1.5,
     )
 
     distinct_dates = (

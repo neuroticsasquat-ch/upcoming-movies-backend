@@ -123,7 +123,7 @@ def test_settings_summary_defaults(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-haiku-4-5"
     assert s.summary_use_batches is True
-    assert s.summary_prompt_version == "8"
+    assert s.summary_prompt_version == "9"
 
 
 def test_settings_summary_overrides_from_env(monkeypatch):
@@ -226,3 +226,17 @@ def test_settings_link_singular_dedup_days_override_from_env(monkeypatch):
     monkeypatch.setenv("LINK_SINGULAR_DEDUP_DAYS", "7")
     s = Settings()  # type: ignore[call-arg]
     assert s.link_singular_dedup_days == 7
+
+
+def test_settings_link_release_restate_days_default(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.delenv("LINK_RELEASE_RESTATE_DAYS", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_release_restate_days == 7
+
+
+def test_settings_link_release_restate_days_override_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RELEASE_RESTATE_DAYS", "3")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_release_restate_days == 3

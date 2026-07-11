@@ -175,3 +175,59 @@ def test_instructions_flag_fake_date_move_matching_known_release_date():
     text = _INSTRUCTIONS.lower()
     assert "regardless of how the headline frames it" in text
     assert "already-known release_date" in text
+
+
+def test_parse_reads_claimed_date_for_release_date_events():
+    from datetime import date
+
+    from upmovies.link.cluster import parse_cluster_groups
+
+    raw = (
+        '{"events": [{"existing": null, "type": "release_date", "confidence": "confirmed", '
+        '"region": "US", "claimed_date": "2027-06-30", "stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None and groups[0].claimed_date == date(2027, 6, 30)
+
+
+def test_parse_bad_claimed_date_is_none():
+    from upmovies.link.cluster import parse_cluster_groups
+
+    raw = (
+        '{"events": [{"existing": null, "type": "release_date", "confidence": "confirmed", '
+        '"claimed_date": "sometime 2027", "stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None and groups[0].claimed_date is None
+
+
+def test_normalize_name_folds_case_and_whitespace():
+    from upmovies.link.cluster import _normalize_name
+
+    assert _normalize_name("Alain  Chabat") == "alain chabat"
+    assert _normalize_name("  Monica Barbaro ") == "monica barbaro"
+    assert _normalize_name("JOHN DOE") == "john doe"
+    assert _normalize_name("") == ""
+
+
+def test_parse_reads_cast_for_casting_events():
+    from upmovies.link.cluster import parse_cluster_groups
+
+    raw = (
+        '{"events": [{"existing": null, "type": "casting", "confidence": "confirmed", '
+        '"cast": ["Monica Barbaro", "John Doe"], "stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None and len(groups) == 1
+    assert groups[0].cast == ["Monica Barbaro", "John Doe"]
+
+
+def test_parse_cast_absent_is_none():
+    from upmovies.link.cluster import parse_cluster_groups
+
+    raw = (
+        '{"events": [{"existing": null, "type": "trailer", "confidence": "confirmed", '
+        '"stories": [1]}]}'
+    )
+    groups = parse_cluster_groups(raw, n_stories=1)
+    assert groups is not None and groups[0].cast is None

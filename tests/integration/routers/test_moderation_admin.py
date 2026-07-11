@@ -1,6 +1,6 @@
 from sqlalchemy import func, select
 
-from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.models import Event, EventStory, EventSummary, Story
 
 
 async def _event_with_source(make_film, add_event, *, slug, url):
@@ -82,3 +82,116 @@ async def test_admin_delink_url_not_in_event_404(admin_authed_client, make_film,
         f"/admin/events/{event.id}/delink", json={"url": "https://x.test/missing"}
     )
     assert r.status_code == 404
+
+
+# --- PATCH /{event_id}/summary (edit) ---
+
+
+async def test_edit_summary_requires_auth(client, make_film, add_event):
+    film = await make_film(slug="es-auth")
+    event = await add_event(film=film, summary="AI text.")
+    r = await client.patch(f"/admin/events/{event.id}/summary", json={"summary": "Human."})
+    assert r.status_code == 401
+
+
+async def test_edit_summary_forbidden_for_non_admin(authed_client, make_film, add_event):
+    film = await make_film(slug="es-forbid")
+    event = await add_event(film=film, summary="AI text.")
+    r = await authed_client.patch(f"/admin/events/{event.id}/summary", json={"summary": "Human."})
+    assert r.status_code == 403
+
+
+async def test_edit_summary_sets_text_and_marker(
+    admin_authed_client, session, make_film, add_event
+):
+    film = await make_film(slug="es-ok")
+    event = await add_event(film=film, summary="AI text.")
+    r = await admin_authed_client.patch(
+        f"/admin/events/{event.id}/summary", json={"summary": "  Human-authored text.  "}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["summary"] == "Human-authored text."  # stripped
+    assert body["edited"] is True and body["edited_at"] is not None
+
+    row = await session.get(EventSummary, event.id, execution_options={"populate_existing": True})
+    assert row is not None
+    assert row.summary == "Human-authored text."
+    assert row.edited_at is not None
+    assert row.edited_by == admin_authed_client.user.id
+
+
+async def test_edit_summary_rejects_empty(admin_authed_client, make_film, add_event):
+    film = await make_film(slug="es-empty")
+    event = await add_event(film=film, summary="AI text.")
+    r = await admin_authed_client.patch(
+        f"/admin/events/{event.id}/summary", json={"summary": "   "}
+    )
+    assert r.status_code == 422
+
+
+async def test_edit_summary_rejects_over_length(admin_authed_client, make_film, add_event):
+    film = await make_film(slug="es-long")
+    event = await add_event(film=film, summary="AI text.")
+    r = await admin_authed_client.patch(
+        f"/admin/events/{event.id}/summary", json={"summary": "x" * 501}
+    )
+    assert r.status_code == 422
+
+
+async def test_edit_summary_accepts_max_length(admin_authed_client, make_film, add_event):
+    film = await make_film(slug="es-max")
+    event = await add_event(film=film, summary="AI text.")
+    r = await admin_authed_client.patch(
+        f"/admin/events/{event.id}/summary", json={"summary": "x" * 500}
+    )
+    assert r.status_code == 200
+
+
+async def test_edit_summary_unknown_event_404(admin_authed_client):
+    from uuid import uuid4
+
+    r = await admin_authed_client.patch(
+        f"/admin/events/{uuid4()}/summary", json={"summary": "Human."}
+    )
+    assert r.status_code == 404
+
+
+# --- DELETE /{event_id}/summary (reset-to-AI) ---
+
+
+async def test_reset_summary_deletes_edited_row(admin_authed_client, session, make_film, add_event):
+    film = await make_film(slug="rs-ok")
+    event = await add_event(film=film, summary="AI text.")
+    await admin_authed_client.patch(f"/admin/events/{event.id}/summary", json={"summary": "Human."})
+
+    r = await admin_authed_client.delete(f"/admin/events/{event.id}/summary")
+    assert r.status_code == 204
+    # Row gone → event re-enters _select_pending's no-summary branch next synthesize run.
+    assert (
+        await session.get(EventSummary, event.id, execution_options={"populate_existing": True})
+    ) is None
+
+
+async def test_reset_summary_not_edited_404(admin_authed_client, session, make_film, add_event):
+    film = await make_film(slug="rs-noedit")
+    event = await add_event(film=film, summary="AI text.")  # machine summary, edited_at IS NULL
+    r = await admin_authed_client.delete(f"/admin/events/{event.id}/summary")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "summary_not_edited"
+    # untouched
+    assert (await session.get(EventSummary, event.id)) is not None
+
+
+async def test_reset_summary_unknown_event_404(admin_authed_client):
+    from uuid import uuid4
+
+    r = await admin_authed_client.delete(f"/admin/events/{uuid4()}/summary")
+    assert r.status_code == 404
+
+
+async def test_reset_summary_requires_auth(client, make_film, add_event):
+    film = await make_film(slug="rs-auth")
+    event = await add_event(film=film, summary="AI text.")
+    r = await client.delete(f"/admin/events/{event.id}/summary")
+    assert r.status_code == 401

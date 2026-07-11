@@ -2,6 +2,7 @@ from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     Date,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
@@ -229,6 +231,31 @@ class Person(Base):
     popularity: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class FilmFieldChange(Base):
+    """Append-only history of changed `catalog.film` column values, written by the
+    `film_field_change_trg` trigger (see the trigger SQL below). Enables deterministic
+    "how long have we held this value?" checks without per-field timestamp columns."""
+
+    __tablename__ = "film_field_change"
+    __table_args__ = (
+        Index("ix_film_field_change_lookup", "film_id", "field", "changed_at"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    field: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value: Mapped[object | None] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[object | None] = mapped_column(JSONB, nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class FilmCredit(Base):
     """Per-film credit edge linking a Film to a Person (rebuilt each ingest)."""
 
@@ -251,3 +278,89 @@ class FilmCredit(Base):
     job: Mapped[str | None] = mapped_column(Text, nullable=True)
     character: Mapped[str | None] = mapped_column(Text, nullable=True)
     credit_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+# --- Film column-change history trigger -------------------------------------
+# Volatile columns TMDB churns on nearly every ingest — excluded so the history
+# table records only semantic changes (release_date, status, title, runtime, ...).
+FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
+    "popularity",
+    "vote_average",
+    "vote_count",
+    "revenue",
+    "tmdb_raw",
+    "updated_at",
+)
+
+
+def _denylist_sql_array(cols: tuple[str, ...]) -> str:
+    return "ARRAY[" + ", ".join(f"'{c}'" for c in cols) + "]::text[]"
+
+
+# asyncpg's extended query protocol (used by both the test engine and Alembic's
+# async engine) rejects a single execute() call containing more than one top-level
+# SQL command ("cannot insert multiple commands into a prepared statement"). The
+# CREATE FUNCTION body's internal semicolons are fine (they're inside a single
+# dollar-quoted statement) — but the DROP/CREATE TRIGGER statements that follow it
+# must be issued as separate execute() calls. We keep each command as its own
+# string and compose the public INSTALL/DROP tuples below from them, so there is
+# exactly one place each statement's text is written.
+_CREATE_FIELD_CHANGE_FUNCTION_SQL = f"""
+CREATE OR REPLACE FUNCTION catalog.log_film_field_change() RETURNS trigger AS $$
+DECLARE
+    o jsonb := to_jsonb(OLD);
+    n jsonb := to_jsonb(NEW);
+    k text;
+BEGIN
+    FOR k IN SELECT jsonb_object_keys(n) LOOP
+        IF k = ANY({_denylist_sql_array(FILM_FIELD_CHANGE_DENYLIST)}) THEN
+            CONTINUE;
+        END IF;
+        IF o -> k IS DISTINCT FROM n -> k THEN
+            INSERT INTO catalog.film_field_change (film_id, field, old_value, new_value)
+            VALUES (NEW.id, k, o -> k, n -> k);
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
+
+_DROP_FIELD_CHANGE_TRIGGER_SQL = "DROP TRIGGER IF EXISTS film_field_change_trg ON catalog.film;"
+
+_CREATE_FIELD_CHANGE_TRIGGER_SQL = """
+CREATE TRIGGER film_field_change_trg
+    BEFORE UPDATE ON catalog.film
+    FOR EACH ROW EXECUTE FUNCTION catalog.log_film_field_change();
+"""
+
+_DROP_FIELD_CHANGE_FUNCTION_SQL = "DROP FUNCTION IF EXISTS catalog.log_film_field_change();"
+
+# Tuple of per-statement DDL (not a single joined string) because asyncpg's extended
+# query protocol cannot run multiple top-level commands in one execute() call — Task
+# 3's Alembic migration must call op.execute() once per element, e.g.
+# `for stmt in INSTALL_FILM_FIELD_CHANGE_TRIGGER: op.execute(stmt)`.
+INSTALL_FILM_FIELD_CHANGE_TRIGGER: tuple[str, ...] = (
+    _CREATE_FIELD_CHANGE_FUNCTION_SQL,
+    _DROP_FIELD_CHANGE_TRIGGER_SQL,
+    _CREATE_FIELD_CHANGE_TRIGGER_SQL,
+)
+
+DROP_FILM_FIELD_CHANGE_TRIGGER: tuple[str, ...] = (
+    _DROP_FIELD_CHANGE_TRIGGER_SQL,
+    _DROP_FIELD_CHANGE_FUNCTION_SQL,
+)
+
+
+def _register_ddl(event_name: str, statements: tuple[str, ...]) -> None:
+    for stmt in statements:
+        event.listen(Film.__table__, event_name, DDL(stmt))
+
+
+# Install under create_all (test DB). Prod installs the same commands via the
+# Alembic migration's op.execute (Task 3). before_drop keeps metadata.drop_all
+# symmetric. Each command is registered as its own DDL/event so a single
+# op.execute()/connection.execute() never receives more than one SQL statement
+# (see the asyncpg note above).
+_register_ddl("after_create", INSTALL_FILM_FIELD_CHANGE_TRIGGER)
+_register_ddl("before_drop", DROP_FILM_FIELD_CHANGE_TRIGGER)

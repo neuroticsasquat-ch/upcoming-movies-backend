@@ -33,7 +33,7 @@ async def _run(session, film_id, story_ids, *, confidence):
     stories_list = ", ".join(str(i + 1) for i in range(len(story_ids)))
     raw = (
         f'{{"events": [{{"existing": null, "type": "casting", "confidence": "{confidence}",'
-        f' "stories": [{stories_list}]}}]}}'
+        f' "cast": ["Test Performer"], "stories": [{stories_list}]}}]}}'
     )
     return await apply_cluster_decisions(session, plan=plan, raw=raw, unresolved_tier="acceptable")
 

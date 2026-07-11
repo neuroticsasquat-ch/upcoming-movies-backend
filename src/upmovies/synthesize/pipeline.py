@@ -1,6 +1,6 @@
-"""The `synthesize` pipeline: select events whose summary is missing, stale (the event grew),
-or prompt-version-mismatched; summarize each (sequential Messages path or batched Batches path);
-and upsert news.event_summary. Idempotent — a re-run with nothing pending is a no-op. One event's
+"""The `synthesize` pipeline: select events with no summary yet (write-once — an existing summary
+is never reselected); summarize each (sequential Messages path or batched Batches path); and
+upsert news.event_summary. Idempotent — a re-run with nothing pending is a no-op. One event's
 failure never rolls back others. Mirrors link/pipeline.py structurally."""
 
 import logging
@@ -56,21 +56,17 @@ async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[Async
         yield s
 
 
-async def _select_pending(session: AsyncSession, *, prompt_version: str) -> list[_PendingEvent]:
-    """Events missing a summary, or whose summary is stale (event.updated_at later than the
-    stored source_updated_at), or whose stored prompt_version differs from the current one.
+async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
+    """Events with no summary row yet — write-once: an event whose summary already exists is
+    never reselected, even if the event was later updated or the prompt version has moved on.
     Returns each mapped to an EventInput (plain dataclasses — safe to use after the session
-    closes), with is_new = no prior summary existed."""
+    closes), with is_new = no prior summary existed (always True here)."""
     rows = (
         await session.execute(
             select(Event, Film.title, EventSummary.event_id)
             .join(Film, Film.id == Event.film_id)
             .outerjoin(EventSummary, EventSummary.event_id == Event.id)
-            .where(
-                EventSummary.event_id.is_(None)
-                | (Event.updated_at > EventSummary.source_updated_at)
-                | (EventSummary.prompt_version != prompt_version)
-            )
+            .where(EventSummary.event_id.is_(None))
         )
     ).all()
     if not rows:
@@ -108,6 +104,7 @@ async def _select_pending(session: AsyncSession, *, prompt_version: str) -> list
                     film_title=film_title,
                     source_updated_at=event.updated_at,
                     stories=story_inputs,
+                    subjects=event.subject_key,
                 ),
             )
         )
@@ -253,7 +250,7 @@ async def run_synthesize_ingest(
     url_resolve_resolver: Resolver = resolve_google_news_url,
 ) -> SynthesizeResult:
     async with _owned_session(session_factory) as s:
-        pending = await _select_pending(s, prompt_version=prompt_version)
+        pending = await _select_pending(s)
 
     run_date = datetime.now(UTC).date()
     stage = _summary_stage_batched if use_batches else _summary_stage_sequential

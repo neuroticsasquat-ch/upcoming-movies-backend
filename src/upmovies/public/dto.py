@@ -17,6 +17,7 @@ class EventOut(BaseModel):
     confidence: str
     created_at: datetime
     summary: str
+    summary_edited: bool
     sources: list[SourceOut]
 
 
