@@ -188,7 +188,6 @@ class ClusterPlan:
     film_status: str | None = None
     film_release_date: date | None = None
     run_date: date | None = None
-    film_created_at: datetime | None = None
 
 
 @dataclass
@@ -387,7 +386,6 @@ async def build_cluster_request(
         film_status=film.status,
         film_release_date=film.release_date,
         run_date=run_date,
-        film_created_at=film.created_at,
     )
     return system, messages, plan
 
@@ -431,7 +429,7 @@ async def apply_cluster_decisions(
     raw: str,
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
-    release_restate_days: int = 7,
+    release_change_window_days: int = 14,
 ) -> ClusterResult:
     """Write half: re-load events/stories from the plan, parse the LLM JSON, and
     create/attach events. The caller owns the session/commit."""
@@ -544,24 +542,42 @@ async def apply_cluster_decisions(
                         assigned.add(sid)
                         stories_rejected += 1
                     continue
-            if (
-                etype == "release_date"
-                and group.claimed_date is not None
-                and plan.film_release_date is not None
-                and group.claimed_date == plan.film_release_date
-            ):
-                established = await field_changed_at(session, plan.film_id, "release_date")
-                baseline = established or plan.film_created_at
-                if (
-                    baseline is not None
-                    and (as_of_date - baseline.date()).days > release_restate_days
-                ):
+            if etype == "release_date":
+                # NEU-718: a release_date event may form only when TMDB's own primary
+                # release_date actually changed within the corroboration window (a first
+                # date, null -> date, counts as a change). The LLM's classification alone
+                # never creates the event.
+                changed_at = await field_changed_at(session, plan.film_id, "release_date")
+                corroborated = (
+                    changed_at is not None
+                    and (as_of_date - changed_at.date()).days <= release_change_window_days
+                )
+                if not corroborated:
+                    # TMDB has not (yet) recorded a matching change. Use the LLM's
+                    # claimed_date only to triage: a story claiming a date TMDB has not
+                    # caught up to is HELD — left linked + unclustered so a later run can
+                    # corroborate it once TMDB updates — until it ages past the window.
+                    # A plain restatement or a dateless story is dropped now.
+                    if (
+                        group.claimed_date is not None
+                        and group.claimed_date != plan.film_release_date
+                    ):
+                        oldest = min(
+                            (by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids
+                        )
+                        if (as_of_date - oldest.date()).days <= release_change_window_days:
+                            continue  # hold: re-evaluated on a later run
+                        note = "release-date-uncorroborated"
+                    elif group.claimed_date is not None:
+                        note = "release-date-restated"
+                    else:
+                        note = "release-date-unchanged"
                     for sid in group_sids:
                         story = by_id[sid]
                         story.link_status = "rejected"
                         story.film_id = None
                         story.link_confidence = None
-                        story.link_note = "release-date-restated"
+                        story.link_note = note
                         assigned.add(sid)
                         stories_rejected += 1
                     continue
@@ -638,7 +654,7 @@ async def cluster_film_events(
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
-    release_restate_days: int = 7,
+    release_change_window_days: int = 14,
     run_date: date,
 ) -> tuple[ClusterResult, Usage]:
     built = await build_cluster_request(
@@ -659,5 +675,5 @@ async def cluster_film_events(
         raw=raw,
         unresolved_tier=unresolved_tier,
         dedup_days=dedup_days,
-        release_restate_days=release_restate_days,
+        release_change_window_days=release_change_window_days,
     ), usage
