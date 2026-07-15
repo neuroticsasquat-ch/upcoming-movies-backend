@@ -15,11 +15,8 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     create_async_engine,
 )
 
-from upmovies.app import models as _app_models  # noqa: F401, E402
-from upmovies.catalog import models as _catalog_models  # noqa: F401, E402
+import upmovies.models  # noqa: F401, E402  -- register every model with Base.metadata
 from upmovies.db import Base  # noqa: E402
-from upmovies.ingest import models as _ingest_models  # noqa: F401, E402
-from upmovies.news import models as _news_models  # noqa: F401, E402
 
 _SCHEMAS = ("app", "catalog", "news", "ingest")
 
