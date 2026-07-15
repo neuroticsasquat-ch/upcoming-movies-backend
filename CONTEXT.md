@@ -52,3 +52,39 @@ _Avoid_: article, item, post.
 A cluster of stories about the same real-world development for a film. What the tracker
 summarizes and displays.
 _Avoid_: cluster (that's the act of forming an event), group.
+
+### Release-date events
+
+**Release-date event**:
+An event recording that a film's release date became known or moved. It is grounded in
+**TMDB state**, not in a story's wording: it may exist only when TMDB's own release date has
+actually changed (a first date being assigned counts as a change from "none"). A story is the
+*trigger and the colour* for a release-date event — never the source of truth for the date.
+_Avoid_: date announcement, release news.
+
+**Corroboration**:
+Confirmation, from TMDB's release-date change history, that a claimed release-date change is
+real. A release-date story is *corroborated* when TMDB records a matching change to the film's
+primary release date within the **corroboration window** (a small number of days). Only
+corroborated stories may form a release-date event.
+_Avoid_: verification, confirmation (too generic).
+
+**Restatement**:
+A story that merely repeats the film's already-known release date rather than reporting a
+change. Restatements never form a release-date event; they are the classic false-positive this
+model exists to suppress.
+_Avoid_: mention, recap.
+
+**Held story**:
+A release-date story that claims a date TMDB has not yet caught up to. Rather than being
+rejected, it is *held* — left unlinked-to-any-event and re-evaluated on later runs — until TMDB
+corroborates the change or the corroboration window lapses, at which point it is dropped as
+**uncorroborated**. Holding exists because the trades usually break a date move before
+community-edited TMDB reflects it.
+_Avoid_: pending (that's a `link_status`), queued, deferred.
+
+**Primary release date**:
+TMDB's single scalar `release_date` for a film — the only date this model gates on. Per-country
+/ per-type dates (the `film_release_date` table) are explicitly out of scope: a regional-only
+move that leaves the primary date untouched does not form a release-date event.
+_Avoid_: regional date, theatrical date (those are the out-of-scope per-country values).
