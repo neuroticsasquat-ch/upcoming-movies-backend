@@ -72,6 +72,7 @@ async def _background_feeds(
             session_factory=_session_factory,
             run_id=run_id,
             recency_days=settings.feed_recency_days,
+            google_enabled=settings.news_google_enabled,
             per_film_enabled=per_film_override
             if per_film_override is not None
             else settings.feeds_per_film_enabled,

@@ -173,6 +173,7 @@ async def run_feeds_ingest(
     session_factory: SessionFactory,
     run_id: UUID,
     recency_days: int,
+    google_enabled: bool = False,
     per_film_enabled: bool = False,
     per_film_throttle: float = 1.0,
     per_film_title_filter_enabled: bool = False,
@@ -181,7 +182,7 @@ async def run_feeds_ingest(
     timeout: float = 30.0,
 ) -> FeedsIngestResult:
     if sources is None:
-        sources = feed_sources(recency_days)
+        sources = feed_sources(recency_days, google_enabled=google_enabled)
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
     feeds_processed = 0
     feeds_failed = 0
@@ -231,7 +232,9 @@ async def run_feeds_ingest(
                 await _record_failure()
 
         # Phase B — per-film Google queries (serialized; abort the phase on a block).
-        if per_film_enabled:
+        # Master-gated by google_enabled (NEU-717): off means no per-film regardless of
+        # per_film_enabled.
+        if google_enabled and per_film_enabled:
             titles = await _film_titles(session_factory)
             pf_sources = per_film_google_sources(titles, recency_days)
             for title, source in zip(titles, pf_sources, strict=True):
