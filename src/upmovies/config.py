@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")
     url_resolve_delay_seconds: float = Field(default=1.0, alias="URL_RESOLVE_DELAY_SECONDS")
     feed_recency_days: int = Field(default=3, alias="FEED_RECENCY_DAYS")
+    # NEU-717 master gate: when off, no Google News at all (broad queries + per-film),
+    # regardless of feeds_per_film_enabled. Paused by default on a trial basis.
+    news_google_enabled: bool = Field(default=False, alias="NEWS_GOOGLE_ENABLED")
     feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
     feeds_per_film_throttle_seconds: float = Field(
         default=1.0, alias="FEEDS_PER_FILM_THROTTLE_SECONDS"
