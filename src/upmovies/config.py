@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
     link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
     link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
-    link_release_restate_days: int = Field(default=7, alias="LINK_RELEASE_RESTATE_DAYS")
+    link_release_change_window_days: int = Field(
+        default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
+    )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
     source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")
@@ -50,6 +52,9 @@ class Settings(BaseSettings):
     url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")
     url_resolve_delay_seconds: float = Field(default=1.0, alias="URL_RESOLVE_DELAY_SECONDS")
     feed_recency_days: int = Field(default=3, alias="FEED_RECENCY_DAYS")
+    # NEU-717 master gate: when off, no Google News at all (broad queries + per-film),
+    # regardless of feeds_per_film_enabled. Paused by default on a trial basis.
+    news_google_enabled: bool = Field(default=False, alias="NEWS_GOOGLE_ENABLED")
     feeds_per_film_enabled: bool = Field(default=True, alias="FEEDS_PER_FILM_ENABLED")
     feeds_per_film_throttle_seconds: float = Field(
         default=1.0, alias="FEEDS_PER_FILM_THROTTLE_SECONDS"

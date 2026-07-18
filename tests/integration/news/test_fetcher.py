@@ -215,6 +215,7 @@ async def _run_pf(session, base_sources, *, recency_days=36500, throttle=0.0):
         session_factory=lambda: session,
         run_id=run_id,
         recency_days=recency_days,
+        google_enabled=True,
         per_film_enabled=True,
         per_film_throttle=throttle,
         sources=base_sources,
@@ -255,6 +256,27 @@ async def test_flag_on_fetches_per_film_and_dedupes_by_url(session):
         )
     ).scalar_one()
     assert row.status == "succeeded"
+
+
+@respx.mock
+async def test_google_disabled_skips_phase_b_even_with_per_film_enabled(session):
+    # NEU-717 master gate: google_enabled=False hard-skips Phase B regardless of
+    # per_film_enabled. No per-film route is mocked, so if Phase B fired respx would raise.
+    await _seed_films(session, ["Spider-Man"])
+    respx.get(RSS_URL).mock(return_value=_xml(RSS_FEED))
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+    result = await run_feeds_ingest(
+        session_factory=lambda: session,
+        run_id=run_id,
+        recency_days=36500,
+        google_enabled=False,
+        per_film_enabled=True,
+        per_film_throttle=0.0,
+        sources=[FeedSource("Deadline", RSS_URL)],
+    )
+    assert result.films_queried == 0
+    assert result.blocked is False
 
 
 @respx.mock
@@ -374,6 +396,7 @@ async def test_per_film_title_filter_drops_off_topic_and_leaves_trades(session):
         session_factory=lambda: session,
         run_id=run_id,
         recency_days=36500,
+        google_enabled=True,
         per_film_enabled=True,
         per_film_throttle=0.0,
         per_film_title_filter_enabled=True,

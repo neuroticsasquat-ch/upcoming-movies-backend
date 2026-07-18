@@ -9,10 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from upmovies.config import get_settings
 from upmovies.db import Base
 
-import upmovies.app.models      # noqa: F401  -- register models with Base.metadata
-import upmovies.catalog.models  # noqa: F401
-import upmovies.ingest.models   # noqa: F401
-import upmovies.news.models     # noqa: F401
+import upmovies.models  # noqa: F401  -- register every model with Base.metadata
 
 config = context.config
 if config.config_file_name is not None:

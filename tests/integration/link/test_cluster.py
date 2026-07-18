@@ -863,9 +863,19 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
 
 
 async def test_release_date_event_persists_region(session):
-    film = Film(tmdb_id=2, title="Runner")
+    film = Film(tmdb_id=2, title="Runner", release_date=date(2026, 1, 1))
     session.add(film)
     await session.flush()
+    # A recent TMDB release_date change corroborates the beat so the event may form.
+    session.add(
+        FilmFieldChange(
+            film_id=film.id,
+            field="release_date",
+            old_value=None,
+            new_value="2026-01-01",
+            changed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
     await _linked_story(session, film, "https://e/region-1")
     await session.commit()
 
@@ -877,6 +887,7 @@ async def test_release_date_event_persists_region(session):
                     "type": "release_date",
                     "confidence": "confirmed",
                     "region": "IN",
+                    "claimed_date": "2026-01-01",
                     "stories": [1],
                 }
             ]
@@ -1242,8 +1253,25 @@ async def test_two_new_trailer_groups_collapse_in_one_pass(session):
     assert len(events) == 1
 
 
-async def _apply_release_date(session, *, film, claimed, film_created_at, run_date, restate_days=7):
-    story = await _linked_story(session, film, "https://e/rd", title="release date news")
+# A release_date event may form only when TMDB's own release_date changed within the
+# corroboration window (NEU-718). A first date (null -> date) counts as a change, so this
+# one rule covers both "no date yet" and "date moved". The LLM's claimed_date is used only
+# to triage a vetoed story into hold-vs-drop, never to create an event.
+
+
+async def _apply_release_date(
+    session,
+    *,
+    film,
+    claimed,
+    run_date,
+    window_days=14,
+    published_at=None,
+    url="https://e/rd",
+):
+    story = await _linked_story(session, film, url, title="release date news")
+    if published_at is not None:
+        story.published_at = published_at
     await session.flush()
     plan = ClusterPlan(
         film_id=film.id,
@@ -1251,7 +1279,6 @@ async def _apply_release_date(session, *, film, claimed, film_created_at, run_da
         unclustered_story_ids=[story.id],
         film_status=film.status,
         film_release_date=film.release_date,
-        film_created_at=film_created_at,
         run_date=run_date,
     )
     raw = json.dumps(
@@ -1267,94 +1294,276 @@ async def _apply_release_date(session, *, film, claimed, film_created_at, run_da
             ]
         }
     )
-    return await apply_cluster_decisions(
-        session, plan=plan, raw=raw, release_restate_days=restate_days
+    result = await apply_cluster_decisions(
+        session, plan=plan, raw=raw, release_change_window_days=window_days
     )
+    return result, story
 
 
-async def test_release_date_restatement_of_established_date_drops(session):
-    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
-    session.add(film)
-    await session.flush()
-    result = await _apply_release_date(
-        session,
-        film=film,
-        claimed="2026-08-12",
-        film_created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        run_date=date(2026, 7, 4),
-    )
-    assert result.events_created == 0
-    assert result.stories_rejected == 1
-    ev = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
-    assert ev == []
-
-
-async def test_release_date_recently_set_is_kept(session):
-    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
-    session.add(film)
-    await session.flush()
-    result = await _apply_release_date(
-        session,
-        film=film,
-        claimed="2026-08-12",
-        film_created_at=datetime(2026, 7, 2, tzinfo=UTC),
-        run_date=date(2026, 7, 4),
-    )
-    assert result.events_created == 1  # date set 2 days ago (< 7) → may be the real announcement
-
-
-async def test_release_date_changed_date_is_kept(session):
-    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
-    session.add(film)
-    await session.flush()
-    result = await _apply_release_date(
-        session,
-        film=film,
-        claimed="2026-09-01",
-        film_created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        run_date=date(2026, 7, 4),
-    )
-    assert result.events_created == 1  # different date → genuine change
-
-
-async def test_release_date_null_claim_is_kept(session):
-    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
-    session.add(film)
-    await session.flush()
-    result = await _apply_release_date(
-        session,
-        film=film,
-        claimed=None,
-        film_created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        run_date=date(2026, 7, 4),
-    )
-    assert result.events_created == 1  # no parseable date → unchanged behavior
-
-
-async def test_release_date_uses_field_changed_at_over_created_at(session):
-    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
-    session.add(film)
-    await session.flush()
-    # Film row is fresh (created_at ~ now), but we learned this date 33 days ago.
+def _seed_release_date_change(session, film, *, old, new, changed_at):
     session.add(
         FilmFieldChange(
             film_id=film.id,
             field="release_date",
-            old_value=None,
-            new_value="2026-08-12",
-            changed_at=datetime(2026, 6, 1, tzinfo=UTC),
+            old_value=old,
+            new_value=new,
+            changed_at=changed_at,
         )
     )
+
+
+async def test_release_date_restatement_of_stable_date_drops(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
     await session.flush()
-    result = await _apply_release_date(
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-08-12", run_date=date(2026, 7, 4)
+    )
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert story.link_status == "rejected"
+    assert story.link_note == "release-date-restated"
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+
+
+async def test_release_date_vague_story_on_stable_date_drops(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    result, story = await _apply_release_date(
+        session, film=film, claimed=None, run_date=date(2026, 7, 4)
+    )
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert story.link_note == "release-date-unchanged"
+
+
+async def test_release_date_recent_tmdb_change_forms_event(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    _seed_release_date_change(
+        session,
+        film,
+        old="2026-08-12",
+        new="2026-09-01",
+        changed_at=datetime(2026, 6, 29, tzinfo=UTC),  # 5 days before run_date, within W
+    )
+    await session.flush()
+    result, _ = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    assert result.events_created == 1
+
+
+async def test_release_date_old_tmdb_change_restated_drops(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    _seed_release_date_change(
+        session,
+        film,
+        old="2026-08-12",
+        new="2026-09-01",
+        changed_at=datetime(2026, 6, 4, tzinfo=UTC),  # 30 days before run_date, past W
+    )
+    await session.flush()
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert story.link_note == "release-date-restated"
+
+
+async def test_release_date_break_ahead_is_held(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-11-20", run_date=date(2026, 7, 4)
+    )
+    assert result.events_created == 0
+    assert result.stories_rejected == 0
+    assert result.stories_clustered == 0
+    # Held: the story stays linked + unclustered for a later run to corroborate.
+    assert story.link_status == "linked"
+    assert story.film_id == film.id
+    assert story.link_note is None
+    assert (await session.execute(select(EventStory))).scalars().all() == []
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
+
+
+async def test_release_date_held_story_forms_event_after_corroboration(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/rd", title="delay news")
+    await session.flush()
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release_date",
+                    "confidence": "confirmed",
+                    "claimed_date": "2026-11-20",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+
+    def _plan():
+        return ClusterPlan(
+            film_id=film.id,
+            existing_event_ids=[],
+            unclustered_story_ids=[story.id],
+            film_status=film.status,
+            film_release_date=film.release_date,
+            run_date=date(2026, 7, 4),
+        )
+
+    r1 = await apply_cluster_decisions(
+        session, plan=_plan(), raw=raw, release_change_window_days=14
+    )
+    assert r1.events_created == 0
+    assert r1.stories_rejected == 0
+    assert story.link_status == "linked"
+
+    # TMDB catches up to the announced move (a recorded release_date change).
+    _seed_release_date_change(
+        session,
+        film,
+        old="2026-08-12",
+        new="2026-11-20",
+        changed_at=datetime(2026, 7, 4, tzinfo=UTC),
+    )
+    await session.flush()
+
+    r2 = await apply_cluster_decisions(
+        session, plan=_plan(), raw=raw, release_change_window_days=14
+    )
+    assert r2.events_created == 1
+
+
+async def test_release_date_held_story_expires_uncorroborated(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    result, story = await _apply_release_date(
         session,
         film=film,
-        claimed="2026-08-12",
-        film_created_at=datetime(2026, 7, 3, tzinfo=UTC),
+        claimed="2026-11-20",
+        run_date=date(2026, 7, 4),
+        published_at=datetime(2026, 6, 10, tzinfo=UTC),  # 24 days old, past W
+    )
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert story.link_status == "rejected"
+    assert story.link_note == "release-date-uncorroborated"
+
+
+async def test_release_date_null_film_holds_then_forms_event_on_first_date(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=None)
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/rd", title="gets a date")
+    await session.flush()
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release_date",
+                    "confidence": "confirmed",
+                    "claimed_date": "2026-08-12",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+
+    def _plan():
+        return ClusterPlan(
+            film_id=film.id,
+            existing_event_ids=[],
+            unclustered_story_ids=[story.id],
+            film_status=film.status,
+            film_release_date=film.release_date,
+            run_date=date(2026, 7, 4),
+        )
+
+    r1 = await apply_cluster_decisions(
+        session, plan=_plan(), raw=raw, release_change_window_days=14
+    )
+    assert r1.events_created == 0
+    assert r1.stories_rejected == 0
+    assert story.link_status == "linked"
+
+    # TMDB assigns the first date (null -> date is a recorded change).
+    _seed_release_date_change(
+        session, film, old=None, new="2026-08-12", changed_at=datetime(2026, 7, 4, tzinfo=UTC)
+    )
+    await session.flush()
+
+    r2 = await apply_cluster_decisions(
+        session, plan=_plan(), raw=raw, release_change_window_days=14
+    )
+    assert r2.events_created == 1
+
+
+async def test_release_date_regional_change_without_primary_move_does_not_card(session):
+    # R1 scope: only the primary scalar release_date is gated on. A recent change to some
+    # OTHER field must not corroborate a release_date beat, and a region the LLM tags does
+    # not bypass the gate — the story is held, never carded.
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    session.add(
+        FilmFieldChange(
+            film_id=film.id,
+            field="status",
+            old_value="Post Production",
+            new_value="Released",
+            changed_at=datetime(2026, 7, 3, tzinfo=UTC),
+        )
+    )
+    story = await _linked_story(session, film, "https://e/rd", title="India date set")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
         run_date=date(2026, 7, 4),
     )
-    assert result.events_created == 0  # established 33 days ago per field_changed_at → drop
-    assert result.stories_rejected == 1
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release_date",
+                    "confidence": "confirmed",
+                    "region": "IN",
+                    "claimed_date": "2026-09-30",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result = await apply_cluster_decisions(
+        session, plan=plan, raw=raw, release_change_window_days=14
+    )
+    assert result.events_created == 0
+    assert (
+        await session.execute(select(Event).where(Event.film_id == film.id))
+    ).scalars().all() == []
 
 
 # ---------------------------------------------------------------------------
