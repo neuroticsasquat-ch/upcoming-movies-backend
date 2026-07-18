@@ -5,7 +5,7 @@ description = "Upcoming Movies Tracker backend"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.139.2",
-    "uvicorn[standard]>=0.50.0",
+    "uvicorn[standard]>=0.51.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.31.0",
     "alembic>=1.18.5",
