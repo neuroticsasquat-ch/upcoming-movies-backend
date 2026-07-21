@@ -1,7 +1,6 @@
 """In-process ingestion orchestration (upmovies.pipeline_run): the shared stage runners and
 the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 
-
 import pytest
 from sqlalchemy import select
 
