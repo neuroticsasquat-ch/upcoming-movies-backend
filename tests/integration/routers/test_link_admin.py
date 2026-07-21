@@ -5,6 +5,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from upmovies import pipeline_run
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
@@ -41,7 +42,7 @@ async def test_trigger_link_creates_run_and_returns_id(client, session, monkeypa
     async def fake_link(run_id, settings):
         called.append(("link", run_id))
 
-    monkeypatch.setattr(ingest_admin, "_background_link", fake_link)
+    monkeypatch.setattr(ingest_admin, "run_link_stage", fake_link)
 
     r = await client.post("/admin/ingest/link", headers=_admin_header())
     assert r.status_code == 202
@@ -57,11 +58,11 @@ async def test_background_link_marks_run_failed_on_crash(session, monkeypatch):
     async def boom(**kwargs):
         raise RuntimeError("simulated link crash")
 
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_link_ingest", boom)
+    monkeypatch.setattr("upmovies.pipeline_run.run_link_ingest", boom)
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    await ingest_admin._background_link(run_id, get_settings())
+    await pipeline_run.run_link_stage(run_id, get_settings())
 
     row = await _run_row(session, run_id)
     assert row.status == "failed"
