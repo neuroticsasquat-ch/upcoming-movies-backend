@@ -52,6 +52,24 @@ async def test_feeds_stage_marks_run_failed_on_crash(session, monkeypatch):
     assert row.error and "simulated feeds crash" in row.error
 
 
+async def test_link_stage_marks_run_failed_on_batch_timeout(session, monkeypatch):
+    """An Anthropic Message Batch that outlives complete_batch's poll deadline must fail the
+    link run, so run_daily aborts before synthesize instead of summarizing unlinked stories."""
+
+    async def boom(**kwargs):
+        raise TimeoutError("batch msgbatch_x did not reach 'ended' within 3600.0s")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_link_ingest", boom)
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await pipeline_run.run_link_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "did not reach 'ended'" in row.error
+
+
 async def test_tmdb_stage_passes_excluded_statuses(session, monkeypatch):
     captured: dict = {}
 

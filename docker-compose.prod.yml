@@ -25,6 +25,16 @@ services:
       # makes the ping a no-op (the pipeline still runs).
       HEALTHCHECK_DAILY_URL: "${HEALTHCHECK_DAILY_URL:-}"
       HEALTHCHECK_HOURLY_URL: "${HEALTHCHECK_HOURLY_URL:-}"
+      # Anthropic Message Batch toggles. Defaulted OFF in prod as of 2026-07-21: batch queue
+      # latency became erratic and uncorrelated with batch size (a 14-request batch took
+      # 12h42m on 07-17; a 21-request one took 4h50m on 07-21), so complete_batch's 3600s
+      # poll deadline started expiring and failing the daily link stage. Unlinked stories
+      # age out of the LINK_RECENCY_DAYS (4) window permanently, so a run that keeps missing
+      # loses data. The sequential path costs ~2x per token but completes in minutes.
+      # Flip back to "true" once batch submit/collect is decoupled — see NEU-742.
+      LINK_USE_BATCHES: "${LINK_USE_BATCHES:-false}"
+      CLUSTER_USE_BATCHES: "${CLUSTER_USE_BATCHES:-false}"
+      SUMMARY_USE_BATCHES: "${SUMMARY_USE_BATCHES:-false}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

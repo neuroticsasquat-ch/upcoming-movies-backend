@@ -415,16 +415,20 @@ class _RaisingBatchClient:
         raise TimeoutError("batch never reached 'ended'")
 
 
-async def test_batched_whole_submit_failure_marks_all_failed_run_succeeds(session):
+async def test_batched_whole_submit_failure_propagates(session):
+    """A per-event failure is isolated (see test_sequential_failure_is_isolated_per_event),
+    but a whole-batch failure produces no summaries at all. It must propagate so the stage
+    runner marks the run failed, rather than finalizing 'succeeded' with nothing written and
+    pinging the daily deadman green."""
     film = await _film(session)
     await _event_with_story(session, film)
     await session.commit()
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=True, client=_RaisingBatchClient())
+    with pytest.raises(TimeoutError):
+        await _run(session, run_id, use_batches=True, client=_RaisingBatchClient())
 
-    assert (result.new, result.refreshed, result.failed) == (0, 0, 1)
     rows = (
         (await session.execute(select(EventSummary), execution_options={"populate_existing": True}))
         .scalars()
@@ -438,7 +442,8 @@ async def test_batched_whole_submit_failure_marks_all_failed_run_succeeds(sessio
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
-    assert run.status == "succeeded"
+    assert run.status == "running"  # the stage runner finalizes, not the pipeline
+    assert run.items_failed == 1
 
 
 async def test_synthesize_invokes_url_resolution_for_run_events(session, monkeypatch):
