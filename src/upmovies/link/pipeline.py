@@ -133,12 +133,17 @@ async def _link_stage_batched(
     try:
         results = await client.complete_batch(requests)
     except Exception:
-        # Whole-batch submit/poll failed: count all chunks failed, leave stories pending.
+        # Whole-batch submit/poll failed: no chunk got a result, so unlike a per-chunk
+        # failure below there is nothing to salvage and nothing to isolate. Record the
+        # counters and re-raise — returning normally here would let run_link_ingest
+        # finalize 'succeeded' with 0 linked, which lets run_daily proceed to synthesize
+        # over unlinked stories and ping the deadman green. Stories stay pending, so a
+        # later run retries them.
         log.exception("link batch submit of %d stories failed", len(pending_ids))
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(pending_ids))
             await s.commit()
-        return 0, 0, Usage()
+        raise
 
     linked = rejected = 0
     total_usage = Usage()
@@ -257,11 +262,14 @@ async def _cluster_stage_batched(
     try:
         results = await client.complete_batch(requests)
     except Exception:
+        # Whole-batch failure: no film got a result, so unlike the per-film failures below
+        # there is nothing to isolate. Record the counters and re-raise so the run is marked
+        # failed rather than finalizing 'succeeded' with zero events clustered.
         log.exception("cluster batch submit of %d films failed", len(requests))
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(requests))
             await s.commit()
-        return 0, 0, 0, Usage()
+        raise
 
     events_created = stories_clustered = stories_rejected = 0
     total_usage = Usage()

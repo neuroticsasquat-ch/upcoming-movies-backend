@@ -197,11 +197,15 @@ async def _summary_stage_batched(
     try:
         results = await client.complete_batch(requests)
     except Exception:
+        # Whole-batch failure: no event got a result, so unlike the per-event failures below
+        # there is nothing to isolate. Record the counters and re-raise so the run is marked
+        # failed rather than finalizing 'succeeded' with no summaries written — which would
+        # ping the daily deadman green on a run that produced nothing.
         log.exception("summary batch submit of %d events failed", len(requests))
         async with _owned_session(session_factory) as s:
             await record_progress(s, run_id, failed_delta=len(requests))
             await s.commit()
-        return 0, 0, len(requests), Usage()
+        raise
 
     new = refreshed = failed = 0
     total_usage = Usage()
