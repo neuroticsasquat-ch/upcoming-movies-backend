@@ -5,6 +5,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from upmovies import pipeline_run
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
@@ -41,7 +42,7 @@ async def test_trigger_synthesize_creates_run_and_returns_id(client, session, mo
     async def fake_synth(run_id, settings):
         called.append(("synthesize", run_id))
 
-    monkeypatch.setattr(ingest_admin, "_background_synth", fake_synth)
+    monkeypatch.setattr(ingest_admin, "run_synthesize_stage", fake_synth)
 
     r = await client.post("/admin/ingest/synthesize", headers=_admin_header())
     assert r.status_code == 202
@@ -57,11 +58,11 @@ async def test_background_synth_marks_run_failed_on_crash(session, monkeypatch):
     async def boom(**kwargs):
         raise RuntimeError("simulated synth crash")
 
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_synthesize_ingest", boom)
+    monkeypatch.setattr("upmovies.pipeline_run.run_synthesize_ingest", boom)
     run_id = await create_run(session, kind="synthesize")
     await session.commit()
 
-    await ingest_admin._background_synth(run_id, get_settings())
+    await pipeline_run.run_synthesize_stage(run_id, get_settings())
 
     row = await _run_row(session, run_id)
     assert row.status == "failed"

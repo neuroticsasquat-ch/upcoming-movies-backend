@@ -20,6 +20,11 @@ services:
       COOKIE_SAMESITE: "lax"
       ENVIRONMENT: "production"
       SENTRY_DSN: "${SENTRY_DSN:-}"
+      # healthchecks.io deadman ping URLs for the Coolify scheduled tasks that run
+      # `python -m upmovies.pipeline_run daily|hourly` in this container. Optional — unset
+      # makes the ping a no-op (the pipeline still runs).
+      HEALTHCHECK_DAILY_URL: "${HEALTHCHECK_DAILY_URL:-}"
+      HEALTHCHECK_HOURLY_URL: "${HEALTHCHECK_HOURLY_URL:-}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"
