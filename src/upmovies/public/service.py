@@ -114,17 +114,6 @@ def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
 
 
-def _publicly_visible_film() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
-    """Return a tuple of WHERE clauses that restrict a Film query to publicly visible films."""
-    has_summary = (
-        select(Event.id)
-        .join(EventSummary, EventSummary.event_id == Event.id)
-        .where(Event.film_id == Film.id, _visible_events())
-        .exists()
-    )
-    return Film.slug.is_not(None), has_summary
-
-
 def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
     """Build FilmIndexItem list for a page of Film rows."""
     items: list[FilmIndexItem] = []
@@ -232,7 +221,11 @@ async def get_film_search(
     if alphanumeric_len < MIN_QUERY_LEN:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
     nq = _normalize_query(term)
-    where = (*_publicly_visible_film(), _title_match(nq))
+    # Search spans the whole catalog: any slugged film whose title matches, regardless of
+    # whether it has news events yet or is upcoming. This is deliberately broader than the
+    # /films index and /feed, which gate on a visible, summarized event. The slug guard stays
+    # because FilmIndexItem requires a non-null slug for its detail link.
+    where = (Film.slug.is_not(None), _title_match(nq))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
     films = (
         (
