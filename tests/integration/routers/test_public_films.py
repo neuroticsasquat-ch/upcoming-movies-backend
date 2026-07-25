@@ -623,27 +623,31 @@ async def test_search_original_title_match(client, make_film, add_event, session
     assert "no-match-2026" not in slugs
 
 
-async def test_search_visibility_parity_no_summarized_event(client, make_film, add_event):
-    """A film whose title matches but has no summarized event is excluded, same as /films."""
-    # visible: has summarized event
+async def test_search_covers_films_without_news(client, make_film, add_event):
+    """Search covers every slugged film whose title matches, regardless of news.
+
+    Unlike /films (which gates on a visible, summarized event), search surfaces a film
+    with a summarized event, one whose only event lacks a summary, and one with no events
+    at all — the catalog is searchable end to end."""
+    # has a summarized event
     shown = await make_film(slug="shown-2026", title="The Odyssey Shown")
     await add_event(film=shown, event_type="casting", summary="A summary.")
-    # hidden: event exists but no summary
-    hidden = await make_film(slug="hidden-odyssey-2026", title="The Odyssey Hidden")
-    await add_event(film=hidden, summary=None)
-    # bare: no events at all
+    # event exists but no summary
+    unsummarized = await make_film(slug="unsummarized-odyssey-2026", title="The Odyssey Unsum")
+    await add_event(film=unsummarized, summary=None)
+    # no events at all
     _ = await make_film(slug="bare-odyssey-2026", title="The Odyssey Bare")
 
     r = await client.get("/films/search", params={"q": "Odyssey"})
     assert r.status_code == 200
     slugs = [i["slug"] for i in r.json()["items"]]
     assert "shown-2026" in slugs
-    assert "hidden-odyssey-2026" not in slugs
-    assert "bare-odyssey-2026" not in slugs
+    assert "unsummarized-odyssey-2026" in slugs
+    assert "bare-odyssey-2026" in slugs
 
 
-async def test_search_visibility_parity_only_other_events(client, make_film, add_event):
-    """A film whose only summarized events are 'other'-type is excluded from search."""
+async def test_search_covers_films_with_only_other_events(client, make_film, add_event):
+    """A film whose only events are 'other'-type still surfaces in search (news-agnostic)."""
     shown = await make_film(slug="real-search-2026", title="Odyssey Real")
     await add_event(film=shown, event_type="casting", summary="s")
     other_only = await make_film(slug="otheronly-search-2026", title="Odyssey Other Only")
@@ -653,7 +657,7 @@ async def test_search_visibility_parity_only_other_events(client, make_film, add
     assert r.status_code == 200
     slugs = [i["slug"] for i in r.json()["items"]]
     assert "real-search-2026" in slugs
-    assert "otheronly-search-2026" not in slugs
+    assert "otheronly-search-2026" in slugs
 
 
 async def test_search_envelope_and_pagination(client, make_film, add_event):
@@ -804,19 +808,21 @@ async def test_search_aka_no_dedup(client, make_film, add_event, attach_alt_titl
     assert slugs.count("dual-match-2026") == 1
 
 
-async def test_search_aka_visibility_parity(client, make_film, add_event, attach_alt_titles):
-    """A film matching via alt-title but with no summarized event / no slug is excluded."""
-    # visible via AKA
-    visible = await make_film(slug="aka-visible-2026", title="Unrelated Title A")
-    await add_event(film=visible, summary="A summary.")
-    await attach_alt_titles(visible, ["Searchable AKA"])
+async def test_search_aka_covers_films_without_news(
+    client, make_film, add_event, attach_alt_titles
+):
+    """A film matching via alt-title surfaces even with no summarized event / no events."""
+    # has a summarized event
+    with_news = await make_film(slug="aka-visible-2026", title="Unrelated Title A")
+    await add_event(film=with_news, summary="A summary.")
+    await attach_alt_titles(with_news, ["Searchable AKA"])
 
-    # hidden: matches alt-title but no summarized event
-    hidden = await make_film(slug="aka-hidden-2026", title="Unrelated Title B")
-    await add_event(film=hidden, summary=None)  # no summary
-    await attach_alt_titles(hidden, ["Searchable AKA"])
+    # matches alt-title but event has no summary
+    unsummarized = await make_film(slug="aka-unsummarized-2026", title="Unrelated Title B")
+    await add_event(film=unsummarized, summary=None)  # no summary
+    await attach_alt_titles(unsummarized, ["Searchable AKA"])
 
-    # bare: matches alt-title but no events at all
+    # matches alt-title but no events at all
     bare = await make_film(slug="aka-bare-2026", title="Unrelated Title C")
     await attach_alt_titles(bare, ["Searchable AKA"])
 
@@ -824,8 +830,8 @@ async def test_search_aka_visibility_parity(client, make_film, add_event, attach
     assert r.status_code == 200
     slugs = [i["slug"] for i in r.json()["items"]]
     assert "aka-visible-2026" in slugs
-    assert "aka-hidden-2026" not in slugs
-    assert "aka-bare-2026" not in slugs
+    assert "aka-unsummarized-2026" in slugs
+    assert "aka-bare-2026" in slugs
 
 
 # ── credits: cast and crew exposure ──────────────────────────────────────────

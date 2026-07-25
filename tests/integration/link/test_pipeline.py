@@ -297,7 +297,12 @@ class _RaisingBatchClient(FakeClient):
         raise TimeoutError("batch never reached 'ended'")
 
 
-async def test_batched_whole_submit_failure_leaves_pending_and_run_succeeds(session):
+async def test_batched_whole_submit_failure_propagates_and_leaves_pending(session):
+    """A whole-batch failure is unrecoverable: no chunk got a result, so there is nothing to
+    salvage. It must propagate rather than be swallowed — swallowing let run_link_ingest
+    finalize 'succeeded' with 0 linked, which let the daily chain run synthesize over
+    unlinked stories and ping the deadman green. The counters are still recorded, and the
+    stories stay pending so a later run retries them."""
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -306,11 +311,15 @@ async def test_batched_whole_submit_failure_leaves_pending_and_run_succeeds(sess
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(
-        session, run_id, use_batches=True, cluster_use_batches=True, client=_RaisingBatchClient()
-    )
+    with pytest.raises(TimeoutError):
+        await _run(
+            session,
+            run_id,
+            use_batches=True,
+            cluster_use_batches=True,
+            client=_RaisingBatchClient(),
+        )
 
-    assert result.linked == 0 and result.rejected == 0
     rows = {
         s.url: s
         for s in (
@@ -327,7 +336,10 @@ async def test_batched_whole_submit_failure_leaves_pending_and_run_succeeds(sess
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
-    assert run.status == "succeeded"  # Stage 2 still ran; one failure never fails the run
+    # run_link_ingest does not finalize on this path — the stage runner owns that
+    # (see test_link_stage_marks_run_failed_on_batch_timeout in test_pipeline_run.py).
+    assert run.status == "running"
+    assert run.items_failed == 1
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +609,49 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
     assert len(ok_events) == 1 and len(fail_events) == 0
     members = {el.story_id for el in (await session.execute(select(EventStory))).scalars().all()}
     assert ok_story.id in members and fail_story.id not in members
+
+
+class _RaisingClusterBatchClient:
+    """Simulates a cluster batch poll that times out before reaching 'ended' status."""
+
+    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
+        raise TimeoutError("cluster batch never reached 'ended'")
+
+
+async def test_cluster_whole_batch_failure_propagates(session):
+    """Same contract as the Stage-1 link batch: a per-film failure is isolated (test above),
+    but a whole-batch failure yields no results at all and must fail the run rather than let
+    run_link_ingest finalize 'succeeded' with zero events clustered."""
+    from upmovies.link.pipeline import _cluster_stage_batched
+
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_unclustered(session, film, "https://e/ok")
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    with pytest.raises(TimeoutError):
+        await _cluster_stage_batched(
+            session_factory=lambda: session,
+            client=_RaisingClusterBatchClient(),
+            run_id=run_id,
+            model="cluster-m",
+            film_ids=[film.id],
+            attach_limit=45,
+            cluster_max_tokens=4096,
+            run_date=date(2026, 1, 1),
+        )
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "running"  # the stage runner finalizes, not the pipeline
+    assert run.items_failed == 1
 
 
 # ---------------------------------------------------------------------------

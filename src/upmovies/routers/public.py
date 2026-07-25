@@ -23,7 +23,11 @@ async def search_films(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> FilmIndexResponse:
-    """Search publicly-visible films by title / original title (case-insensitive substring).
+    """Search the whole film catalog by title / original title (case-insensitive substring).
+
+    Unlike the /films index and /feed (which surface only films with a visible, summarized
+    news event), search covers every slugged film — including ones with no news yet and ones
+    that are not upcoming — so the full catalog is reachable by title.
 
     Queries with fewer than two alphanumeric characters (blank, single-character, or
     all-punctuation, e.g. ``%``) intentionally return an empty page (``items: []``,

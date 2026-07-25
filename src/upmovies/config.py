@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     )
     ingest_stale_run_minutes: int = Field(default=15, alias="INGEST_STALE_RUN_MINUTES")
 
+    # healthchecks.io deadman ping URLs for the Coolify scheduled tasks (see
+    # upmovies.pipeline_run). Optional: unset → the ping is a no-op, so local/dev runs of
+    # `python -m upmovies.pipeline_run` don't need them. `daily` runs the full chain
+    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass.
+    healthcheck_daily_url: str | None = Field(default=None, alias="HEALTHCHECK_DAILY_URL")
+    healthcheck_hourly_url: str | None = Field(default=None, alias="HEALTHCHECK_HOURLY_URL")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     cors_allowed_origins_raw: str = Field(

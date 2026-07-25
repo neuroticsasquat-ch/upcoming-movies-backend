@@ -1,4 +1,5 @@
-"""Admin ingest trigger + status endpoints and their background-task wrappers."""
+"""Admin ingest trigger + status endpoints. The stage runners they spawn live in
+`upmovies.pipeline_run` and are exercised in tests/integration/test_pipeline_run.py."""
 
 import asyncio
 import uuid
@@ -9,7 +10,7 @@ from sqlalchemy import select
 
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
-from upmovies.ingest.runs import create_run, record_progress
+from upmovies.ingest.runs import create_run, finalize_run, record_progress
 from upmovies.main import app
 from upmovies.routers import ingest_admin
 
@@ -48,13 +49,13 @@ async def test_status_requires_admin_token(client):
     assert (await client.get(f"/admin/ingest/{uuid.uuid4()}")).status_code == 401
 
 
-# --- triggers create a run + spawn the background task -------------------------
+# --- triggers create a run + spawn the stage-runner task -----------------------
 
 
 @pytest.fixture
-def spy_background(monkeypatch):
-    """Swap the background pipeline wrappers for harmless stand-ins so the trigger
-    still spawns a real asyncio task, but it doesn't hit the network. (Patching
+def spy_stage(monkeypatch):
+    """Swap the stage runners (as imported into the router) for harmless stand-ins so the
+    trigger still spawns a real asyncio task without hitting the network. (Patching
     asyncio.create_task itself would break the ASGI/DB machinery, which also uses it.)"""
     called: list[tuple[str, uuid.UUID]] = []
 
@@ -64,83 +65,71 @@ def spy_background(monkeypatch):
     async def fake_feeds(run_id, settings, per_film_override=None):
         called.append(("feeds", run_id))
 
-    monkeypatch.setattr(ingest_admin, "_background_tmdb", fake_tmdb)
-    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
+    monkeypatch.setattr(ingest_admin, "run_tmdb_stage", fake_tmdb)
+    monkeypatch.setattr(ingest_admin, "run_feeds_stage", fake_feeds)
     return called
 
 
-async def test_trigger_tmdb_creates_run_and_returns_id(client, session, spy_background):
+async def test_trigger_tmdb_creates_run_and_returns_id(client, session, spy_stage):
     r = await client.post("/admin/ingest/tmdb", headers=_admin_header())
     assert r.status_code == 202
     run_id = uuid.UUID(r.json()["run_id"])
     await asyncio.sleep(0.05)  # let the spawned task run
-    assert ("tmdb", run_id) in spy_background, "must spawn the tmdb background task"
+    assert ("tmdb", run_id) in spy_stage, "must spawn the tmdb stage task"
     row = await _run_row(session, run_id)
     assert row.kind == "tmdb"
     assert row.status == "running"
 
 
-async def test_trigger_feeds_creates_run_and_returns_id(client, session, spy_background):
+async def test_trigger_feeds_creates_run_and_returns_id(client, session, spy_stage):
     r = await client.post("/admin/ingest/feeds", headers=_admin_header())
     assert r.status_code == 202
     run_id = uuid.UUID(r.json()["run_id"])
     await asyncio.sleep(0.05)
-    assert ("feeds", run_id) in spy_background, "must spawn the feeds background task"
+    assert ("feeds", run_id) in spy_stage, "must spawn the feeds stage task"
     row = await _run_row(session, run_id)
     assert row.kind == "feeds"
     assert row.status == "running"
 
 
-# --- background wrappers finalize the run -------------------------------------
+# --- per_film query param threads through to the stage runner ------------------
 
 
-async def test_background_tmdb_marks_run_failed_on_crash(session, monkeypatch):
-    async def boom(**kwargs):
-        raise RuntimeError("simulated tmdb crash")
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [("?per_film=true", True), ("?per_film=false", False), ("", None)],
+)
+async def test_trigger_feeds_per_film_override(client, session, monkeypatch, query, expected):
+    captured: dict = {}
 
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_tmdb_ingest", boom)
-    run_id = await create_run(session, kind="tmdb")
-    await session.commit()
+    async def fake_feeds(run_id, settings, per_film_override=None):
+        captured["per_film_override"] = per_film_override
 
-    await ingest_admin._background_tmdb(run_id, get_settings())
+    monkeypatch.setattr(ingest_admin, "run_feeds_stage", fake_feeds)
 
-    row = await _run_row(session, run_id)
-    assert row.status == "failed"
-    assert row.error and "simulated tmdb crash" in row.error
-
-
-async def test_background_feeds_marks_run_failed_on_crash(session, monkeypatch):
-    async def boom(**kwargs):
-        raise RuntimeError("simulated feeds crash")
-
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", boom)
-    run_id = await create_run(session, kind="feeds")
-    await session.commit()
-
-    await ingest_admin._background_feeds(run_id, get_settings())
-
-    row = await _run_row(session, run_id)
-    assert row.status == "failed"
-    assert row.error and "simulated feeds crash" in row.error
+    r = await client.post(f"/admin/ingest/feeds{query}", headers=_admin_header())
+    assert r.status_code == 202
+    await asyncio.sleep(0.05)
+    assert captured["per_film_override"] is expected
 
 
-# --- end-to-end: trigger path (pipeline mocked) reflected in status ------------
+# --- status endpoint -----------------------------------------------------------
 
 
-async def test_status_reflects_terminal_state_after_background_run(client, session, monkeypatch):
-    from upmovies.ingest.runs import finalize_run
-
+async def test_status_reflects_terminal_state_after_run(client, session, monkeypatch):
     async def fake_pipeline(*, session_factory, run_id, **kwargs):
         async with session_factory() as s:
             await record_progress(s, run_id, processed_delta=7)
             await finalize_run(s, run_id, status="succeeded")
             await s.commit()
 
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake_pipeline)
+    monkeypatch.setattr("upmovies.pipeline_run.run_feeds_ingest", fake_pipeline)
+    from upmovies import pipeline_run
+
     run_id = await create_run(session, kind="feeds")
     await session.commit()
 
-    await ingest_admin._background_feeds(run_id, get_settings())
+    await pipeline_run.run_feeds_stage(run_id, get_settings())
 
     r = await client.get(f"/admin/ingest/{run_id}", headers=_admin_header())
     assert r.status_code == 200
@@ -154,111 +143,3 @@ async def test_status_reflects_terminal_state_after_background_run(client, sessi
 async def test_status_unknown_run_returns_404(client):
     r = await client.get(f"/admin/ingest/{uuid.uuid4()}", headers=_admin_header())
     assert r.status_code == 404
-
-
-async def test_background_tmdb_passes_excluded_statuses(session, monkeypatch):
-    captured: dict = {}
-
-    async def fake(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_tmdb_ingest", fake)
-    run_id = await create_run(session, kind="tmdb")
-    await session.commit()
-
-    await ingest_admin._background_tmdb(run_id, get_settings())
-
-    assert captured["excluded_statuses"] == frozenset({"Released", "Canceled"})
-
-
-async def test_background_feeds_passes_per_film_settings(session, monkeypatch):
-    captured: dict = {}
-
-    async def fake(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake)
-    run_id = await create_run(session, kind="feeds")
-    await session.commit()
-
-    await ingest_admin._background_feeds(run_id, get_settings())
-
-    assert captured["per_film_enabled"] is True  # config default
-    assert captured["per_film_throttle"] == 1.0
-
-
-async def test_trigger_feeds_per_film_override_true(client, session, monkeypatch):
-    """per_film=true query param forces per_film_enabled=True regardless of config."""
-    captured: dict = {}
-
-    async def fake_feeds(run_id, settings, per_film_override=None):
-        captured["per_film_override"] = per_film_override
-
-    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
-
-    r = await client.post("/admin/ingest/feeds?per_film=true", headers=_admin_header())
-    assert r.status_code == 202
-    await asyncio.sleep(0.05)
-    assert captured["per_film_override"] is True
-
-
-async def test_trigger_feeds_per_film_override_false(client, session, monkeypatch):
-    """per_film=false query param forces per_film_enabled=False."""
-    captured: dict = {}
-
-    async def fake_feeds(run_id, settings, per_film_override=None):
-        captured["per_film_override"] = per_film_override
-
-    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
-
-    r = await client.post("/admin/ingest/feeds?per_film=false", headers=_admin_header())
-    assert r.status_code == 202
-    await asyncio.sleep(0.05)
-    assert captured["per_film_override"] is False
-
-
-async def test_trigger_feeds_per_film_omitted_uses_config(client, session, monkeypatch):
-    """Omitting per_film passes None override → _background_feeds falls back to config."""
-    captured: dict = {}
-
-    async def fake_feeds(run_id, settings, per_film_override=None):
-        captured["per_film_override"] = per_film_override
-
-    monkeypatch.setattr(ingest_admin, "_background_feeds", fake_feeds)
-
-    r = await client.post("/admin/ingest/feeds", headers=_admin_header())
-    assert r.status_code == 202
-    await asyncio.sleep(0.05)
-    assert captured["per_film_override"] is None
-
-
-async def test_background_feeds_per_film_override_wins_over_config(session, monkeypatch):
-    """per_film_override=False is passed to run_feeds_ingest even though config default is True."""
-    captured: dict = {}
-
-    async def fake(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake)
-    run_id = await create_run(session, kind="feeds")
-    await session.commit()
-
-    await ingest_admin._background_feeds(run_id, get_settings(), per_film_override=False)
-
-    assert captured["per_film_enabled"] is False
-
-
-async def test_background_feeds_per_film_override_none_uses_config(session, monkeypatch):
-    """per_film_override=None falls back to settings.feeds_per_film_enabled (True by default)."""
-    captured: dict = {}
-
-    async def fake(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr("upmovies.routers.ingest_admin.run_feeds_ingest", fake)
-    run_id = await create_run(session, kind="feeds")
-    await session.commit()
-
-    await ingest_admin._background_feeds(run_id, get_settings(), per_film_override=None)
-
-    assert captured["per_film_enabled"] is True  # config default
