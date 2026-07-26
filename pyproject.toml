@@ -51,6 +51,11 @@ packages = ["src/upmovies"]
 line-length = 100
 target-version = "py313"
 
+[tool.ruff.format]
+# ruff 0.16.0 began formatting Python code blocks inside Markdown by default.
+# Keep `ruff format` scoped to real source so hand-authored docs aren't rewritten.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["B008"]
