@@ -38,5 +38,11 @@ COPY migrations/ migrations/
 
 EXPOSE 8000
 
-# Run migrations on startup, then exec uvicorn so signals reach the server.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn upmovies.main:app --host 0.0.0.0 --port 8000"]
+# opentelemetry-distro defaults the OTLP protocol to gRPC, but we install only
+# the HTTP exporter. Pin http/protobuf so the absent grpc exporter is never
+# looked up. Endpoint + service.name come from the deploy env (Coolify).
+ENV OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+
+# Run migrations on startup, then exec uvicorn (wrapped by opentelemetry-instrument
+# to auto-instrument FastAPI/SQLAlchemy/asyncpg/httpx) so signals reach the server.
+CMD ["sh", "-c", "alembic upgrade head && exec opentelemetry-instrument uvicorn upmovies.main:app --host 0.0.0.0 --port 8000"]
