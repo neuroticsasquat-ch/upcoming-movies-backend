@@ -4,25 +4,27 @@ from sqlalchemy import select
 
 from upmovies.catalog.models import Film
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallLog, CallResult
 from upmovies.news.models import Event, SourceDomain, Story
 
 
 class _StubClient:
     """Completer stub: linking is skipped (no pending stories), cluster returns one event."""
 
-    async def complete_with_usage(
-        self, *, model: str, system: list, messages: list, max_tokens: int = 4096
-    ) -> tuple[str, Usage]:
+    async def complete_call(
+        self, *, model: str, system: list, messages: list, max_tokens: int = 4096, calls: CallLog
+    ) -> CallResult:
         # Domain judge for unknown domains -> mshale.com low.
         if "source-quality rater" in system[0]["text"]:
-            return '[{"domain": "mshale.com", "tier": "low", "reason": "farm"}]', Usage()
+            return calls.record(
+                CallResult(text='[{"domain": "mshale.com", "tier": "low", "reason": "farm"}]')
+            )
         # Cluster call -> one confirmed casting event over story n=1.
         cluster_resp = (
             '{"events": [{"existing": null, "type": "casting",'
             ' "confidence": "confirmed", "cast": ["Test Performer"], "stories": [1]}]}'
         )
-        return cluster_resp, Usage()
+        return calls.record(CallResult(text=cluster_resp))
 
 
 async def test_pipeline_gate_downgrades_low_trust(session_factory, session):

@@ -2,10 +2,14 @@ import json
 import types
 
 import httpx
+import pytest
 import respx
+from anthropic import APIStatusError
 
 from upmovies.llm.client import (
     AnthropicClient,
+    CallLog,
+    CallResult,
     Usage,
     cached_system_block,
 )
@@ -91,6 +95,135 @@ async def test_complete_with_usage_returns_text_and_usage():
         cache_read_input_tokens=900,
         cache_creation_input_tokens=100,
     )
+
+
+@respx.mock
+async def test_complete_call_records_the_call_and_returns_it():
+    respx.post(MESSAGES_URL).mock(
+        return_value=_message_response(
+            [{"type": "text", "text": "hi there"}],
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 100,
+            },
+        )
+    )
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key") as c:
+        result = await c.complete_call(
+            model="claude-haiku-4-5",
+            system=[cached_system_block("ROSTER")],
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=16,
+            calls=calls,
+        )
+
+    assert result.text == "hi there"
+    assert result.usage == Usage(
+        input_tokens=12,
+        output_tokens=4,
+        cache_read_input_tokens=900,
+        cache_creation_input_tokens=100,
+    )
+    assert result.ok is True
+    assert result.error_type is None
+    assert result.parse_ok is None
+    assert result.attempts == 1
+    assert result.latency_ms >= 0
+    assert calls.results == (result,)
+
+
+@respx.mock
+async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts():
+    respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            httpx.Response(429, json={"error": {"type": "rate_limit_error"}}),
+            _message_response([{"type": "text", "text": "ok"}]),
+        ]
+    )
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key", max_retries=1) as c:
+        result = await c.complete_call(
+            model="claude-haiku-4-5",
+            system=[{"type": "text", "text": "S"}],
+            messages=[{"role": "user", "content": "hi"}],
+            calls=calls,
+        )
+
+    # One *logical* call — retries folded in, per NEU-975/spec §5.2 — but visibly retried.
+    assert len(calls.results) == 1
+    assert result.attempts == 2
+    assert result.ok is True
+
+
+@respx.mock
+async def test_complete_call_records_a_failed_call_then_re_raises():
+    respx.post(MESSAGES_URL).mock(
+        return_value=httpx.Response(500, json={"error": {"type": "api_error"}})
+    )
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key", max_retries=1) as c:
+        with pytest.raises(APIStatusError):
+            await c.complete_call(
+                model="claude-haiku-4-5",
+                system=[{"type": "text", "text": "S"}],
+                messages=[{"role": "user", "content": "hi"}],
+                calls=calls,
+            )
+
+    (failed,) = calls.results
+    assert failed.ok is False
+    assert failed.error_type == "InternalServerError"
+    assert failed.attempts == 2
+    assert failed.usage == Usage()
+
+
+@respx.mock
+async def test_complete_call_records_a_200_whose_body_does_not_validate():
+    """A response that arrives but doesn't deserialize is still a call that was made and paid
+    for — it must not vanish from the telemetry just because the SDK raised late."""
+    respx.post(MESSAGES_URL).mock(return_value=httpx.Response(200, json={"not": "a message"}))
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key", max_retries=0) as c:
+        with pytest.raises(Exception):  # noqa: B017 — SDK's own validation error type
+            await c.complete_call(
+                model="claude-haiku-4-5",
+                system=[{"type": "text", "text": "S"}],
+                messages=[{"role": "user", "content": "hi"}],
+                calls=calls,
+            )
+
+    (failed,) = calls.results
+    assert failed.ok is False
+    assert failed.error_type is not None
+
+
+def test_call_log_stamps_parse_ok_on_the_most_recent_call():
+    calls = CallLog()
+    calls.record(CallResult(text="a"))
+    calls.record(CallResult(text="b"))
+    calls.set_parse_ok(False)
+
+    assert [r.parse_ok for r in calls.results] == [None, False]
+
+
+def test_call_log_set_parse_ok_without_a_call_is_a_programming_error():
+    with pytest.raises(ValueError):
+        CallLog().set_parse_ok(True)
+
+
+def test_call_log_usage_sums_every_recorded_call():
+    calls = CallLog()
+    calls.record(CallResult(usage=Usage(input_tokens=1, output_tokens=2)))
+    calls.record(CallResult(usage=Usage(input_tokens=10, cache_read_input_tokens=5)))
+
+    assert calls.usage == Usage(input_tokens=11, output_tokens=2, cache_read_input_tokens=5)
+
+
+def test_call_log_usage_of_an_empty_log_is_zero():
+    assert CallLog().usage == Usage()
 
 
 def test_usage_from_sdk_maps_all_four_fields():

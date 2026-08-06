@@ -7,7 +7,7 @@ import upmovies.synthesize.pipeline as pipeline_mod
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run as _create_run
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallResult
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.synthesize.pipeline import _select_pending, _upsert_summary, run_synthesize_ingest
 from upmovies.synthesize.summarizer import SummaryResult
@@ -198,11 +198,11 @@ class FakeSummaryClient:
 
     def __init__(self, summary="A neutral update."):
         self._summary = summary
-        self.calls: list[dict] = []
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        self.calls.append({"model": model, "messages": messages, "max_tokens": max_tokens})
-        return json.dumps({"summary": self._summary}), Usage()
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        self.requests.append({"model": model, "messages": messages, "max_tokens": max_tokens})
+        return calls.record(CallResult(text=json.dumps({"summary": self._summary})))
 
 
 async def _run(session, run_id, *, client=None, prompt_version="1"):
@@ -287,11 +287,11 @@ async def test_prompt_version_bump_does_not_refresh_existing(session):
 class _FailOneCompleter(FakeSummaryClient):
     """Raises for the event whose film title starts 'FAIL', succeeds otherwise."""
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
         payload = json.loads(messages[0]["content"])
         if payload["film"].startswith("FAIL"):
             raise RuntimeError("boom")
-        return json.dumps({"summary": self._summary}), Usage()
+        return calls.record(CallResult(text=json.dumps({"summary": self._summary})))
 
 
 async def test_failure_is_isolated_per_event(session):
@@ -338,7 +338,7 @@ async def test_failure_is_isolated_per_event(session):
 class _TotalOutageCompleter(FakeSummaryClient):
     """Every call raises — a total LLM outage, so every pending event fails."""
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
         raise RuntimeError("boom")
 
 
@@ -420,9 +420,9 @@ async def test_summary_request_mapping(session):
     client = FakeSummaryClient()
     await _run(session, run_id, client=client)
 
-    assert len(client.calls) == 1  # one call per pending event
-    assert client.calls[0]["model"] == "claude-haiku-4-5"
-    assert client.calls[0]["max_tokens"] == 256  # == summarizer._MAX_TOKENS
+    assert len(client.requests) == 1  # one call per pending event
+    assert client.requests[0]["model"] == "claude-haiku-4-5"
+    assert client.requests[0]["max_tokens"] == 256  # == summarizer._MAX_TOKENS
 
 
 async def test_synthesize_invokes_url_resolution_for_run_events(session, monkeypatch):

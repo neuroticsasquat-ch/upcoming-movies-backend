@@ -19,11 +19,12 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.runs import (
     StageCounts,
     finalize_run,
+    record_llm_calls,
     record_llm_usage,
     record_progress,
     total_failure_error,
 )
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallLog, Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
 from upmovies.news.visibility import visible_events
@@ -155,19 +156,22 @@ async def _summary_stage_sequential(
     new = refreshed = failed = 0
     total_usage = Usage()
     for pe in pending:
+        # Owned outside the try so an event that fails *after* its call — a runaway or
+        # unparseable summary, say — still records what that call cost (NEU-975).
+        calls = CallLog()
         try:
-            result, usage = await summarize_event(
+            result = await summarize_event(
                 client=client,
                 model=model,
                 prompt_version=prompt_version,
                 event=pe.event_input,
                 run_date=run_date,
+                calls=calls,
             )
             async with _owned_session(session_factory) as s:
                 await _upsert_summary(s, pe.event_id, result)
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
-            total_usage += usage
             if pe.is_new:
                 new += 1
             else:
@@ -178,6 +182,14 @@ async def _summary_stage_sequential(
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
             failed += 1
+        finally:
+            total_usage += calls.usage
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s, run_id, stage="summarize", model=model, results=calls.results
+                    )
+                    await s.commit()
     return new, refreshed, failed, total_usage
 
 

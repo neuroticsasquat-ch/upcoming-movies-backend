@@ -20,7 +20,7 @@ from upmovies.link.linker import link_story_batch
 from upmovies.link.metrics import compute_link_metrics
 from upmovies.link.roster import build_roster
 from upmovies.link.validation import load_validation_set
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm.client import AnthropicClient, CallLog
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
@@ -56,6 +56,7 @@ async def main(path: str) -> None:
                 stories=stories[i : i + settings.link_batch_size],
                 floor=0.0,
                 run_date=datetime.now(UTC).date(),
+                calls=CallLog(),
             )
 
     floor = settings.link_confidence_floor

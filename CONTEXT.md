@@ -14,6 +14,14 @@ One of the four named steps at which the pipeline consults a model: **link** (st
 configured independently. The set is closed, and enforced as such in the schema.
 _Avoid_: step, phase, pass.
 
+**Logical call**:
+One request a stage makes of a model, counted **once** however many HTTP attempts it took.
+Its latency is the total wall-clock the pipeline experienced, retries included — that is the
+number that decides whether a provider is viable for a daily publish — and its retries are
+kept visible separately as `attempts` rather than hidden inside that figure. The grain of
+`ingest.llm_call`, and the unit a `parse_ok` outcome hangs off.
+_Avoid_: request, attempt (that's the retry, not the call), round-trip.
+
 **Total stage failure**:
 A stage that produced **nothing at all** yet recorded failures — the case where per-item
 isolation degenerates into "discard everything and report success". It is the one condition a

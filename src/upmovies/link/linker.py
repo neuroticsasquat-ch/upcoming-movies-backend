@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from upmovies.link.roster import Roster
-from upmovies.llm.client import Usage, cached_system_block
+from upmovies.llm.client import CallLog, CallResult, cached_system_block
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -124,14 +124,20 @@ otherwise)."""
 
 
 class Completer(Protocol):
-    async def complete_with_usage(
+    """The LLM surface a stage needs: one logical call, recorded into the caller's `CallLog`.
+    Token usage rides along inside the recorded `CallResult` rather than being returned
+    separately, so the per-call telemetry rows and the per-stage `run_llm_usage` aggregate are
+    built from the same numbers (NEU-975)."""
+
+    async def complete_call(
         self,
         *,
         model: str,
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         max_tokens: int = ...,
-    ) -> tuple[str, "Usage"]: ...
+        calls: CallLog,
+    ) -> "CallResult": ...
 
 
 @dataclass
@@ -239,11 +245,26 @@ async def link_story_batch(
     stories: Sequence[Story],
     floor: float,
     run_date: date,
-) -> tuple[BatchLinkResult, Usage]:
+    calls: CallLog,
+) -> BatchLinkResult:
+    """One classifier call for one batch of stories, recorded into `calls` — including the
+    parse outcome, which `link` deliberately raises on rather than swallowing (spec §12)."""
     if not stories:
-        return BatchLinkResult(0, 0), Usage()
+        return BatchLinkResult(0, 0)
     system, messages = build_link_request(roster, stories, run_date)
-    raw, usage = await client.complete_with_usage(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
+    result = await client.complete_call(
+        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS, calls=calls
     )
-    return apply_link_decisions(raw=raw, stories=stories, roster=roster, floor=floor), usage
+    try:
+        decisions = apply_link_decisions(
+            raw=result.text, stories=stories, roster=roster, floor=floor
+        )
+    except Exception:
+        # `apply_link_decisions` does no I/O, so anything it raises is the model's output being
+        # unusable — a bare JSONDecodeError when the reply isn't JSON, but equally an
+        # AttributeError when it is JSON of the wrong shape. Recording only the first would
+        # leave the second as a NULL, which reads as "no parse happened".
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return decisions

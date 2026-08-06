@@ -8,7 +8,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import _cluster_stage_sequential, run_link_ingest
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallResult
 from upmovies.news.models import Event, EventStory, Story
 
 
@@ -19,11 +19,11 @@ class FakeClient:
     def __init__(self):
         self.complete_calls: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
         self.complete_calls.append(
             {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
         )
-        return self._decide(system, messages), Usage()
+        return calls.record(CallResult(text=self._decide(system, messages)))
 
     def _decide(self, system, messages) -> str:
         if "entity-linking classifier" in system[0]["text"]:
@@ -186,7 +186,7 @@ class _TaggedFailClient(FakeClient):
         super().__init__()
         self._unparseable = unparseable
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
         if "entity-linking classifier" in system[0]["text"]:
             payload = json.loads(messages[0]["content"])
             if any(st["title"].startswith("FAIL") for st in payload["stories"]):
@@ -199,10 +199,10 @@ class _TaggedFailClient(FakeClient):
                             "max_tokens": max_tokens,
                         }
                     )
-                    return "not json", Usage()
+                    return calls.record(CallResult(text="not json"))
                 raise RuntimeError("boom")
-        return await super().complete_with_usage(
-            model=model, system=system, messages=messages, max_tokens=max_tokens
+        return await super().complete_call(
+            model=model, system=system, messages=messages, max_tokens=max_tokens, calls=calls
         )
 
 
@@ -261,7 +261,7 @@ async def test_failed_chunk_stays_pending_others_commit(session, unparseable):
 class _TotalOutageClient(FakeClient):
     """Every call raises — a total LLM outage, so every chunk and every film fails."""
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
         raise RuntimeError("boom")
 
 
@@ -489,25 +489,26 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
 class _ClusterFailClient:
     """Stage-level fake: serves cluster calls, failing the film whose title starts 'FAIL'."""
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
         payload = json.loads(messages[0]["content"])
         if payload["film"]["title"].startswith("FAIL"):
             raise RuntimeError("boom")
         new_ns = [s["n"] for s in payload["new_stories"]]
-        return (
-            json.dumps(
-                {
-                    "events": [
-                        {
-                            "existing": None,
-                            "type": "trailer",
-                            "confidence": "confirmed",
-                            "stories": new_ns,
-                        }
-                    ]
-                }
-            ),
-            Usage(),
+        return calls.record(
+            CallResult(
+                text=json.dumps(
+                    {
+                        "events": [
+                            {
+                                "existing": None,
+                                "type": "trailer",
+                                "confidence": "confirmed",
+                                "stories": new_ns,
+                            }
+                        ]
+                    }
+                )
+            )
         )
 
 
@@ -547,7 +548,7 @@ async def test_cluster_failure_is_isolated_per_film(session):
         session_factory=lambda: session,
         client=_ClusterFailClient(),
         run_id=run_id,
-        model="cluster-m",
+        model="claude-haiku-4-5",
         film_ids=[ok_film.id, fail_film.id],
         attach_limit=45,
         cluster_max_tokens=4096,
@@ -594,7 +595,7 @@ async def test_cluster_stage_persists_processed_films(session):
         session_factory=lambda: session,
         client=FakeClient(),  # every film clusters cleanly
         run_id=run_id,
-        model="cluster-m",
+        model="claude-haiku-4-5",
         film_ids=[film.id],
         attach_limit=45,
         cluster_max_tokens=4096,
@@ -619,8 +620,8 @@ class _UnparseableClusterClient:
     """Returns an unparseable cluster response for every film, so apply_cluster_decisions
     raises ClusterParseError, which the pipeline catch-block records as failed_delta=1."""
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        return "not json {", Usage()
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        return calls.record(CallResult(text="not json {"))
 
 
 async def test_cluster_parse_failure_surfaces_as_failed(session):
@@ -643,7 +644,7 @@ async def test_cluster_parse_failure_surfaces_as_failed(session):
         session_factory=lambda: session,
         client=_UnparseableClusterClient(),
         run_id=run_id,
-        model="cluster-m",
+        model="claude-haiku-4-5",
         film_ids=[film.id],
         attach_limit=45,
         cluster_max_tokens=4096,

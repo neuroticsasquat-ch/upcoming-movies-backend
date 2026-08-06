@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.link.linker import Completer
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallLog
 from upmovies.news.models import SourceDomain, Story
 from upmovies.news.resolve import is_google_news_url
 
@@ -202,6 +202,17 @@ def build_judge_request(
     return system, messages
 
 
+def judge_output_parses(raw: str) -> bool:
+    """Whether the judge's reply is a parseable JSON array at all — deliberately distinct from
+    whether it yielded usable verdicts, which `parse_judge_verdicts` collapses into the same
+    `{}`. `parse_ok` records output-format compliance, not quality (design §11), so conflating
+    the two would make this stage's `parse_ok` rate incomparable with the other three."""
+    try:
+        return isinstance(json.loads(_extract_json_array(raw)), list)
+    except json.JSONDecodeError:
+        return False
+
+
 def parse_judge_verdicts(raw: str, *, domains: set[str]) -> dict[str, tuple[str, str]]:
     """Parse the judge's JSON array into `{domain: (tier, reason)}`. Keeps only entries whose
     domain was actually asked about and whose tier is valid; last write wins on duplicates.
@@ -224,32 +235,40 @@ def parse_judge_verdicts(raw: str, *, domains: set[str]) -> dict[str, tuple[str,
 
 
 async def judge_domains(
-    *, client: Completer, model: str, items: list[dict[str, str]]
-) -> tuple[dict[str, tuple[str, str]], Usage]:
+    *, client: Completer, model: str, items: list[dict[str, str]], calls: CallLog
+) -> dict[str, tuple[str, str]]:
     """Judge unknown domains in bounded chunks (`_JUDGE_BATCH_SIZE`) so a large batch never
     overruns the output cap and truncates into unparseable JSON. Returns `{domain: (tier,
-    reason)}` merged across chunks plus summed token usage. A chunk that yields no verdicts
-    is logged (not silently dropped) and the remaining chunks still run. No-op (`{}`, empty
-    Usage) for empty input."""
+    reason)}` merged across chunks; every chunk is one logical call, recorded into `calls`.
+    A chunk that yields no verdicts is logged (not silently dropped) and the remaining chunks
+    still run. No-op (`{}`) for empty input.
+
+    The stage's own tolerance of bad output is unchanged — it warns and moves on, and unifying
+    the four stages' parse-failure behaviours is explicitly out of scope (design §12). Only the
+    recorded outcome is added, and it records format compliance (`judge_output_parses`), which
+    is not the same question as whether any verdict survived filtering."""
     if not items:
-        return {}, Usage()
+        return {}
     verdicts: dict[str, tuple[str, str]] = {}
-    usage = Usage()
     for start in range(0, len(items), _JUDGE_BATCH_SIZE):
         chunk = items[start : start + _JUDGE_BATCH_SIZE]
         system, messages = build_judge_request(chunk)
-        raw, chunk_usage = await client.complete_with_usage(
-            model=model, system=system, messages=messages, max_tokens=_JUDGE_MAX_TOKENS
+        result = await client.complete_call(
+            model=model,
+            system=system,
+            messages=messages,
+            max_tokens=_JUDGE_MAX_TOKENS,
+            calls=calls,
         )
-        usage = usage + chunk_usage
         domains = {item["domain"] for item in chunk}
-        chunk_verdicts = parse_judge_verdicts(raw, domains=domains)
+        chunk_verdicts = parse_judge_verdicts(result.text, domains=domains)
+        calls.set_parse_ok(judge_output_parses(result.text))
         if not chunk_verdicts:
             log.warning(
                 "source-judge: chunk of %d domains produced no verdicts "
                 "(unparseable/empty response; raw prefix: %r)",
                 len(chunk),
-                raw[:200],
+                result.text[:200],
             )
         verdicts.update(chunk_verdicts)
-    return verdicts, usage
+    return verdicts
