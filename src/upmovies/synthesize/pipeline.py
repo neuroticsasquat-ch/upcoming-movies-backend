@@ -223,9 +223,7 @@ async def run_synthesize_ingest(
         resolve_result = ResolveResult(marked=0, resolved=0, failed=0, pending=0)
 
     error = total_failure_error(
-        # Self-healing: a failed event stays pending and is re-selected next run, so a single
-        # failure must not fail the run (NEU-987).
-        summarize=StageCounts(processed=new + refreshed, failed=failed, self_healing=True),
+        summarize=StageCounts(processed=new + refreshed, failed=failed),
     )
     async with _owned_session(session_factory) as s:
         await finalize_run(

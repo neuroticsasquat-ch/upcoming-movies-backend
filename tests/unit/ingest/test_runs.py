@@ -1,8 +1,10 @@
-"""NEU-986/NEU-987: the rule that decides whether a stage's tally is a total outage."""
+"""NEU-986/NEU-987: the rule that decides whether a stage's tally is a total outage.
+NEU-988: the two halves of that rule are named by `StageKind`, classified once in
+`STAGE_KINDS` rather than restated at each construction site."""
 
 import pytest
 
-from upmovies.ingest.runs import StageCounts, total_failure_error
+from upmovies.ingest.runs import STAGE_KINDS, StageCounts, StageKind, total_failure_error
 
 
 @pytest.mark.parametrize(
@@ -17,9 +19,10 @@ from upmovies.ingest.runs import StageCounts, total_failure_error
     ],
 )
 def test_lossy_stage_fails_on_zero_processed_with_any_failure(processed, failed, expected):
-    """The default (lossy) rule is unchanged from NEU-986: a failed item is not retried
+    """The lossy rule is unchanged from NEU-986: a failed item is not retried
     unconditionally, so even a backlog of one is worth failing the run over."""
-    assert StageCounts(processed=processed, failed=failed).total_failure is expected
+    counts = StageCounts(processed=processed, failed=failed)
+    assert counts.total_failure(StageKind.LOSSY) is expected
 
 
 @pytest.mark.parametrize(
@@ -37,20 +40,45 @@ def test_lossy_stage_fails_on_zero_processed_with_any_failure(processed, failed,
 def test_self_healing_stage_needs_more_than_one_failure(processed, failed, expected):
     """NEU-987: a self-healing stage retries a failed item unconditionally on the next run,
     so `failed == 1` is indistinguishable from one pathological item and must not fire."""
-    counts = StageCounts(processed=processed, failed=failed, self_healing=True)
-    assert counts.total_failure is expected
+    counts = StageCounts(processed=processed, failed=failed)
+    assert counts.total_failure(StageKind.SELF_HEALING) is expected
 
 
-def test_counts_default_to_a_clean_lossy_empty_stage():
-    assert StageCounts() == StageCounts(processed=0, failed=0, self_healing=False)
-    assert StageCounts().total_failure is False
-    assert StageCounts().self_healing is False
+def test_counts_default_to_a_clean_empty_stage():
+    assert StageCounts() == StageCounts(processed=0, failed=0)
+    assert StageCounts().total_failure(StageKind.LOSSY) is False
+    assert StageCounts().total_failure(StageKind.SELF_HEALING) is False
+
+
+def test_both_kinds_are_named_neither_is_the_absence_of_the_other():
+    """NEU-988: `lossy` is a value, not `False`. The two thresholds differ by exactly the
+    denominator NEU-987 introduced."""
+    assert StageKind.LOSSY.failure_floor == 1
+    assert StageKind.SELF_HEALING.failure_floor == 2
+    assert {k.value for k in StageKind} == {"lossy", "self_healing"}
+
+
+def test_every_guarded_stage_is_classified():
+    """The guarded stages, and only those. `source_judge` is a link sub-stage that keeps no
+    counters and is not guarded (CONTEXT.md), so it is deliberately absent — the loud
+    lookup below is what forces that decision if it ever grows counters."""
+    assert STAGE_KINDS == {
+        "link": StageKind.LOSSY,
+        "cluster": StageKind.SELF_HEALING,
+        "summarize": StageKind.SELF_HEALING,
+    }
+
+
+def test_unclassified_stage_fails_loudly_rather_than_defaulting():
+    """NEU-988: a stage added later must not pick up a rule by omission."""
+    with pytest.raises(ValueError, match="source_judge"):
+        total_failure_error(source_judge=StageCounts(processed=0, failed=1))
 
 
 def test_total_failure_error_names_only_the_stages_that_failed_totally():
     error = total_failure_error(
         link=StageCounts(processed=0, failed=1),
-        cluster=StageCounts(processed=0, failed=1, self_healing=True),
+        cluster=StageCounts(processed=0, failed=1),
     )
     assert error is not None
     assert "link stage" in error
@@ -61,7 +89,7 @@ def test_total_failure_error_is_none_when_no_stage_failed_totally():
     assert (
         total_failure_error(
             link=StageCounts(processed=3, failed=1),
-            cluster=StageCounts(processed=0, failed=1, self_healing=True),
+            cluster=StageCounts(processed=0, failed=1),
         )
         is None
     )
