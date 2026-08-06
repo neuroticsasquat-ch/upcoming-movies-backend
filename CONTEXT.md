@@ -5,6 +5,15 @@ films, clusters them into events, and summarizes those events for the tracker.
 
 ## Language
 
+### Pipeline shape
+
+**Stage**:
+One of the four named steps at which the pipeline consults a model: **link** (story → film),
+**cluster** (linked stories → event), **summarize** (event → published summary), and
+**source_judge** (unknown outlet domain → trust tier). Each has its own quality bar and is
+configured independently. The set is closed, and enforced as such in the schema.
+_Avoid_: step, phase, pass.
+
 ### News sources
 
 **Trade feed**:
