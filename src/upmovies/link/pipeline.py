@@ -127,6 +127,12 @@ async def _cluster_stage_sequential(
                     release_change_window_days=release_change_window_days,
                     run_date=run_date,
                 )
+                # One film, counted the same way the catch-block counts a failure, so a clean
+                # cluster stage no longer persists as 0 processed / 0 failed — which on the
+                # run row was indistinguishable from a stage that never ran (NEU-987). These
+                # counters remain a whole-run total across both stages, so they still cannot
+                # reproduce the per-stage decision; the guard reads the in-memory counts.
+                await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
             events_created += cluster.events_created
             stories_clustered += cluster.stories_clustered
@@ -145,7 +151,9 @@ async def _cluster_stage_sequential(
         stories_rejected,
         total_usage,
         # Counted in films, not events: a film can cluster fine and yield no new event.
-        StageCounts(processed=films_ok, failed=films_failed),
+        # Self-healing: an unclustered film is re-selected every run until it clusters, so a
+        # single failure must not fail the run (NEU-987).
+        StageCounts(processed=films_ok, failed=films_failed, self_healing=True),
     )
 
 

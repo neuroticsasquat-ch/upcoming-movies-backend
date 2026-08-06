@@ -31,14 +31,39 @@ class StageCounts:
 
     Deliberately narrow: a partial failure is still a success, so no proportional threshold.
     Zero processed with zero failed is an idempotent no-op, not an outage.
+
+    **The denominator problem, and why `self_healing` exists (NEU-987).** The rule has no
+    denominator, so with a backlog of *one* "the stage produced nothing" and "one item
+    failed" are the same observation. Whether that ambiguity is worth failing a run over
+    depends on what a failed item costs, and the two kinds of stage differ:
+
+    - **Lossy** (`self_healing=False`, the default) — `link`. A story the stage never links
+      stays `pending` and ages out of the recency window after `LINK_RECENCY_DAYS`, so a
+      missed run really can lose it. Worth failing the run on a single failure, ambiguity and
+      all: a false alarm costs one noisy deadman ping, a miss costs data.
+    - **Self-healing** (`self_healing=True`) — `cluster`, `summarize`. A failed film or event
+      is re-selected unconditionally on the next run, so nothing is lost by waiting. Here the
+      strict rule is actively harmful: one permanently unclusterable film on an otherwise
+      empty backlog would fail the *whole daily chain* every day, and because `run_daily` is
+      fail-fast, no summaries would publish at all for as long as it sat there. These stages
+      require a denominator — more than one candidate must have failed.
+
+    The trade-off: on a self-healing stage a genuine outage that happens to catch exactly one
+    candidate now reports `succeeded`. That is deliberate. It is the same "nothing to do"
+    signal a quiet day produces, and the next run retries the item regardless.
     """
 
     processed: int = 0
     failed: int = 0
+    self_healing: bool = False
 
     @property
     def total_failure(self) -> bool:
-        return self.processed == 0 and self.failed > 0
+        if self.processed > 0:
+            return False
+        # A self-healing stage retries a failed item unconditionally, so a lone failure is
+        # indistinguishable from one bad item and must not fail the run (NEU-987).
+        return self.failed > 1 if self.self_healing else self.failed > 0
 
 
 def total_failure_error(**stages: StageCounts) -> str | None:
