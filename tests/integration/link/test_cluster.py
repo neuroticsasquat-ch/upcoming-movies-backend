@@ -11,7 +11,6 @@ from upmovies.link.cluster import (
     ClusterParseError,
     ClusterPlan,
     apply_cluster_decisions,
-    build_cluster_batch_request,
     build_cluster_request,
     cluster_film_events,
 )
@@ -367,76 +366,6 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
         )
     assert s1.id in e1_members  # plan index 1 → e1 despite the occurred_at flip
     assert s1.id not in e2_members
-
-
-# ---------------------------------------------------------------------------
-# Task 4 — build_cluster_batch_request
-# ---------------------------------------------------------------------------
-
-
-async def test_build_cluster_batch_request_wraps_into_batch_request(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    s1 = await _linked_story(session, film, "https://e/1")
-    await session.commit()
-
-    built = await build_cluster_batch_request(
-        session,
-        custom_id=str(film.id),
-        model="cluster-m",
-        film_id=film.id,
-        attach_limit=45,
-        run_date=date(2026, 1, 1),
-    )
-    assert built is not None
-    req, plan = built
-    assert req.custom_id == str(film.id)
-    assert req.model == "cluster-m"
-    assert req.max_tokens == 4096
-    assert "cache_control" not in req.system[0]
-    assert "distinct EVENTS" in req.system[0]["text"]
-    assert plan.film_id == film.id
-    assert set(plan.unclustered_story_ids) == {s1.id}
-
-
-async def test_build_cluster_batch_request_honours_max_tokens(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    await _linked_story(session, film, "https://e/1")
-    await session.commit()
-
-    built = await build_cluster_batch_request(
-        session,
-        custom_id=str(film.id),
-        model="cluster-m",
-        film_id=film.id,
-        attach_limit=45,
-        max_tokens=9999,
-        run_date=date(2026, 1, 1),
-    )
-    assert built is not None
-    req, _plan = built
-    assert req.max_tokens == 9999
-
-
-async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    await session.commit()
-    assert (
-        await build_cluster_batch_request(
-            session,
-            custom_id=str(film.id),
-            model="cluster-m",
-            film_id=film.id,
-            attach_limit=45,
-            run_date=date(2026, 1, 1),
-        )
-        is None
-    )
 
 
 # ---------------------------------------------------------------------------

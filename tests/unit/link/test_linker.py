@@ -4,7 +4,6 @@ from uuid import uuid4
 
 from upmovies.link.linker import (
     apply_link_decisions,
-    build_batch_request,
     build_link_request,
     link_story_batch,
 )
@@ -139,21 +138,6 @@ def test_apply_link_decisions_links_about_high_confidence():
     assert result.linked == 1
     assert story.link_status == "linked"
     assert story.film_id == film_id
-
-
-def test_build_batch_request_carries_custom_id_and_cached_block():
-    req = build_batch_request(
-        custom_id="3",
-        model="link-m",
-        roster=_roster(uuid4()),
-        stories=[_story()],
-        run_date=date(2026, 6, 25),
-    )
-    assert req.custom_id == "3"
-    assert req.model == "link-m"
-    assert req.max_tokens == 2048
-    assert req.system[0]["cache_control"] == {"type": "ephemeral"}
-    assert "entity-linking classifier" in req.system[0]["text"]
 
 
 async def test_not_news_with_category_is_rejected():

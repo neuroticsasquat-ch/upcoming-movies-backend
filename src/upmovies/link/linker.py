@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from upmovies.link.roster import Roster
-from upmovies.llm.client import BatchRequest, BatchResult, Usage, cached_system_block
+from upmovies.llm.client import Usage, cached_system_block
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -134,19 +134,6 @@ class Completer(Protocol):
     ) -> tuple[str, "Usage"]: ...
 
 
-class BatchCompleter(Protocol):
-    async def complete_batch(
-        self,
-        requests: list[BatchRequest],
-        *,
-        poll_interval: float = ...,
-        timeout: float = ...,
-    ) -> dict[str, BatchResult]: ...
-
-
-class LinkClient(Completer, BatchCompleter, Protocol): ...
-
-
 @dataclass
 class BatchLinkResult:
     linked: int
@@ -175,8 +162,7 @@ def _extract_json_array(text: str) -> str:
 def build_link_request(
     roster: Roster, stories: Sequence[Story], run_date: date
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The cached roster system block + the JSON story payload — shared by both the
-    sequential `complete()` path and the batched `complete_batch()` path."""
+    """The cached roster system block + the JSON story payload for one story chunk."""
     # `instructions + roster` prefix = ~15 193 tok — clears Haiku 4.5's 4096-tok cache floor.
     # Verified 2026-06-24: call 1 cache_creation=15 193, call 2 cache_read=15 193 (NEU-377).
     system = [cached_system_block(f"{_INSTRUCTIONS}\n\nROSTER:\n{roster.text}")]
@@ -185,22 +171,11 @@ def build_link_request(
     return system, messages
 
 
-def build_batch_request(
-    *, custom_id: str, model: str, roster: Roster, stories: Sequence[Story], run_date: date
-) -> BatchRequest:
-    """One Message-Batch request for a story chunk. `max_tokens` matches the sequential
-    path's `_MAX_TOKENS` so the two paths are token-identical."""
-    system, messages = build_link_request(roster, stories, run_date)
-    return BatchRequest(
-        custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
-    )
-
-
 def apply_link_decisions(
     *, raw: str, stories: Sequence[Story], roster: Roster, floor: float
 ) -> BatchLinkResult:
     """Apply the classifier's JSON decisions to each Story in place: floor/resolution rules
-    plus the no-decision fallback. Identical for both execution paths."""
+    plus the no-decision fallback."""
     decisions = json.loads(_extract_json_array(raw))  # raises on un-parseable output
 
     by_id = {str(s.id): s for s in stories}

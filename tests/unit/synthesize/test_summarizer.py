@@ -3,11 +3,9 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from upmovies.llm.client import BatchResult
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
-    build_summary_batch_request,
     build_summary_request,
     parse_summary,
     summarize_event,
@@ -37,19 +35,6 @@ class FakeCompleter:
         return self._response, Usage()
 
 
-class FakeBatchCompleter:
-    def __init__(self, response: str):
-        self._response = response
-        self.requests: list | None = None
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        self.requests = list(requests)
-        return {
-            r.custom_id: BatchResult(custom_id=r.custom_id, ok=True, text=self._response)
-            for r in requests
-        }
-
-
 def test_build_summary_request_plain_block_and_payload():
     event = _event(
         stories=[
@@ -74,13 +59,9 @@ def test_build_summary_request_plain_block_and_payload():
     assert payload["stories"][0]["dek"] == "Star joins the film."
 
 
-def test_build_summary_batch_request_carries_as_of_date():
-    system, messages = build_summary_request(_event(), date(2026, 6, 25))
+def test_build_summary_request_carries_as_of_date():
+    _system, messages = build_summary_request(_event(), date(2026, 6, 25))
     assert json.loads(messages[0]["content"])["as_of_date"] == "2026-06-25"
-    req = build_summary_batch_request(
-        custom_id="e1", model="m", event=_event(), run_date=date(2026, 6, 25)
-    )
-    assert json.loads(req.messages[0]["content"])["as_of_date"] == "2026-06-25"
 
 
 def test_build_summary_request_truncates_dek():
@@ -154,7 +135,7 @@ async def test_summarize_event_returns_result_with_provenance():
     assert result.model == "claude-haiku-4-5"
     assert result.prompt_version == "1"
     assert result.source_updated_at == event.source_updated_at
-    # the sequential path pins max_tokens for parity with the batched path
+    # max_tokens is pinned to the summarizer's own ceiling, not the client default
     assert client.calls[0]["max_tokens"] == 256
 
 
@@ -173,32 +154,6 @@ async def test_summarize_event_prompt_includes_every_member_story():
     payload = json.loads(client.calls[0]["messages"][0]["content"])
     assert [s["title"] for s in payload["stories"]] == ["A", "B", "C"]
     assert [s["source"] for s in payload["stories"]] == ["Deadline", "Variety", "THR"]
-
-
-async def test_batched_path_round_trips_to_same_summary():
-    event = _event()
-    envelope = '{"summary": "Principal photography has begun."}'
-    client = FakeBatchCompleter(envelope)
-
-    req = build_summary_batch_request(
-        custom_id="evt-9", model="m", event=event, run_date=date(2026, 6, 25)
-    )
-    assert req.custom_id == "evt-9"
-    assert req.model == "m"
-    assert req.max_tokens == 256
-    # parity: same system + messages the sequential builder produces
-    system, messages = build_summary_request(event, date(2026, 6, 25))
-    assert req.system == system
-    assert req.messages == messages
-    assert "cache_control" not in req.system[0]
-
-    results = await client.complete_batch([req])
-    assert client.requests is not None
-    assert client.requests[0].custom_id == "evt-9"
-    result = results["evt-9"]
-    assert result.ok
-    # batched path yields the identical parsed summary as the sequential path
-    assert parse_summary(result.text) == "Principal photography has begun."
 
 
 def test_parse_summary_recovers_unescaped_inner_quote(caplog):

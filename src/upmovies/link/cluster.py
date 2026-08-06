@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import field_changed_at
 from upmovies.link.linker import Completer
-from upmovies.llm.client import BatchRequest, Usage
+from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.news.source_quality import (
     best_tier,
@@ -613,35 +613,6 @@ async def apply_cluster_decisions(
             stories_clustered += 1
 
     return ClusterResult(events_created, stories_clustered, stories_rejected)
-
-
-async def build_cluster_batch_request(
-    session: AsyncSession,
-    *,
-    custom_id: str,
-    model: str,
-    film_id: UUID,
-    attach_limit: int,
-    max_tokens: int = _DEFAULT_MAX_TOKENS,
-    run_date: date,
-) -> tuple[BatchRequest, ClusterPlan] | None:
-    """Wrap build_cluster_request into a BatchRequest ready for the Anthropic Batch API."""
-    built = await build_cluster_request(
-        session, film_id=film_id, attach_limit=attach_limit, run_date=run_date
-    )
-    if built is None:
-        return None
-    system, messages, plan = built
-    return (
-        BatchRequest(
-            custom_id=custom_id,
-            model=model,
-            system=system,
-            messages=messages,
-            max_tokens=max_tokens,
-        ),
-        plan,
-    )
 
 
 async def cluster_film_events(
