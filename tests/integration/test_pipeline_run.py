@@ -1,13 +1,18 @@
 """In-process ingestion orchestration (upmovies.pipeline_run): the shared stage runners and
 the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 
 from upmovies import pipeline_run
+from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
+from upmovies.link.pipeline import run_link_ingest
+from upmovies.news.models import Story
 
 
 async def _run_row(session, run_id) -> IngestRun:
@@ -182,6 +187,74 @@ async def test_run_daily_fails_fast_on_stage_failure(session, spy_stages):
     # link failed → synthesize must never run.
     assert order == ["tmdb", "feeds", "link"]
     assert "synthesize" not in order
+    assert pings == ["/start", "/fail"]
+
+
+async def test_run_daily_aborts_when_link_stage_totally_fails(
+    session, session_factory, monkeypatch
+):
+    """NEU-986, end to end through the real link pipeline: a total LLM outage fails every
+    chunk, so the run finalizes `failed` off its counters alone (no crash propagates out of
+    the stage). That status is what makes the chain stop before `synthesize` and ping the
+    deadman `/fail` — the incident NEU-743 fixed, where it pinged green instead."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add(
+        Story(
+            source="X",
+            url="https://e/outage",
+            title="Runner news",
+            published_at=datetime.now(UTC),
+            link_status="pending",
+            raw={"summary": ""},
+        )
+    )
+    await session.commit()
+
+    class _OutageClient:
+        async def complete_with_usage(self, **kwargs):
+            raise RuntimeError("total outage")
+
+    order: list[str] = []
+    pings: list[str] = []
+
+    def _make(kind: str):
+        async def fake(run_id, settings, *args, **kwargs):
+            order.append(kind)
+            async with pipeline_run.SessionLocal() as s:
+                await finalize_run(s, run_id, status="succeeded")
+                await s.commit()
+
+        return fake
+
+    for kind in ("tmdb", "feeds", "synthesize"):
+        monkeypatch.setattr(pipeline_run, f"run_{kind}_stage", _make(kind))
+
+    async def real_link_stage(run_id, settings, *args, **kwargs):
+        order.append("link")
+        await run_link_ingest(
+            session_factory=session_factory,
+            client=_OutageClient(),
+            run_id=run_id,
+            model="claude-haiku-4-5",
+            cluster_model="claude-sonnet-4-6",
+            recency_days=45,
+            batch_size=10,
+            floor=0.7,
+        )
+
+    monkeypatch.setattr(pipeline_run, "run_link_stage", real_link_stage)
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append(suffix)
+
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+
+    ok = await pipeline_run.run_daily(get_settings())
+
+    assert ok is False
+    assert order == ["tmdb", "feeds", "link"]  # synthesize never ran
     assert pings == ["/start", "/fail"]
 
 

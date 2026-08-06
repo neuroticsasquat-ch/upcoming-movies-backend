@@ -13,7 +13,13 @@ from uuid import UUID
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
+from upmovies.ingest.runs import (
+    StageCounts,
+    finalize_run,
+    record_llm_usage,
+    record_progress,
+    total_failure_error,
+)
 from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import Completer, link_story_batch
 from upmovies.link.roster import Roster, build_roster
@@ -53,8 +59,8 @@ async def _link_stage_sequential(
     batch_size: int,
     floor: float,
     run_date: date,
-) -> tuple[int, int, Usage]:
-    linked = rejected = 0
+) -> tuple[int, int, Usage, StageCounts]:
+    linked = rejected = failed_stories = 0
     total_usage = Usage()
     for batch_ids in _chunks(pending_ids, batch_size):
         try:
@@ -80,7 +86,13 @@ async def _link_stage_sequential(
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=len(batch_ids))
                 await s.commit()
-    return linked, rejected, total_usage
+            failed_stories += len(batch_ids)
+    return (
+        linked,
+        rejected,
+        total_usage,
+        StageCounts(processed=linked + rejected, failed=failed_stories),
+    )
 
 
 async def _cluster_stage_sequential(
@@ -96,8 +108,9 @@ async def _cluster_stage_sequential(
     dedup_days: int = 14,
     release_change_window_days: int = 14,
     run_date: date,
-) -> tuple[int, int, int, Usage]:
+) -> tuple[int, int, int, Usage, StageCounts]:
     events_created = stories_clustered = stories_rejected = 0
+    films_ok = films_failed = 0
     total_usage = Usage()
     for film_id in film_ids:
         try:
@@ -119,12 +132,21 @@ async def _cluster_stage_sequential(
             stories_clustered += cluster.stories_clustered
             stories_rejected += cluster.stories_rejected
             total_usage += usage
+            films_ok += 1
         except Exception:
             log.exception("clustering failed for film %s", film_id)
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
-    return events_created, stories_clustered, stories_rejected, total_usage
+            films_failed += 1
+    return (
+        events_created,
+        stories_clustered,
+        stories_rejected,
+        total_usage,
+        # Counted in films, not events: a film can cluster fine and yield no new event.
+        StageCounts(processed=films_ok, failed=films_failed),
+    )
 
 
 async def run_link_ingest(
@@ -159,7 +181,7 @@ async def run_link_ingest(
         )
         pending_ids = [row[0] for row in result.all()]
 
-    linked, rejected, link_usage = await _link_stage_sequential(
+    linked, rejected, link_usage, link_counts = await _link_stage_sequential(
         session_factory=session_factory,
         client=client,
         run_id=run_id,
@@ -220,6 +242,7 @@ async def run_link_ingest(
         stories_clustered,
         stories_rejected,
         cluster_usage,
+        cluster_counts,
     ) = await _cluster_stage_sequential(
         session_factory=session_factory,
         client=client,
@@ -237,11 +260,13 @@ async def run_link_ingest(
         await record_llm_usage(s, run_id, stage="cluster", model=cluster_model, usage=cluster_usage)
         await s.commit()
 
+    error = total_failure_error(link=link_counts, cluster=cluster_counts)
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,
             run_id,
-            status="succeeded",
+            status="failed" if error else "succeeded",
+            error=error,
             detail=(
                 f"linked {linked}, rejected {rejected}; "
                 f"{events_created} events from {stories_clustered} stories "

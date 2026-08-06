@@ -253,6 +253,105 @@ async def test_failed_chunk_stays_pending_others_commit(session, unparseable):
 
 
 # ---------------------------------------------------------------------------
+# NEU-986: a total stage failure finalizes the run `failed`
+# ---------------------------------------------------------------------------
+
+
+class _TotalOutageClient(FakeClient):
+    """Every call raises — a total LLM outage, so every chunk and every film fails."""
+
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        raise RuntimeError("boom")
+
+
+async def test_total_link_failure_finalizes_run_failed(session):
+    """When every link chunk fails there is no per-item isolation left to do: the stage
+    produced nothing, so finalizing `succeeded` would let run_daily summarize unlinked
+    stories and ping the deadman green (NEU-743's incident). The stories stay `pending`,
+    the counters are still recorded, and the run ends `failed`."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add_all(
+        [
+            await _story("https://e/a", published_offset_days=1),
+            await _story("https://e/b", published_offset_days=1),
+        ]
+    )
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    result = await _run(session, run_id, batch_size=1, client=_TotalOutageClient())
+
+    assert (result.linked, result.rejected) == (0, 0)
+    rows = (
+        (await session.execute(select(Story), execution_options={"populate_existing": True}))
+        .scalars()
+        .all()
+    )
+    assert all(s.link_status == "pending" for s in rows)  # untouched → a later run retries
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+    assert run.items_processed == 0
+    assert run.items_failed == 2
+    assert run.error and "link stage" in run.error
+
+
+async def test_total_cluster_failure_finalizes_run_failed(session):
+    """Stage 2 has the same degenerate case: nothing was linked this run (so the link stage
+    is a legitimate no-op), every film failed to cluster, and a `succeeded` run would let the
+    chain summarize and ping green off zero clustered events."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_unclustered(session, film, "https://e/already-linked")
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await _run(session, run_id, client=_TotalOutageClient())
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+    assert run.items_failed == 1
+    assert run.error and "cluster stage" in run.error
+
+
+async def test_run_with_nothing_to_do_still_succeeds(session):
+    """Zero processed with zero failed is an idempotent no-op, not an outage — the guard
+    must not fire on a run that simply had nothing pending."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await _run(session, run_id, client=_TotalOutageClient())
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+    assert run.error is None
+
+
+# ---------------------------------------------------------------------------
 # Request mapping (cache_control, max_tokens, model)
 # ---------------------------------------------------------------------------
 
@@ -383,7 +482,13 @@ async def test_cluster_failure_is_isolated_per_film(session):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_sequential(
+    (
+        events_created,
+        stories_clustered,
+        stories_rejected,
+        _usage,
+        _counts,
+    ) = await _cluster_stage_sequential(
         session_factory=lambda: session,
         client=_ClusterFailClient(),
         run_id=run_id,
@@ -431,7 +536,13 @@ async def test_cluster_parse_failure_surfaces_as_failed(session):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_sequential(
+    (
+        events_created,
+        stories_clustered,
+        stories_rejected,
+        _usage,
+        _counts,
+    ) = await _cluster_stage_sequential(
         session_factory=lambda: session,
         client=_UnparseableClusterClient(),
         run_id=run_id,

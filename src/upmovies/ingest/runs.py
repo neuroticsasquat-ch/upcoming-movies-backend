@@ -1,5 +1,7 @@
-"""Run-tracking helpers for the ingestion pipelines. Pure DB I/O — callers own commits."""
+"""Run-tracking for the ingestion pipelines: the DB helpers (pure I/O — callers own commits)
+plus `StageCounts`, the pure rule a pipeline consults to decide a run's terminal status."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -14,6 +16,41 @@ from upmovies.llm.pricing import price, rates_for
 
 # Every new usage row is sequential — the Message Batches path is gone (ADR-0005).
 _BATCHED = False
+
+
+@dataclass(frozen=True)
+class StageCounts:
+    """One stage's tally of items that produced output vs. items that failed.
+
+    Stages isolate per-item failures: a chunk (or film, or event) that fails is recorded and
+    skipped so the ones that worked still commit. `total_failure` marks the one case where
+    that isolation degenerates into "discard everything and report success" — the stage
+    produced *nothing at all* yet had at least one failure, i.e. a total LLM outage rather
+    than a bad item. Runs finalize `failed` on it, which is what makes `run_daily` abort and
+    ping the deadman `/fail` instead of summarizing unlinked stories (NEU-743, NEU-986).
+
+    Deliberately narrow: a partial failure is still a success, so no proportional threshold.
+    Zero processed with zero failed is an idempotent no-op, not an outage.
+    """
+
+    processed: int = 0
+    failed: int = 0
+
+    @property
+    def total_failure(self) -> bool:
+        return self.processed == 0 and self.failed > 0
+
+
+def total_failure_error(**stages: StageCounts) -> str | None:
+    """Describe every stage that ended in a `total_failure`, keyed by stage name, or None
+    when none did. A pipeline finalizes `failed` iff this returns a message — that is the
+    whole of the finalize decision, so it reads the counters rather than assuming success."""
+    outages = [
+        f"{name} stage produced nothing: 0 processed, {counts.failed} failed"
+        for name, counts in stages.items()
+        if counts.total_failure
+    ]
+    return "; ".join(outages) or None
 
 
 async def create_run(session: AsyncSession, kind: str) -> UUID:
