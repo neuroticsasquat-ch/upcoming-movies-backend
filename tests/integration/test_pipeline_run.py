@@ -258,6 +258,76 @@ async def test_run_daily_aborts_when_link_stage_totally_fails(
     assert pings == ["/start", "/fail"]
 
 
+async def test_run_daily_continues_past_a_lone_cluster_failure(
+    session, session_factory, monkeypatch
+):
+    """NEU-987, the counterpart to the test above: clustering is self-healing, so one
+    pathological film on an otherwise empty backlog must NOT abort the chain. Before the
+    denominator, `cluster` reporting 0 processed / 1 failed failed the link run, and because
+    `run_daily` is fail-fast that meant `synthesize` never ran and the deadman got `/fail`
+    every day for as long as the film stayed unclusterable."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add(
+        Story(
+            source="X",
+            url="https://e/linked-unclustered",
+            title="Runner news",
+            published_at=datetime.now(UTC),
+            link_status="linked",  # nothing pending → the link stage is a legitimate no-op
+            film_id=film.id,
+            raw={"summary": ""},
+        )
+    )
+    await session.commit()
+
+    class _OutageClient:
+        async def complete_with_usage(self, **kwargs):
+            raise RuntimeError("this one film never clusters")
+
+    order: list[str] = []
+    pings: list[str] = []
+
+    def _make(kind: str):
+        async def fake(run_id, settings, *args, **kwargs):
+            order.append(kind)
+            async with pipeline_run.SessionLocal() as s:
+                await finalize_run(s, run_id, status="succeeded")
+                await s.commit()
+
+        return fake
+
+    for kind in ("tmdb", "feeds", "synthesize"):
+        monkeypatch.setattr(pipeline_run, f"run_{kind}_stage", _make(kind))
+
+    async def real_link_stage(run_id, settings, *args, **kwargs):
+        order.append("link")
+        await run_link_ingest(
+            session_factory=session_factory,
+            client=_OutageClient(),
+            run_id=run_id,
+            model="claude-haiku-4-5",
+            cluster_model="claude-sonnet-4-6",
+            recency_days=45,
+            batch_size=10,
+            floor=0.7,
+        )
+
+    monkeypatch.setattr(pipeline_run, "run_link_stage", real_link_stage)
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append(suffix)
+
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+
+    ok = await pipeline_run.run_daily(get_settings())
+
+    assert ok is True
+    assert order == ["tmdb", "feeds", "link", "synthesize"]  # the chain ran to completion
+    assert pings == ["/start", ""]  # green, not /fail
+
+
 async def test_run_daily_synthesize_waits_for_link(session, monkeypatch):
     """Sequential await: synthesize's runner cannot begin until link's has returned."""
     events: list[str] = []

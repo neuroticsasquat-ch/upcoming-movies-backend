@@ -345,7 +345,34 @@ class _TotalOutageCompleter(FakeSummaryClient):
 async def test_total_summarize_failure_finalizes_run_failed(session):
     """Summarize is self-healing (a failed event is retried next run), but a run that
     summarized nothing at all must not report `succeeded` — run_daily pings the deadman
-    green off that status, which would be a lie about the day's output."""
+    green off that status, which would be a lie about the day's output.
+
+    Two events, because self-healing stages require a denominator (NEU-987)."""
+    film = await _film(session)
+    other = await _film(session, tmdb_id=2, title="Blade")
+    await _event_with_story(session, film)
+    await _event_with_story(session, other)
+    await session.commit()
+    run_id = await _create_run(session, kind="synthesize")
+    await session.commit()
+
+    result = await _run(session, run_id, client=_TotalOutageCompleter())
+
+    assert (result.new, result.refreshed, result.failed) == (0, 0, 2)
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+    assert run.error and "summarize stage" in run.error
+
+
+async def test_single_summarize_failure_does_not_fail_the_run(session):
+    """NEU-987: one permanently unsummarizable event on an otherwise empty backlog is a bad
+    item, not an outage. The event stays pending and is retried next run, so failing here
+    would only ping the deadman `/fail` every day for a self-healing condition."""
     film = await _film(session)
     await _event_with_story(session, film)
     await session.commit()
@@ -361,8 +388,9 @@ async def test_total_summarize_failure_finalizes_run_failed(session):
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
-    assert run.status == "failed"
-    assert run.error and "summarize stage" in run.error
+    assert run.status == "succeeded"
+    assert run.error is None
+    assert run.items_failed == 1  # still counted — only the terminal status is relaxed
 
 
 async def test_run_with_nothing_pending_still_succeeds(session):

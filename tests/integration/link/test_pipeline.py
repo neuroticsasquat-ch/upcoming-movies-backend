@@ -254,6 +254,7 @@ async def test_failed_chunk_stays_pending_others_commit(session, unparseable):
 
 # ---------------------------------------------------------------------------
 # NEU-986: a total stage failure finalizes the run `failed`
+# NEU-987: ...but a self-healing stage needs more than one failed candidate
 # ---------------------------------------------------------------------------
 
 
@@ -262,6 +263,56 @@ class _TotalOutageClient(FakeClient):
 
     async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
         raise RuntimeError("boom")
+
+
+async def test_single_link_failure_still_finalizes_run_failed(session):
+    """NEU-987 relaxed the guard only on the *self-healing* stages. `link` is lossy — an
+    unlinked story ages out of the recency window — so it keeps the strict rule and fails the
+    run even when the whole backlog was one story."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add(await _story("https://e/only", published_offset_days=1))
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await _run(session, run_id, batch_size=1, client=_TotalOutageClient())
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+    assert run.error and "link stage" in run.error
+
+
+async def test_single_cluster_failure_does_not_fail_the_run(session):
+    """NEU-987's core case: one pathological film on an otherwise empty backlog. Clustering
+    is self-healing — the film stays unclustered and is re-selected next run — so failing the
+    run here would abort the fail-fast daily chain *every day* and publish no summaries at
+    all for as long as that one film stayed unclusterable."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_unclustered(session, film, "https://e/only-linked")
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await _run(session, run_id, client=_TotalOutageClient())
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+    assert run.error is None
+    assert run.items_failed == 1  # still counted — only the terminal status is relaxed
 
 
 async def test_total_link_failure_finalizes_run_failed(session):
@@ -307,11 +358,15 @@ async def test_total_link_failure_finalizes_run_failed(session):
 async def test_total_cluster_failure_finalizes_run_failed(session):
     """Stage 2 has the same degenerate case: nothing was linked this run (so the link stage
     is a legitimate no-op), every film failed to cluster, and a `succeeded` run would let the
-    chain summarize and ping green off zero clustered events."""
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
+    chain summarize and ping green off zero clustered events.
+
+    Two films, because clustering is self-healing and so needs a denominator (NEU-987): with
+    a backlog of one, `0 processed / 1 failed` is a bad film, not an outage."""
+    films = [Film(tmdb_id=1, title="Runner"), Film(tmdb_id=2, title="Blade")]
+    session.add_all(films)
     await session.flush()
-    await _linked_unclustered(session, film, "https://e/already-linked")
+    for i, film in enumerate(films):
+        await _linked_unclustered(session, film, f"https://e/already-linked-{i}")
     await session.commit()
     run_id = await create_run(session, kind="link")
     await session.commit()
@@ -325,7 +380,7 @@ async def test_total_cluster_failure_finalizes_run_failed(session):
         )
     ).scalar_one()
     assert run.status == "failed"
-    assert run.items_failed == 1
+    assert run.items_failed == 2
     assert run.error and "cluster stage" in run.error
 
 
@@ -511,6 +566,48 @@ async def test_cluster_failure_is_isolated_per_film(session):
     assert len(ok_events) == 1 and len(fail_events) == 0
     members = {el.story_id for el in (await session.execute(select(EventStory))).scalars().all()}
     assert ok_story.id in members and fail_story.id not in members
+
+    # NEU-987: the successful film is persisted too, not just the failed one — otherwise the
+    # run row cannot reproduce the guard's decision.
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert (run.items_processed, run.items_failed) == (1, 1)
+
+
+async def test_cluster_stage_persists_processed_films(session):
+    """NEU-987: a fully successful cluster stage must leave `items_processed` > 0. Before
+    this, only `failed_delta` was written, so a clean stage persisted 0 processed / 0 failed
+    — indistinguishable on the run row from a stage that never ran."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _linked_unclustered(session, film, "https://e/ok")
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await _cluster_stage_sequential(
+        session_factory=lambda: session,
+        client=FakeClient(),  # every film clusters cleanly
+        run_id=run_id,
+        model="cluster-m",
+        film_ids=[film.id],
+        attach_limit=45,
+        cluster_max_tokens=4096,
+        run_date=date(2026, 1, 1),
+    )
+
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert (run.items_processed, run.items_failed) == (1, 0)
 
 
 # ---------------------------------------------------------------------------

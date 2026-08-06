@@ -14,6 +14,29 @@ One of the four named steps at which the pipeline consults a model: **link** (st
 configured independently. The set is closed, and enforced as such in the schema.
 _Avoid_: step, phase, pass.
 
+**Total stage failure**:
+A stage that produced **nothing at all** yet recorded failures — the case where per-item
+isolation degenerates into "discard everything and report success". It is the one condition a
+pipeline *chooses* to finalize a run `failed` on, reading its own counters, as opposed to a
+crash the background wrapper catches. It is what makes the daily chain abort before the next
+stage and ping the deadman `/fail`. A *partial* failure is not one: the survivors committed,
+so the run succeeded.
+_Avoid_: outage (that's the cause, not the observation), batch failure.
+
+**Lossy stage**:
+A stage whose failed item gets no second chance, so one failure is enough to declare a total
+stage failure. **link** is the only one: a story it never links ages out of the recency window
+and is never retried, so a missed run really can lose it.
+_Avoid_: retryable (that's the opposite), transient.
+
+**Self-healing stage**:
+A stage whose failed item is re-selected unconditionally on the next run, so declaring a total
+stage failure takes more than one failed candidate. **cluster** and **summarize** are both.
+Without that denominator, one permanently bad film or event on an otherwise empty backlog
+would fail the whole chain every day and publish nothing at all. **source_judge** is neither:
+it is a link sub-stage that keeps no counters and is not guarded.
+_Avoid_: idempotent (that's about re-running, not about failures).
+
 ### News sources
 
 **Trade feed**:
