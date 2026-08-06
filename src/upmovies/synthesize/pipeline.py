@@ -16,7 +16,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
-from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
+from upmovies.ingest.runs import (
+    StageCounts,
+    finalize_run,
+    record_llm_usage,
+    record_progress,
+    total_failure_error,
+)
 from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
@@ -216,11 +222,15 @@ async def run_synthesize_ingest(
         log.exception("url-resolution stage failed")
         resolve_result = ResolveResult(marked=0, resolved=0, failed=0, pending=0)
 
+    error = total_failure_error(
+        summarize=StageCounts(processed=new + refreshed, failed=failed),
+    )
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,
             run_id,
-            status="succeeded",
+            status="failed" if error else "succeeded",
+            error=error,
             detail=(
                 f"summarized {new + refreshed} ({new} new, {refreshed} refreshed); {failed} failed"
                 f"; urls marked {resolve_result.marked}, resolved {resolve_result.resolved},"
