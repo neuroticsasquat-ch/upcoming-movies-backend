@@ -45,6 +45,27 @@ would fail the whole chain every day and publish nothing at all. **source_judge*
 it is a link sub-stage that keeps no counters and is not guarded.
 _Avoid_: idempotent (that's about re-running, not about failures).
 
+### Candidate retrieval
+
+**Candidate set**:
+The small set of films offered to the **link** stage for one story, selected by lexical match
+before the model sees anything. A story's candidate set is its own — two stories in the same
+batch carry different ones, and the model names a film by its position within that story's set.
+_Avoid_: shortlist, roster (that was the full-catalog prompt prefix this replaced), matches.
+
+**Retrieval miss**:
+The correct film absent from a story's candidate set. The failure mode retrieval introduces,
+and an unforgiving one: **link** is lossy, so a missed story is not linked late, it is lost.
+Distinct from the model declining a film it *was* shown, which is an ordinary rejection.
+_Avoid_: false negative (that's the model's error, not retrieval's), recall failure.
+
+**Zero-candidate rejection**:
+A story rejected because no film cleared the threshold — decided by the lexical rule alone,
+with no model call. Carries `link_note = no-candidates` so it stays distinguishable from a
+`no-match` the model actually reached, and is deliberately **not** counted as `processed`,
+since no classifier decided it.
+_Avoid_: auto-reject, unmatched, filtered.
+
 ### News sources
 
 **Trade feed**:
