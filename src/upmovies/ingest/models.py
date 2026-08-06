@@ -55,6 +55,9 @@ class IngestRun(Base):
     llm_usage: Mapped[list["RunLLMUsage"]] = relationship(
         "RunLLMUsage", cascade="all, delete-orphan", back_populates="run"
     )
+    llm_calls: Mapped[list["LLMCall"]] = relationship(
+        "LLMCall", cascade="all, delete-orphan", back_populates="run"
+    )
 
 
 class RunLLMUsage(Base):
@@ -94,3 +97,59 @@ class RunLLMUsage(Base):
     )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="llm_usage")
+
+
+class LLMCall(Base):
+    """One row per *logical* LLM API call — retries folded in, not split out. Sits alongside
+    `RunLLMUsage` rather than replacing it: that table's per-(run, stage) grain structurally
+    cannot answer the questions provider selection turns on, because latency is not summable
+    and cache-hit is not averageable. Deliberately has no unique (run, stage) constraint —
+    many rows per stage is the point.
+
+    Cached tokens are stored as the counts the providers report, not as a `cache_hit` boolean;
+    "hit" is a predicate over them. Same shape as `RunLLMUsage`, which keeps `pricing` honest."""
+
+    __tablename__ = "llm_call"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('link', 'cluster', 'summarize', 'source_judge')",
+            name="ck_llm_call_stage",
+        ),
+        CheckConstraint("attempts >= 1", name="ck_llm_call_attempts"),
+        {"schema": "ingest"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ingest.ingest_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    cache_read_input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    cache_creation_input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    """Total wall-clock for the logical call, retries included."""
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    """Kept separate from `latency_ms` so retry behaviour stays visible rather than hidden
+    inside it."""
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    error_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """NULL when the caller performs no JSON parse — distinct from a parse that failed."""
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="llm_calls")
