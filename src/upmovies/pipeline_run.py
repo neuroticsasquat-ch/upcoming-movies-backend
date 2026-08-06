@@ -7,10 +7,10 @@ rather than duplicating the wiring.
 
 `run_daily` / `run_hourly` run the stages **sequentially in one process**: because each
 stage is awaited to completion before the next begins, `synthesize` cannot start until
-`link` has fully finished — there is no HTTP poll window to time out, so slow Anthropic
-Message Batches no longer fail the pipeline. The daily chain is fail-fast: the first stage
-that does not reach `succeeded` aborts the rest. A best-effort healthchecks.io deadman ping
-(`/start` at the top, base URL on success, `/fail` on any failure) drives alerting.
+`link` has fully finished — there is no HTTP poll window to time out. The daily chain is
+fail-fast: the first stage that does not reach `succeeded` aborts the rest. A best-effort
+healthchecks.io deadman ping (`/start` at the top, base URL on success, `/fail` on any
+failure) drives alerting.
 
 Entry point: `python -m upmovies.pipeline_run {daily|hourly}`.
 """
@@ -112,8 +112,6 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
                 attach_limit=settings.link_cluster_attach_limit,
                 batch_size=settings.link_batch_size,
                 floor=settings.link_confidence_floor,
-                use_batches=settings.link_use_batches,
-                cluster_use_batches=settings.cluster_use_batches,
                 cluster_max_tokens=settings.link_cluster_max_tokens,
                 source_gate_enabled=settings.source_gate_enabled,
                 source_judge_model=settings.source_judge_model,
@@ -135,7 +133,6 @@ async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
                 run_id=run_id,
                 model=settings.summary_model,
                 prompt_version=settings.summary_prompt_version,
-                use_batches=settings.summary_use_batches,
                 url_resolve_per_run=settings.url_resolve_per_run,
                 url_resolve_max_attempts=settings.url_resolve_max_attempts,
                 url_resolve_delay_seconds=settings.url_resolve_delay_seconds,

@@ -1,7 +1,7 @@
 """The `synthesize` pipeline: select events with no summary yet (write-once — an existing summary
-is never reselected); summarize each (sequential Messages path or batched Batches path); and
-upsert news.event_summary. Idempotent — a re-run with nothing pending is a no-op. One event's
-failure never rolls back others. Mirrors link/pipeline.py structurally."""
+is never reselected); summarize each via the Messages API; and upsert news.event_summary.
+Idempotent — a re-run with nothing pending is a no-op. One event's failure never rolls back
+others. Mirrors link/pipeline.py structurally."""
 
 import logging
 from collections import defaultdict
@@ -22,12 +22,10 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
 from upmovies.news.visibility import visible_events
 from upmovies.synthesize.summarizer import (
+    Completer,
     EventInput,
     StoryInput,
-    SummaryClient,
     SummaryResult,
-    build_summary_batch_request,
-    parse_summary,
     summarize_event,
 )
 from upmovies.synthesize.url_resolution import Resolver, ResolveResult, run_url_resolution
@@ -141,7 +139,7 @@ async def _upsert_summary(session: AsyncSession, event_id: UUID, result: Summary
 async def _summary_stage_sequential(
     *,
     session_factory: SessionFactory,
-    client: SummaryClient,
+    client: Completer,
     run_id: UUID,
     model: str,
     prompt_version: str,
@@ -177,81 +175,13 @@ async def _summary_stage_sequential(
     return new, refreshed, failed, total_usage
 
 
-async def _summary_stage_batched(
-    *,
-    session_factory: SessionFactory,
-    client: SummaryClient,
-    run_id: UUID,
-    model: str,
-    prompt_version: str,
-    pending: list[_PendingEvent],
-    run_date: date,
-) -> tuple[int, int, int, Usage]:
-    if not pending:
-        return 0, 0, 0, Usage()
-
-    by_id = {str(pe.event_id): pe for pe in pending}
-    requests = [
-        build_summary_batch_request(
-            custom_id=str(pe.event_id), model=model, event=pe.event_input, run_date=run_date
-        )
-        for pe in pending
-    ]
-
-    try:
-        results = await client.complete_batch(requests)
-    except Exception:
-        # Whole-batch failure: no event got a result, so unlike the per-event failures below
-        # there is nothing to isolate. Record the counters and re-raise so the run is marked
-        # failed rather than finalizing 'succeeded' with no summaries written — which would
-        # ping the daily deadman green on a run that produced nothing.
-        log.exception("summary batch submit of %d events failed", len(requests))
-        async with _owned_session(session_factory) as s:
-            await record_progress(s, run_id, failed_delta=len(requests))
-            await s.commit()
-        raise
-
-    new = refreshed = failed = 0
-    total_usage = Usage()
-    for custom_id, pe in by_id.items():
-        result = results.get(custom_id)
-        try:
-            if result is None or not result.ok:
-                detail = result.error_type if result else "missing"
-                raise RuntimeError(f"summary for event {custom_id} unavailable: {detail}")
-            summary_result = SummaryResult(
-                summary=parse_summary(result.text),
-                model=model,
-                prompt_version=prompt_version,
-                source_updated_at=pe.event_input.source_updated_at,
-            )
-            async with _owned_session(session_factory) as s:
-                await _upsert_summary(s, pe.event_id, summary_result)
-                await record_progress(s, run_id, processed_delta=1)
-                await s.commit()
-            if result.usage is not None:
-                total_usage += result.usage
-            if pe.is_new:
-                new += 1
-            else:
-                refreshed += 1
-        except Exception:
-            log.exception("summary apply failed for event %s", custom_id)
-            async with _owned_session(session_factory) as s:
-                await record_progress(s, run_id, failed_delta=1)
-                await s.commit()
-            failed += 1
-    return new, refreshed, failed, total_usage
-
-
 async def run_synthesize_ingest(
     *,
     session_factory: SessionFactory,
-    client: SummaryClient,
+    client: Completer,
     run_id: UUID,
     model: str,
     prompt_version: str,
-    use_batches: bool = True,
     url_resolve_per_run: int = 500,
     url_resolve_max_attempts: int = 3,
     url_resolve_delay_seconds: float = 1.0,
@@ -261,8 +191,7 @@ async def run_synthesize_ingest(
         pending = await _select_pending(s)
 
     run_date = datetime.now(UTC).date()
-    stage = _summary_stage_batched if use_batches else _summary_stage_sequential
-    new, refreshed, failed, summary_usage = await stage(
+    new, refreshed, failed, summary_usage = await _summary_stage_sequential(
         session_factory=session_factory,
         client=client,
         run_id=run_id,
@@ -272,9 +201,7 @@ async def run_synthesize_ingest(
         run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
-        await record_llm_usage(
-            s, run_id, stage="summarize", model=model, batched=use_batches, usage=summary_usage
-        )
+        await record_llm_usage(s, run_id, stage="summarize", model=model, usage=summary_usage)
         await s.commit()
 
     try:

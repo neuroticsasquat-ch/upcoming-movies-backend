@@ -9,7 +9,7 @@ from upmovies.news.models import Event, SourceDomain, Story
 
 
 class _StubClient:
-    """LinkClient stub: linking is skipped (no pending stories), cluster returns one event."""
+    """Completer stub: linking is skipped (no pending stories), cluster returns one event."""
 
     async def complete_with_usage(
         self, *, model: str, system: list, messages: list, max_tokens: int = 4096
@@ -23,11 +23,6 @@ class _StubClient:
             ' "confidence": "confirmed", "cast": ["Test Performer"], "stories": [1]}]}'
         )
         return cluster_resp, Usage()
-
-    async def complete_batch(
-        self, requests: list, *, poll_interval: float = 15.0, timeout: float = 3600.0
-    ) -> dict:
-        return {}
 
 
 async def test_pipeline_gate_downgrades_low_trust(session_factory, session):

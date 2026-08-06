@@ -12,6 +12,9 @@ from upmovies.ingest.models import IngestRun, RunLLMUsage
 from upmovies.llm.client import Usage
 from upmovies.llm.pricing import price, rates_for
 
+# Every new usage row is sequential — the Message Batches path is gone (ADR-0005).
+_BATCHED = False
+
 
 async def create_run(session: AsyncSession, kind: str) -> UUID:
     """Open a new run in the `running` state and return its id. Caller commits."""
@@ -80,19 +83,22 @@ async def record_llm_usage(
     *,
     stage: str,
     model: str,
-    batched: bool,
     usage: Usage,
 ) -> None:
     """UPSERT the per-stage LLM usage + estimated dollar cost for a run. Prices `usage` via
     the shared pricing module (`rates_for(model)` raises KeyError on an unknown model) and
     writes one row per (run_id, stage), overwriting on the uq_run_llm_usage_run_stage
-    conflict so a stage re-run refreshes rather than duplicates. Caller owns the commit."""
-    cost = Decimal(str(price(usage, rates_for(model), batch=batched)))
+    conflict so a stage re-run refreshes rather than duplicates. Caller owns the commit.
+
+    `batched` is written as a constant `False`: the Message Batches path was removed
+    (ADR-0005) so no new row can be batched, but the column stays because historical rows
+    recorded under batch mode must keep pricing correctly."""
+    cost = Decimal(str(price(usage, rates_for(model), batch=_BATCHED)))
     stmt = pg_insert(RunLLMUsage).values(
         run_id=run_id,
         stage=stage,
         model=model,
-        batched=batched,
+        batched=_BATCHED,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cache_read_input_tokens=usage.cache_read_input_tokens,
@@ -103,7 +109,7 @@ async def record_llm_usage(
         constraint="uq_run_llm_usage_run_stage",
         set_={
             "model": model,
-            "batched": batched,
+            "batched": _BATCHED,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "cache_read_input_tokens": usage.cache_read_input_tokens,

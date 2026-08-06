@@ -8,42 +8,22 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import _cluster_stage_sequential, run_link_ingest
-from upmovies.llm.client import BatchResult, Usage
+from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, Story
 
 
 class FakeClient:
-    """Serves both paths. `complete` (sequential Stage 1 + Stage 2) and `complete_batch`
-    (batched Stage 1) route on the same `_decide` so outcomes are path-identical."""
+    """Serves Stage 1 (link) and Stage 2 (cluster) off the same `_decide`, recording every
+    call's system blocks, messages, and max_tokens."""
 
     def __init__(self):
         self.complete_calls: list[dict] = []
-        self.batch_requests: list | None = None
-        self.cluster_batch_requests: list | None = None
-
-    async def complete(self, *, model, system, messages, max_tokens=4096) -> str:
-        self.complete_calls.append({"system": system, "messages": messages})
-        return self._decide(system, messages)
 
     async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        self.complete_calls.append({"system": system, "messages": messages})
+        self.complete_calls.append(
+            {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
+        )
         return self._decide(system, messages), Usage()
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        reqs = list(requests)
-        if reqs and "entity-linking classifier" in reqs[0].system[0]["text"]:
-            self.batch_requests = reqs  # Stage-1 link batch
-        else:
-            self.cluster_batch_requests = reqs  # Stage-2 cluster batch
-        return {
-            r.custom_id: BatchResult(
-                custom_id=r.custom_id,
-                ok=True,
-                text=self._decide(r.system, r.messages),
-                usage=Usage(),
-            )
-            for r in reqs
-        }
 
     def _decide(self, system, messages) -> str:
         if "entity-linking classifier" in system[0]["text"]:
@@ -67,6 +47,20 @@ class FakeClient:
         )
 
 
+def _link_calls(client) -> list[dict]:
+    return [
+        c for c in client.complete_calls if "entity-linking classifier" in c["system"][0]["text"]
+    ]
+
+
+def _cluster_calls(client) -> list[dict]:
+    return [
+        c
+        for c in client.complete_calls
+        if "entity-linking classifier" not in c["system"][0]["text"]
+    ]
+
+
 async def _story(url, *, published_offset_days, status="pending", title="Runner news"):
     now = datetime.now(UTC)
     return Story(
@@ -79,19 +73,7 @@ async def _story(url, *, published_offset_days, status="pending", title="Runner 
     )
 
 
-async def _run(
-    session,
-    run_id,
-    *,
-    recency_days=45,
-    use_batches=False,
-    cluster_use_batches=None,
-    batch_size=10,
-    client=None,
-):
-    kwargs = {}
-    if cluster_use_batches is not None:
-        kwargs["cluster_use_batches"] = cluster_use_batches
+async def _run(session, run_id, *, recency_days=45, batch_size=10, client=None):
     return await run_link_ingest(
         session_factory=lambda: session,
         client=client or FakeClient(),
@@ -101,13 +83,10 @@ async def _run(
         recency_days=recency_days,
         batch_size=batch_size,
         floor=0.7,
-        use_batches=use_batches,
-        **kwargs,
     )
 
 
-@pytest.mark.parametrize("use_batches,cluster_use_batches", [(False, False), (True, True)])
-async def test_links_then_clusters_recent_pending(session, use_batches, cluster_use_batches):
+async def test_links_then_clusters_recent_pending(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -121,9 +100,7 @@ async def test_links_then_clusters_recent_pending(session, use_batches, cluster_
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(
-        session, run_id, use_batches=use_batches, cluster_use_batches=cluster_use_batches
-    )
+    result = await _run(session, run_id)
 
     assert result.linked == 1
     rows = {
@@ -157,8 +134,7 @@ async def test_links_then_clusters_recent_pending(session, use_batches, cluster_
     )
 
 
-@pytest.mark.parametrize("use_batches,cluster_use_batches", [(False, False), (True, True)])
-async def test_rerun_is_noop_when_fully_processed(session, use_batches, cluster_use_batches):
+async def test_rerun_is_noop_when_fully_processed(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -166,14 +142,11 @@ async def test_rerun_is_noop_when_fully_processed(session, use_batches, cluster_
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(
-        session, run_id, use_batches=use_batches, cluster_use_batches=cluster_use_batches
-    )
+    result = await _run(session, run_id)
     assert result.linked == 0 and result.rejected == 0
 
 
-@pytest.mark.parametrize("use_batches", [False, True])
-async def test_link_window_of_four_includes_story_past_the_feed_window(session, use_batches):
+async def test_link_window_of_four_includes_story_past_the_feed_window(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -190,7 +163,7 @@ async def test_link_window_of_four_includes_story_past_the_feed_window(session, 
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    result = await _run(session, run_id, recency_days=4, use_batches=use_batches)
+    result = await _run(session, run_id, recency_days=4)
 
     assert result.linked == 1
     rows = {
@@ -206,41 +179,38 @@ async def test_link_window_of_four_includes_story_past_the_feed_window(session, 
     assert rows["https://e/past"].link_status == "pending"
 
 
-class _TaggedFailBatchClient(FakeClient):
-    """Fails (or corrupts) the batched chunk whose payload contains a 'FAIL'-titled story."""
+class _TaggedFailClient(FakeClient):
+    """Fails (or corrupts) the Stage-1 chunk whose payload contains a 'FAIL'-titled story."""
 
     def __init__(self, *, unparseable=False):
         super().__init__()
         self._unparseable = unparseable
 
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        reqs = list(requests)
-        if not (reqs and "entity-linking classifier" in reqs[0].system[0]["text"]):
-            return await super().complete_batch(reqs)  # Stage-2 cluster batch: serve normally
-        self.batch_requests = reqs
-        out = {}
-        for r in reqs:
-            payload = json.loads(r.messages[0]["content"])
-            stories = payload["stories"]
-            tainted = any(st["title"].startswith("FAIL") for st in stories)
-            if tainted and not self._unparseable:
-                out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id, ok=False, error_type="errored", error_message="boom"
-                )
-            elif tainted:
-                out[r.custom_id] = BatchResult(custom_id=r.custom_id, ok=True, text="not json")
-            else:
-                out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id,
-                    ok=True,
-                    text=self._decide(r.system, r.messages),
-                    usage=Usage(),
-                )
-        return out
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        if "entity-linking classifier" in system[0]["text"]:
+            payload = json.loads(messages[0]["content"])
+            if any(st["title"].startswith("FAIL") for st in payload["stories"]):
+                if self._unparseable:
+                    self.complete_calls.append(
+                        {
+                            "model": model,
+                            "system": system,
+                            "messages": messages,
+                            "max_tokens": max_tokens,
+                        }
+                    )
+                    return "not json", Usage()
+                raise RuntimeError("boom")
+        return await super().complete_with_usage(
+            model=model, system=system, messages=messages, max_tokens=max_tokens
+        )
 
 
 @pytest.mark.parametrize("unparseable", [False, True])
-async def test_batched_failed_chunk_stays_pending_others_commit(session, unparseable):
+async def test_failed_chunk_stays_pending_others_commit(session, unparseable):
+    """One chunk's failure — an API error or an unparseable reply — must not roll back or
+    reject the chunks that succeeded. The failed chunk's stories stay `pending` so the next
+    run retries them."""
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -256,11 +226,7 @@ async def test_batched_failed_chunk_stays_pending_others_commit(session, unparse
 
     # batch_size=1 → one chunk per story, so exactly the 'FAIL' chunk fails.
     result = await _run(
-        session,
-        run_id,
-        use_batches=True,
-        batch_size=1,
-        client=_TaggedFailBatchClient(unparseable=unparseable),
+        session, run_id, batch_size=1, client=_TaggedFailClient(unparseable=unparseable)
     )
 
     assert result.linked == 1
@@ -283,71 +249,15 @@ async def test_batched_failed_chunk_stays_pending_others_commit(session, unparse
         )
     ).scalar_one()
     assert run.status == "succeeded"
-
-
-# ---------------------------------------------------------------------------
-# Task 5: Whole-batch submit failure
-# ---------------------------------------------------------------------------
-
-
-class _RaisingBatchClient(FakeClient):
-    """Simulates a batch poll that times out before reaching 'ended' status."""
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        raise TimeoutError("batch never reached 'ended'")
-
-
-async def test_batched_whole_submit_failure_propagates_and_leaves_pending(session):
-    """A whole-batch failure is unrecoverable: no chunk got a result, so there is nothing to
-    salvage. It must propagate rather than be swallowed — swallowing let run_link_ingest
-    finalize 'succeeded' with 0 linked, which let the daily chain run synthesize over
-    unlinked stories and ping the deadman green. The counters are still recorded, and the
-    stories stay pending so a later run retries them."""
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    session.add_all([await _story("https://e/x", published_offset_days=1)])
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    with pytest.raises(TimeoutError):
-        await _run(
-            session,
-            run_id,
-            use_batches=True,
-            cluster_use_batches=True,
-            client=_RaisingBatchClient(),
-        )
-
-    rows = {
-        s.url: s
-        for s in (
-            await session.execute(select(Story), execution_options={"populate_existing": True})
-        )
-        .scalars()
-        .all()
-    }
-    assert rows["https://e/x"].link_status == "pending"
-
-    run = (
-        await session.execute(
-            select(IngestRun).where(IngestRun.id == run_id),
-            execution_options={"populate_existing": True},
-        )
-    ).scalar_one()
-    # run_link_ingest does not finalize on this path — the stage runner owns that
-    # (see test_link_stage_marks_run_failed_on_batch_timeout in test_pipeline_run.py).
-    assert run.status == "running"
     assert run.items_failed == 1
 
 
 # ---------------------------------------------------------------------------
-# Task 6: Request mapping (custom_id, cache_control, max_tokens)
+# Request mapping (cache_control, max_tokens, model)
 # ---------------------------------------------------------------------------
 
 
-async def test_batched_request_mapping(session):
+async def test_link_request_mapping(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -362,107 +272,17 @@ async def test_batched_request_mapping(session):
     await session.commit()
 
     client = FakeClient()
-    await _run(session, run_id, use_batches=True, batch_size=1, client=client)
+    await _run(session, run_id, batch_size=1, client=client)
 
-    reqs = client.batch_requests
-    assert reqs is not None
-    assert {r.custom_id for r in reqs} == {"0", "1"}  # set of chunk indices
-    for r in reqs:
-        assert r.model == "claude-haiku-4-5"
-        assert r.max_tokens == 2048  # == linker._MAX_TOKENS, for parity with the sequential path
-        assert r.system[0]["cache_control"] == {"type": "ephemeral"}
-        assert "entity-linking classifier" in r.system[0]["text"]
+    calls = _link_calls(client)
+    assert len(calls) == 2  # one call per chunk
+    for c in calls:
+        assert c["model"] == "claude-haiku-4-5"
+        assert c["max_tokens"] == 2048  # == linker._MAX_TOKENS
+        assert c["system"][0]["cache_control"] == {"type": "ephemeral"}
 
 
-# ---------------------------------------------------------------------------
-# Task 7: Flag routing (each path uses only its own client surface for Stage 1)
-# ---------------------------------------------------------------------------
-
-
-def _stage1_complete_calls(client) -> int:
-    return sum(
-        1 for c in client.complete_calls if "entity-linking classifier" in c["system"][0]["text"]
-    )
-
-
-async def test_flag_off_uses_sequential_only(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    session.add_all([await _story("https://e/x", published_offset_days=1)])
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    client = FakeClient()
-    await _run(session, run_id, use_batches=False, client=client)
-
-    assert client.batch_requests is None  # complete_batch never called
-    assert _stage1_complete_calls(client) == 1  # Stage 1 went through complete()
-
-
-async def test_flag_on_uses_batch_for_stage1(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    session.add_all([await _story("https://e/x", published_offset_days=1)])
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    client = FakeClient()
-    await _run(session, run_id, use_batches=True, cluster_use_batches=True, client=client)
-
-    assert client.batch_requests is not None  # Stage 1 went through complete_batch()
-    assert _stage1_complete_calls(client) == 0  # no Stage-1 complete() call
-    assert client.cluster_batch_requests is not None  # Stage 2 also went through complete_batch()
-
-
-async def test_link_batched_cluster_sequential_are_independent(session):
-    """link batches, cluster sequential — proves the two flags are independent."""
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    session.add_all([await _story("https://e/x", published_offset_days=1)])
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    client = FakeClient()
-    await _run(session, run_id, use_batches=True, cluster_use_batches=False, client=client)
-
-    assert client.batch_requests is not None  # Stage 1 used the batch surface
-    assert client.cluster_batch_requests is None  # Stage 2 did NOT use the batch surface
-    # Stage 2 went through complete(): a non-link complete() call was made.
-    assert any(
-        "entity-linking classifier" not in c["system"][0]["text"] for c in client.complete_calls
-    )
-
-
-async def test_link_sequential_cluster_batched_are_independent(session):
-    """link sequential, cluster batched — the mirror image."""
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    session.add_all([await _story("https://e/x", published_offset_days=1)])
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    client = FakeClient()
-    await _run(session, run_id, use_batches=False, cluster_use_batches=True, client=client)
-
-    assert client.batch_requests is None  # Stage 1 did NOT use the batch surface
-    assert _stage1_complete_calls(client) == 1  # Stage 1 went through complete()
-    assert client.cluster_batch_requests is not None  # Stage 2 used the batch surface
-
-
-# ---------------------------------------------------------------------------
-# Task 7: Cluster batch request mapping
-# ---------------------------------------------------------------------------
-
-
-async def test_batched_cluster_request_mapping(session):
+async def test_cluster_request_mapping(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -472,18 +292,14 @@ async def test_batched_cluster_request_mapping(session):
     await session.commit()
 
     client = FakeClient()
-    await _run(session, run_id, use_batches=True, cluster_use_batches=True, client=client)
+    await _run(session, run_id, client=client)
 
-    reqs = client.cluster_batch_requests
-    assert reqs is not None
-    assert {r.custom_id for r in reqs} == {
-        str(film.id)
-    }  # one cluster request per film, keyed by id
-    for r in reqs:
-        assert r.model == "claude-sonnet-4-6"
-        assert r.max_tokens == 4096
-        assert "cache_control" not in r.system[0]
-        assert "distinct EVENTS" in r.system[0]["text"]
+    calls = _cluster_calls(client)
+    assert len(calls) == 1  # one cluster call per film
+    assert calls[0]["model"] == "claude-sonnet-4-6"
+    assert calls[0]["max_tokens"] == 4096
+    assert "cache_control" not in calls[0]["system"][0]
+    assert "distinct EVENTS" in calls[0]["system"][0]["text"]
 
 
 async def test_run_link_ingest_threads_cluster_max_tokens(session):
@@ -505,57 +321,40 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
         recency_days=45,
         batch_size=1,
         floor=0.7,
-        use_batches=True,
-        cluster_use_batches=True,
         cluster_max_tokens=7777,
     )
 
-    reqs = client.cluster_batch_requests
-    assert reqs is not None
-    assert all(r.max_tokens == 7777 for r in reqs)
+    assert all(c["max_tokens"] == 7777 for c in _cluster_calls(client))
 
 
 # ---------------------------------------------------------------------------
-# Task 7: Batched cluster failure isolation
+# Cluster failure isolation
 # ---------------------------------------------------------------------------
 
 
-class _ClusterFailBatchClient:
-    """Stage-level fake: serves cluster batches, failing the film whose title starts 'FAIL'."""
+class _ClusterFailClient:
+    """Stage-level fake: serves cluster calls, failing the film whose title starts 'FAIL'."""
 
-    def __init__(self):
-        self.cluster_batch_requests: list | None = None
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        reqs = list(requests)
-        self.cluster_batch_requests = reqs
-        out = {}
-        for r in reqs:
-            payload = json.loads(r.messages[0]["content"])
-            if payload["film"]["title"].startswith("FAIL"):
-                out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id, ok=False, error_type="errored", error_message="boom"
-                )
-            else:
-                new_ns = [s["n"] for s in payload["new_stories"]]
-                out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id,
-                    ok=True,
-                    text=json.dumps(
+    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        payload = json.loads(messages[0]["content"])
+        if payload["film"]["title"].startswith("FAIL"):
+            raise RuntimeError("boom")
+        new_ns = [s["n"] for s in payload["new_stories"]]
+        return (
+            json.dumps(
+                {
+                    "events": [
                         {
-                            "events": [
-                                {
-                                    "existing": None,
-                                    "type": "trailer",
-                                    "confidence": "confirmed",
-                                    "stories": new_ns,
-                                }
-                            ]
+                            "existing": None,
+                            "type": "trailer",
+                            "confidence": "confirmed",
+                            "stories": new_ns,
                         }
-                    ),
-                    usage=Usage(),
-                )
-        return out
+                    ]
+                }
+            ),
+            Usage(),
+        )
 
 
 async def _linked_unclustered(session, film, url):
@@ -573,9 +372,7 @@ async def _linked_unclustered(session, film, url):
     return s
 
 
-async def test_batched_cluster_failure_is_isolated_per_film(session):
-    from upmovies.link.pipeline import _cluster_stage_batched
-
+async def test_cluster_failure_is_isolated_per_film(session):
     ok_film = Film(tmdb_id=1, title="Runner")
     fail_film = Film(tmdb_id=2, title="FAIL Movie")
     session.add_all([ok_film, fail_film])
@@ -586,9 +383,9 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
     run_id = await create_run(session, kind="link")
     await session.commit()
 
-    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_batched(
+    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_sequential(
         session_factory=lambda: session,
-        client=_ClusterFailBatchClient(),
+        client=_ClusterFailClient(),
         run_id=run_id,
         model="cluster-m",
         film_ids=[ok_film.id, fail_film.id],
@@ -611,49 +408,6 @@ async def test_batched_cluster_failure_is_isolated_per_film(session):
     assert ok_story.id in members and fail_story.id not in members
 
 
-class _RaisingClusterBatchClient:
-    """Simulates a cluster batch poll that times out before reaching 'ended' status."""
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        raise TimeoutError("cluster batch never reached 'ended'")
-
-
-async def test_cluster_whole_batch_failure_propagates(session):
-    """Same contract as the Stage-1 link batch: a per-film failure is isolated (test above),
-    but a whole-batch failure yields no results at all and must fail the run rather than let
-    run_link_ingest finalize 'succeeded' with zero events clustered."""
-    from upmovies.link.pipeline import _cluster_stage_batched
-
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    await _linked_unclustered(session, film, "https://e/ok")
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    with pytest.raises(TimeoutError):
-        await _cluster_stage_batched(
-            session_factory=lambda: session,
-            client=_RaisingClusterBatchClient(),
-            run_id=run_id,
-            model="cluster-m",
-            film_ids=[film.id],
-            attach_limit=45,
-            cluster_max_tokens=4096,
-            run_date=date(2026, 1, 1),
-        )
-
-    run = (
-        await session.execute(
-            select(IngestRun).where(IngestRun.id == run_id),
-            execution_options={"populate_existing": True},
-        )
-    ).scalar_one()
-    assert run.status == "running"  # the stage runner finalizes, not the pipeline
-    assert run.items_failed == 1
-
-
 # ---------------------------------------------------------------------------
 # NEU-365: cluster parse failure surfaces as items_failed (not silent drop)
 # ---------------------------------------------------------------------------
@@ -667,8 +421,8 @@ class _UnparseableClusterClient:
         return "not json {", Usage()
 
 
-async def test_cluster_parse_failure_surfaces_as_failed_sequential(session):
-    """Sequential path: a ClusterParseError increments items_failed on the run."""
+async def test_cluster_parse_failure_surfaces_as_failed(session):
+    """A ClusterParseError increments items_failed on the run."""
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -680,62 +434,6 @@ async def test_cluster_parse_failure_surfaces_as_failed_sequential(session):
     events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_sequential(
         session_factory=lambda: session,
         client=_UnparseableClusterClient(),
-        run_id=run_id,
-        model="cluster-m",
-        film_ids=[film.id],
-        attach_limit=45,
-        cluster_max_tokens=4096,
-        run_date=date(2026, 1, 1),
-    )
-
-    assert events_created == 0
-    assert stories_clustered == 0
-
-    run = (
-        await session.execute(
-            select(IngestRun).where(IngestRun.id == run_id),
-            execution_options={"populate_existing": True},
-        )
-    ).scalar_one()
-    assert run.items_failed == 1
-
-
-class _UnparseableClusterBatchClient:
-    """Returns an unparseable (but ok=True) BatchResult for every cluster film,
-    so apply_cluster_decisions raises ClusterParseError in the batched path."""
-
-    def __init__(self):
-        self.cluster_batch_requests: list | None = None
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        reqs = list(requests)
-        self.cluster_batch_requests = reqs
-        return {
-            r.custom_id: BatchResult(
-                custom_id=r.custom_id,
-                ok=True,
-                text="not json {",
-                usage=Usage(),
-            )
-            for r in reqs
-        }
-
-
-async def test_cluster_parse_failure_surfaces_as_failed_batched(session):
-    """Batched path: a ClusterParseError increments items_failed on the run."""
-    from upmovies.link.pipeline import _cluster_stage_batched
-
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    await _linked_unclustered(session, film, "https://e/1")
-    await session.commit()
-    run_id = await create_run(session, kind="link")
-    await session.commit()
-
-    events_created, stories_clustered, stories_rejected, _usage = await _cluster_stage_batched(
-        session_factory=lambda: session,
-        client=_UnparseableClusterBatchClient(),
         run_id=run_id,
         model="cluster-m",
         film_ids=[film.id],

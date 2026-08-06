@@ -74,20 +74,6 @@ def test_settings_ingestion_overrides_from_env(monkeypatch):
     assert s.tmdb_release_window_future_days == 365
 
 
-def test_settings_link_use_batches_defaults_true(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.delenv("LINK_USE_BATCHES", raising=False)
-    s = Settings()  # type: ignore[call-arg]
-    assert s.link_use_batches is True
-
-
-def test_settings_link_use_batches_override_from_env(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("LINK_USE_BATCHES", "true")
-    s = Settings()  # type: ignore[call-arg]
-    assert s.link_use_batches is True
-
-
 def test_settings_link_batch_size_default(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.delenv("LINK_BATCH_SIZE", raising=False)
@@ -102,38 +88,21 @@ def test_settings_link_batch_size_override_from_env(monkeypatch):
     assert s.link_batch_size == 10
 
 
-def test_settings_cluster_use_batches_defaults_true(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.delenv("CLUSTER_USE_BATCHES", raising=False)
-    s = Settings()  # type: ignore[call-arg]
-    assert s.cluster_use_batches is True
-
-
-def test_settings_cluster_use_batches_override_from_env(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("CLUSTER_USE_BATCHES", "false")
-    s = Settings()  # type: ignore[call-arg]
-    assert s.cluster_use_batches is False
-
-
 def test_settings_summary_defaults(monkeypatch):
     _set_required(monkeypatch)
-    for key in ("SUMMARY_MODEL", "SUMMARY_USE_BATCHES", "SUMMARY_PROMPT_VERSION"):
+    for key in ("SUMMARY_MODEL", "SUMMARY_PROMPT_VERSION"):
         monkeypatch.delenv(key, raising=False)
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-haiku-4-5"
-    assert s.summary_use_batches is True
     assert s.summary_prompt_version == "9"
 
 
 def test_settings_summary_overrides_from_env(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("SUMMARY_MODEL", "claude-sonnet-4-6")
-    monkeypatch.setenv("SUMMARY_USE_BATCHES", "false")
     monkeypatch.setenv("SUMMARY_PROMPT_VERSION", "2")
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-sonnet-4-6"
-    assert s.summary_use_batches is False
     assert s.summary_prompt_version == "2"
 
 

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
-from upmovies.llm.client import BatchResult, Usage
+from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -17,17 +17,6 @@ class UsageSummaryClient:
 
     async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
         return json.dumps({"summary": "A neutral update."}), self._usage
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        return {
-            r.custom_id: BatchResult(
-                custom_id=r.custom_id,
-                ok=True,
-                text=json.dumps({"summary": "A neutral update."}),
-                usage=self._usage,
-            )
-            for r in requests
-        }
 
 
 async def _event(session):
@@ -53,7 +42,7 @@ async def _event(session):
     return event
 
 
-async def test_run_synthesize_records_summarize_usage_sequential(session):
+async def test_run_synthesize_records_summarize_usage(session):
     await _event(session)
     await session.commit()
     run_id = await create_run(session, kind="synthesize")
@@ -65,7 +54,6 @@ async def test_run_synthesize_records_summarize_usage_sequential(session):
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version="1",
-        use_batches=False,
     )
 
     row = (
@@ -76,29 +64,7 @@ async def test_run_synthesize_records_summarize_usage_sequential(session):
     ).scalar_one()
     assert row.stage == "summarize"
     assert row.model == "claude-haiku-4-5"
+    # The Message Batches path is gone (ADR-0005) — every new row is sequential.
     assert row.batched is False
     assert row.input_tokens == 42
     assert row.output_tokens == 8
-
-
-async def test_run_synthesize_records_summarize_usage_batched(session):
-    await _event(session)
-    await session.commit()
-    run_id = await create_run(session, kind="synthesize")
-    await session.commit()
-
-    await run_synthesize_ingest(
-        session_factory=lambda: session,
-        client=UsageSummaryClient(Usage(input_tokens=5)),
-        run_id=run_id,
-        model="claude-haiku-4-5",
-        prompt_version="1",
-        use_batches=True,
-    )
-
-    row = (
-        await session.execute(select(RunLLMUsage).where(RunLLMUsage.run_id == run_id))
-    ).scalar_one()
-    assert row.stage == "summarize"
-    assert row.batched is True
-    assert row.input_tokens == 5
