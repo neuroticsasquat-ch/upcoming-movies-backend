@@ -1,6 +1,20 @@
 # Run ingestion as in-process Coolify scheduled tasks, not HTTP-polled GitHub Actions
 
-**Status:** accepted
+**Status:** accepted — batch-mode reasoning amended 2026-08-05, see ADR-0005
+
+> **Amendment (2026-08-05).** This ADR's scheduling decision stands unchanged. Its
+> **batch-mode** reasoning does not, and was self-contradictory as written: the Decision
+> section concluded batch mode "stays on for its ~50% cost saving", while Considered
+> alternatives listed turning it off as available "if latency ever matters more than cost".
+>
+> Both readings are now obsolete. Measurement showed the 50% discount was more than eaten by
+> cache thrash — batch runs outlive the 5-minute ephemeral cache TTL, giving read/write
+> ratios of 0.04–3.04 against 12–18x in standard mode. Production has run
+> `*_USE_BATCHES=false` since. The batch path is being deleted outright; see
+> [ADR-0005](0005-remove-message-batches-path.md).
+>
+> Read the two paragraphs below that mention batch mode as historical context for why the
+> scheduler changed, not as current guidance.
 
 ## Context
 
