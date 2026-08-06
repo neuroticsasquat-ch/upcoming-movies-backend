@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.ingest.runs import (
     StageCounts,
     finalize_run,
+    record_llm_calls,
     record_llm_usage,
     record_progress,
     total_failure_error,
@@ -24,7 +25,7 @@ from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import Completer, link_story_batch
 from upmovies.link.roster import Roster, build_roster
 from upmovies.link.source_stage import run_source_quality_stage
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallLog, Usage
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -63,30 +64,41 @@ async def _link_stage_sequential(
     linked = rejected = failed_stories = 0
     total_usage = Usage()
     for batch_ids in _chunks(pending_ids, batch_size):
+        # Owned outside the try so a batch that fails *after* its call still records what that
+        # call cost — both as an `llm_call` row and in the stage aggregate (NEU-975).
+        calls = CallLog()
         try:
             async with _owned_session(session_factory) as s:
                 stories = (
                     (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
                 )
-                batch, usage = await link_story_batch(
+                batch = await link_story_batch(
                     client=client,
                     model=model,
                     roster=roster,
                     stories=list(stories),
                     floor=floor,
                     run_date=run_date,
+                    calls=calls,
                 )
                 await record_progress(s, run_id, processed_delta=batch.linked + batch.rejected)
                 await s.commit()
             linked += batch.linked
             rejected += batch.rejected
-            total_usage += usage
         except Exception:
             log.exception("link batch of %d stories failed", len(batch_ids))
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=len(batch_ids))
                 await s.commit()
             failed_stories += len(batch_ids)
+        finally:
+            total_usage += calls.usage
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s, run_id, stage="link", model=model, results=calls.results
+                    )
+                    await s.commit()
     return (
         linked,
         rejected,
@@ -113,9 +125,10 @@ async def _cluster_stage_sequential(
     films_ok = films_failed = 0
     total_usage = Usage()
     for film_id in film_ids:
+        calls = CallLog()  # see `_link_stage_sequential` — owned outside the try on purpose
         try:
             async with _owned_session(session_factory) as s:
-                cluster, usage = await cluster_film_events(
+                cluster = await cluster_film_events(
                     s,
                     client=client,
                     model=model,
@@ -126,6 +139,7 @@ async def _cluster_stage_sequential(
                     dedup_days=dedup_days,
                     release_change_window_days=release_change_window_days,
                     run_date=run_date,
+                    calls=calls,
                 )
                 # One film, counted the same way the catch-block counts a failure, so a clean
                 # cluster stage no longer persists as 0 processed / 0 failed — which on the
@@ -137,7 +151,6 @@ async def _cluster_stage_sequential(
             events_created += cluster.events_created
             stories_clustered += cluster.stories_clustered
             stories_rejected += cluster.stories_rejected
-            total_usage += usage
             films_ok += 1
         except Exception:
             log.exception("clustering failed for film %s", film_id)
@@ -145,6 +158,14 @@ async def _cluster_stage_sequential(
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
             films_failed += 1
+        finally:
+            total_usage += calls.usage
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s, run_id, stage="cluster", model=model, results=calls.results
+                    )
+                    await s.commit()
     return (
         events_created,
         stories_clustered,
@@ -209,6 +230,7 @@ async def run_link_ingest(
         source_result, source_usage = await run_source_quality_stage(
             session_factory=session_factory,
             client=client,
+            run_id=run_id,
             judge_model=source_judge_model,
             unresolved_tier=unresolved_tier,
         )

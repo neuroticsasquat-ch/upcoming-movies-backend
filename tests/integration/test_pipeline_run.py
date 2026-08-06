@@ -213,7 +213,7 @@ async def test_run_daily_aborts_when_link_stage_totally_fails(
     await session.commit()
 
     class _OutageClient:
-        async def complete_with_usage(self, **kwargs):
+        async def complete_call(self, **kwargs):
             raise RuntimeError("total outage")
 
     order: list[str] = []
@@ -283,7 +283,7 @@ async def test_run_daily_continues_past_a_lone_cluster_failure(
     await session.commit()
 
     class _OutageClient:
-        async def complete_with_usage(self, **kwargs):
+        async def complete_call(self, **kwargs):
             raise RuntimeError("this one film never clusters")
 
     order: list[str] = []

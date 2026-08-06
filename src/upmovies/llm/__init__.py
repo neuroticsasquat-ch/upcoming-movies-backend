@@ -1,4 +1,7 @@
 from upmovies.llm.client import AnthropicClient as AnthropicClient
+from upmovies.llm.client import CallLog as CallLog
+from upmovies.llm.client import CallResult as CallResult
+from upmovies.llm.client import Usage as Usage
 from upmovies.llm.client import cached_system_block as cached_system_block
 from upmovies.llm.pricing import HAIKU_4_5 as HAIKU_4_5
 from upmovies.llm.pricing import SONNET_4_6 as SONNET_4_6

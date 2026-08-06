@@ -1,7 +1,7 @@
 """Run-tracking for the ingestion pipelines: the DB helpers (pure I/O — callers own commits)
 plus `StageCounts`, the pure rule a pipeline consults to decide a run's terminal status."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -12,12 +12,16 @@ from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.ingest.models import IngestRun, RunLLMUsage
-from upmovies.llm.client import Usage
+from upmovies.ingest.models import IngestRun, LLMCall, RunLLMUsage
+from upmovies.llm.client import CallResult, Usage
 from upmovies.llm.pricing import price, rates_for
 
 # Every new usage row is sequential — the Message Batches path is gone (ADR-0005).
 _BATCHED = False
+
+# Every call still goes to Anthropic; the gateway that makes this vary is M4 (NEU-980). Written
+# per row rather than assumed so the pre-gateway baseline is comparable to what follows it.
+_PROVIDER = "anthropic"
 
 
 class StageKind(StrEnum):
@@ -216,3 +220,43 @@ async def record_llm_usage(
         },
     )
     await session.execute(stmt)
+
+
+async def record_llm_calls(
+    session: AsyncSession,
+    run_id: UUID,
+    *,
+    stage: str,
+    model: str,
+    results: Sequence[CallResult],
+) -> None:
+    """Insert one `ingest.llm_call` row per logical call in `results`, priced by the same
+    shared pricing module `record_llm_usage` uses. Caller owns the commit.
+
+    `stage` and `run_id` are the two things the LLM adapter cannot know, which is exactly why
+    the write lives here and not in `llm/` — that package stays free of DB imports (spec §4).
+    A failed call is a row like any other: `ok=False` with an `error_type`, priced at whatever
+    tokens it managed to burn (zero, when the request never returned)."""
+    if not results:
+        return
+    rates = rates_for(model)
+    session.add_all(
+        LLMCall(
+            run_id=run_id,
+            stage=stage,
+            provider=_PROVIDER,
+            model=model,
+            input_tokens=r.usage.input_tokens,
+            output_tokens=r.usage.output_tokens,
+            cache_read_input_tokens=r.usage.cache_read_input_tokens,
+            cache_creation_input_tokens=r.usage.cache_creation_input_tokens,
+            latency_ms=r.latency_ms,
+            attempts=r.attempts,
+            ok=r.ok,
+            error_type=r.error_type,
+            parse_ok=r.parse_ok,
+            cost_usd=Decimal(str(price(r.usage, rates, batch=_BATCHED))),
+        )
+        for r in results
+    )
+    await session.flush()

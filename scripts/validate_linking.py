@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from upmovies.link.metrics import compute_link_metrics, compute_news_value_metrics
 from upmovies.link.roster import build_roster
 from upmovies.link.validation import ValidationItem, load_validation_set
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm.client import AnthropicClient, CallLog
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
@@ -74,6 +74,7 @@ async def main(path: str) -> None:
                 client=client, model=settings.link_model, roster=roster,
                 stories=batch, floor=settings.link_confidence_floor,
                 run_date=datetime.now(UTC).date(),
+                calls=CallLog(),
             )
 
     # Non-'about' items have expected_film_tmdb_id=None; correct rejections count as TN

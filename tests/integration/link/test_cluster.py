@@ -14,19 +14,20 @@ from upmovies.link.cluster import (
     build_cluster_request,
     cluster_film_events,
 )
+from upmovies.llm.client import CallLog
 from upmovies.news.models import Event, EventStory, Story
 
 
 class FakeClient:
     def __init__(self, response: dict):
         self._response = response
-        self.calls: list[dict] = []
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        from upmovies.llm.client import Usage
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        from upmovies.llm.client import CallResult
 
-        self.calls.append({"system": system, "messages": messages})
-        return json.dumps(self._response), Usage()
+        self.requests.append({"system": system, "messages": messages})
+        return calls.record(CallResult(text=json.dumps(self._response)))
 
 
 async def _linked_story(session, film, url, *, title="Runner news"):
@@ -63,13 +64,14 @@ async def test_creates_new_event_for_unclustered_stories(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -98,13 +100,14 @@ async def test_attaches_to_existing_event(session):
     await session.commit()
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -130,16 +133,17 @@ async def test_noop_when_nothing_unclustered(session):
     await session.commit()
 
     client = FakeClient({"events": []})
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     assert result == result.__class__(0, 0)
-    assert client.calls == []  # short-circuits before calling the model
+    assert client.requests == []  # short-circuits before calling the model
 
 
 # ---------------------------------------------------------------------------
@@ -765,13 +769,14 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
     await session.commit()
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=25,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -829,6 +834,7 @@ async def test_release_date_event_persists_region(session):
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -951,6 +957,7 @@ async def test_non_release_date_event_ignores_region(session):
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1010,7 +1017,7 @@ async def test_new_trailer_merges_into_recent_existing_trailer(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1018,6 +1025,7 @@ async def test_new_trailer_merges_into_recent_existing_trailer(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1054,7 +1062,7 @@ async def test_new_trailer_outside_window_stays_separate(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1062,6 +1070,7 @@ async def test_new_trailer_outside_window_stays_separate(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1091,7 +1100,7 @@ async def test_new_first_look_merges_into_recent_existing_first_look(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1099,6 +1108,7 @@ async def test_new_first_look_merges_into_recent_existing_first_look(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1133,7 +1143,7 @@ async def test_duplicate_casting_within_window_not_merged(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1141,6 +1151,7 @@ async def test_duplicate_casting_within_window_not_merged(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1165,7 +1176,7 @@ async def test_two_new_trailer_groups_collapse_in_one_pass(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1173,6 +1184,7 @@ async def test_two_new_trailer_groups_collapse_in_one_pass(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1536,13 +1548,14 @@ async def test_casting_new_performer_creates_scoped_event(session):
             ]
         }
     )
-    result, _ = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1581,13 +1594,14 @@ async def test_casting_no_new_performer_drops(session):
             ]
         }
     )
-    result, _ = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1626,13 +1640,14 @@ async def test_casting_in_pass_dedup(session):
             ]
         }
     )
-    result, _ = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 

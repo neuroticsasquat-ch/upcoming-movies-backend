@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from upmovies.llm.client import CallLog
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
@@ -24,15 +25,15 @@ def _event(*, stories=None, event_type="casting", film_title="Runner"):
 class FakeCompleter:
     def __init__(self, response: str):
         self._response = response
-        self.calls: list[dict] = []
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        from upmovies.llm.client import Usage
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        from upmovies.llm.client import CallResult
 
-        self.calls.append(
+        self.requests.append(
             {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
         )
-        return self._response, Usage()
+        return calls.record(CallResult(text=self._response))
 
 
 def test_build_summary_request_plain_block_and_payload():
@@ -124,19 +125,20 @@ def test_parse_summary_rejects_code_fence_leak():
 async def test_summarize_event_returns_result_with_provenance():
     client = FakeCompleter('{"summary": "The studio confirmed a 2027 release."}')
     event = _event()
-    result, _usage = await summarize_event(
+    result = await summarize_event(
         client=client,
         model="claude-haiku-4-5",
         prompt_version="1",
         event=event,
         run_date=date(2026, 6, 25),
+        calls=CallLog(),
     )
     assert result.summary == "The studio confirmed a 2027 release."
     assert result.model == "claude-haiku-4-5"
     assert result.prompt_version == "1"
     assert result.source_updated_at == event.source_updated_at
     # max_tokens is pinned to the summarizer's own ceiling, not the client default
-    assert client.calls[0]["max_tokens"] == 256
+    assert client.requests[0]["max_tokens"] == 256
 
 
 async def test_summarize_event_prompt_includes_every_member_story():
@@ -149,9 +151,14 @@ async def test_summarize_event_prompt_includes_every_member_story():
         ]
     )
     await summarize_event(
-        client=client, model="m", prompt_version="1", event=event, run_date=date(2026, 6, 25)
+        client=client,
+        model="m",
+        prompt_version="1",
+        event=event,
+        run_date=date(2026, 6, 25),
+        calls=CallLog(),
     )
-    payload = json.loads(client.calls[0]["messages"][0]["content"])
+    payload = json.loads(client.requests[0]["messages"][0]["content"])
     assert [s["title"] for s in payload["stories"]] == ["A", "B", "C"]
     assert [s["source"] for s in payload["stories"]] == ["Deadline", "Variety", "THR"]
 

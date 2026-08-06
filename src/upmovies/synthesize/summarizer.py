@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol
 
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallLog, CallResult
 
 _DEK_MAX = 500
 _MAX_TOKENS = 256
@@ -123,14 +123,18 @@ class SummaryResult:
 
 
 class Completer(Protocol):
-    async def complete_with_usage(
+    """Structurally identical to `link.linker.Completer` — see its docstring for why usage
+    rides inside the recorded `CallResult`."""
+
+    async def complete_call(
         self,
         *,
         model: str,
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         max_tokens: int = ...,
-    ) -> tuple[str, "Usage"]: ...
+        calls: CallLog,
+    ) -> "CallResult": ...
 
 
 def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
@@ -221,19 +225,31 @@ def build_summary_request(
 
 
 async def summarize_event(
-    *, client: Completer, model: str, prompt_version: str, event: EventInput, run_date: date
-) -> tuple[SummaryResult, Usage]:
-    """Build the request, call `complete_with_usage` (max_tokens pinned to `_MAX_TOKENS`),
-    parse the JSON envelope, and bundle the provenance the caller persists into
-    `event_summary` alongside the call's token `Usage`."""
+    *,
+    client: Completer,
+    model: str,
+    prompt_version: str,
+    event: EventInput,
+    run_date: date,
+    calls: CallLog,
+) -> SummaryResult:
+    """Build the request, call `complete_call` (max_tokens pinned to `_MAX_TOKENS`), parse the
+    JSON envelope, and bundle the provenance the caller persists into `event_summary`. The
+    call — and its parse outcome, counting `parse_summary`'s recovery path as a success — is
+    recorded into `calls`."""
     system, messages = build_summary_request(event, run_date)
-    raw, usage = await client.complete_with_usage(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
+    result = await client.complete_call(
+        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS, calls=calls
     )
-    result = SummaryResult(
-        summary=parse_summary(raw),
+    try:
+        summary = parse_summary(result.text)
+    except (json.JSONDecodeError, ValueError):
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return SummaryResult(
+        summary=summary,
         model=model,
         prompt_version=prompt_version,
         source_updated_at=event.source_updated_at,
     )
-    return result, usage

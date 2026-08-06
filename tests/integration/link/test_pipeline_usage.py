@@ -7,7 +7,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallResult, Usage
 from upmovies.news.models import Story
 
 
@@ -18,8 +18,8 @@ class UsageFakeClient:
     def __init__(self, usage: Usage):
         self._usage = usage
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        return self._decide(system, messages), self._usage
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        return calls.record(CallResult(text=self._decide(system, messages), usage=self._usage))
 
     def _decide(self, system, messages) -> str:
         if "entity-linking classifier" in system[0]["text"]:

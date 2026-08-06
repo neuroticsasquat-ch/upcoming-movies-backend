@@ -8,19 +8,20 @@ from upmovies.link.linker import (
     link_story_batch,
 )
 from upmovies.link.roster import Roster, RosterEntry
+from upmovies.llm.client import CallLog
 from upmovies.news.models import Story
 
 
 class FakeClient:
     def __init__(self, response: str):
         self._response = response
-        self.calls: list[dict] = []
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        from upmovies.llm.client import Usage
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        from upmovies.llm.client import CallResult
 
-        self.calls.append({"model": model, "system": system, "messages": messages})
-        return self._response, Usage()
+        self.requests.append({"model": model, "system": system, "messages": messages})
+        return calls.record(CallResult(text=self._response))
 
 
 def _roster(film_id):
@@ -40,13 +41,14 @@ async def _run(response, *, floor=0.7):
     film_id = uuid4()
     story = _story()
     client = FakeClient(response(str(story.id)))
-    result, _usage = await link_story_batch(
+    result = await link_story_batch(
         client=client,
         model="m",
         roster=_roster(film_id),
         stories=[story],
         floor=floor,
         run_date=date(2026, 6, 25),
+        calls=CallLog(),
     )
     return story, film_id, client, result
 
@@ -94,7 +96,7 @@ async def test_roster_is_sent_as_cached_system_block():
     _, _, client, _ = await _run(
         lambda sid: json.dumps([{"id": sid, "film": None, "confidence": 0.0, "reason": "no-match"}])
     )
-    system = client.calls[0]["system"]
+    system = client.requests[0]["system"]
     assert system[0]["cache_control"] == {"type": "ephemeral"}
     assert "Runner" in system[0]["text"]
 

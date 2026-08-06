@@ -2,7 +2,8 @@
 (no DB); callers pass system content blocks + messages and get the response text back.
 Mirrors the TMDB client's shape: an async context manager that returns plain data."""
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -56,9 +57,90 @@ class Usage:
         )
 
 
+@dataclass(frozen=True)
+class CallResult:
+    """Everything one *logical* API call is worth recording — retries folded in, not split out.
+
+    `latency_ms` is total wall-clock for the logical call, retries included: that is the number
+    the pipeline actually experiences, and the one that decides whether a provider is viable for
+    a daily publish. `attempts` is kept separate so retry behaviour stays visible rather than
+    hidden inside the latency figure.
+
+    `parse_ok` is not the adapter's to fill in — the adapter has no idea whether the caller will
+    parse the text, let alone how. The call site stamps it via `CallLog.set_parse_ok` after its
+    own parse, and it stays None where no parse happens."""
+
+    text: str = ""
+    usage: Usage = Usage()
+    latency_ms: int = 0
+    attempts: int = 1
+    ok: bool = True
+    error_type: str | None = None
+    parse_ok: bool | None = None
+
+
+class CallLog:
+    """The per-unit-of-work accumulator a *stage* owns, passes down to the service function, and
+    persists afterwards.
+
+    Why a log rather than just returning `CallResult` upward: a call that fails must still be
+    recorded, and today's failure isolation depends on the exception continuing to propagate
+    from four call sites that each handle it differently. A returned value cannot do both. The
+    stage keeps the log outside its `try`, so whatever the call recorded survives the exception
+    and still becomes a row.
+
+    Deliberately DB-free (spec §4): it holds plain dataclasses, and `ingest.runs` is what turns
+    them into `ingest.llm_call` rows."""
+
+    def __init__(self) -> None:
+        self._results: list[CallResult] = []
+
+    def record(self, result: CallResult) -> CallResult:
+        """Append a result and hand it back, so an adapter can `return calls.record(...)`."""
+        self._results.append(result)
+        return result
+
+    def set_parse_ok(self, ok: bool) -> None:
+        """Stamp `parse_ok` on the most recently recorded call. Raises when nothing has been
+        recorded — parsing output that was never fetched is a programming error, not a NULL."""
+        if not self._results:
+            raise ValueError("set_parse_ok called before any call was recorded")
+        self._results[-1] = replace(self._results[-1], parse_ok=ok)
+
+    @property
+    def results(self) -> tuple[CallResult, ...]:
+        return tuple(self._results)
+
+    @property
+    def usage(self) -> Usage:
+        """Summed token usage across every recorded call — the single source the per-stage
+        `run_llm_usage` aggregate is built from, so it reconciles against the per-call rows by
+        construction rather than by coincidence."""
+        return sum((r.usage for r in self._results), Usage())
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def _attempts_from_error(exc: BaseException) -> int:
+    """How many HTTP attempts a failed call made. The SDK owns the retry loop until the shared
+    policy lands (spec §9) and stamps every attempt's request with `x-stainless-retry-count`;
+    reading it back off the failed request is the only place that count survives an exception.
+    Falls back to 1 when no request is attached."""
+    request = getattr(exc, "request", None)
+    header = getattr(request, "headers", {}).get("x-stainless-retry-count")
+    if not isinstance(header, str):
+        return 1
+    try:
+        return int(header) + 1
+    except ValueError:
+        return 1
+
+
 class AnthropicClient:
-    """Async context manager over `AsyncAnthropic`. Call surfaces: `complete` and
-    `complete_with_usage`."""
+    """Async context manager over `AsyncAnthropic`. Call surfaces: `complete`,
+    `complete_with_usage`, and `complete_call` (the telemetry-bearing one)."""
 
     def __init__(self, api_key: str, *, max_retries: int = 3, timeout: float = 60.0):
         self._client = AsyncAnthropic(api_key=api_key, max_retries=max_retries, timeout=timeout)
@@ -69,6 +151,50 @@ class AnthropicClient:
     async def __aexit__(self, *exc: object) -> None:
         await self._client.close()
 
+    async def complete_call(
+        self,
+        *,
+        model: str,
+        system: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        max_tokens: int = 4096,
+        calls: CallLog,
+    ) -> CallResult:
+        """One logical Messages call, recorded into `calls` and returned.
+
+        A provider failure is recorded with `ok=False` and an `error_type` *before* the
+        exception is re-raised, so the caller's failure handling is unchanged and the call
+        still leaves a telemetry row. Timing spans the whole logical call, SDK retries
+        included; `with_raw_response` is what makes the retry count observable."""
+        started = time.perf_counter()
+        try:
+            raw = await self._client.messages.with_raw_response.create(
+                model=model,
+                system=system,  # type: ignore[arg-type]
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=max_tokens,
+            )
+            # Deserialization is inside the try on purpose: a 200 whose body doesn't validate
+            # is still a call that was made, took time and cost tokens.
+            resp = raw.parse()
+            result = CallResult(
+                text=_concat_text(resp.content),
+                usage=Usage.from_sdk(resp.usage),
+                latency_ms=_elapsed_ms(started),
+                attempts=raw.retries_taken + 1,
+            )
+        except Exception as exc:
+            calls.record(
+                CallResult(
+                    latency_ms=_elapsed_ms(started),
+                    attempts=_attempts_from_error(exc),
+                    ok=False,
+                    error_type=type(exc).__name__,
+                )
+            )
+            raise
+        return calls.record(result)
+
     async def complete_with_usage(
         self,
         *,
@@ -78,14 +204,16 @@ class AnthropicClient:
         max_tokens: int = 4096,
     ) -> tuple[str, Usage]:
         """Like `complete` but also returns the call's token `Usage` (incl. cache reads/
-        writes). The measurement harness uses this; production callers use `complete`."""
-        resp = await self._client.messages.create(
+        writes). The measurement harness uses this; pipeline stages use `complete_call`, which
+        additionally records what `ingest.llm_call` needs."""
+        result = await self.complete_call(
             model=model,
-            system=system,  # type: ignore[arg-type]
-            messages=messages,  # type: ignore[arg-type]
+            system=system,
+            messages=messages,
             max_tokens=max_tokens,
+            calls=CallLog(),
         )
-        return _concat_text(resp.content), Usage.from_sdk(resp.usage)
+        return result.text, result.usage
 
     async def complete(
         self,

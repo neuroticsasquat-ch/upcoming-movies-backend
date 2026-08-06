@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import field_changed_at
 from upmovies.link.linker import Completer
-from upmovies.llm.client import Usage
+from upmovies.llm.client import CallLog
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.news.source_quality import (
     best_tier,
@@ -627,24 +627,34 @@ async def cluster_film_events(
     dedup_days: int = 14,
     release_change_window_days: int = 14,
     run_date: date,
-) -> tuple[ClusterResult, Usage]:
+    calls: CallLog,
+) -> ClusterResult:
+    """One clustering call for one film, recorded into `calls` — including the parse outcome,
+    which `cluster` turns into a `ClusterParseError` the pipeline isolates per film."""
     built = await build_cluster_request(
         session, film_id=film_id, attach_limit=attach_limit, run_date=run_date
     )
     if built is None:
-        return ClusterResult(0, 0), Usage()
+        return ClusterResult(0, 0)
     system, messages, plan = built
-    raw, usage = await client.complete_with_usage(
+    result = await client.complete_call(
         model=model,
         system=system,
         messages=messages,
         max_tokens=max_tokens,
+        calls=calls,
     )
-    return await apply_cluster_decisions(
-        session,
-        plan=plan,
-        raw=raw,
-        unresolved_tier=unresolved_tier,
-        dedup_days=dedup_days,
-        release_change_window_days=release_change_window_days,
-    ), usage
+    try:
+        clustered = await apply_cluster_decisions(
+            session,
+            plan=plan,
+            raw=result.text,
+            unresolved_tier=unresolved_tier,
+            dedup_days=dedup_days,
+            release_change_window_days=release_change_window_days,
+        )
+    except ClusterParseError:
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return clustered
