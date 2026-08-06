@@ -150,10 +150,10 @@ async def _cluster_stage_sequential(
         stories_clustered,
         stories_rejected,
         total_usage,
-        # Counted in films, not events: a film can cluster fine and yield no new event.
-        # Self-healing: an unclustered film is re-selected every run until it clusters, so a
-        # single failure must not fail the run (NEU-987).
-        StageCounts(processed=films_ok, failed=films_failed, self_healing=True),
+        # Counted in films, not events: a film can cluster fine and yield no new event. What a
+        # lone failure means here is settled once by STAGE_KINDS["cluster"] (NEU-987/NEU-988):
+        # an unclustered film is re-selected every run until it clusters.
+        StageCounts(processed=films_ok, failed=films_failed),
     )
 
 
