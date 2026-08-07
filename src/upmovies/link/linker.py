@@ -1,6 +1,12 @@
-"""Stage 1 link service: classify a batch of stories against the cached roster and apply
-the confidence floor, mutating each Story's link state in place. The caller owns the
-session/commit. The LLM client is injected (Completer) so this is unit-testable with a fake."""
+"""Stage 1 link service: classify a batch of stories against a set of tracked films and
+apply the confidence floor, mutating each Story's link state in place. The caller owns the
+session/commit. The LLM client is injected (Completer) so this is unit-testable with a fake.
+
+**Two request shapes live here while the cutover runs.** `build_link_request` sends the
+whole active catalog as one cached roster prefix and takes back a global roster index;
+`build_retrieval_link_request` sends each story its own retrieved candidate list and takes
+back an index into that story's list. The roster path is the incumbent the cutover's F1 gate
+measures against, so it stays untouched until it is deleted outright at M4 (NEU-1004)."""
 
 import json
 import logging
@@ -9,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
+from upmovies.link.retrieval.render import render_candidates
+from upmovies.link.retrieval.select import CandidateSet
 from upmovies.link.roster import Roster
 from upmovies.llm.client import CallLog, CallResult, cached_system_block
 from upmovies.news.models import Story
@@ -19,13 +27,48 @@ _SUMMARY_MAX = 500
 _MAX_TOKENS = 2048
 _NOT_NEWS_CATEGORIES = {"reaction", "roundup", "streaming-move", "interview-quote", "downstream"}
 
-_INSTRUCTIONS = """You are an entity-linking classifier for an upcoming-movies tracker.
+_ROSTER_HEADER = """You are an entity-linking classifier for an upcoming-movies tracker.
 
 You are given a ROSTER of tracked films (each with a numeric index) and a batch of news \
 stories (each an id, headline, and short dek). For every story, decide whether it is \
-primarily ABOUT exactly one of the tracked films.
+primarily ABOUT exactly one of the tracked films."""
 
-Definitions:
+_RETRIEVAL_HEADER = """You are an entity-linking classifier for an upcoming-movies tracker.
+
+You are given a batch of news stories (each an id, headline, and short dek). Each story \
+carries its OWN numbered list of candidate tracked films: the lists differ from story to \
+story, and candidate 1 in one story's list is a DIFFERENT film from candidate 1 in \
+another's. For every story, decide whether it is primarily ABOUT exactly one of the films \
+in that story's candidate list. A story's candidates are the only tracked films available \
+to it — never answer with an index that story does not offer. Each candidate carries its \
+director, top-billed cast, and collection alongside its title, year, genres and overview: \
+use ALL of them to separate a candidate from a same-franchise film that is not tracked \
+here. A shared title stem is not a match; a shared director or lead is not a match either."""
+
+# The classification rules are shared verbatim by both prompts, rendered with the term the
+# path uses for the set of tracked films it shows. Two copies of ~1.4k tokens of prose
+# would drift, and these paragraphs are load-bearing: the franchise traps are the
+# counterweight to the precision cost of narrowing the candidate set (spec §4.3), so a fix
+# to one prompt's wording must never silently miss the other's. The roster terms below
+# reproduce today's prompt character for character — the roster path is still the incumbent
+# the cutover's F1 gate measures against, and moving its baseline mid-project would make
+# that comparison meaningless.
+#
+# `_CLASSIFICATION_RULES` is a `str.format` template: any literal brace added to it must be
+# doubled (`{{`, `}}`) or the render below raises at import time. The JSON examples live in
+# the per-path tails for exactly that reason — those are plain strings.
+_ROSTER_TERMS = {
+    "exact_film": "the exact roster film",
+    "only_candidate": "the only roster candidate",
+    "in_the_set": "in the roster",
+}
+_RETRIEVAL_TERMS = {
+    "exact_film": "the exact candidate film",
+    "only_candidate": "the only candidate offered",
+    "in_the_set": "among the story's candidates",
+}
+
+_CLASSIFICATION_RULES = """Definitions:
 - "about": the story announces or confirms something NEW about exactly one tracked film's \
 production — casting, a filming start/wrap/status change, a trailer or teaser, a release \
 date set or moved, a major creative/production change (director, studio, format), or a \
@@ -72,15 +115,15 @@ Be strict about franchise-generic casting/announcement traps: a story that refer
 franchise only generically — "the next Batman", "a new Spider-Man", "the next James Bond" — \
 is NOT necessarily about the tracked film that happens to share that franchise. Studios run \
 multiple films per franchise, and many are not tracked here. Link such a story only when it \
-unambiguously identifies the exact roster film (its distinct subtitle, year, or director). \
-When the only roster candidate is a DIFFERENT entry in the same franchise, return no-match — \
+unambiguously identifies {exact_film} (its distinct subtitle, year, or director). \
+When {only_candidate} is a DIFFERENT entry in the same franchise, return no-match — \
 do not force a nearest-match. \
 This includes a distinct, NAMED sibling film — a spin-off, sequel, prequel, or origin/\
 companion film ("a Shrek spin-off", "the Donkey origin movie", "an untitled sequel") — that \
-is a DIFFERENT entry in a tracked film's franchise and is not itself tracked in the roster. \
+is a DIFFERENT entry in a tracked film's franchise and is not itself tracked {in_the_set}. \
 Return no-match for it EVEN WHEN the story states a release date: a spin-off's or sequel's \
 own date is not the tracked film's date. Link only when the story unambiguously identifies \
-the exact roster film (its distinct subtitle, year, or director).
+{exact_film} (its distinct subtitle, year, or director).
 
 This franchise trap runs in BOTH directions. A story about an EARLIER or ORIGINAL film in a \
 franchise — the first film, when only its sequel or continuation is tracked here — is NOT \
@@ -106,8 +149,9 @@ video game, a stage adaptation, or any project in a different medium — is NOT 
 tracked film merely because it names the same characters or franchise. A character's casting \
 or appearance in a TV series, game, or other adjacent project is not a casting fact about the \
 tracked FILM. Return "no-match" for it (or "mention" if the tracked film is named only in \
-passing) unless the story also reports a new production fact about the film itself.
+passing) unless the story also reports a new production fact about the film itself."""
 
+_ROSTER_TAIL = """\
 The input is a JSON object `{"as_of_date": <YYYY-MM-DD>, "stories": [...]}`. `as_of_date` is \
 the date this run executed (UTC); treat it as "today" when judging how recent or stale a \
 story is. Classify every story in `stories`.
@@ -121,6 +165,36 @@ story's id:
 "confidence" is your probability that the story is about that exact roster film (0.0 for \
 mention/no-match/not-news). "category" labels why a "not-news" story was excluded (null \
 otherwise)."""
+
+_RETRIEVAL_TAIL = """\
+The input is a JSON object `{"as_of_date": <YYYY-MM-DD>, "stories": [...]}`. `as_of_date` is \
+the date this run executed (UTC); treat it as "today" when judging how recent or stale a \
+story is. Each story object carries its `id`, `title`, `summary`, and its own `candidates` \
+list; every candidate has an `n` and the details of one tracked film. Classify every story \
+in `stories`.
+
+Return ONLY a JSON array — no prose, no markdown — one object per input story, using the \
+story's id:
+[{"id": "<story id>", "film": <an "n" from that story's candidate list, or null>, \
+"confidence": <0.0-1.0>, "reason": "about" | "mention" | "no-match" | "not-news", \
+"category": "reaction" | "roundup" | "streaming-move" | "interview-quote" | "downstream" | \
+null}]
+
+"film" MUST be an "n" that appears in that story's candidate list, or null. Candidates are \
+numbered independently per story, so a number taken from another story's list — or invented \
+— names no film and will be discarded.
+
+"confidence" is your probability that the story is about that exact candidate film (0.0 for \
+mention/no-match/not-news). "category" labels why a "not-news" story was excluded (null \
+otherwise)."""
+
+_INSTRUCTIONS = (
+    f"{_ROSTER_HEADER}\n\n{_CLASSIFICATION_RULES.format(**_ROSTER_TERMS)}\n\n{_ROSTER_TAIL}"
+)
+_RETRIEVAL_INSTRUCTIONS = (
+    f"{_RETRIEVAL_HEADER}\n\n{_CLASSIFICATION_RULES.format(**_RETRIEVAL_TERMS)}\n\n"
+    f"{_RETRIEVAL_TAIL}"
+)
 
 
 class Completer(Protocol):
@@ -146,6 +220,18 @@ class BatchLinkResult:
     rejected: int
 
 
+@dataclass(frozen=True)
+class StoryCandidates:
+    """A story paired with the films retrieval offers for it.
+
+    The two travel together from selection through to the request and, at NEU-999, through
+    to resolving the reply's index back to a film — carrying them apart would let a story be
+    scored against one candidate set and answered against another."""
+
+    story: Story
+    candidates: CandidateSet
+
+
 def story_dek(story: Story) -> str:
     """The short summary shown to the classifier beside a story's headline.
 
@@ -157,8 +243,14 @@ def story_dek(story: Story) -> str:
     return str(story.raw.get("summary", ""))[:_SUMMARY_MAX]
 
 
+def _story_object(story: Story) -> dict[str, str]:
+    """The story fields both request builders send — one definition, because retrieval
+    scores the same headline and dek the classifier reads (see `story_dek`)."""
+    return {"id": str(story.id), "title": story.title, "summary": story_dek(story)}
+
+
 def _story_payload(stories: Sequence[Story]) -> list[dict[str, str]]:
-    return [{"id": str(s.id), "title": s.title, "summary": story_dek(s)} for s in stories]
+    return [_story_object(s) for s in stories]
 
 
 def _extract_json_array(text: str) -> str:
@@ -179,6 +271,45 @@ def build_link_request(
     system = [cached_system_block(f"{_INSTRUCTIONS}\n\nROSTER:\n{roster.text}")]
     payload = {"as_of_date": run_date.isoformat(), "stories": _story_payload(stories)}
     messages = [{"role": "user", "content": json.dumps(payload)}]
+    return system, messages
+
+
+def build_retrieval_link_request(
+    batch: Sequence[StoryCandidates], run_date: date
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The instructions-only system block + a story payload carrying per-story candidates.
+
+    Batches survive the rewrite — they still amortize the instruction block over 15 stories —
+    but the catalog leaves the system block entirely, which is the point of the whole
+    project: the prefix stopped scaling with catalog size, so it stops threatening the 200k
+    context ceiling when the undated-film expansion multiplies that catalog (spec §4.2).
+
+    **The system block is deliberately not cached.** What remains is ~1.5k tokens, below
+    Haiku 4.5's 4096-token cache floor, so `cache_control` would silently no-op — and `link`
+    was the only stage that cached at all. That is the anticipated consequence, not a
+    regression to engineer around.
+    """
+    for entry in batch:
+        # A zero-candidate story is rejected without a model call (ADR-0009), so one
+        # reaching here is a wiring bug upstream. Sending an empty list would be worse than
+        # useless: it asks the model to choose from nothing, and every index it could reply
+        # with would be out of list.
+        if entry.candidates.is_empty:
+            raise ValueError(f"story {entry.story.id} has no candidates and must not be sent")
+    system = [{"type": "text", "text": _RETRIEVAL_INSTRUCTIONS}]
+    payload = {
+        "as_of_date": run_date.isoformat(),
+        "stories": [
+            {**_story_object(entry.story), "candidates": render_candidates(entry.candidates)}
+            for entry in batch
+        ],
+    }
+    # `ensure_ascii=False` because candidates carry titles the roster prefix used to send as
+    # plain text. Escaped, one CJK or Cyrillic character costs six, and `original_title` is
+    # rendered precisely when it *differs* from the title — i.e. exactly the non-Latin case.
+    # That would blow the ~320 tok/story the rendering was costed at (spec §4.3) on the
+    # stories that can least afford it, and hand the model `\uXXXX` runs to disambiguate on.
+    messages = [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
     return system, messages
 
 
