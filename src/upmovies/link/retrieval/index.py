@@ -61,7 +61,9 @@ from upmovies.link.retrieval.normalize import (
 
 log = logging.getLogger(__name__)
 
-# Billed cast carried for rendering. Three is what §4.3 of the design costs out.
+# Billed cast carried for rendering. Three is what the candidate rendering was costed at:
+# ~320 tokens per story at a p90 of four candidates, against a ~50k-token roster prefix.
+# The whole cast would be unaffordable; three names is enough to tell sibling films apart.
 _CAST_LIMIT = 3
 
 
@@ -111,21 +113,26 @@ class CandidateIndex:
 
     films: tuple[IndexedFilm, ...]
     rescue_folds: tuple[FoldedTitle, ...]
-    _by_token: Mapping[str, frozenset[UUID]] = field(repr=False)
-    _by_id: Mapping[UUID, IndexedFilm] = field(repr=False)
+    token_films: Mapping[str, frozenset[UUID]] = field(repr=False)
+    films_by_id: Mapping[UUID, IndexedFilm] = field(repr=False)
 
     @property
     def size(self) -> int:
         """The number of indexed films — the row count worth logging and alerting on."""
         return len(self.films)
 
+    @property
+    def token_count(self) -> int:
+        """The number of distinct tokens indexed — the other half of the build's shape."""
+        return len(self.token_films)
+
     def film(self, film_id: UUID) -> IndexedFilm | None:
         """The indexed film for `film_id`, or None if it is not in the active set."""
-        return self._by_id.get(film_id)
+        return self.films_by_id.get(film_id)
 
     def films_for_token(self, token: str) -> frozenset[UUID]:
         """Every film carrying `token` in one of its searchable titles."""
-        return self._by_token.get(token, frozenset())
+        return self.token_films.get(token, frozenset())
 
     def films_for_tokens(self, tokens: Iterable[str]) -> set[UUID]:
         """The union over `tokens` — the films worth scoring for a story.
@@ -135,7 +142,7 @@ class CandidateIndex:
         low-scoring candidate for the threshold to judge, not a non-candidate."""
         matched: set[UUID] = set()
         for token in tokens:
-            matched |= self._by_token.get(token, frozenset())
+            matched |= self.token_films.get(token, frozenset())
         return matched
 
 
@@ -144,21 +151,26 @@ def _searchable_titles(
 ) -> tuple[SearchableTitle, ...]:
     """The distinct titles a film can be found by, in title → original → alternatives order.
 
-    Deduplicated on the folded form rather than the raw string: TMDB routinely repeats the
-    title as its own alternative title, and `"Avatar: Fire and Ash"` against
-    `"Avatar Fire & Ash"` is the same string to every test that follows."""
-    seen: set[str] = set()
+    Deduplicated on the fold *and* the tokens together, not on the fold alone: TMDB
+    routinely repeats the title as its own alternative title, but two spellings can share
+    a fold while tokenizing differently — tracked `"Nagabandham"` beside the alternative
+    `"Naga Bandham"` both fold to `nagabandham`, yet only the second carries the tokens
+    `naga` and `bandham`. Deduplicating on the fold alone would drop that second form, and
+    with it the only way the token scorer can reach a headline that spells the title with
+    the space. The fold rescues that particular pair anyway, but only because it clears
+    `SQUASH_FOLD_MIN_CHARS`; a shorter pair (`"Sunup"` / `"Sun Up"`, folding to five
+    characters) would have no rescue to fall back on and would go unreachable."""
+    seen: set[tuple[str, tuple[str, ...]]] = set()
     titles: list[SearchableTitle] = []
     for text in (title, original_title, *alternative_titles):
         if not text:
             continue
         folded = squash_fold(text)
-        if folded in seen:
+        tokens = tuple(significant_tokens(text))
+        if (folded, tokens) in seen:
             continue
-        seen.add(folded)
-        titles.append(
-            SearchableTitle(text=text, tokens=tuple(significant_tokens(text)), folded=folded)
-        )
+        seen.add((folded, tokens))
+        titles.append(SearchableTitle(text=text, tokens=tokens, folded=folded))
     return tuple(titles)
 
 
@@ -194,6 +206,7 @@ def build_index(films: Iterable[IndexedFilm]) -> CandidateIndex:
     """Invert `films` into the token map and the rescue folds. Pure — no I/O."""
     by_token: defaultdict[str, set[UUID]] = defaultdict(set)
     rescue_folds: list[FoldedTitle] = []
+    seen_folds: set[tuple[str, UUID]] = set()
     ordered: list[IndexedFilm] = []
     for film in films:
         ordered.append(film)
@@ -202,13 +215,19 @@ def build_index(films: Iterable[IndexedFilm]) -> CandidateIndex:
                 by_token[token].add(film.film_id)
             # Folds shorter than the guard would match inside unrelated words, so they
             # are withheld here rather than re-checked against every story.
-            if len(title.folded) >= SQUASH_FOLD_MIN_CHARS:
-                rescue_folds.append(FoldedTitle(folded=title.folded, film_id=film.film_id))
+            if len(title.folded) < SQUASH_FOLD_MIN_CHARS:
+                continue
+            # Two of a film's titles can tokenize differently yet share a fold, and both
+            # are kept as searchable forms — but the fold only needs offering once.
+            if (title.folded, film.film_id) in seen_folds:
+                continue
+            seen_folds.add((title.folded, film.film_id))
+            rescue_folds.append(FoldedTitle(folded=title.folded, film_id=film.film_id))
     return CandidateIndex(
         films=tuple(ordered),
         rescue_folds=tuple(rescue_folds),
-        _by_token={token: frozenset(ids) for token, ids in by_token.items()},
-        _by_id={f.film_id: f for f in ordered},
+        token_films={token: frozenset(ids) for token, ids in by_token.items()},
+        films_by_id={f.film_id: f for f in ordered},
     )
 
 
@@ -222,17 +241,16 @@ async def build_candidate_index(session: AsyncSession) -> CandidateIndex:
     started = time.perf_counter()
     excluded = get_settings().tmdb_excluded_statuses
     today = datetime.now(UTC).date()
-    active_ids = (
-        select(Film.id)
-        .where(active_film_clause(today=today, excluded_statuses=excluded))
-        .scalar_subquery()
-    )
+    # Built once and shared by every query below, so the child reads can never disagree
+    # with the film read about what "active" means.
+    is_active = active_film_clause(today=today, excluded_statuses=excluded)
+    active_ids = select(Film.id).where(is_active).scalar_subquery()
 
     film_rows = (
         await session.execute(
             select(Film, Collection.name)
             .outerjoin(Collection, Collection.id == Film.collection_id)
-            .where(active_film_clause(today=today, excluded_statuses=excluded))
+            .where(is_active)
             .order_by(Film.title)
         )
     ).all()
@@ -297,7 +315,7 @@ async def build_candidate_index(session: AsyncSession) -> CandidateIndex:
         "duration_ms=%d",
         index.size,
         sum(len(f.titles) for f in index.films),
-        len(index._by_token),
+        index.token_count,
         len(index.rescue_folds),
         round((time.perf_counter() - started) * 1000),
     )

@@ -1,7 +1,7 @@
 from uuid import UUID, uuid4
 
 from upmovies.link.retrieval.index import IndexedFilm, build_index, indexed_film
-from upmovies.link.retrieval.normalize import SQUASH_FOLD_MIN_CHARS
+from upmovies.link.retrieval.normalize import SQUASH_FOLD_MIN_CHARS, squash_fold
 
 
 def _film(title: str, **kwargs) -> IndexedFilm:
@@ -23,7 +23,7 @@ class TestSearchableTitles:
         assert title.tokens == ("spider", "man", "brand", "new", "day")
         assert title.folded == "spidermanbrandnewday"
 
-    def test_titles_are_deduplicated_on_their_folded_form(self):
+    def test_titles_identical_in_both_fold_and_tokens_are_deduplicated(self):
         # TMDB routinely repeats the title as an alternative title, and the roster's
         # own "original_title != title" guard exists for the same reason. Scoring the
         # same string three times would be wasted work, not a stronger signal.
@@ -34,16 +34,31 @@ class TestSearchableTitles:
         )
         assert [t.text for t in film.titles] == ["Avatar: Fire and Ash"]
 
-    def test_dedup_is_on_the_fold_not_on_punctuation_lookalikes(self):
+    def test_dedup_is_not_a_similarity_judgement(self):
         # "&" and "and" are different strings to the squash-fold, so this is a genuinely
-        # distinct spelling and must survive — dedup is not a similarity judgement.
+        # distinct spelling and must survive.
         film = _film("Avatar: Fire and Ash", alternative_titles=("Avatar Fire & Ash",))
         assert [t.text for t in film.titles] == ["Avatar: Fire and Ash", "Avatar Fire & Ash"]
 
-    def test_a_genuinely_distinct_alternative_title_survives_dedup(self):
+    def test_a_spacing_variant_survives_dedup_because_it_tokenizes_differently(self):
+        # "Naga Bandham" folds onto "Nagabandham" but is the only form carrying the
+        # tokens "naga" and "bandham". Deduplicating on the fold alone would drop it and
+        # leave the token scorer unable to reach a headline that spells it with a space.
         film = _film("Nagabandham", alternative_titles=("Naga Bandham", "The Snake Bond"))
-        # "Naga Bandham" folds onto the title, "The Snake Bond" does not.
-        assert [t.text for t in film.titles] == ["Nagabandham", "The Snake Bond"]
+        assert [t.text for t in film.titles] == ["Nagabandham", "Naga Bandham", "The Snake Bond"]
+
+    def test_a_short_spacing_variant_is_reachable_only_through_its_tokens(self):
+        # The regression the fold-only dedup would have caused. "Sunup" folds to five
+        # characters — below SQUASH_FOLD_MIN_CHARS — so the substring rescue declines it
+        # and the tokens of "Sun Up" are the film's only route in.
+        film = _film("Sunup", alternative_titles=("Sun Up",))
+        assert len(squash_fold("Sunup")) < SQUASH_FOLD_MIN_CHARS
+        index = build_index([film])
+        assert index.rescue_folds == ()
+        assert index.films_for_token("sun") == frozenset({film.film_id})
+        assert index.films_for_token("up") == frozenset({film.film_id})
+        # The one-word spelling reaches nothing a headline written "Sun Up" would offer.
+        assert index.films_for_token("sunup") == frozenset({film.film_id})
 
     def test_untokenizable_title_is_kept_as_a_searchable_form(self):
         # It contributes nothing to the token index and cannot rescue, but dropping it
@@ -107,8 +122,16 @@ class TestRescueFolds:
     def test_alternative_titles_are_offered_too(self):
         film = _film("Nagabandham", alternative_titles=("Naga Bandham", "The Snake Bond"))
         index = build_index([film])
-        # "Naga Bandham" folds onto the title and was deduplicated away.
         assert {f.folded for f in index.rescue_folds} == {"nagabandham", "thesnakebond"}
+
+    def test_a_fold_shared_by_two_of_a_films_titles_is_offered_once(self):
+        # "Nagabandham" and "Naga Bandham" are both searchable titles — they tokenize
+        # differently — but they fold to the same string, and one substring test settles
+        # both. Offering it twice would only make the scorer do the work twice.
+        film = _film("Nagabandham", alternative_titles=("Naga Bandham",))
+        assert len(film.titles) == 2
+        index = build_index([film])
+        assert [f.folded for f in index.rescue_folds] == ["nagabandham"]
 
 
 class TestDisplayFields:

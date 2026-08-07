@@ -148,7 +148,7 @@ async def test_display_fields_are_carried_on_the_index(session):
     assert entry.overview == "A courier runs."
     assert entry.genres == ("Drama", "Thriller")
     assert entry.director == "Ana Ruiz"
-    # Top three billed only — the fourth is dropped (§4.3).
+    # Top three billed only — the fourth is dropped (see _CAST_LIMIT).
     assert entry.cast == ("Lee Park", "Mira Sen", "Tom Ade")
     assert entry.collection == "The Runner Collection"
 
