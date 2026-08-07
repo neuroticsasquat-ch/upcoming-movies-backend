@@ -62,9 +62,13 @@ class IngestRun(Base):
     retrieval_probes: Mapped[list["LinkRetrievalProbe"]] = relationship(
         "LinkRetrievalProbe", cascade="all, delete-orphan", back_populates="run"
     )
-    retrieval_health: Mapped["RunRetrievalHealth | None"] = relationship(
+    retrieval_health_row: Mapped["RunRetrievalHealth | None"] = relationship(
         "RunRetrievalHealth", cascade="all, delete-orphan", back_populates="run", uselist=False
     )
+    """Named for the row rather than the concept: the run's retrieval *health* as the admin
+    surface reads it also carries recall, which is an aggregate over `LinkRetrievalProbe` and
+    not on this row. Keeping the names apart stops a read model that mirrors the concept from
+    silently extracting this relationship instead (NEU-997)."""
 
 
 class RunLLMUsage(Base):
@@ -302,4 +306,4 @@ class RunRetrievalHealth(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
-    run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="retrieval_health")
+    run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="retrieval_health_row")
