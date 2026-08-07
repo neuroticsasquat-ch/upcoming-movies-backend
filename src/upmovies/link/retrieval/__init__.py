@@ -1,3 +1,10 @@
+from upmovies.link.retrieval.index import CandidateIndex as CandidateIndex
+from upmovies.link.retrieval.index import FoldedTitle as FoldedTitle
+from upmovies.link.retrieval.index import IndexedFilm as IndexedFilm
+from upmovies.link.retrieval.index import SearchableTitle as SearchableTitle
+from upmovies.link.retrieval.index import build_candidate_index as build_candidate_index
+from upmovies.link.retrieval.index import build_index as build_index
+from upmovies.link.retrieval.index import indexed_film as indexed_film
 from upmovies.link.retrieval.normalize import SQUASH_FOLD_MIN_CHARS as SQUASH_FOLD_MIN_CHARS
 from upmovies.link.retrieval.normalize import significant_tokens as significant_tokens
 from upmovies.link.retrieval.normalize import squash_fold as squash_fold
