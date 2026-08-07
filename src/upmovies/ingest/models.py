@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -57,6 +58,12 @@ class IngestRun(Base):
     )
     llm_calls: Mapped[list["LLMCall"]] = relationship(
         "LLMCall", cascade="all, delete-orphan", back_populates="run"
+    )
+    retrieval_probes: Mapped[list["LinkRetrievalProbe"]] = relationship(
+        "LinkRetrievalProbe", cascade="all, delete-orphan", back_populates="run"
+    )
+    retrieval_health: Mapped["RunRetrievalHealth | None"] = relationship(
+        "RunRetrievalHealth", cascade="all, delete-orphan", back_populates="run", uselist=False
     )
 
 
@@ -153,3 +160,146 @@ class LLMCall(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="llm_calls")
+
+
+class LinkRetrievalProbe(Base):
+    """One row per story the **roster linked**, recording what candidate retrieval would
+    have offered for it while running in shadow.
+
+    Grain follows the `LLMCall` precedent rather than the per-run aggregate shape of
+    `RunLLMUsage`, because the cutover gate commits to hand-adjudicating a sample of
+    disagreements — the roster makes false positives, so retrieval declining to surface one
+    is a win a bare percentage scores as a loss. Aggregates cannot support that reading.
+
+    Where the roster rejected and retrieval found nothing, both paths agree and there is
+    nothing to inspect, so those are not rows. Linked stories are a minority of a batch,
+    which keeps this at tens of rows per run.
+
+    `rank` and `score` are deliberately independent. A pick with a score but no rank was
+    lost to the cap (raise K); one with neither never cleared the threshold, which K cannot
+    reach at all (ADR-0008) — on the measured corpus those are score-zero misses (§3.1), but
+    the column cannot say so, since the retriever reports no score below T. Only
+    `RunRetrievalHealth` carries the denominator — the stories that produce it are precisely
+    the ones this table does not record."""
+
+    __tablename__ = "link_retrieval_probe"
+    __table_args__ = (
+        # `retrieved` restates "has a rank"; the constraint stops the two ever disagreeing.
+        CheckConstraint("retrieved = (rank IS NOT NULL)", name="ck_link_retrieval_probe_retrieved"),
+        CheckConstraint("rank IS NULL OR rank >= 1", name="ck_link_retrieval_probe_rank_positive"),
+        # Rank is a position in the set the model was shown, so that set bounds it.
+        CheckConstraint(
+            "rank IS NULL OR rank <= candidate_count", name="ck_link_retrieval_probe_rank_in_set"
+        ),
+        # A ranked pick was offered, and nothing is offered without clearing the threshold —
+        # so the one pairing the retriever cannot produce is a rank with no score.
+        CheckConstraint(
+            "rank IS NULL OR score IS NOT NULL", name="ck_link_retrieval_probe_ranked_has_score"
+        ),
+        CheckConstraint(
+            "score IS NULL OR (score >= 0 AND score <= 1)", name="ck_link_retrieval_probe_score"
+        ),
+        CheckConstraint("candidate_count >= 0", name="ck_link_retrieval_probe_candidate_count"),
+        # The grain, enforced. Its leading column also serves the per-run reads, so no
+        # separate `run_id` index is carried for queries nobody runs.
+        UniqueConstraint("run_id", "story_id", name="uq_link_retrieval_probe_run_story"),
+        {"schema": "ingest"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ingest.ingest_run.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    story_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.story.id", ondelete="CASCADE"), nullable=False
+    )
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), nullable=False
+    )
+    """The film the roster picked — the thing retrieval is being measured against.
+
+    Cascades on delete like `story_id`: the column is NOT NULL because the pick *is* the
+    measurement, so there is no surviving row to keep. A film vanishing mid-shadow-period
+    would invalidate the roster's pick as an oracle anyway, not merely orphan the probe."""
+    retrieved: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    """Whether the roster's pick was among the candidates the model would have been shown."""
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """1-based position of the pick in the candidate set; NULL when it was not offered."""
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    """The pick's retrieval score, present even when the cap discarded it; NULL when it
+    never cleared the threshold."""
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    """Size of the candidate set — post-cap, so it is what the model would have seen."""
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="retrieval_probes")
+
+
+class RunRetrievalHealth(Base):
+    """Per-run retrieval aggregates: the recall denominator plus the health signals.
+
+    Not derivable from `LinkRetrievalProbe`. That table holds only roster-linked stories,
+    while every figure here is drawn from *all* stories retrieval ran over — the
+    zero-candidate majority (ADR-0009) contributes nothing to the probe by design.
+
+    Measurement only. The hard-breach guard that fails a run on these rates is held to M4
+    so it cannot start failing runs while T and K are still untuned (ADR-0010)."""
+
+    __tablename__ = "run_retrieval_health"
+    __table_args__ = (
+        CheckConstraint("stories_retrieved >= 0", name="ck_run_retrieval_health_denominator"),
+        # Both signals count stories drawn from the denominator; a rate above 1 would mean a
+        # miscount, and would silently corrupt the M4 breach guard built on these columns.
+        CheckConstraint(
+            "zero_candidate_stories BETWEEN 0 AND stories_retrieved",
+            name="ck_run_retrieval_health_zero_candidate",
+        ),
+        CheckConstraint(
+            "saturated_stories BETWEEN 0 AND stories_retrieved",
+            name="ck_run_retrieval_health_saturated",
+        ),
+        # No denominator, no average — NULL rather than a 0.0 that reads as "every story
+        # got zero candidates".
+        CheckConstraint(
+            "(stories_retrieved = 0) = (mean_candidates IS NULL)",
+            name="ck_run_retrieval_health_mean",
+        ),
+        # The grain, enforced — one row per run. Also serves the per-run read on /admin/runs.
+        UniqueConstraint("run_id", name="uq_run_retrieval_health_run"),
+        {"schema": "ingest"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ingest.ingest_run.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    stories_retrieved: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    """The denominator: every story retrieval ran over, including those it found nothing for."""
+    zero_candidate_stories: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    """Stories retrieval offered nothing for — a rejection without a model call (ADR-0009)."""
+    saturated_stories: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    """Stories where the cap discarded a film that had cleared the threshold, so the model
+    may never have seen the right one however well it scored."""
+    mean_candidates: Mapped[float | None] = mapped_column(Float, nullable=True)
+    """Mean candidate-set size per story — post-cap, so it is bounded by K and reads as
+    prompt size rather than match volume; `saturated_stories` is what says how often the cap
+    bit. NULL when there were no stories to average."""
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="retrieval_health")
