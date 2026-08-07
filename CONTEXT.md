@@ -53,6 +53,13 @@ before the model sees anything. A story's candidate set is its own — two stori
 batch carry different ones, and the model names a film by its position within that story's set.
 _Avoid_: shortlist, roster (that was the full-catalog prompt prefix this replaced), matches.
 
+**Squash-fold**:
+A title or headline lowercased and stripped of *all* punctuation and whitespace, so
+`Naga Bandham` and `Nagabandham` both become `nagabandham`. Compared as a substring, not for
+equality, and only for titles of at least six folded characters — short ones would match inside
+unrelated words. It is the whole of retrieval's normalization story beyond tokenization.
+_Avoid_: slug, normalize (too broad — tokenization normalizes too), fuzzy match.
+
 **Retrieval miss**:
 The correct film absent from a story's candidate set. The failure mode retrieval introduces,
 and an unforgiving one: **link** is lossy, so a missed story is not linked late, it is lost.
