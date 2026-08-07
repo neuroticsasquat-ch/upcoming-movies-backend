@@ -1,5 +1,7 @@
 from uuid import uuid4
 
+import pytest
+
 from upmovies.link.retrieval.index import IndexedFilm, build_index, indexed_film
 from upmovies.link.retrieval.normalize import squash_fold
 from upmovies.link.retrieval.select import (
@@ -215,6 +217,38 @@ class TestTelemetryInterface:
         (candidate,) = got.candidates
         assert (candidate.film.year, candidate.film.director) == (2027, "Ana Ruiz")
         assert candidate.film.cast == ("Lee Park",)
+
+
+class TestFilmIdForIndex:
+    """Resolving the model's reply back to a film — 1-based, local to this story's set."""
+
+    def test_it_resolves_a_one_based_index_into_the_offered_set(self):
+        first, second = _film("Avatar Part One"), _film("Avatar Part Two")
+        got = _select([first, second], "Avatar Part One and Avatar Part Two", threshold=0.0)
+        offered = got.film_ids
+        assert got.film_id_for_index(1) == offered[0]
+        assert got.film_id_for_index(2) == offered[1]
+
+    def test_an_index_past_the_offered_set_names_no_film(self):
+        got = _select([_film("Avatar: Fire and Ash")], "Avatar Fire and Ash gets a date")
+        assert got.film_id_for_index(2) is None
+
+    def test_a_film_the_cap_discarded_is_not_nameable(self):
+        # It was never shown, so the model cannot have meant it — and coercing an index
+        # onto a hidden film would be a link nobody asked for.
+        films = [_film(f"Avatar Part {n}") for n in ("One", "Two", "Three")]
+        got = _select(films, "Avatar Part One Two Three", threshold=0.0, limit=1)
+        assert got.over_threshold == 3
+        assert got.film_id_for_index(2) is None
+
+    @pytest.mark.parametrize("index", [0, -1, None, "1", 1.0, True])
+    def test_anything_that_is_not_a_positive_int_names_no_film(self, index):
+        # `True` is an `int` in Python and would otherwise resolve to the first candidate.
+        got = _select([_film("Avatar: Fire and Ash")], "Avatar Fire and Ash gets a date")
+        assert got.film_id_for_index(index) is None
+
+    def test_an_empty_set_names_no_film_at_any_index(self):
+        assert CandidateSet(scored=(), limit=10).film_id_for_index(1) is None
 
 
 class TestEmptyInputs:

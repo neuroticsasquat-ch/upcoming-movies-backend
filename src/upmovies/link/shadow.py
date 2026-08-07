@@ -12,9 +12,12 @@ a lost story, because the roster path is still the one deciding. Said once here 
 restated at every call site in `link/pipeline.py`.
 
 **Two grains, for two different questions.** `LinkRetrievalProbe` gets one row per story the
-roster *linked* — the only stories with a pick to measure retrieval against. `RunRetrievalHealth`
-gets one row per run, counted over *every* story retrieval ran over, because the zero-candidate
-majority (ADR-0009) never reaches the probe table and is exactly what the denominator is for.
+roster *linked* — the only stories with a pick to measure retrieval against, and the reason
+this table is shadow-only: once retrieval decides, there is no second opinion to adjudicate
+against. `RunRetrievalHealth` gets one row per run, counted over *every* story retrieval ran
+over, because the zero-candidate majority (ADR-0009) never reaches the probe table and is
+exactly what the denominator is for. That row is written by both paths and so lives in
+`link/retrieval/health.py`, which outlives this module.
 
 **Reading the output.** Recall here is measured against roster picks, and the roster makes
 false positives — so retrieval declining to surface one is a win that a bare percentage
@@ -31,8 +34,9 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.config import LinkRetrievalMode
-from upmovies.ingest.models import LinkRetrievalProbe, RunRetrievalHealth
+from upmovies.ingest.models import LinkRetrievalProbe
 from upmovies.link.linker import story_dek
+from upmovies.link.retrieval.health import RetrievalTally, record_retrieval_health
 from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
 from upmovies.link.retrieval.select import (
     DEFAULT_CANDIDATE_LIMIT,
@@ -68,39 +72,6 @@ class StoryObservation:
     rank: int | None
     score: float | None
     candidate_count: int
-
-
-@dataclass
-class RetrievalTally:
-    """The per-run aggregates, accumulated over every story retrieval ran over.
-
-    Kept as counters rather than derived from the probe rows because those hold only the
-    roster-linked minority — the zero-candidate stories that dominate the rate are absent
-    from that table by design."""
-
-    stories_retrieved: int = 0
-    zero_candidate_stories: int = 0
-    saturated_stories: int = 0
-    candidates_offered: int = 0
-
-    def add(self, candidates: CandidateSet) -> None:
-        """Fold one story's retrieval result into the run's totals."""
-        self.stories_retrieved += 1
-        self.candidates_offered += len(candidates.candidates)
-        if candidates.is_empty:
-            self.zero_candidate_stories += 1
-        if candidates.saturated:
-            self.saturated_stories += 1
-
-    @property
-    def mean_candidates(self) -> float | None:
-        """Mean offered-set size per story, or None when there were no stories.
-
-        None rather than 0.0: with no denominator, a zero would read as "every story got
-        zero candidates", which is the alarm this number exists to raise."""
-        if not self.stories_retrieved:
-            return None
-        return self.candidates_offered / self.stories_retrieved
 
 
 def observe_story(story: Story, candidates: CandidateSet) -> StoryObservation | None:
@@ -188,33 +159,10 @@ class ShadowObserver:
             log.exception("shadow retrieval failed for a batch of %d stories", len(stories))
 
     async def record_health(self) -> None:
-        """Write the run's aggregate row.
-
-        Written once at the end of the stage rather than incremented per batch: the row is
-        a whole-run rate, and a partial one would understate the denominator it is read
-        against. Written even when the run had nothing pending, so that a *missing* row
-        keeps its own meaning — shadow did not run at all."""
-        try:
-            async with _owned_session(self._session_factory) as s:
-                s.add(
-                    RunRetrievalHealth(
-                        run_id=self._run_id,
-                        stories_retrieved=self._tally.stories_retrieved,
-                        zero_candidate_stories=self._tally.zero_candidate_stories,
-                        saturated_stories=self._tally.saturated_stories,
-                        mean_candidates=self._tally.mean_candidates,
-                    )
-                )
-                await s.commit()
-            log.info(
-                "shadow retrieval: stories=%d zero_candidate=%d saturated=%d mean_candidates=%s",
-                self._tally.stories_retrieved,
-                self._tally.zero_candidate_stories,
-                self._tally.saturated_stories,
-                self._tally.mean_candidates,
-            )
-        except Exception:
-            log.exception("recording shadow retrieval health failed")
+        """Write the run's aggregate row — the same row and the same best-effort contract
+        the live path writes, so a shadow period and the stage that follows it are read on
+        one shape (see `link/retrieval/health.py`)."""
+        await record_retrieval_health(self._session_factory, run_id=self._run_id, tally=self._tally)
 
     def _retrieve(self, story: Story) -> CandidateSet:
         """The candidate set for one story, counted into the run's tally as it goes.
@@ -242,17 +190,15 @@ async def build_shadow_observer(
 ) -> ShadowObserver | None:
     """The observer for this run, or None when retrieval is not running in shadow.
 
-    The one place `LINK_RETRIEVAL_MODE` is interpreted. `on` is not wired yet — it lands
-    with the retrieval link path in M3 — and until it is, it runs the roster path and says
-    so, rather than leaving a flipped flag looking like it took effect.
+    `on` gets None too, and correctly: under `on` retrieval is not observing the roster, it
+    *is* the path (`link/pipeline.py`), and there is no second opinion left for a probe row
+    to adjudicate against.
 
     A failed index build returns None: the whole run then proceeds on the roster path with
-    no observations, which is the same degradation every other failure here takes."""
+    no observations, which is the same degradation every other failure here takes. The live
+    path deliberately does **not** degrade that way — with no roster to fall back to, an
+    unbuildable index would zero-candidate the entire backlog."""
     if mode != "shadow":
-        if mode == "on":
-            log.warning(
-                "LINK_RETRIEVAL_MODE=on is not implemented yet (M3); running the roster path"
-            )
         return None
     try:
         async with _owned_session(session_factory) as s:

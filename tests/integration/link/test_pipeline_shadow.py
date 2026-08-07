@@ -2,7 +2,6 @@
 records what it *would* have offered, and never gets to fail the run."""
 
 import json
-import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -222,17 +221,6 @@ class TestOtherModes:
         assert await _probes(session, run_id) == []
         assert await _health(session, run_id) is None
 
-    async def test_on_does_not_silently_become_the_retrieval_path(self, session, caplog):
-        # `on` lands in M3. Until it does it runs the roster path — but says so, rather
-        # than leaving a flipped flag looking like it took effect.
-        await _catalog(session, stories={"https://e/hit": "Runner wraps filming"})
-
-        with caplog.at_level(logging.WARNING):
-            run_id = await _run(session, retrieval_mode="on")
-
-        assert await _probes(session, run_id) == []
-        assert "LINK_RETRIEVAL_MODE=on" in caplog.text
-
 
 class TestShadowNeverFailsTheRun:
     async def test_a_retrieval_failure_costs_the_observation_not_the_story(
@@ -273,7 +261,7 @@ class TestShadowNeverFailsTheRun:
         def boom(*args, **kwargs):
             raise RuntimeError("the health write failed")
 
-        monkeypatch.setattr("upmovies.link.shadow.RunRetrievalHealth", boom)
+        monkeypatch.setattr("upmovies.link.retrieval.health.RunRetrievalHealth", boom)
         await _catalog(session, stories={"https://e/hit": "Runner wraps filming"})
 
         run_id = await _run(session, retrieval_mode="shadow")
