@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from upmovies.config import Settings
+from upmovies.link.retrieval import DEFAULT_CANDIDATE_LIMIT, DEFAULT_SCORE_THRESHOLD
 
 _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
@@ -209,3 +210,84 @@ def test_settings_link_release_change_window_days_override_from_env(monkeypatch)
     monkeypatch.setenv("LINK_RELEASE_CHANGE_WINDOW_DAYS", "3")
     s = Settings()  # type: ignore[call-arg]
     assert s.link_release_change_window_days == 3
+
+
+_RETRIEVAL_ENV = (
+    "LINK_RETRIEVAL_MODE",
+    "LINK_RETRIEVAL_THRESHOLD",
+    "LINK_RETRIEVAL_MAX_CANDIDATES",
+)
+
+
+def _clear_retrieval(monkeypatch):
+    for key in _RETRIEVAL_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_link_retrieval_defaults_to_off(monkeypatch):
+    """All three settings default, so no local or test run needs new env (NEU-995)."""
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_mode == "off"
+    assert s.link_retrieval_threshold == 0.34
+    assert s.link_retrieval_max_candidates == 10
+
+
+def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
+    """The tuning defaults must not drift from `link.retrieval.select`'s own.
+
+    They are duplicated rather than shared because `config` cannot import the selector:
+    `retrieval/index.py` reads settings, so the import would be circular. This pins them.
+    """
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_threshold == DEFAULT_SCORE_THRESHOLD
+    assert s.link_retrieval_max_candidates == DEFAULT_CANDIDATE_LIMIT
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+def test_settings_link_retrieval_mode_accepts_each_state(monkeypatch, mode):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MODE", mode)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["enabled", "true", "Shadow", ""])
+def test_settings_link_retrieval_mode_rejects_anything_else(monkeypatch, mode):
+    """A typo'd mode must fail at startup, not silently fall back to the roster path."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MODE", mode)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_link_retrieval_tuning_overrides_from_env(monkeypatch):
+    """M3 tunes T and K by config, not by deploy."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_THRESHOLD", "0.5")
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "25")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_threshold == 0.5
+    assert s.link_retrieval_max_candidates == 25
+
+
+@pytest.mark.parametrize("threshold", ["-0.1", "1.5"])
+def test_settings_link_retrieval_threshold_rejects_out_of_range(monkeypatch, threshold):
+    """Scores are token fractions, so a threshold outside 0..1 can only mean a mistake —
+    above 1.0 nothing ever clears it and every story becomes a zero-candidate reject."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_THRESHOLD", threshold)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_link_retrieval_max_candidates_rejects_zero(monkeypatch):
+    """A cap of zero offers the model nothing while retrieval still reports a hit —
+    a story that is neither linked nor a zero-candidate reject."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "0")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]

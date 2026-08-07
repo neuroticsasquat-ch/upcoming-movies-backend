@@ -73,6 +73,14 @@ with no model call. Carries `link_note = no-candidates` so it stays distinguisha
 since no classifier decided it.
 _Avoid_: auto-reject, unmatched, filtered.
 
+**Shadow mode**:
+The middle state of `LINK_RETRIEVAL_MODE`, between `off` and `on`: the roster path still
+decides, while retrieval runs beside it and records what it *would* have offered. Because
+retrieval is pure and needs no model call, this measures recall against the incumbent on live
+traffic at full scale for no added cost — it is where the cutover evidence comes from.
+_Avoid_: dry run (it records, and the records are the point), dark launch, A/B test (nothing is
+split — both paths see every story).
+
 ### News sources
 
 **Trade feed**:

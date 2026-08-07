@@ -1,7 +1,18 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The candidate-retrieval rollout states (NEU-995). Three rather than a boolean because the
+# middle one is where the cutover evidence comes from: retrieval is pure and free, so it can
+# run beside the incumbent on live traffic at no added LLM cost.
+#
+#   off     roster path only — current behaviour.
+#   shadow  the roster path still decides; retrieval runs beside it and records what it
+#           *would* have offered. No behaviour change.
+#   on      retrieval decides; the roster path is not built.
+LinkRetrievalMode = Literal["off", "shadow", "on"]
 
 
 class Settings(BaseSettings):
@@ -39,6 +50,19 @@ class Settings(BaseSettings):
     link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
     link_release_change_window_days: int = Field(
         default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
+    )
+    # Defaults to `off`, so no local or test run needs new env to keep current behaviour.
+    link_retrieval_mode: LinkRetrievalMode = Field(default="off", alias="LINK_RETRIEVAL_MODE")
+    # T and K for `link.retrieval.select`. Untuned placeholders — a 249-film probe cannot
+    # predict collision behaviour at 1,200 films — so they live here to make M3's tuning a
+    # config change rather than a deploy. They mirror the selector's own module defaults;
+    # `config` cannot import those (retrieval/index.py reads settings, so it would be a
+    # cycle), so a test pins the two together instead.
+    link_retrieval_threshold: float = Field(
+        default=0.34, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
+    )
+    link_retrieval_max_candidates: int = Field(
+        default=10, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
     )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
