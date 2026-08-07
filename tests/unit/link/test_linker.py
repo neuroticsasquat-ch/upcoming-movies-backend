@@ -2,11 +2,17 @@ import json
 from datetime import date
 from uuid import uuid4
 
+import pytest
+
 from upmovies.link.linker import (
+    StoryCandidates,
     apply_link_decisions,
     build_link_request,
+    build_retrieval_link_request,
     link_story_batch,
 )
+from upmovies.link.retrieval.index import indexed_film
+from upmovies.link.retrieval.select import CandidateSet, ScoredCandidate
 from upmovies.link.roster import Roster, RosterEntry
 from upmovies.llm.client import CallLog
 from upmovies.news.models import Story
@@ -254,3 +260,120 @@ def test_instructions_cover_medium_mismatch_trap():
     assert "different medium" in lowered
     assert "tv series" in lowered
     assert "video game" in lowered
+
+
+# --- the retrieval request builder (NEU-998) ---------------------------------------
+
+
+def _candidates(*titles, limit=10):
+    films = [indexed_film(film_id=uuid4(), title=t, year=2026) for t in titles]
+    return CandidateSet(
+        scored=tuple(ScoredCandidate(film=f, score=1.0) for f in films), limit=limit
+    )
+
+
+def _batch(*pairs):
+    return [StoryCandidates(story=story, candidates=candidates) for story, candidates in pairs]
+
+
+def test_retrieval_request_sends_no_roster_and_no_cached_block():
+    """The point of the rewrite: the prefix is instructions only. Below Haiku 4.5's
+    4096-token cache floor, so marking it cached would buy nothing and misreport why
+    `cache_creation_input_tokens` is zero (spec §4.2)."""
+    system, _ = build_retrieval_link_request(
+        _batch((_story(), _candidates("Runner"))), date(2026, 6, 25)
+    )
+    assert len(system) == 1
+    assert "cache_control" not in system[0]
+    assert "ROSTER" not in system[0]["text"]
+
+
+def test_retrieval_request_carries_each_story_its_own_numbered_candidates():
+    first, second = _story(title="Runner news"), _story(title="Sunup news")
+    _, messages = build_retrieval_link_request(
+        _batch((first, _candidates("Runner", "Runner Up")), (second, _candidates("Sunup"))),
+        date(2026, 6, 25),
+    )
+    payload = json.loads(messages[0]["content"])
+    assert payload["as_of_date"] == "2026-06-25"
+    one, two = payload["stories"]
+    assert one["id"] == str(first.id) and one["title"] == "Runner news"
+    assert [c["n"] for c in one["candidates"]] == [1, 2]
+    assert [c["title"] for c in one["candidates"]] == ["Runner", "Runner Up"]
+    # Numbering restarts per story — index 1 is a different film in each list.
+    assert [c["n"] for c in two["candidates"]] == [1]
+    assert two["candidates"][0]["title"] == "Sunup"
+
+
+def test_retrieval_request_shows_only_the_capped_candidates():
+    story = _story()
+    _, messages = build_retrieval_link_request(
+        _batch((story, _candidates("A", "B", "C", limit=2))), date(2026, 6, 25)
+    )
+    candidates = json.loads(messages[0]["content"])["stories"][0]["candidates"]
+    assert [c["title"] for c in candidates] == ["A", "B"]
+
+
+def test_retrieval_request_carries_the_story_dek():
+    story = _story(title="Runner news", summary="A dek about Runner.")
+    _, messages = build_retrieval_link_request(
+        _batch((story, _candidates("Runner"))), date(2026, 6, 25)
+    )
+    assert json.loads(messages[0]["content"])["stories"][0]["summary"] == "A dek about Runner."
+
+
+def test_retrieval_request_rejects_a_zero_candidate_story():
+    """A zero-candidate story never reaches the model at all (ADR-0009) — an empty list
+    in the prompt would leave the reply nothing valid to index into."""
+    story = _story()
+    with pytest.raises(ValueError):
+        build_retrieval_link_request(
+            _batch((story, CandidateSet(scored=(), limit=10))), date(2026, 6, 25)
+        )
+
+
+def test_retrieval_instructions_ask_for_a_per_story_index():
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
+
+    lowered = _RETRIEVAL_INSTRUCTIONS.lower()
+    assert "candidate" in lowered
+    assert "roster" not in lowered
+    # The reply must index into *that story's* list, and saying so is what makes an
+    # out-of-list index rejectable rather than a coercion (NEU-999).
+    assert "that story's candidate list" in lowered
+
+
+def test_retrieval_instructions_retain_the_franchise_traps_in_full():
+    """The ticket is explicit: a smaller candidate set makes these paragraphs more
+    necessary, not less. Both prompts render from one shared block so they cannot drift."""
+    from upmovies.link.linker import _INSTRUCTIONS, _RETRIEVAL_INSTRUCTIONS
+
+    lowered = _RETRIEVAL_INSTRUCTIONS.lower()
+    for phrase in (
+        "franchise-generic casting/announcement traps",
+        "spin-off",
+        "not itself tracked",
+        "both directions",
+        "title stem",
+        "different medium",
+        "video game",
+        "wishlist",
+        "listicle",
+        "one entry among many",
+    ):
+        assert phrase in lowered, phrase
+    # And the definitions block is the same one, word for word: both prompts render from
+    # `_CLASSIFICATION_RULES`, so this is the shared text, not a second copy of it.
+    assert "the story is not about any tracked film. most stories are no-match" in lowered
+    assert _INSTRUCTIONS.count("franchise trap runs in BOTH directions") == 1
+
+
+def test_retrieval_request_does_not_escape_non_latin_titles():
+    """Escaped, one CJK character costs six — and `original_title` is rendered precisely
+    when it differs from the title, which is exactly the non-Latin case (spec §4.3)."""
+    story = _story()
+    film = indexed_film(film_id=uuid4(), title="Godzilla Minus One", original_title="ゴジラ-1.0")
+    candidates = CandidateSet(scored=(ScoredCandidate(film=film, score=1.0),), limit=10)
+    _, messages = build_retrieval_link_request(_batch((story, candidates)), date(2026, 6, 25))
+    assert "ゴジラ" in messages[0]["content"]
+    assert "\\u" not in messages[0]["content"]
