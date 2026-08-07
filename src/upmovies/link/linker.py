@@ -10,10 +10,11 @@ measures against, so it stays untouched until it is deleted outright at M4 (NEU-
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
+from uuid import UUID
 
 from upmovies.link.retrieval.render import render_candidates
 from upmovies.link.retrieval.select import CandidateSet
@@ -313,11 +314,34 @@ def build_retrieval_link_request(
     return system, messages
 
 
-def apply_link_decisions(
-    *, raw: str, stories: Sequence[Story], roster: Roster, floor: float
+@dataclass(frozen=True)
+class _FilmChoice:
+    """What one decision's `film` field resolved to, and whether it named nothing.
+
+    `out_of_list` is what separates *the model chose no film* — the answer the prompt asks
+    for most often — from *the model named a number that indexes nothing here*. Only the
+    retrieval path can tell those apart: under the global roster every index the model could
+    plausibly return resolved to some film, so there was no such reply to distinguish."""
+
+    film_id: UUID | None = None
+    out_of_list: bool = False
+
+
+def _apply_decisions(
+    *,
+    raw: str,
+    stories: Sequence[Story],
+    floor: float,
+    choose: Callable[[Story, object], _FilmChoice],
 ) -> BatchLinkResult:
     """Apply the classifier's JSON decisions to each Story in place: floor/resolution rules
-    plus the no-decision fallback."""
+    plus the no-decision fallback.
+
+    Shared by both request shapes, which differ only in how a reply's `film` names a film —
+    a global roster index or an index into that story's own candidate list. Everything after
+    the resolution is one set of rules on purpose: the floor, the note vocabulary, and the
+    no-decision fallback are what downstream stages and `link_note` queries read, and a
+    second copy of them would drift exactly as two copies of the prompt would."""
     decisions = json.loads(_extract_json_array(raw))  # raises on un-parseable output
 
     by_id = {str(s.id): s for s in stories}
@@ -331,7 +355,7 @@ def apply_link_decisions(
         if story is None:
             continue
         decided.add(sid)
-        film_id = roster.film_id_for_index(decision.get("film"))
+        choice = choose(story, decision.get("film"))
         reason = decision.get("reason")
         try:
             confidence = float(decision.get("confidence") or 0.0)
@@ -339,9 +363,9 @@ def apply_link_decisions(
             confidence = 0.0
 
         story.linked_at = now
-        if reason == "about" and film_id is not None and confidence >= floor:
+        if reason == "about" and choice.film_id is not None and confidence >= floor:
             story.link_status = "linked"
-            story.film_id = film_id
+            story.film_id = choice.film_id
             story.link_confidence = confidence
             story.link_note = None
             linked += 1
@@ -349,8 +373,15 @@ def apply_link_decisions(
             story.link_status = "rejected"
             story.film_id = None
             story.link_confidence = None
-            if reason == "about" and film_id is not None and confidence < floor:
+            if reason == "about" and choice.film_id is not None and confidence < floor:
                 story.link_note = "below-floor"
+            elif reason == "about" and choice.out_of_list:
+                # Its own note rather than `no-match`: the model did not reach a verdict of
+                # "no tracked film", it answered with a number naming none of the films this
+                # story offered. Folding the two together would hide a numbering regression
+                # inside the ordinary majority outcome — in the one stage where a lost story
+                # is lost for good.
+                story.link_note = "out-of-list"
             elif reason == "mention":
                 story.link_note = "mention"
             elif reason == "not-news":
@@ -371,6 +402,70 @@ def apply_link_decisions(
             rejected += 1
 
     return BatchLinkResult(linked, rejected)
+
+
+def apply_link_decisions(
+    *, raw: str, stories: Sequence[Story], roster: Roster, floor: float
+) -> BatchLinkResult:
+    """Apply decisions naming films by their **global roster index**.
+
+    Unchanged behaviour: the roster resolves an unusable index to no film and the reply is
+    stamped `no-match`, as it always has been. It never reports `out_of_list`, because with
+    one shared list there is no story-local scope for an index to fall outside of — and the
+    roster path is the incumbent the cutover's F1 gate measures against, so its notes must
+    not move underneath that comparison."""
+    return _apply_decisions(
+        raw=raw,
+        stories=stories,
+        floor=floor,
+        choose=lambda _story, index: _FilmChoice(film_id=roster.film_id_for_index(index)),
+    )
+
+
+def apply_retrieval_link_decisions(
+    *, raw: str, batch: Sequence[StoryCandidates], floor: float
+) -> BatchLinkResult:
+    """Apply decisions naming films by an index into **that story's own candidate list**.
+
+    Each story is answered against the candidate set it was scored and sent with — the two
+    travel together in `StoryCandidates` precisely so they cannot be paired up wrongly here.
+    An index outside a story's list is **rejected, not coerced**: numbering restarts per
+    story, so a number valid in a neighbour's list names nothing here, and quietly linking
+    to the nearest candidate would turn a defective reply into a confident wrong link."""
+    candidates_by_story = {str(entry.story.id): entry.candidates for entry in batch}
+
+    def choose(story: Story, index: object) -> _FilmChoice:
+        if index is None:
+            return _FilmChoice()
+        film_id = candidates_by_story[str(story.id)].film_id_for_index(index)
+        return _FilmChoice(film_id=film_id, out_of_list=film_id is None)
+
+    return _apply_decisions(
+        raw=raw, stories=[entry.story for entry in batch], floor=floor, choose=choose
+    )
+
+
+def reject_zero_candidate_stories(stories: Sequence[Story]) -> int:
+    """Reject every story retrieval found nothing for, and return how many. No model call.
+
+    The zero-candidate rejection (ADR-0009), and on the measured corpus the majority of the
+    stage's workload. `no-candidates` is deliberately its own note rather than folded into
+    `no-match`: it is the difference between *the classifier judged this story* and *the
+    classifier never saw it*, which is what keeps stories lost to a retrieval bug queryable
+    and re-runnable inside the recency window.
+
+    The count is returned rather than folded into a `BatchLinkResult` because its caller
+    must keep it out of `StageCounts.processed` — these stories were decided by a lexical
+    rule, and letting them stand in for classifier output would switch off the total-failure
+    guard on the repo's one lossy stage."""
+    now = datetime.now(UTC)
+    for story in stories:
+        story.link_status = "rejected"
+        story.film_id = None
+        story.link_confidence = None
+        story.link_note = "no-candidates"
+        story.linked_at = now
+    return len(stories)
 
 
 async def link_story_batch(
@@ -400,6 +495,36 @@ async def link_story_batch(
         # unusable — a bare JSONDecodeError when the reply isn't JSON, but equally an
         # AttributeError when it is JSON of the wrong shape. Recording only the first would
         # leave the second as a NULL, which reads as "no parse happened".
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return decisions
+
+
+async def link_retrieval_story_batch(
+    *,
+    client: Completer,
+    model: str,
+    batch: Sequence[StoryCandidates],
+    floor: float,
+    run_date: date,
+    calls: CallLog,
+) -> BatchLinkResult:
+    """One classifier call for one batch of stories and their candidate sets.
+
+    The retrieval counterpart of `link_story_batch`, raising on unusable output on the same
+    terms. `batch` carries only stories with candidates — a zero-candidate story is rejected
+    by `reject_zero_candidate_stories` without ever reaching a model — so an empty batch here
+    means the whole chunk was zero-candidate and there is nothing to ask about."""
+    if not batch:
+        return BatchLinkResult(0, 0)
+    system, messages = build_retrieval_link_request(batch, run_date)
+    result = await client.complete_call(
+        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS, calls=calls
+    )
+    try:
+        decisions = apply_retrieval_link_decisions(raw=result.text, batch=batch, floor=floor)
+    except Exception:
         calls.set_parse_ok(False)
         raise
     calls.set_parse_ok(True)

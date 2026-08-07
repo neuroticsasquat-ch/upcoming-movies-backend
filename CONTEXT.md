@@ -60,6 +60,14 @@ equality, and only for titles of at least six folded characters — short ones w
 unrelated words. It is the whole of retrieval's normalization story beyond tokenization.
 _Avoid_: slug, normalize (too broad — tokenization normalizes too), fuzzy match.
 
+**Out-of-list reply**:
+A classifier reply naming a candidate number that story's set does not offer — a number
+valid only in another story's list, or none at all. Rejected rather than coerced to the
+nearest candidate, and stamped `link_note = out-of-list` so a numbering regression stays
+distinguishable from the `no-match` the model never actually reached. Expressible only
+because numbering is per story; the global roster had no local scope to fall outside of.
+_Avoid_: invalid index, hallucinated film (it may name a real film — just not this story's).
+
 **Retrieval miss**:
 The correct film absent from a story's candidate set. The failure mode retrieval introduces,
 and an unforgiving one: **link** is lossy, so a missed story is not linked late, it is lost.
@@ -69,8 +77,10 @@ _Avoid_: false negative (that's the model's error, not retrieval's), recall fail
 **Zero-candidate rejection**:
 A story rejected because no film cleared the threshold — decided by the lexical rule alone,
 with no model call. Carries `link_note = no-candidates` so it stays distinguishable from a
-`no-match` the model actually reached, and is deliberately **not** counted as `processed`,
-since no classifier decided it.
+`no-match` the model actually reached, and is deliberately **not** counted as
+`StageCounts.processed`, since no classifier decided it — it feeds **retrieval health**
+instead. (The run row's own `items_processed` does count it: the stage really did dispose of
+the story. Only the total-failure guard reads `StageCounts`.)
 _Avoid_: auto-reject, unmatched, filtered.
 
 **Shadow mode**:

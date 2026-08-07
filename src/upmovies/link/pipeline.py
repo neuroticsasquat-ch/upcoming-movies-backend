@@ -23,8 +23,22 @@ from upmovies.ingest.runs import (
     total_failure_error,
 )
 from upmovies.link.cluster import cluster_film_events
-from upmovies.link.linker import Completer, link_story_batch
-from upmovies.link.retrieval.select import DEFAULT_CANDIDATE_LIMIT, DEFAULT_SCORE_THRESHOLD
+from upmovies.link.linker import (
+    Completer,
+    StoryCandidates,
+    link_retrieval_story_batch,
+    link_story_batch,
+    reject_zero_candidate_stories,
+    story_dek,
+)
+from upmovies.link.retrieval.health import RetrievalTally, record_retrieval_health
+from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
+from upmovies.link.retrieval.select import (
+    DEFAULT_CANDIDATE_LIMIT,
+    DEFAULT_SCORE_THRESHOLD,
+    CandidateSet,
+    select_candidates,
+)
 from upmovies.link.roster import Roster, build_roster
 from upmovies.link.shadow import ShadowObserver, build_shadow_observer
 from upmovies.link.source_stage import run_source_quality_stage
@@ -115,6 +129,118 @@ async def _link_stage_sequential(
         rejected,
         total_usage,
         StageCounts(processed=linked + rejected, failed=failed_stories),
+    )
+
+
+async def _link_stage_retrieval(
+    *,
+    session_factory: SessionFactory,
+    client: Completer,
+    run_id: UUID,
+    model: str,
+    index: CandidateIndex,
+    pending_ids: Sequence[UUID],
+    batch_size: int,
+    floor: float,
+    run_date: date,
+    threshold: float,
+    limit: int,
+    tally: RetrievalTally,
+) -> tuple[int, int, Usage, StageCounts]:
+    """The link stage under `LINK_RETRIEVAL_MODE=on`: retrieve per story, reject the ones
+    with no candidates without a model call, and classify the rest against their own lists.
+
+    Per-batch failure isolation matches the roster path, with one deliberate difference:
+    the zero-candidate rejects **commit before the classifier call** and are counted as
+    committed straight away. No model decided them, so no model failure may take them back —
+    which is what makes an outage's tally `0 processed / N failed` rather than a partial
+    success (ADR-0009), and what the outage test in `test_pipeline_retrieval.py` pins."""
+    linked = classified_rejected = zero_candidate_rejected = failed_stories = 0
+    total_usage = Usage()
+    for batch_ids in _chunks(pending_ids, batch_size):
+        calls = CallLog()  # see `_link_stage_sequential` — owned outside the try on purpose
+        # What is still at risk if this batch fails, decremented as work commits.
+        at_risk = len(batch_ids)
+        try:
+            async with _owned_session(session_factory) as s:
+                stories = (
+                    (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
+                )
+                batch = [
+                    StoryCandidates(
+                        story=story,
+                        candidates=_retrieve(index, story, threshold=threshold, limit=limit),
+                    )
+                    for story in stories
+                ]
+                for entry in batch:
+                    tally.add(entry.candidates)
+
+                no_candidates = [e.story for e in batch if e.candidates.is_empty]
+                to_classify = [e for e in batch if not e.candidates.is_empty]
+                if no_candidates:
+                    rejected_here = reject_zero_candidate_stories(no_candidates)
+                    # Counted into the *run row* — the stage really did dispose of these
+                    # stories — but pointedly not into `StageCounts` below.
+                    await record_progress(s, run_id, processed_delta=rejected_here)
+                    await s.commit()
+                    zero_candidate_rejected += rejected_here
+                    at_risk -= rejected_here
+
+                result = await link_retrieval_story_batch(
+                    client=client,
+                    model=model,
+                    batch=to_classify,
+                    floor=floor,
+                    run_date=run_date,
+                    calls=calls,
+                )
+                if to_classify:
+                    await record_progress(
+                        s, run_id, processed_delta=result.linked + result.rejected
+                    )
+                    await s.commit()
+            linked += result.linked
+            classified_rejected += result.rejected
+        except Exception:
+            # `at_risk`, not the batch size: the zero-candidate rejects in this batch have
+            # already committed, and logging them as failed would misreport the outage the
+            # counters below describe correctly.
+            log.exception("link batch of %d stories failed", at_risk)
+            async with _owned_session(session_factory) as s:
+                await record_progress(s, run_id, failed_delta=at_risk)
+                await s.commit()
+            failed_stories += at_risk
+        finally:
+            total_usage += calls.usage
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s, run_id, stage="link", model=model, results=calls.results
+                    )
+                    await s.commit()
+    return (
+        linked,
+        classified_rejected + zero_candidate_rejected,
+        total_usage,
+        # **`processed` is classifier output only.** `total_failure` returns False the
+        # instant `processed > 0`, so folding the zero-candidate rejects in here would let a
+        # total Anthropic outage report ~30% processed, finalize the run `succeeded`, and let
+        # the fail-fast daily chain proceed — while the stories the outage cost aged out of
+        # the recency window unrecoverably, `link` being the repo's one lossy stage. The
+        # rejects feed retrieval health instead, via `tally` (ADR-0009, NEU-999).
+        StageCounts(processed=linked + classified_rejected, failed=failed_stories),
+    )
+
+
+def _retrieve(index: CandidateIndex, story: Story, *, threshold: float, limit: int) -> CandidateSet:
+    """One story's candidate set, scored on the headline + dek the classifier is shown."""
+    return select_candidates(
+        index,
+        headline=story.title,
+        dek=story_dek(story),
+        threshold=threshold,
+        limit=limit,
     )
 
 
@@ -210,10 +336,9 @@ async def run_link_ingest(
     retrieval_threshold: float = DEFAULT_SCORE_THRESHOLD,
     retrieval_max_candidates: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> LinkIngestResult:
-    async with _owned_session(session_factory) as s:
-        roster = await build_roster(s)
-    # Alongside the roster and on the same once-per-run terms: one catalog read, then pure
-    # lookups. None unless the mode is `shadow` (or the build failed) — see `link/shadow.py`.
+    # Alongside the catalog read below and on the same once-per-run terms: one query, then
+    # pure lookups. None unless the mode is `shadow` (or the build failed) — see
+    # `link/shadow.py`.
     shadow = await build_shadow_observer(
         session_factory,
         run_id=run_id,
@@ -233,23 +358,53 @@ async def run_link_ingest(
         )
         pending_ids = [row[0] for row in result.all()]
 
-    linked, rejected, link_usage, link_counts = await _link_stage_sequential(
-        session_factory=session_factory,
-        client=client,
-        run_id=run_id,
-        model=model,
-        roster=roster,
-        pending_ids=pending_ids,
-        batch_size=batch_size,
-        floor=floor,
-        run_date=run_date,
-        shadow=shadow,
-    )
-    if shadow is not None:
-        # Immediately after the stage that produced the numbers: nothing may sit between
-        # them and leave probe rows without the denominator they are read against, since a
-        # *missing* health row is how "shadow did not run at all" is told apart.
-        await shadow.record_health()
+    # The two link paths, each owning the catalog read it needs. Under `on` **no roster is
+    # built at all** — deleting that ~50k-token prefix is the project's whole point (spec
+    # §1) — and a failed index build is deliberately *not* caught: with no roster to fall
+    # back to, an unbuildable index would zero-candidate the whole backlog and reject it, so
+    # the run must crash and finalize `failed` instead. M4 (NEU-1004) deletes the `else`.
+    if retrieval_mode == "on":
+        async with _owned_session(session_factory) as s:
+            index = await build_candidate_index(s)
+        tally = RetrievalTally()
+        linked, rejected, link_usage, link_counts = await _link_stage_retrieval(
+            session_factory=session_factory,
+            client=client,
+            run_id=run_id,
+            model=model,
+            index=index,
+            pending_ids=pending_ids,
+            batch_size=batch_size,
+            floor=floor,
+            run_date=run_date,
+            threshold=retrieval_threshold,
+            limit=retrieval_max_candidates,
+            tally=tally,
+        )
+        # Immediately after the stage that produced the numbers, on the same terms shadow
+        # records its own: a *missing* health row is how "retrieval did not run at all" is
+        # told apart from a run whose retrieval found nothing.
+        await record_retrieval_health(session_factory, run_id=run_id, tally=tally)
+    else:
+        async with _owned_session(session_factory) as s:
+            roster = await build_roster(s)
+        linked, rejected, link_usage, link_counts = await _link_stage_sequential(
+            session_factory=session_factory,
+            client=client,
+            run_id=run_id,
+            model=model,
+            roster=roster,
+            pending_ids=pending_ids,
+            batch_size=batch_size,
+            floor=floor,
+            run_date=run_date,
+            shadow=shadow,
+        )
+        if shadow is not None:
+            # Immediately after the stage that produced the numbers: nothing may sit between
+            # them and leave probe rows without the denominator they are read against, since
+            # a *missing* health row is how "shadow did not run at all" is told apart.
+            await shadow.record_health()
     async with _owned_session(session_factory) as s:
         await record_llm_usage(s, run_id, stage="link", model=model, usage=link_usage)
         await s.commit()

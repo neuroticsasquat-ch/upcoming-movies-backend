@@ -95,6 +95,24 @@ class CandidateSet:
         """The offered films, best-first — the set the model's reply indexes into."""
         return tuple(c.film.film_id for c in self.candidates)
 
+    def film_id_for_index(self, index: object) -> UUID | None:
+        """The film at 1-based `index` in *this story's* offered set, or None.
+
+        The local counterpart to `Roster.film_id_for_index`, and the reason an out-of-list
+        reply is expressible at all: numbering restarts at 1 per story, so a number that
+        overruns this set names no film here even when it names one in another story's
+        (spec §4.2). None is a rejection upstream, never a coercion to a neighbouring
+        candidate — `link` is lossy, and a wrong link is worse than no link.
+
+        `bool` is excluded explicitly: `True` is an `int` in Python and would otherwise
+        resolve to the first candidate, turning a malformed reply into a confident link.
+        The cap applies — a film the model was never shown must not be nameable."""
+        if isinstance(index, bool) or not isinstance(index, int):
+            return None
+        if 1 <= index <= len(self.candidates):
+            return self.candidates[index - 1].film.film_id
+        return None
+
     def rank_of(self, film_id: UUID) -> int | None:
         """The 1-based position of `film_id` in the offered set, or None if not offered.
 
