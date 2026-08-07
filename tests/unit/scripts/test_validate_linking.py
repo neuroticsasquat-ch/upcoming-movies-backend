@@ -1,0 +1,190 @@
+import json
+from datetime import date
+from uuid import uuid4
+
+from scripts.validate_linking import (
+    RetrievalCoverage,
+    build_stories,
+    evaluate_gate,
+    format_comparison,
+    format_retrieval_report,
+    link_pairs,
+    retrieval_coverage,
+    run_retrieval_path,
+)
+from upmovies.link.metrics import LinkMetrics, compute_link_metrics, compute_news_value_metrics
+from upmovies.link.retrieval.health import RetrievalTally
+from upmovies.link.retrieval.index import build_index, indexed_film
+from upmovies.link.validation import ValidationItem
+from upmovies.llm.client import CallResult
+
+
+def _about(tmdb_id: int, title: str = "t", **kw) -> ValidationItem:
+    base = dict(
+        url=f"u{tmdb_id}",
+        source="s",
+        title=title,
+        summary="",
+        relation="about",
+        expected_film_tmdb_id=tmdb_id,
+    )
+    base.update(kw)
+    return ValidationItem.model_validate(base)
+
+
+def _none(url: str = "u0") -> ValidationItem:
+    return ValidationItem.model_validate(
+        dict(url=url, source="s", title="t", summary="", relation="none")
+    )
+
+
+def _metrics(precision: float, recall: float) -> LinkMetrics:
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    return LinkMetrics(0, 0, 0, 0, precision, recall, f1)
+
+
+def test_link_pairs_zips_predictions_onto_expected_ids():
+    items = [_about(7), _none(), _about(9)]
+    assert link_pairs(items, [7, None, 11]) == [(7, 7), (None, None), (11, 9)]
+
+
+def test_retrieval_coverage_scores_about_items_only():
+    items = [_about(7, "Hit"), _about(9, "Miss"), _none()]
+    coverage = retrieval_coverage(items, [(7, 22), (22,), ()])
+    assert (coverage.hits, coverage.total) == (1, 2)
+    assert coverage.misses == (("Miss", 9),)
+    assert coverage.rate == 0.5
+
+
+def test_retrieval_coverage_has_no_rate_without_about_items():
+    assert retrieval_coverage([_none()], [()]).rate is None
+
+
+def test_retrieval_coverage_sets_aside_films_that_left_the_active_catalog():
+    """The fixture outlives the release dates of the films it names. A film retrieval was
+    never allowed to consider is a scope loss, not a lexical one, and scoring it as a miss
+    would invite the fix — a lower T, another alias — that could not have helped."""
+    items = [_about(7, "Hit"), _about(9, "Released last month")]
+    coverage = retrieval_coverage(items, [(7,), ()], indexed_tmdb_ids={7})
+    assert (coverage.hits, coverage.total, coverage.out_of_catalog) == (1, 1, 1)
+    assert coverage.misses == ()
+    assert coverage.rate == 1.0
+
+
+def test_retrieval_report_names_misses_and_flags_the_aged_out_films():
+    coverage = RetrievalCoverage(hits=1, total=2, misses=(("Naga Bandham", 9),), out_of_catalog=3)
+    tally = RetrievalTally(
+        stories_retrieved=4, zero_candidate_stories=2, saturated_stories=1, candidates_offered=6
+    )
+    report = format_retrieval_report(coverage, tally)
+    assert "zero-candidate=2" in report and "cap-saturated=1" in report
+    assert "mean-candidates=1.50" in report
+    assert "MISS  [9] Naga Bandham" in report
+    assert "3 more expected film(s) have aged out" in report
+
+
+def test_gate_passes_when_f1_holds_and_precision_holds():
+    verdict = evaluate_gate(_metrics(0.90, 0.80), _metrics(0.895, 0.80))
+    assert verdict.passed
+    assert not verdict.masked_precision_loss
+
+
+def test_gate_passes_when_retrieval_beats_the_baseline():
+    """A gain is not a breach — gate #3 is one-sided ('within ~1 point of the baseline')."""
+    assert evaluate_gate(_metrics(0.80, 0.80), _metrics(0.90, 0.90)).passed
+
+
+def test_gate_fails_when_f1_drops_past_the_tolerance():
+    verdict = evaluate_gate(_metrics(0.90, 0.90), _metrics(0.80, 0.80))
+    assert not verdict.passed
+    assert verdict.f1_delta < -1.0
+
+
+def test_gate_fails_when_precision_falls_behind_a_steady_f1():
+    """The regression a naive F1 gate waves through: the model shown one film and a headline
+    about that film's untracked sibling links it anyway — precision down, recall up."""
+    verdict = evaluate_gate(_metrics(0.95, 0.70), _metrics(0.85, 0.766))
+    assert abs(verdict.f1_delta) < 1.0
+    assert verdict.masked_precision_loss
+    assert not verdict.passed
+
+
+def test_comparison_report_breaks_out_precision_and_flags_the_masked_loss():
+    baseline = compute_link_metrics([(1, 1), (2, 2), (3, None)])
+    candidate = compute_link_metrics([(1, 1), (2, 2), (3, None), (4, None)])
+    nv = compute_news_value_metrics([(True, False, "reaction")])
+    report = format_comparison(
+        baseline=baseline, candidate=candidate, baseline_nv=nv, candidate_nv=nv
+    )
+    assert "precision" in report and "recall" in report and "f1" in report
+    assert "GATE" in report
+    assert "reaction" in report  # leaks broken out by category, both paths side by side
+
+
+class _LinkFirstCandidate:
+    """A classifier that links every story it is asked about to its first candidate."""
+
+    def __init__(self):
+        self.seen_story_ids: list[str] = []
+
+    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        stories = json.loads(messages[0]["content"])["stories"]
+        self.seen_story_ids += [s["id"] for s in stories]
+        return calls.record(
+            CallResult(
+                text=json.dumps(
+                    [
+                        {"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"}
+                        for s in stories
+                    ]
+                )
+            )
+        )
+
+
+async def test_retrieval_path_rejects_zero_candidate_stories_without_a_model_call():
+    """The measured population is every fixture item, not just the ones retrieval reached —
+    a zero-candidate story is a prediction of 'no film' and must be scored as one."""
+    film_id = uuid4()
+    index = build_index([indexed_film(film_id=film_id, title="Nagabandham")])
+    items = [_about(7, "Naga Bandham Movie Trailer Launch"), _about(9, "Unrelated sports result")]
+    stories = build_stories(items)
+    client = _LinkFirstCandidate()
+
+    candidate_sets, tally = await run_retrieval_path(
+        client=client,
+        model="m",
+        index=index,
+        stories=stories,
+        floor=0.7,
+        batch_size=15,
+        run_date=date(2026, 8, 7),
+        threshold=0.34,
+        limit=10,
+    )
+
+    assert client.seen_story_ids == [str(stories[0].id)]
+    assert stories[0].link_status == "linked" and stories[0].film_id == film_id
+    assert stories[1].link_status == "rejected" and stories[1].link_note == "no-candidates"
+    assert [cs.is_empty for cs in candidate_sets] == [False, True]
+    assert (tally.stories_retrieved, tally.zero_candidate_stories) == (2, 1)
+
+
+async def test_retrieval_path_sends_no_call_for_an_all_zero_candidate_batch():
+    index = build_index([indexed_film(film_id=uuid4(), title="Nagabandham")])
+    stories = build_stories([_about(9, "Unrelated sports result")])
+    client = _LinkFirstCandidate()
+
+    await run_retrieval_path(
+        client=client,
+        model="m",
+        index=index,
+        stories=stories,
+        floor=0.7,
+        batch_size=15,
+        run_date=date(2026, 8, 7),
+        threshold=0.34,
+        limit=10,
+    )
+
+    assert client.seen_story_ids == []

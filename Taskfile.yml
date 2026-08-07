@@ -43,6 +43,18 @@ tasks:
           docker exec tbc_postgresql_db psql -U root -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
             || docker exec tbc_postgresql_db psql -U root -d postgres -c "CREATE DATABASE $db"
         done
+  db:refresh:
+    desc: 'Refresh local catalog/news/ingest from prod (local app + user data preserved)'
+    cmds:
+      - 'scripts/refresh_db.sh content'
+  db:refresh:app:
+    desc: 'Refresh local app schema from prod — DROPS local users (prompts first)'
+    cmds:
+      - 'scripts/refresh_db.sh app'
+  db:refresh:all:
+    desc: 'Refresh every schema from prod — DROPS local users (prompts first)'
+    cmds:
+      - 'scripts/refresh_db.sh both'
   migrate:
     desc: Run alembic migrations against the upmovies database
     cmds:

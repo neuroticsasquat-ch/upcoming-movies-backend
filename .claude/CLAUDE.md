@@ -20,6 +20,10 @@ Do **not** run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. 
 | `task migrate` | `alembic upgrade head` |
 | `task makemigration -- "msg"` | autogenerate a migration |
 | `task shell` / `task logs` | bash in container / stream logs |
+| `task db:refresh` | pull prod `catalog`/`news`/`ingest` into the local DB — **local `app`/user data untouched** |
+| `task db:refresh:app` / `db:refresh:all` | same, including `app` — drops local users, prompts first |
+
+`db:refresh` needs `PROD_SSH` in `.env` (see `.env.example`); it reads prod only, and every write goes through the local Postgres container. Use it before any measurement script — the dev catalog is a fraction of prod's, so accuracy numbers taken against it don't mean much.
 
 Before claiming work done, `task test`, `task lint`, `task typecheck` must all be green (ruff also reformats — run `task format`).
 
