@@ -76,10 +76,11 @@ def test_settings_ingestion_overrides_from_env(monkeypatch):
 
 
 def test_settings_link_batch_size_default(monkeypatch):
+    """20, re-derived at NEU-1001 — the reply ceiling sets it now, not a cached prefix."""
     _set_required(monkeypatch)
     monkeypatch.delenv("LINK_BATCH_SIZE", raising=False)
     s = Settings()  # type: ignore[call-arg]
-    assert s.link_batch_size == 15
+    assert s.link_batch_size == 20
 
 
 def test_settings_link_batch_size_override_from_env(monkeypatch):
@@ -230,8 +231,11 @@ def test_settings_link_retrieval_defaults_to_off(monkeypatch):
     _clear_retrieval(monkeypatch)
     s = Settings()  # type: ignore[call-arg]
     assert s.link_retrieval_mode == "off"
-    assert s.link_retrieval_threshold == 0.34
-    assert s.link_retrieval_max_candidates == 10
+    # Tuned at NEU-1001 against 98,662 real stories and a 1,226-film catalog: T=0.5 is the
+    # top of the flat region (every reachable roster pick scores 0.5 or better) and K=25
+    # clears both the p99 candidate set of 18 and the deepest pick seen, at rank 21.
+    assert s.link_retrieval_threshold == 0.5
+    assert s.link_retrieval_max_candidates == 25
 
 
 def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
@@ -265,13 +269,14 @@ def test_settings_link_retrieval_mode_rejects_anything_else(monkeypatch, mode):
 
 
 def test_settings_link_retrieval_tuning_overrides_from_env(monkeypatch):
-    """M3 tunes T and K by config, not by deploy."""
+    """T and K move by config, not by deploy — which is what made NEU-1001 a config change,
+    and what lets the next catalog expansion be answered the same way."""
     _set_required(monkeypatch)
-    monkeypatch.setenv("LINK_RETRIEVAL_THRESHOLD", "0.5")
-    monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "25")
+    monkeypatch.setenv("LINK_RETRIEVAL_THRESHOLD", "0.34")
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "10")
     s = Settings()  # type: ignore[call-arg]
-    assert s.link_retrieval_threshold == 0.5
-    assert s.link_retrieval_max_candidates == 25
+    assert s.link_retrieval_threshold == 0.34
+    assert s.link_retrieval_max_candidates == 10
 
 
 @pytest.mark.parametrize("threshold", ["-0.1", "1.5"])

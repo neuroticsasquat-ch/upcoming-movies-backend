@@ -18,19 +18,31 @@ rejection downstream — no model call, `link_note = 'no-candidates'` (ADR-0009)
 is the majority of the stage's workload on the measured corpus, so the empty set is the
 common case rather than the edge one.
 
-**Ranking is deliberately plain.** Measured on the labeled fixture, recall@1 equals
-recall@40: misses are score-zero misses, never ranking failures. `K` is therefore a
-prompt-size guard rather than a recall lever, and there is nothing for a more elaborate
-ranker to recover. What the order does have to be is *deterministic* — score, then title,
-then id — because shadow telemetry records the rank of the roster's pick and a rank that
-moved between runs for no reason would be unreadable.
+**Ranking is deliberately plain.** Over 98,662 production stories at a 1,226-film catalog,
+262 of the 361 roster picks retrieval reaches rank first and the p99 rank is 8: misses are
+score-zero misses, not ranking failures, so there is nothing for a more elaborate ranker to
+recover. What the order does have to be is *deterministic* — score, then title, then id —
+because shadow telemetry records the rank of the roster's pick and a rank that moved
+between runs for no reason would be unreadable.
 
-**The constants here are placeholders.** T and K are defensible defaults, not tuned
-values: a 249-film probe cannot predict collision behaviour at 1,200 films, let alone at
-the ~24,000 the undated-film expansion implies. They are tuned in M3 against shadow data,
-which is why both are parameters and the module-level values are only the defaults.
-Two measured facts bound that tuning: T=0.34 and T=0.5 are identical on the corpus, and
-T=0.67 loses three real items — so the cliff sits between 0.5 and 0.67.
+**The constants below are tuned, not assumed** (NEU-1001, design spec §5.2). Measured over
+that corpus, against 365 roster picks whose film is still in the active catalog:
+
+- **T = 0.5 is the top of the flat region.** No pick scores between zero and 0.5 — the 361
+  retrieval reaches all score 0.5 or better, and the four it misses share no title token
+  with their story at all. Recall is therefore identical for every T from 0 to 0.5 (0.989),
+  and those four are the lexical floor rather than a threshold effect. T=0.6 costs 11 picks.
+  Taking the highest T that loses nothing is what resists catalog growth: what degrades as
+  the catalog expands is candidate-set size, and a higher threshold admits fewer collisions.
+- **K = 25 caps the tail without discarding a pick.** The over-threshold set runs median 3,
+  p90 9, p99 18, max 44, and the deepest pick observed sits at rank 21. K is a prompt-size
+  guard, as designed — but at this catalog it is no longer free: K=10 would saturate 7.3%
+  of stories and lose two picks outright.
+
+Cap saturation is the health signal to watch as the catalog grows (`retrieval/health.py`):
+at K=25 it is 0.1% today, low enough that a rise means something. It will rise — measured
+against sub-catalogs, p90 candidates grows about linearly with catalog size, so the
+undated-film expansion is expected to saturate this cap and force a retune (spec §5.2).
 """
 
 from dataclasses import dataclass
@@ -39,9 +51,10 @@ from uuid import UUID
 from upmovies.link.retrieval.index import CandidateIndex, IndexedFilm
 from upmovies.link.retrieval.normalize import significant_tokens, squash_fold
 
-# Placeholder constants — see the module docstring. Tuned in M3 against shadow data.
-DEFAULT_SCORE_THRESHOLD = 0.34
-DEFAULT_CANDIDATE_LIMIT = 10
+# Tuned against production traffic — see the module docstring. `config.Settings` carries the
+# same two values so they can be moved without a deploy; a test pins the pair together.
+DEFAULT_SCORE_THRESHOLD = 0.5
+DEFAULT_CANDIDATE_LIMIT = 25
 
 
 @dataclass(frozen=True)

@@ -61,9 +61,11 @@ from upmovies.link.retrieval.normalize import (
 
 log = logging.getLogger(__name__)
 
-# Billed cast carried for rendering. Three is what the candidate rendering was costed at:
-# ~320 tokens per story at a p90 of four candidates, against a ~50k-token roster prefix.
-# The whole cast would be unaffordable; three names is enough to tell sibling films apart.
+# Billed cast carried for rendering. Three is what the candidate rendering was costed at,
+# and the measurement at production scale holds it: a rendered candidate costs ~102 tokens,
+# so a mean 4.2-candidate story carries ~360 against the ~46k-token roster prefix it
+# replaces (NEU-1001, spec §5.1–5.2). The whole cast would be unaffordable; three names is
+# enough to tell sibling films apart.
 _CAST_LIMIT = 3
 
 

@@ -3,8 +3,9 @@
 A retrieved film is shown to the classifier as a small JSON object carrying **more** than
 the roster line it replaces: the roster's title, year, original title, genres and overview,
 **plus director, top-3 billed cast, and collection name**. At ~1,200 films those extra
-fields were unaffordable; at a p90 of four candidates they cost ~320 tokens per story,
-against a ~50k-token prefix (spec §4.3).
+fields were unaffordable; at a measured mean of 4.2 candidates per story a rendered candidate
+costs ~102 tokens and a story's whole candidate list ~360, against the ~46k-token prefix they
+replace (spec §4.3, §5.1, §5.2).
 
 The richer rendering is not a bonus — it is the counterweight to the risk the whole project
 runs. Narrowing the candidate set **hurts precision**: shown one film and a headline about
@@ -29,9 +30,13 @@ from upmovies.link.retrieval.index import IndexedFilm
 from upmovies.link.retrieval.select import CandidateSet
 
 # Matches the roster's trim, so the cutover does not change what the model reads about a
-# film at the same time as it changes which films it reads about. A wider overview is
-# affordable at four candidates where it was not at 1,200 — but widening it is a
-# prompt-size trade, and those are tuned together in M3 (NEU-1001), not decided here.
+# film at the same time as it changes which films it reads about. NEU-1001 weighed widening
+# it and **kept 120**: 120 characters is already ~30 of the ~102 tokens a candidate costs,
+# so tripling it would add ~29% to every request to buy something no free measurement can
+# price — whether a longer overview helps the classifier is an F1 question, and answering it
+# means paying for a `validate_linking` run. Worse, moving it now would move the roster
+# path's baseline at the same time, which is the one comparison the cutover gate rests on.
+# Revisit after the cutover, when the roster is gone and only one path moves.
 OVERVIEW_MAX = 120
 
 

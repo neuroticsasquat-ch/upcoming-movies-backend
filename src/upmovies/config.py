@@ -44,7 +44,14 @@ class Settings(BaseSettings):
     cluster_model: str = Field(default="claude-sonnet-4-6", alias="CLUSTER_MODEL")
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
-    link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
+    # Re-derived at NEU-1001. The old 15 was chosen when a ~46k-token roster prefix was
+    # cached and amortized across the batch; the retrieval path sends no prefix, so what
+    # bounds the batch now is the **reply**: `_MAX_TOKENS` caps it at 2048, and a batch
+    # whose reply is truncated fails to parse and takes every story in it down. At 20 the
+    # worst-case reply measures 1,183 tok (58% of the ceiling) while the instruction block
+    # falls to 11.4% of the request, against 14.7% at 15. A batch of 40 overruns the reply
+    # ceiling outright.
+    link_batch_size: int = Field(default=20, alias="LINK_BATCH_SIZE")
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
     link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
     link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
@@ -53,16 +60,16 @@ class Settings(BaseSettings):
     )
     # Defaults to `off`, so no local or test run needs new env to keep current behaviour.
     link_retrieval_mode: LinkRetrievalMode = Field(default="off", alias="LINK_RETRIEVAL_MODE")
-    # T and K for `link.retrieval.select`. Untuned placeholders — a 249-film probe cannot
-    # predict collision behaviour at 1,200 films — so they live here to make M3's tuning a
-    # config change rather than a deploy. They mirror the selector's own module defaults;
-    # `config` cannot import those (retrieval/index.py reads settings, so it would be a
-    # cycle), so a test pins the two together instead.
+    # T and K for `link.retrieval.select`, tuned at NEU-1001 over 98,662 real stories
+    # against the 1,226-film production catalog (design spec §5.2). They stay settings so
+    # the next catalog expansion is answered by config rather than by a deploy. They mirror
+    # the selector's own module defaults; `config` cannot import those (retrieval/index.py
+    # reads settings, so it would be a cycle), so a test pins the two together instead.
     link_retrieval_threshold: float = Field(
-        default=0.34, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
+        default=0.5, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
     )
     link_retrieval_max_candidates: int = Field(
-        default=10, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
+        default=25, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
     )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
