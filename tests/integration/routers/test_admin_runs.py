@@ -1,13 +1,21 @@
 """Session + is_admin protected, read-only ingest-run endpoints for the admin UI.
 Distinct from the ADMIN_TOKEN trigger/poll endpoints."""
 
+import itertools
 import uuid
+from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from upmovies.ingest.models import IngestRun
+from upmovies.catalog.models import Film
+from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
 from upmovies.main import app
+from upmovies.news.models import Story
+
+# `catalog.film.tmdb_id` is unique, and these tests seed several films per run.
+_tmdb_ids = itertools.count(90_000)
 
 
 @pytest.fixture
@@ -161,3 +169,177 @@ async def test_run_without_usage_serializes_empty_list(admin_authed_client, sess
     r = await admin_authed_client.get(f"/admin/runs/{tmdb.id}")
     assert r.status_code == 200
     assert r.json()["llm_usage"] == []
+
+
+# --- retrieval health (NEU-997) -------------------------------------------------
+
+
+async def _seed_retrieval_health(
+    session,
+    *,
+    started_at: datetime | None = None,
+    stories_retrieved: int = 200,
+    zero_candidate_stories: int = 50,
+    saturated_stories: int = 10,
+    mean_candidates: float | None = 2.5,
+    picks: Sequence[bool] = (),
+) -> IngestRun:
+    """A `link` run with a health row, plus one probe row per entry in `picks` (True where
+    retrieval surfaced the roster's film)."""
+    run = IngestRun(kind="link", status="succeeded")
+    if started_at is not None:
+        run.started_at = started_at
+    session.add(run)
+    await session.flush()
+    session.add(
+        RunRetrievalHealth(
+            run_id=run.id,
+            stories_retrieved=stories_retrieved,
+            zero_candidate_stories=zero_candidate_stories,
+            saturated_stories=saturated_stories,
+            mean_candidates=mean_candidates,
+        )
+    )
+    for index, retrieved in enumerate(picks):
+        film = Film(tmdb_id=next(_tmdb_ids), title=f"Runner {index}")
+        story = Story(source="X", url=f"https://e/{uuid.uuid4()}", title="Runner news")
+        session.add_all([film, story])
+        await session.flush()
+        session.add(
+            LinkRetrievalProbe(
+                run_id=run.id,
+                story_id=story.id,
+                film_id=film.id,
+                retrieved=retrieved,
+                rank=1 if retrieved else None,
+                score=1.0 if retrieved else None,
+                candidate_count=3,
+            )
+        )
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
+async def test_run_detail_includes_retrieval_health_rates(admin_authed_client, session):
+    run = await _seed_retrieval_health(session, picks=(True, True, True, False))
+    r = await admin_authed_client.get(f"/admin/runs/{run.id}")
+    assert r.status_code == 200
+    health = r.json()["retrieval_health"]
+    assert health["stories_retrieved"] == 200
+    assert health["zero_candidate_stories"] == 50
+    assert health["saturated_stories"] == 10
+    assert health["mean_candidates"] == 2.5
+    assert health["zero_candidate_rate"] == 0.25
+    assert health["saturation_rate"] == 0.05
+    # Recall is measured against the roster's picks, so its denominator is the probe rows.
+    assert health["roster_picks"] == 4
+    assert health["roster_picks_retrieved"] == 3
+    assert health["roster_pick_recall"] == 0.75
+
+
+async def test_run_list_includes_retrieval_health(admin_authed_client, session):
+    run = await _seed_retrieval_health(session, picks=(True,))
+    r = await admin_authed_client.get("/admin/runs")
+    assert r.status_code == 200
+    rows = {row["id"]: row for row in r.json()}
+    assert rows[str(run.id)]["retrieval_health"]["zero_candidate_rate"] == 0.25
+
+
+async def test_run_without_a_health_row_serializes_null(admin_authed_client, session):
+    # A missing row keeps its own meaning: shadow did not run at all.
+    tmdb, _ = await _seed_runs(session)
+    r = await admin_authed_client.get(f"/admin/runs/{tmdb.id}")
+    assert r.status_code == 200
+    assert r.json()["retrieval_health"] is None
+
+
+async def test_health_without_probes_reports_no_recall(admin_authed_client, session):
+    run = await _seed_retrieval_health(session, picks=())
+    r = await admin_authed_client.get(f"/admin/runs/{run.id}")
+    health = r.json()["retrieval_health"]
+    assert health["roster_picks"] == 0
+    assert health["roster_pick_recall"] is None
+
+
+async def test_probe_counts_do_not_leak_between_runs(admin_authed_client, session):
+    # The aggregate is grouped by run; a shared count would make every trend point identical.
+    quiet = await _seed_retrieval_health(session, picks=(True,))
+    busy = await _seed_retrieval_health(session, picks=(True, False))
+    rows = {row["id"]: row for row in (await admin_authed_client.get("/admin/runs")).json()}
+    assert rows[str(quiet.id)]["retrieval_health"]["roster_picks"] == 1
+    assert rows[str(busy.id)]["retrieval_health"]["roster_picks"] == 2
+
+
+# --- retrieval-health trend -----------------------------------------------------
+
+
+async def test_trend_requires_authentication(anon_client):
+    assert (await anon_client.get("/admin/runs/retrieval-health")).status_code == 401
+
+
+async def test_trend_forbidden_for_non_admin(authed_client):
+    assert (await authed_client.get("/admin/runs/retrieval-health")).status_code == 403
+
+
+async def test_trend_returns_runs_newest_first(admin_authed_client, session):
+    older = await _seed_retrieval_health(
+        session, started_at=datetime(2026, 8, 1, tzinfo=UTC), zero_candidate_stories=20
+    )
+    newer = await _seed_retrieval_health(
+        session, started_at=datetime(2026, 8, 5, tzinfo=UTC), zero_candidate_stories=80
+    )
+    r = await admin_authed_client.get("/admin/runs/retrieval-health")
+    assert r.status_code == 200
+    body = r.json()
+    assert [point["run_id"] for point in body] == [str(newer.id), str(older.id)]
+    # The drift the trend exists to show: the zero-candidate rate creeping up over runs.
+    assert [point["zero_candidate_rate"] for point in body] == [0.4, 0.1]
+    assert body[0]["run_status"] == "succeeded"
+
+
+async def test_trend_omits_runs_that_never_ran_shadow(admin_authed_client, session):
+    await _seed_runs(session)
+    run = await _seed_retrieval_health(session)
+    r = await admin_authed_client.get("/admin/runs/retrieval-health")
+    assert [point["run_id"] for point in r.json()] == [str(run.id)]
+
+
+async def test_trend_respects_limit(admin_authed_client, session):
+    await _seed_retrieval_health(session, started_at=datetime(2026, 8, 1, tzinfo=UTC))
+    newer = await _seed_retrieval_health(session, started_at=datetime(2026, 8, 5, tzinfo=UTC))
+    r = await admin_authed_client.get("/admin/runs/retrieval-health", params={"limit": 1})
+    assert [point["run_id"] for point in r.json()] == [str(newer.id)]
+
+
+async def test_trend_carries_the_recall_against_roster_picks(admin_authed_client, session):
+    await _seed_retrieval_health(session, picks=(True, True, False, False))
+    r = await admin_authed_client.get("/admin/runs/retrieval-health")
+    assert r.json()[0]["roster_pick_recall"] == 0.5
+
+
+async def test_trend_order_is_stable_for_runs_sharing_a_start(admin_authed_client, session):
+    # A series compared against itself cannot have `limit` drop a different point each call.
+    same = datetime(2026, 8, 5, tzinfo=UTC)
+    runs = [await _seed_retrieval_health(session, started_at=same) for _ in range(3)]
+    expected = [str(run.id) for run in sorted(runs, key=lambda r: r.id, reverse=True)]
+    for _ in range(3):
+        r = await admin_authed_client.get("/admin/runs/retrieval-health")
+        assert [point["run_id"] for point in r.json()] == expected
+
+
+async def test_trend_since_bounds_the_window(admin_authed_client, session):
+    await _seed_retrieval_health(session, started_at=datetime(2026, 7, 20, tzinfo=UTC))
+    inside = await _seed_retrieval_health(session, started_at=datetime(2026, 8, 5, tzinfo=UTC))
+    r = await admin_authed_client.get(
+        "/admin/runs/retrieval-health", params={"since": "2026-08-01T00:00:00Z"}
+    )
+    assert [point["run_id"] for point in r.json()] == [str(inside.id)]
+
+
+async def test_trend_since_without_an_offset_is_read_as_utc(admin_authed_client, session):
+    run = await _seed_retrieval_health(session, started_at=datetime(2026, 8, 5, tzinfo=UTC))
+    r = await admin_authed_client.get(
+        "/admin/runs/retrieval-health", params={"since": "2026-08-01T00:00:00"}
+    )
+    assert [point["run_id"] for point in r.json()] == [str(run.id)]
