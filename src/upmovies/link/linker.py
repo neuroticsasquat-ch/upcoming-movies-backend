@@ -280,7 +280,7 @@ def build_retrieval_link_request(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The instructions-only system block + a story payload carrying per-story candidates.
 
-    Batches survive the rewrite — they still amortize the instruction block over 15 stories —
+    Batches survive the rewrite — they still amortize the instruction block over 20 stories —
     but the catalog leaves the system block entirely, which is the point of the whole
     project: the prefix stopped scaling with catalog size, so it stops threatening the 200k
     context ceiling when the undated-film expansion multiplies that catalog (spec §4.2).

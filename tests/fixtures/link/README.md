@@ -197,6 +197,11 @@ clears the 92/93 recorded above because the residual there was the K=10 cap cutt
 Legend of Zelda* to rank 11 on a 287-film catalog; against a catalog of only the labeled
 films the cap never binds.
 
+**Re-measured the same day at the tuned constants (NEU-1001): still 93/93** at T=0.5,
+K=25. The test reads the module defaults rather than a frozen pair precisely so a retune
+re-runs it, and this one costs the fixture nothing — every labeled film scores at or above
+0.5, which is the same fact the production sweep found on its own corpus.
+
 Which is also the gate's limit. With no distractors it cannot see a precision regression
 or cap saturation — those belong to the offline F1 cutover gate and to shadow telemetry
 respectively. This one answers recall, which is the question that costs nothing to ask.
