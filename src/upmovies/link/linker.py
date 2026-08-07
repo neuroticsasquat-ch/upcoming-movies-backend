@@ -146,14 +146,19 @@ class BatchLinkResult:
     rejected: int
 
 
+def story_dek(story: Story) -> str:
+    """The short summary shown to the classifier beside a story's headline.
+
+    Public because candidate retrieval scores the same two fields (spec §4.1): shadow mode
+    measuring recall against a wider or narrower text than the one the classifier reads
+    would not be measuring the path that ships."""
+    if not isinstance(story.raw, dict):
+        return ""
+    return str(story.raw.get("summary", ""))[:_SUMMARY_MAX]
+
+
 def _story_payload(stories: Sequence[Story]) -> list[dict[str, str]]:
-    payload: list[dict[str, str]] = []
-    for s in stories:
-        summary = ""
-        if isinstance(s.raw, dict):
-            summary = str(s.raw.get("summary", ""))[:_SUMMARY_MAX]
-        payload.append({"id": str(s.id), "title": s.title, "summary": summary})
-    return payload
+    return [{"id": str(s.id), "title": s.title, "summary": story_dek(s)} for s in stories]
 
 
 def _extract_json_array(text: str) -> str:

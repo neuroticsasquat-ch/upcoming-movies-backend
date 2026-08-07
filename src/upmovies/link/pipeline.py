@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.config import LinkRetrievalMode
 from upmovies.ingest.runs import (
     StageCounts,
     finalize_run,
@@ -23,7 +24,9 @@ from upmovies.ingest.runs import (
 )
 from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import Completer, link_story_batch
+from upmovies.link.retrieval.select import DEFAULT_CANDIDATE_LIMIT, DEFAULT_SCORE_THRESHOLD
 from upmovies.link.roster import Roster, build_roster
+from upmovies.link.shadow import ShadowObserver, build_shadow_observer
 from upmovies.link.source_stage import run_source_quality_stage
 from upmovies.llm.client import CallLog, Usage
 from upmovies.news.models import EventStory, Story
@@ -60,6 +63,7 @@ async def _link_stage_sequential(
     batch_size: int,
     floor: float,
     run_date: date,
+    shadow: ShadowObserver | None = None,
 ) -> tuple[int, int, Usage, StageCounts]:
     linked = rejected = failed_stories = 0
     total_usage = Usage()
@@ -85,6 +89,13 @@ async def _link_stage_sequential(
                 await s.commit()
             linked += batch.linked
             rejected += batch.rejected
+            if shadow is not None:
+                # After the commit, so the picks observed are the ones that stuck — and
+                # outside the session block, since the observer owns a session of its own
+                # (nesting two would close the outer one). `expire_on_commit=False` is what
+                # keeps the decided stories readable out here. Never raises, so a batch
+                # cannot fail on shadow work; see `link/shadow.py`.
+                await shadow.observe_batch(stories)
         except Exception:
             log.exception("link batch of %d stories failed", len(batch_ids))
             async with _owned_session(session_factory) as s:
@@ -195,9 +206,21 @@ async def run_link_ingest(
     release_change_window_days: int = 14,
     source_gate_enabled: bool = False,
     source_judge_model: str = "claude-haiku-4-5",
+    retrieval_mode: LinkRetrievalMode = "off",
+    retrieval_threshold: float = DEFAULT_SCORE_THRESHOLD,
+    retrieval_max_candidates: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> LinkIngestResult:
     async with _owned_session(session_factory) as s:
         roster = await build_roster(s)
+    # Alongside the roster and on the same once-per-run terms: one catalog read, then pure
+    # lookups. None unless the mode is `shadow` (or the build failed) — see `link/shadow.py`.
+    shadow = await build_shadow_observer(
+        session_factory,
+        run_id=run_id,
+        mode=retrieval_mode,
+        threshold=retrieval_threshold,
+        limit=retrieval_max_candidates,
+    )
 
     run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
@@ -220,7 +243,13 @@ async def run_link_ingest(
         batch_size=batch_size,
         floor=floor,
         run_date=run_date,
+        shadow=shadow,
     )
+    if shadow is not None:
+        # Immediately after the stage that produced the numbers: nothing may sit between
+        # them and leave probe rows without the denominator they are read against, since a
+        # *missing* health row is how "shadow did not run at all" is told apart.
+        await shadow.record_health()
     async with _owned_session(session_factory) as s:
         await record_llm_usage(s, run_id, stage="link", model=model, usage=link_usage)
         await s.commit()

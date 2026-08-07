@@ -118,6 +118,9 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
                 unresolved_tier=settings.source_unresolved_tier,
                 dedup_days=settings.link_singular_dedup_days,
                 release_change_window_days=settings.link_release_change_window_days,
+                retrieval_mode=settings.link_retrieval_mode,
+                retrieval_threshold=settings.link_retrieval_threshold,
+                retrieval_max_candidates=settings.link_retrieval_max_candidates,
             )
     except Exception as e:
         log.exception("link ingest crashed")

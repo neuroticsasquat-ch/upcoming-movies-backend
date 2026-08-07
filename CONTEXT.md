@@ -81,6 +81,22 @@ traffic at full scale for no added cost — it is where the cutover evidence com
 _Avoid_: dry run (it records, and the records are the point), dark launch, A/B test (nothing is
 split — both paths see every story).
 
+**Retrieval probe**:
+One shadow-mode observation: for a story the **roster linked**, where retrieval put that pick —
+retrieved or not, at what rank, at what score, out of how many candidates. One row per linked
+story, because a story both paths rejected is agreement with nothing to adjudicate. Its recall
+rate is *not* truth on its own: the roster makes false positives, so retrieval declining to
+surface one is a win that a bare percentage scores as a loss.
+_Avoid_: sample, trace, shadow result (too vague — health is a shadow result too).
+
+**Retrieval health**:
+The per-run retrieval rates — zero-candidate share, cap saturation, mean candidate-set size —
+counted over *every* story retrieval ran over, not just the linked ones. It carries the
+denominator a **retrieval probe** cannot, and it is what replaced the briefed cache-ratio
+guardrail (ADR-0010).
+_Avoid_: retrieval metrics (that's the offline F1 gate), recall (health says nothing about
+whether the right film was found).
+
 ### News sources
 
 **Trade feed**:
