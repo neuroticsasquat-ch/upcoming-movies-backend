@@ -175,3 +175,28 @@ tuning ticket (M3) rather than fixing here.
 NEU-993, which owns the permanent oracle test, should therefore pin the recall number
 **together with** the as-of date and the K it assumes — an absolute figure alone is not
 reproducible against this fixture.
+
+## Retrieval recall oracle (NEU-993)
+
+`retrieval_catalog.json` is the catalog the recall gate scores against —
+`tests/integration/link/retrieval/test_recall_oracle.py`. It holds the `title`,
+`original_title` and `alternative_titles` of exactly the 33 films the `about` rows label,
+exported from the dev database once by `scripts/export_retrieval_catalog.py` and
+committed. Re-export it when the validation set gains a labeled film; a companion test
+fails with that instruction when the two drift.
+
+Committing the catalog is what makes the floor reproducible. The measurement is otherwise
+pinned to whatever is ingested locally on the day, and — per *Corpus date* above — to how
+many of the fixture's films have since been released. **The test sidesteps the as-of date
+entirely** by seeding every fixture film with a release date a year out, so all 33 are
+active whenever the suite runs.
+
+**Measured 2026-08-07 with the real retriever (NEU-990–992): 93/93, recall 1.000**, at
+T=0.34, K=10, over the 33-film fixture catalog. That is the floor, with no slack. It
+clears the 92/93 recorded above because the residual there was the K=10 cap cutting *The
+Legend of Zelda* to rank 11 on a 287-film catalog; against a catalog of only the labeled
+films the cap never binds.
+
+Which is also the gate's limit. With no distractors it cannot see a precision regression
+or cap saturation — those belong to the offline F1 cutover gate and to shadow telemetry
+respectively. This one answers recall, which is the question that costs nothing to ask.
