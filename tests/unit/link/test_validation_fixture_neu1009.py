@@ -16,7 +16,7 @@ _FAST_URL = "https://deadline.com/2026/08/f-a-s-t-release-date-warner-bros-12370
 
 
 def test_the_dotted_initialism_row_is_in_the_gold_set():
-    by_url = {it.url: it for it in load_validation_set(_FIXTURE)}
+    by_url = {it.url: it for it in load_validation_set(_FIXTURE).items}
 
     it = by_url.get(_FAST_URL)
     assert it is not None, f"{_FAST_URL} must be in the gold set"
@@ -31,7 +31,7 @@ def test_the_dotted_initialism_row_is_in_the_gold_set():
 def test_the_row_exercises_the_collapse_on_both_headline_and_dek():
     """The dek re-states the initialism, so the row would still cover the collapse if the
     headline were ever re-worded — and a fix that only reached one field would not pass."""
-    by_url = {it.url: it for it in load_validation_set(_FIXTURE)}
+    by_url = {it.url: it for it in load_validation_set(_FIXTURE).items}
     it = by_url[_FAST_URL]
 
     assert "fast" in significant_tokens(it.title)

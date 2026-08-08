@@ -29,7 +29,7 @@ SWEEP = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 async def main(path: str) -> None:
     settings = get_settings()
-    items = load_validation_set(path)
+    items = load_validation_set(path).items
 
     async with SessionLocal() as s:
         roster = await build_roster(s)

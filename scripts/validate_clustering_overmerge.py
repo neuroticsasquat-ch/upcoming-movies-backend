@@ -40,7 +40,7 @@ def _gold_key(it) -> str:
 
 async def main(only_tmdb: int | None) -> None:
     settings = get_settings()
-    items = load_validation_set(FIX)
+    items = load_validation_set(FIX).items
     by_film: dict[int, list] = defaultdict(list)
     for it in items:
         if it.relation == "about" and it.expected_film_tmdb_id is not None:

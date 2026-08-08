@@ -33,7 +33,7 @@ async def main() -> None:
     tmdb_ids = sorted(
         {
             item.expected_film_tmdb_id
-            for item in load_validation_set(VALIDATION_SET)
+            for item in load_validation_set(VALIDATION_SET).items
             if item.expected_film_tmdb_id is not None
         }
     )

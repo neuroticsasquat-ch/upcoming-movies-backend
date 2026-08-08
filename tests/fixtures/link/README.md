@@ -3,6 +3,39 @@
 `validation_set.json` is the **ground truth** for the NEU-279 accuracy baseline. It is
 produced by hand-labeling a sample of real stories drawn from the current corpus.
 
+## The file is dated: `as_of_date` (NEU-1010)
+
+The set is an envelope, not a bare list:
+
+```json
+{ "as_of_date": "2026-07-01", "items": [ … ] }
+```
+
+`as_of_date` is the date the catalog must be **read as of** when scoring. It is not
+decoration: the fixture's stories are news from the weeks around labeling, and the films they
+name are in the active catalog only until they release. Roughly **22% of the active catalog
+turns over per month** (88 films release within 7 days of any given day, 266 within 30), so a
+set scored against *today's* catalog steadily loses its own subjects. By 2026-08-08 that was
+42 of 94 `about` items naming films that had left the active set — unlinkable by **either**
+link path, and scored as recall failures of the path under test rather than as drift.
+
+Pinned to 2026-07-01, all 34 films the set names are in scope and **94/94 `about` items are
+reachable**. `scripts/validate_linking.py` reads the date from the file, applies it to the
+roster *and* the retrieval index, and uses it as the prompt's own `as_of_date` so recency
+reasoning is reproducible too. It **exits with an error** if a pinned set still names an
+unreachable film — that means the pin has drifted from the labels, and the resulting numbers
+would look plausible while measuring decay.
+
+`--as-of` overrides the file's date; it is an escape hatch for re-pinning, not routine use.
+A bare-list fixture (the pre-NEU-1010 shape) still loads and falls back to wall clock.
+
+**What the pin is and isn't.** It rewinds the *active-film filter*, not ingestion history —
+74% of the films now in `catalog.film` were ingested after 2026-07-01, so the pinned catalog
+(1,407 films) is larger than the catalog that literally existed then. That is deliberate and
+conservative: both paths see the same films, so the gate's comparison stays like-for-like,
+and a larger catalog means more lexical collisions, which makes retrieval's job harder rather
+than easier. It is a fair comparison, not a historical replay.
+
 **Except for 9 synthetic rows.** NEU-358 and NEU-367 added hand-written `about` examples to
 exercise the production-news axis where the real corpus was thin. They are identifiable by an
 `https://example.test/{ticket}/...` url, and they are labeled by exactly the same rules as the

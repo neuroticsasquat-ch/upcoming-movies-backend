@@ -36,7 +36,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import Row, ScalarSelect, func, nulls_last, select
@@ -233,16 +233,22 @@ def build_index(films: Iterable[IndexedFilm]) -> CandidateIndex:
     )
 
 
-async def build_candidate_index(session: AsyncSession) -> CandidateIndex:
+async def build_candidate_index(
+    session: AsyncSession, *, as_of: date | None = None
+) -> CandidateIndex:
     """Read the active catalog once and build the index over it.
 
     Child tables are read as separate keyed queries rather than one wide join: joining
     alternative titles, genres and credits onto the same statement multiplies rows by the
     product of their cardinalities, which is a worse trade than four extra round-trips
-    made once per run."""
+    made once per run.
+
+    `as_of` reconstructs the active set as it stood on a past date, for scoring a dated
+    fixture against the catalog its stories were news in. Production passes nothing and
+    reads the catalog as of today."""
     started = time.perf_counter()
     excluded = get_settings().tmdb_excluded_statuses
-    today = datetime.now(UTC).date()
+    today = as_of or datetime.now(UTC).date()
     # Built once and shared by every query below, so the child reads can never disagree
     # with the film read about what "active" means.
     is_active = active_film_clause(today=today, excluded_statuses=excluded)

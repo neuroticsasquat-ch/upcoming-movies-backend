@@ -78,3 +78,17 @@ async def test_build_roster_excludes_released_and_canceled_films(session):
     roster = await build_roster(session)
 
     assert [e.title for e in roster.entries] == ["Active"]
+
+
+async def test_build_roster_as_of_reads_the_catalog_as_it_stood_then(session):
+    """The eval harness scores both paths on one rewound catalog, so the roster takes the
+    same `as_of` the retrieval index does — otherwise the two would be compared against
+    different active sets and the gate-#3 delta would be meaningless (spec §5.1a)."""
+    session.add(Film(tmdb_id=2, title="Released Since Labeling", release_date=date(2026, 7, 28)))
+    await session.commit()
+
+    assert (await build_roster(session, as_of=date(2026, 8, 8))).entries == []
+
+    pinned = await build_roster(session, as_of=date(2026, 7, 1))
+
+    assert [e.title for e in pinned.entries] == ["Released Since Labeling"]
