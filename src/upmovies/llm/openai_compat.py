@@ -1,10 +1,9 @@
 """OpenAI-compatible adapter: one `Completer` covering DeepInfra and DeepSeek.
 
 A thin first-party client over the `httpx` already in the dependency list and already OTel-
-instrumented, rather than a routing library — the reasoning is ADR-0007's to record (NEU-982,
-not yet written). The endpoint surface actually used is one POST with four fields, so what a
-library would add here is mostly its own pricing table shadowing `pricing.py`'s deliberate
-`KeyError` on an unknown model.
+instrumented, rather than a routing library — see ADR-0007. The endpoint surface actually used
+is one POST with four fields, so what a library would add here is mostly its own pricing table
+shadowing `pricing.py`'s deliberate `KeyError` on an unknown model.
 
 Providers differ in more than their base URL, and the differences that matter are in `usage`:
 see `_usage_from`."""
