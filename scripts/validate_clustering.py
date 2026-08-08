@@ -22,7 +22,7 @@ from upmovies.db import SessionLocal
 from upmovies.link.cluster import assemble_cluster_payload, parse_cluster_groups
 from upmovies.link.metrics import compute_cluster_metrics
 from upmovies.link.validation import ValidationItem, load_validation_set
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
 _SUMMARY_MAX = 500  # mirror cluster.build_cluster_request's _SUMMARY_MAX
@@ -48,7 +48,7 @@ def _clustering_rows(items: list[ValidationItem]) -> dict[int, list[ValidationIt
 
 async def main(path: str) -> None:
     settings = get_settings()
-    items = load_validation_set(path)
+    items = load_validation_set(path).items
     by_film = _clustering_rows(items)
 
     async with SessionLocal() as s:
@@ -80,20 +80,16 @@ async def main(path: str) -> None:
                 {"n": i, "title": it.title, "summary": (it.summary or "")[:_SUMMARY_MAX]}
                 for i, it in enumerate(labeled, start=1)
             ]
-            system, messages = assemble_cluster_payload(
+            prompt = assemble_cluster_payload(
                 film_title=film.title,
                 film_year=film.release_date.year if film.release_date else None,
                 film_release_date=film.release_date,
                 existing_payload=[],
                 new_payload=new_payload,
                 run_date=datetime.now(UTC).date(),
-            )
-            raw = await client.complete(
-                model=settings.cluster_model,
-                system=system,
-                messages=messages,
                 max_tokens=settings.link_cluster_max_tokens,
             )
+            raw = await client.complete(model=settings.cluster_model, prompt=prompt)
             groups = parse_cluster_groups(raw, n_stories=len(labeled))
             if groups is None:
                 n_unparseable += 1

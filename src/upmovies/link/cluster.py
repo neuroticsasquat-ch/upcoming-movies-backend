@@ -17,8 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import field_changed_at
-from upmovies.link.linker import Completer
-from upmovies.llm.client import BatchRequest, Usage
+from upmovies.llm.types import CallLog, Completer, Prompt
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.news.source_quality import (
     best_tier,
@@ -271,10 +270,14 @@ def assemble_cluster_payload(
     existing_payload: list[dict[str, Any]],
     new_payload: list[dict[str, Any]],
     run_date: date,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
+) -> Prompt:
     """Pure prompt assembly shared by build_cluster_request (production) and the
-    validate_clustering harness. No DB, no LLM. NEU-377: plain system block (cluster
-    instructions are below Sonnet's 2048-token cache floor, so no cache_control)."""
+    validate_clustering harness. No DB, no LLM.
+
+    The instructions are the stable prefix and the per-film payload is what varies; that this
+    stage has never actually cached (the instructions sit under Sonnet 4.6's 2048-token floor,
+    NEU-377) is now the adapter's business rather than a fact encoded here."""
     user: dict[str, Any] = {
         "as_of_date": run_date.isoformat(),
         "film": {
@@ -285,9 +288,7 @@ def assemble_cluster_payload(
         "existing_events": existing_payload,
         "new_stories": new_payload,
     }
-    system = [{"type": "text", "text": _INSTRUCTIONS}]
-    messages = [{"role": "user", "content": json.dumps(user)}]
-    return system, messages
+    return Prompt(stable_prefix=_INSTRUCTIONS, user=json.dumps(user), max_tokens=max_tokens)
 
 
 async def build_cluster_request(
@@ -296,10 +297,11 @@ async def build_cluster_request(
     film_id: UUID,
     attach_limit: int,
     run_date: date,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], ClusterPlan] | None:
-    """Read half: load unclustered stories and recent events, build the system + messages
-    payload and a ClusterPlan. Returns None when there is nothing to cluster (no film or
-    no unclustered stories). Makes no writes and calls no LLM."""
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
+) -> tuple[Prompt, ClusterPlan] | None:
+    """Read half: load unclustered stories and recent events, build the `Prompt` and a
+    ClusterPlan. Returns None when there is nothing to cluster (no film or no unclustered
+    stories). Makes no writes and calls no LLM."""
     film = (await session.execute(select(Film).where(Film.id == film_id))).scalar_one_or_none()
     if film is None:
         return None
@@ -371,13 +373,14 @@ async def build_cluster_request(
         for i, s in enumerate(unclustered, start=1)
     ]
 
-    system, messages = assemble_cluster_payload(
+    prompt = assemble_cluster_payload(
         film_title=film.title,
         film_year=film.release_date.year if film.release_date else None,
         film_release_date=film.release_date,
         existing_payload=existing_payload,
         new_payload=new_payload,
         run_date=run_date,
+        max_tokens=max_tokens,
     )
     plan = ClusterPlan(
         film_id=film_id,
@@ -387,7 +390,7 @@ async def build_cluster_request(
         film_release_date=film.release_date,
         run_date=run_date,
     )
-    return system, messages, plan
+    return prompt, plan
 
 
 async def _load_events_in_order(session: AsyncSession, event_ids: list[UUID]) -> list[Event]:
@@ -615,35 +618,6 @@ async def apply_cluster_decisions(
     return ClusterResult(events_created, stories_clustered, stories_rejected)
 
 
-async def build_cluster_batch_request(
-    session: AsyncSession,
-    *,
-    custom_id: str,
-    model: str,
-    film_id: UUID,
-    attach_limit: int,
-    max_tokens: int = _DEFAULT_MAX_TOKENS,
-    run_date: date,
-) -> tuple[BatchRequest, ClusterPlan] | None:
-    """Wrap build_cluster_request into a BatchRequest ready for the Anthropic Batch API."""
-    built = await build_cluster_request(
-        session, film_id=film_id, attach_limit=attach_limit, run_date=run_date
-    )
-    if built is None:
-        return None
-    system, messages, plan = built
-    return (
-        BatchRequest(
-            custom_id=custom_id,
-            model=model,
-            system=system,
-            messages=messages,
-            max_tokens=max_tokens,
-        ),
-        plan,
-    )
-
-
 async def cluster_film_events(
     session: AsyncSession,
     *,
@@ -656,24 +630,32 @@ async def cluster_film_events(
     dedup_days: int = 14,
     release_change_window_days: int = 14,
     run_date: date,
-) -> tuple[ClusterResult, Usage]:
+    calls: CallLog,
+) -> ClusterResult:
+    """One clustering call for one film, recorded into `calls` — including the parse outcome,
+    which `cluster` turns into a `ClusterParseError` the pipeline isolates per film."""
     built = await build_cluster_request(
-        session, film_id=film_id, attach_limit=attach_limit, run_date=run_date
-    )
-    if built is None:
-        return ClusterResult(0, 0), Usage()
-    system, messages, plan = built
-    raw, usage = await client.complete_with_usage(
-        model=model,
-        system=system,
-        messages=messages,
+        session,
+        film_id=film_id,
+        attach_limit=attach_limit,
+        run_date=run_date,
         max_tokens=max_tokens,
     )
-    return await apply_cluster_decisions(
-        session,
-        plan=plan,
-        raw=raw,
-        unresolved_tier=unresolved_tier,
-        dedup_days=dedup_days,
-        release_change_window_days=release_change_window_days,
-    ), usage
+    if built is None:
+        return ClusterResult(0, 0)
+    prompt, plan = built
+    result = await client.complete_call(model=model, prompt=prompt, calls=calls)
+    try:
+        clustered = await apply_cluster_decisions(
+            session,
+            plan=plan,
+            raw=result.text,
+            unresolved_tier=unresolved_tier,
+            dedup_days=dedup_days,
+            release_change_window_days=release_change_window_days,
+        )
+    except ClusterParseError:
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return clustered

@@ -1,7 +1,7 @@
 """Summarization service: turn one news event (as an in-memory EventInput) into one neutral
-single-sentence paraphrase via the Anthropic Messages/Batches API. Self-contained (no DB); the
-caller maps ORM→EventInput and persists the returned SummaryResult. The LLM client is injected
-(Completer / BatchCompleter) so this is unit-testable with fakes."""
+single-sentence paraphrase via the Anthropic Messages API. Self-contained (no DB); the caller
+maps ORM→EventInput and persists the returned SummaryResult. The LLM client is injected
+(Completer) so this is unit-testable with a fake."""
 
 import json
 import logging
@@ -9,9 +9,9 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol
+from typing import Any
 
-from upmovies.llm.client import BatchRequest, BatchResult, Usage
+from upmovies.llm.types import CallLog, Completer, Prompt
 
 _DEK_MAX = 500
 _MAX_TOKENS = 256
@@ -122,30 +122,6 @@ class SummaryResult:
     source_updated_at: datetime
 
 
-class Completer(Protocol):
-    async def complete_with_usage(
-        self,
-        *,
-        model: str,
-        system: list[dict[str, Any]],
-        messages: list[dict[str, Any]],
-        max_tokens: int = ...,
-    ) -> tuple[str, "Usage"]: ...
-
-
-class BatchCompleter(Protocol):
-    async def complete_batch(
-        self,
-        requests: list[BatchRequest],
-        *,
-        poll_interval: float = ...,
-        timeout: float = ...,
-    ) -> dict[str, BatchResult]: ...
-
-
-class SummaryClient(Completer, BatchCompleter, Protocol): ...
-
-
 def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "as_of_date": run_date.isoformat(),
@@ -219,45 +195,41 @@ def parse_summary(raw: str) -> str:
     return summary
 
 
-def build_summary_request(
-    event: EventInput, run_date: date
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The plain instructions system block + the JSON event payload — shared by both the
-    sequential `complete()` path and the batched `complete_batch()` path. Truncates each dek."""
-    system = [{"type": "text", "text": _INSTRUCTIONS}]
-    messages = [
-        {"role": "user", "content": json.dumps(_event_payload(event, run_date))},
-        # Assistant prefill: forces a JSON-envelope continuation (no preamble/reasoning).
-        {"role": "assistant", "content": _PREFILL},
-    ]
-    return system, messages
-
-
-def build_summary_batch_request(
-    *, custom_id: str, model: str, event: EventInput, run_date: date
-) -> BatchRequest:
-    """One Message-Batch request for one event. `custom_id` is the event id (the caller
-    supplies it). `max_tokens` matches the sequential path's `_MAX_TOKENS` for parity."""
-    system, messages = build_summary_request(event, run_date)
-    return BatchRequest(
-        custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
+def build_summary_request(event: EventInput, run_date: date) -> Prompt:
+    """The instructions as the stable prefix + the JSON event payload for one event, with the
+    assistant prefill that forces a JSON-envelope continuation. Truncates each dek."""
+    return Prompt(
+        stable_prefix=_INSTRUCTIONS,
+        user=json.dumps(_event_payload(event, run_date)),
+        prefill=_PREFILL,
+        max_tokens=_MAX_TOKENS,
     )
 
 
 async def summarize_event(
-    *, client: Completer, model: str, prompt_version: str, event: EventInput, run_date: date
-) -> tuple[SummaryResult, Usage]:
-    """Sequential path: build the request, call `complete_with_usage` (max_tokens pinned to
-    `_MAX_TOKENS` for parity with the batched path), parse the JSON envelope, and bundle the
-    provenance the caller persists into `event_summary` alongside the call's token `Usage`."""
-    system, messages = build_summary_request(event, run_date)
-    raw, usage = await client.complete_with_usage(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
-    )
-    result = SummaryResult(
-        summary=parse_summary(raw),
+    *,
+    client: Completer,
+    model: str,
+    prompt_version: str,
+    event: EventInput,
+    run_date: date,
+    calls: CallLog,
+) -> SummaryResult:
+    """Build the request (max_tokens pinned to `_MAX_TOKENS`), call `complete_call`, parse the
+    JSON envelope, and bundle the provenance the caller persists into `event_summary`. The
+    call — and its parse outcome, counting `parse_summary`'s recovery path as a success — is
+    recorded into `calls`."""
+    prompt = build_summary_request(event, run_date)
+    result = await client.complete_call(model=model, prompt=prompt, calls=calls)
+    try:
+        summary = parse_summary(result.text)
+    except (json.JSONDecodeError, ValueError):
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return SummaryResult(
+        summary=summary,
         model=model,
         prompt_version=prompt_version,
         source_updated_at=event.source_updated_at,
     )
-    return result, usage

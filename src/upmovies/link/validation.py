@@ -3,6 +3,8 @@ each item embeds the story text plus its label, keyed to films by TMDB id (stabl
 databases) rather than local uuids."""
 
 import json
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -39,6 +41,48 @@ class ValidationItem(BaseModel):
         return self
 
 
-def load_validation_set(path: str | Path) -> list[ValidationItem]:
+class ValidationSet(BaseModel):
+    """The labeled items plus the date the catalog should be read as of.
+
+    `as_of_date` exists because the set is a *dated* observation, not a timeless one. Its
+    stories are news from the weeks around labeling, and the films they name are upcoming
+    only until they release — roughly a fifth of the active catalog turns over per month.
+    Scored against today's catalog, the fixture's own subjects fall out of scope and read as
+    recall failures of the path under test; scored as of the labeling date, it stays a stable
+    oracle. The date lives with the data so a caller cannot supply the wrong one.
+
+    Deliberately *not* list-like: mimicking a sequence on a pydantic model shadows
+    `BaseModel.__iter__` (which yields field pairs, and is what `dict(model)` consumes) and
+    makes an empty set falsy. Readers that only want the labels say `.items`.
+    """
+
+    as_of_date: date | None = None
+    items: list[ValidationItem]
+
+
+def films_ingested_after(as_of: date | None, ingested_at: Mapping[int, date]) -> frozenset[int]:
+    """TMDB ids of films the catalog only learned about *after* the fixture was labeled.
+
+    `as_of_date` rewinds the active-film filter, but not ingestion history: a film added to
+    `catalog.film` last week is still in a catalog pinned to last month. That matters because
+    a `none` label means "not about any film tracked **at labeling time**" — so a prediction
+    naming one of these films is outside the label space entirely, and scoring it a false
+    positive asserts an opinion the fixture does not contain. Measured on the retrieval path,
+    six of thirteen false positives were exactly this (NEU-1011).
+
+    Callers neutralize such a prediction to "no link" — the counterfactual where the film was
+    not there to pick.
+
+    Empty for an unpinned fixture: with no date there is no "after"."""
+    if as_of is None:
+        return frozenset()
+    return frozenset(tmdb_id for tmdb_id, first_seen in ingested_at.items() if first_seen > as_of)
+
+
+def load_validation_set(path: str | Path) -> ValidationSet:
+    """Load a validation set in either shape: the `{as_of_date, items}` envelope, or a bare
+    list of items (pre-pin fixtures, which carry no date and fall back to wall clock)."""
     data = json.loads(Path(path).read_text())
-    return [ValidationItem.model_validate(row) for row in data]
+    if isinstance(data, list):
+        return ValidationSet(items=[ValidationItem.model_validate(row) for row in data])
+    return ValidationSet.model_validate(data)

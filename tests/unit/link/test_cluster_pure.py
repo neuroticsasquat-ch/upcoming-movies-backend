@@ -5,7 +5,7 @@ from upmovies.link.cluster import _INSTRUCTIONS, assemble_cluster_payload, parse
 
 
 def test_assemble_cluster_payload_shape():
-    system, messages = assemble_cluster_payload(
+    prompt = assemble_cluster_payload(
         film_title="The Odyssey",
         film_year=2026,
         film_release_date=date(2026, 7, 17),
@@ -13,9 +13,9 @@ def test_assemble_cluster_payload_shape():
         new_payload=[{"n": 1, "title": "T", "summary": "S"}],
         run_date=date(2026, 6, 25),
     )
-    assert system == [{"type": "text", "text": _INSTRUCTIONS}]
-    assert len(messages) == 1 and messages[0]["role"] == "user"
-    user = json.loads(messages[0]["content"])
+    assert prompt.stable_prefix == _INSTRUCTIONS
+    assert prompt.prefill is None
+    user = json.loads(prompt.user)
     assert user["as_of_date"] == "2026-06-25"
     assert user["film"] == {"title": "The Odyssey", "year": 2026, "release_date": "2026-07-17"}
     assert user["existing_events"] == []
@@ -23,7 +23,7 @@ def test_assemble_cluster_payload_shape():
 
 
 def test_assemble_cluster_payload_release_date_null_when_absent():
-    _, messages = assemble_cluster_payload(
+    prompt = assemble_cluster_payload(
         film_title="Untitled",
         film_year=None,
         film_release_date=None,
@@ -31,7 +31,7 @@ def test_assemble_cluster_payload_release_date_null_when_absent():
         new_payload=[],
         run_date=date(2026, 6, 25),
     )
-    user = json.loads(messages[0]["content"])
+    user = json.loads(prompt.user)
     assert user["film"] == {"title": "Untitled", "year": None, "release_date": None}
 
 

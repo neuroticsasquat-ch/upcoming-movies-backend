@@ -1,16 +1,23 @@
-"""Stage 1 link service: classify a batch of stories against the cached roster and apply
-the confidence floor, mutating each Story's link state in place. The caller owns the
-session/commit. The LLM client is injected (Completer) so this is unit-testable with a fake."""
+"""Stage 1 link service: classify a batch of stories against a set of tracked films and
+apply the confidence floor, mutating each Story's link state in place. The caller owns the
+session/commit. The LLM client is injected (Completer) so this is unit-testable with a fake.
+
+**One request shape.** `build_retrieval_link_request` sends each story its own retrieved
+candidate list and takes back an index into that story's list. The roster shape it replaced
+— the whole active catalog as one cached prefix, answered with a global index — was deleted
+at M4 (NEU-1004) once the cutover held; with it went the last prefix in production large
+enough for any provider to cache (spec §5.5)."""
 
 import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any, Protocol
+from uuid import UUID
 
-from upmovies.link.roster import Roster
-from upmovies.llm.client import BatchRequest, BatchResult, Usage, cached_system_block
+from upmovies.link.retrieval.render import render_candidates
+from upmovies.link.retrieval.select import CandidateSet
+from upmovies.llm.types import CallLog, Completer, Prompt
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -19,13 +26,44 @@ _SUMMARY_MAX = 500
 _MAX_TOKENS = 2048
 _NOT_NEWS_CATEGORIES = {"reaction", "roundup", "streaming-move", "interview-quote", "downstream"}
 
-_INSTRUCTIONS = """You are an entity-linking classifier for an upcoming-movies tracker.
+_RETRIEVAL_HEADER = """You are an entity-linking classifier for an upcoming-movies tracker.
 
-You are given a ROSTER of tracked films (each with a numeric index) and a batch of news \
-stories (each an id, headline, and short dek). For every story, decide whether it is \
-primarily ABOUT exactly one of the tracked films.
+You are given a batch of news stories (each an id, headline, and short dek). Each story \
+carries its OWN numbered list of candidate tracked films: the lists differ from story to \
+story, and candidate 1 in one story's list is a DIFFERENT film from candidate 1 in \
+another's. For every story, decide whether it is primarily ABOUT exactly one of the films \
+in that story's candidate list. A story's candidates are the only tracked films available \
+to it — never answer with an index that story does not offer. Each candidate carries its \
+director, top-billed cast, and collection alongside its title, year, genres and overview: \
+use ALL of them to separate a candidate from a same-franchise film that is not tracked \
+here. A shared title stem is not a match; a shared director or lead is not a match either.
 
-Definitions:
+The candidate list is a LEXICAL PREFILTER, not a shortlist of likely answers. A film appears \
+in it only because its title shares a word with the headline or dek, which is not evidence \
+that the story is about it — a story about an untracked film will still be handed the \
+tracked films whose titles happen to overlap it, and a story that merely lists a candidate \
+among others will still be handed it. Being offered a candidate is never itself a reason to \
+pick one. Classify by the rules below exactly as you would if the entire catalog were in \
+front of you rather than this short list."""
+
+# The classification rules were shared verbatim by both prompts, rendered with the term
+# each path used for the set of tracked films it showed. Deleting the roster path leaves one
+# caller, but the template stays: these ~1.4k tokens of prose are load-bearing — the
+# franchise traps are the counterweight to the precision cost of narrowing the candidate set
+# (spec §4.3) — and they are the exact text every gate-#3 measurement was taken against.
+# Folding the terms into the prose by hand would be an unmeasured edit to a measured prompt
+# for no behavioural gain.
+#
+# `_CLASSIFICATION_RULES` is a `str.format` template: any literal brace added to it must be
+# doubled (`{{`, `}}`) or the render below raises at import time. The JSON examples live in
+# `_RETRIEVAL_TAIL` for exactly that reason — that is a plain string.
+_RETRIEVAL_TERMS = {
+    "exact_film": "the exact candidate film",
+    "only_candidate": "the only candidate offered",
+    "in_the_set": "among the story's candidates",
+}
+
+_CLASSIFICATION_RULES = """Definitions:
 - "about": the story announces or confirms something NEW about exactly one tracked film's \
 production — casting, a filming start/wrap/status change, a trailer or teaser, a release \
 date set or moved, a major creative/production change (director, studio, format), or a \
@@ -72,15 +110,15 @@ Be strict about franchise-generic casting/announcement traps: a story that refer
 franchise only generically — "the next Batman", "a new Spider-Man", "the next James Bond" — \
 is NOT necessarily about the tracked film that happens to share that franchise. Studios run \
 multiple films per franchise, and many are not tracked here. Link such a story only when it \
-unambiguously identifies the exact roster film (its distinct subtitle, year, or director). \
-When the only roster candidate is a DIFFERENT entry in the same franchise, return no-match — \
+unambiguously identifies {exact_film} (its distinct subtitle, year, or director). \
+When {only_candidate} is a DIFFERENT entry in the same franchise, return no-match — \
 do not force a nearest-match. \
 This includes a distinct, NAMED sibling film — a spin-off, sequel, prequel, or origin/\
 companion film ("a Shrek spin-off", "the Donkey origin movie", "an untitled sequel") — that \
-is a DIFFERENT entry in a tracked film's franchise and is not itself tracked in the roster. \
+is a DIFFERENT entry in a tracked film's franchise and is not itself tracked {in_the_set}. \
 Return no-match for it EVEN WHEN the story states a release date: a spin-off's or sequel's \
 own date is not the tracked film's date. Link only when the story unambiguously identifies \
-the exact roster film (its distinct subtitle, year, or director).
+{exact_film} (its distinct subtitle, year, or director).
 
 This franchise trap runs in BOTH directions. A story about an EARLIER or ORIGINAL film in a \
 franchise — the first film, when only its sequel or continuation is tracked here — is NOT \
@@ -106,45 +144,34 @@ video game, a stage adaptation, or any project in a different medium — is NOT 
 tracked film merely because it names the same characters or franchise. A character's casting \
 or appearance in a TV series, game, or other adjacent project is not a casting fact about the \
 tracked FILM. Return "no-match" for it (or "mention" if the tracked film is named only in \
-passing) unless the story also reports a new production fact about the film itself.
+passing) unless the story also reports a new production fact about the film itself."""
 
+_RETRIEVAL_TAIL = """\
 The input is a JSON object `{"as_of_date": <YYYY-MM-DD>, "stories": [...]}`. `as_of_date` is \
 the date this run executed (UTC); treat it as "today" when judging how recent or stale a \
-story is. Classify every story in `stories`.
+story is. Each story object carries its `id`, `title`, `summary`, and its own `candidates` \
+list; every candidate has an `n` and the details of one tracked film. Classify every story \
+in `stories`.
 
 Return ONLY a JSON array — no prose, no markdown — one object per input story, using the \
 story's id:
-[{"id": "<story id>", "film": <roster index or null>, "confidence": <0.0-1.0>, "reason": \
-"about" | "mention" | "no-match" | "not-news", "category": "reaction" | "roundup" | \
-"streaming-move" | "interview-quote" | "downstream" | null}]
+[{"id": "<story id>", "film": <an "n" from that story's candidate list, or null>, \
+"confidence": <0.0-1.0>, "reason": "about" | "mention" | "no-match" | "not-news", \
+"category": "reaction" | "roundup" | "streaming-move" | "interview-quote" | "downstream" | \
+null}]
 
-"confidence" is your probability that the story is about that exact roster film (0.0 for \
+"film" MUST be an "n" that appears in that story's candidate list, or null. Candidates are \
+numbered independently per story, so a number taken from another story's list — or invented \
+— names no film and will be discarded.
+
+"confidence" is your probability that the story is about that exact candidate film (0.0 for \
 mention/no-match/not-news). "category" labels why a "not-news" story was excluded (null \
 otherwise)."""
 
-
-class Completer(Protocol):
-    async def complete_with_usage(
-        self,
-        *,
-        model: str,
-        system: list[dict[str, Any]],
-        messages: list[dict[str, Any]],
-        max_tokens: int = ...,
-    ) -> tuple[str, "Usage"]: ...
-
-
-class BatchCompleter(Protocol):
-    async def complete_batch(
-        self,
-        requests: list[BatchRequest],
-        *,
-        poll_interval: float = ...,
-        timeout: float = ...,
-    ) -> dict[str, BatchResult]: ...
-
-
-class LinkClient(Completer, BatchCompleter, Protocol): ...
+_RETRIEVAL_INSTRUCTIONS = (
+    f"{_RETRIEVAL_HEADER}\n\n{_CLASSIFICATION_RULES.format(**_RETRIEVAL_TERMS)}\n\n"
+    f"{_RETRIEVAL_TAIL}"
+)
 
 
 @dataclass
@@ -153,14 +180,33 @@ class BatchLinkResult:
     rejected: int
 
 
-def _story_payload(stories: Sequence[Story]) -> list[dict[str, str]]:
-    payload: list[dict[str, str]] = []
-    for s in stories:
-        summary = ""
-        if isinstance(s.raw, dict):
-            summary = str(s.raw.get("summary", ""))[:_SUMMARY_MAX]
-        payload.append({"id": str(s.id), "title": s.title, "summary": summary})
-    return payload
+@dataclass(frozen=True)
+class StoryCandidates:
+    """A story paired with the films retrieval offers for it.
+
+    The two travel together from selection through to the request and, at NEU-999, through
+    to resolving the reply's index back to a film — carrying them apart would let a story be
+    scored against one candidate set and answered against another."""
+
+    story: Story
+    candidates: CandidateSet
+
+
+def story_dek(story: Story) -> str:
+    """The short summary shown to the classifier beside a story's headline.
+
+    Public because candidate retrieval scores the same two fields (spec §4.1): retrieving
+    against a wider or narrower text than the one the classifier reads would score a path
+    that does not ship."""
+    if not isinstance(story.raw, dict):
+        return ""
+    return str(story.raw.get("summary", ""))[:_SUMMARY_MAX]
+
+
+def _story_object(story: Story) -> dict[str, str]:
+    """The story fields the request builder sends — retrieval scores the same headline and
+    dek the classifier reads (see `story_dek`)."""
+    return {"id": str(story.id), "title": story.title, "summary": story_dek(story)}
 
 
 def _extract_json_array(text: str) -> str:
@@ -172,38 +218,84 @@ def _extract_json_array(text: str) -> str:
     return text[start : end + 1]
 
 
-def build_link_request(
-    roster: Roster, stories: Sequence[Story], run_date: date
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The cached roster system block + the JSON story payload — shared by both the
-    sequential `complete()` path and the batched `complete_batch()` path."""
-    # `instructions + roster` prefix = ~15 193 tok — clears Haiku 4.5's 4096-tok cache floor.
-    # Verified 2026-06-24: call 1 cache_creation=15 193, call 2 cache_read=15 193 (NEU-377).
-    system = [cached_system_block(f"{_INSTRUCTIONS}\n\nROSTER:\n{roster.text}")]
-    payload = {"as_of_date": run_date.isoformat(), "stories": _story_payload(stories)}
-    messages = [{"role": "user", "content": json.dumps(payload)}]
-    return system, messages
+def build_retrieval_link_request(batch: Sequence[StoryCandidates], run_date: date) -> Prompt:
+    """The instructions-only stable prefix + a story payload carrying per-story candidates.
 
+    Batches survive the rewrite — they still amortize the instruction block over 20 stories —
+    but the catalog leaves the prefix entirely, which is the point of the whole project: the
+    prefix stopped scaling with catalog size, so it stops threatening the 200k context ceiling
+    when the undated-film expansion multiplies that catalog (spec §4.2).
 
-def build_batch_request(
-    *, custom_id: str, model: str, roster: Roster, stories: Sequence[Story], run_date: date
-) -> BatchRequest:
-    """One Message-Batch request for a story chunk. `max_tokens` matches the sequential
-    path's `_MAX_TOKENS` so the two paths are token-identical."""
-    system, messages = build_link_request(roster, stories, run_date)
-    return BatchRequest(
-        custom_id=custom_id, model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
+    Whether the prefix is *cached* is no longer decided here. What remains is ~1.5k tokens,
+    below Haiku 4.5's 4096-token floor, so no provider will cache it today — but that is a
+    fact about the provider, not about this request, and `Prompt` is where the distinction
+    now lives (spec §5.1).
+    """
+    for entry in batch:
+        # A zero-candidate story is rejected without a model call (ADR-0009), so one
+        # reaching here is a wiring bug upstream. Sending an empty list would be worse than
+        # useless: it asks the model to choose from nothing, and every index it could reply
+        # with would be out of list.
+        if entry.candidates.is_empty:
+            raise ValueError(f"story {entry.story.id} has no candidates and must not be sent")
+    payload = {
+        "as_of_date": run_date.isoformat(),
+        "stories": [
+            {**_story_object(entry.story), "candidates": render_candidates(entry.candidates)}
+            for entry in batch
+        ],
+    }
+    # `ensure_ascii=False` because candidates carry titles the roster prefix used to send as
+    # plain text. Escaped, one CJK or Cyrillic character costs six, and `original_title` is
+    # rendered precisely when it *differs* from the title — i.e. exactly the non-Latin case.
+    # That would blow the ~320 tok/story the rendering was costed at (spec §4.3) on the
+    # stories that can least afford it, and hand the model `\uXXXX` runs to disambiguate on.
+    return Prompt(
+        stable_prefix=_RETRIEVAL_INSTRUCTIONS,
+        user=json.dumps(payload, ensure_ascii=False),
+        max_tokens=_MAX_TOKENS,
     )
 
 
-def apply_link_decisions(
-    *, raw: str, stories: Sequence[Story], roster: Roster, floor: float
+@dataclass(frozen=True)
+class _FilmChoice:
+    """What one decision's `film` field resolved to, and whether it named nothing.
+
+    `out_of_list` is what separates *the model chose no film* — the answer the prompt asks
+    for most often — from *the model named a number that indexes nothing here*. Only a
+    story-local candidate list can tell those apart: under the deleted global roster every
+    index the model could plausibly return resolved to some film, so there was no such reply
+    to distinguish."""
+
+    film_id: UUID | None = None
+    out_of_list: bool = False
+
+
+def apply_retrieval_link_decisions(
+    *, raw: str, batch: Sequence[StoryCandidates], floor: float
 ) -> BatchLinkResult:
-    """Apply the classifier's JSON decisions to each Story in place: floor/resolution rules
-    plus the no-decision fallback. Identical for both execution paths."""
+    """Apply the classifier's JSON decisions to each Story in place: resolve each reply's
+    `film` against **that story's own candidate list**, apply the floor, and stamp the note.
+
+    Each story is answered against the candidate set it was scored and sent with — the two
+    travel together in `StoryCandidates` precisely so they cannot be paired up wrongly here.
+    An index outside a story's list is **rejected, not coerced**: numbering restarts per
+    story, so a number valid in a neighbour's list names nothing here, and quietly linking
+    to the nearest candidate would turn a defective reply into a confident wrong link.
+
+    The floor, the note vocabulary and the no-decision fallback are what downstream stages
+    and `link_note` queries read, so they live here once."""
     decisions = json.loads(_extract_json_array(raw))  # raises on un-parseable output
 
-    by_id = {str(s.id): s for s in stories}
+    candidates_by_story = {str(entry.story.id): entry.candidates for entry in batch}
+
+    def choose(story: Story, index: object) -> _FilmChoice:
+        if index is None:
+            return _FilmChoice()
+        film_id = candidates_by_story[str(story.id)].film_id_for_index(index)
+        return _FilmChoice(film_id=film_id, out_of_list=film_id is None)
+
+    by_id = {str(entry.story.id): entry.story for entry in batch}
     now = datetime.now(UTC)
     decided: set[str] = set()
     linked = rejected = 0
@@ -214,7 +306,7 @@ def apply_link_decisions(
         if story is None:
             continue
         decided.add(sid)
-        film_id = roster.film_id_for_index(decision.get("film"))
+        choice = choose(story, decision.get("film"))
         reason = decision.get("reason")
         try:
             confidence = float(decision.get("confidence") or 0.0)
@@ -222,9 +314,9 @@ def apply_link_decisions(
             confidence = 0.0
 
         story.linked_at = now
-        if reason == "about" and film_id is not None and confidence >= floor:
+        if reason == "about" and choice.film_id is not None and confidence >= floor:
             story.link_status = "linked"
-            story.film_id = film_id
+            story.film_id = choice.film_id
             story.link_confidence = confidence
             story.link_note = None
             linked += 1
@@ -232,8 +324,15 @@ def apply_link_decisions(
             story.link_status = "rejected"
             story.film_id = None
             story.link_confidence = None
-            if reason == "about" and film_id is not None and confidence < floor:
+            if reason == "about" and choice.film_id is not None and confidence < floor:
                 story.link_note = "below-floor"
+            elif reason == "about" and choice.out_of_list:
+                # Its own note rather than `no-match`: the model did not reach a verdict of
+                # "no tracked film", it answered with a number naming none of the films this
+                # story offered. Folding the two together would hide a numbering regression
+                # inside the ordinary majority outcome — in the one stage where a lost story
+                # is lost for good.
+                story.link_note = "out-of-list"
             elif reason == "mention":
                 story.link_note = "mention"
             elif reason == "not-news":
@@ -256,19 +355,57 @@ def apply_link_decisions(
     return BatchLinkResult(linked, rejected)
 
 
-async def link_story_batch(
+def reject_zero_candidate_stories(stories: Sequence[Story]) -> int:
+    """Reject every story retrieval found nothing for, and return how many. No model call.
+
+    The zero-candidate rejection (ADR-0009), and on the measured corpus the majority of the
+    stage's workload. `no-candidates` is deliberately its own note rather than folded into
+    `no-match`: it is the difference between *the classifier judged this story* and *the
+    classifier never saw it*, which is what keeps stories lost to a retrieval bug queryable
+    and re-runnable inside the recency window.
+
+    The count is returned rather than folded into a `BatchLinkResult` because its caller
+    must keep it out of `StageCounts.processed` — these stories were decided by a lexical
+    rule, and letting them stand in for classifier output would switch off the total-failure
+    guard on the repo's one lossy stage."""
+    now = datetime.now(UTC)
+    for story in stories:
+        story.link_status = "rejected"
+        story.film_id = None
+        story.link_confidence = None
+        story.link_note = "no-candidates"
+        story.linked_at = now
+    return len(stories)
+
+
+async def link_retrieval_story_batch(
     *,
     client: Completer,
     model: str,
-    roster: Roster,
-    stories: Sequence[Story],
+    batch: Sequence[StoryCandidates],
     floor: float,
     run_date: date,
-) -> tuple[BatchLinkResult, Usage]:
-    if not stories:
-        return BatchLinkResult(0, 0), Usage()
-    system, messages = build_link_request(roster, stories, run_date)
-    raw, usage = await client.complete_with_usage(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS
-    )
-    return apply_link_decisions(raw=raw, stories=stories, roster=roster, floor=floor), usage
+    calls: CallLog,
+) -> BatchLinkResult:
+    """One classifier call for one batch of stories and their candidate sets, recorded into
+    `calls` — including the parse outcome, which `link` deliberately raises on rather than
+    swallowing (spec §12).
+
+    `batch` carries only stories with candidates — a zero-candidate story is rejected by
+    `reject_zero_candidate_stories` without ever reaching a model — so an empty batch here
+    means the whole chunk was zero-candidate and there is nothing to ask about."""
+    if not batch:
+        return BatchLinkResult(0, 0)
+    prompt = build_retrieval_link_request(batch, run_date)
+    result = await client.complete_call(model=model, prompt=prompt, calls=calls)
+    try:
+        decisions = apply_retrieval_link_decisions(raw=result.text, batch=batch, floor=floor)
+    except Exception:
+        # `apply_retrieval_link_decisions` does no I/O, so anything it raises is the model's
+        # output being unusable — a bare JSONDecodeError when the reply isn't JSON, but
+        # equally an AttributeError when it is JSON of the wrong shape. Recording only the
+        # first would leave the second as a NULL, which reads as "no parse happened".
+        calls.set_parse_ok(False)
+        raise
+    calls.set_parse_ok(True)
+    return decisions

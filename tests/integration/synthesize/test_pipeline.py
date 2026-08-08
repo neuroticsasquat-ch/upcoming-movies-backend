@@ -1,14 +1,14 @@
 import json
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from sqlalchemy import select
 
 import upmovies.synthesize.pipeline as pipeline_mod
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run as _create_run
-from upmovies.llm.client import BatchResult, Usage
+from upmovies.llm import CallResult
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.synthesize.pipeline import _select_pending, _upsert_summary, run_synthesize_ingest
 from upmovies.synthesize.summarizer import SummaryResult
@@ -195,50 +195,35 @@ async def test_upsert_summary_inserts_then_updates_idempotently(session):
 
 
 class FakeSummaryClient:
-    """Serves both surfaces. `complete_with_usage` (sequential) and `complete_batch` (batched)
-    both return the JSON summary envelope the service expects."""
+    """Returns the JSON summary envelope the service expects, recording each call."""
 
     def __init__(self, summary="A neutral update."):
         self._summary = summary
-        self.complete_calls = 0
-        self.batch_requests = None
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        self.complete_calls += 1
-        return json.dumps({"summary": self._summary}), Usage()
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        self.batch_requests = list(requests)
-        return {
-            r.custom_id: BatchResult(
-                custom_id=r.custom_id,
-                ok=True,
-                text=json.dumps({"summary": self._summary}),
-                usage=Usage(),
-            )
-            for r in self.batch_requests
-        }
+    async def complete_call(self, *, model, prompt, calls):
+        self.requests.append({"model": model, "prompt": prompt})
+        return calls.record(CallResult(text=json.dumps({"summary": self._summary})))
 
 
-async def _run(session, run_id, *, use_batches=False, client=None, prompt_version="1"):
+async def _run(session, run_id, *, client=None, prompt_version="1"):
     return await run_synthesize_ingest(
         session_factory=lambda: session,
-        client=client or FakeSummaryClient(),
+        gateway=StubGateway(client or FakeSummaryClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version=prompt_version,
-        use_batches=use_batches,
     )
 
 
-async def test_sequential_summarizes_new_event_and_finalizes(session):
+async def test_summarizes_new_event_and_finalizes(session):
     film = await _film(session)
     event = await _event_with_story(session, film, dek="Star cast.")
     await session.commit()
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=False)
+    result = await _run(session, run_id)
 
     assert (result.new, result.refreshed, result.failed) == (1, 0, 0)
     row = (
@@ -269,11 +254,11 @@ async def test_rerun_is_noop_when_nothing_pending(session):
     await session.commit()
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
-    await _run(session, run_id, use_batches=False)  # first run summarizes
+    await _run(session, run_id)  # first run summarizes
 
     run_id2 = await _create_run(session, kind="synthesize")
     await session.commit()
-    result = await _run(session, run_id2, use_batches=False)
+    result = await _run(session, run_id2)
 
     assert (result.new, result.refreshed, result.failed) == (0, 0, 0)
 
@@ -284,11 +269,11 @@ async def test_prompt_version_bump_does_not_refresh_existing(session):
     await session.commit()
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
-    await _run(session, run_id, use_batches=False, prompt_version="1")
+    await _run(session, run_id, prompt_version="1")
 
     run_id2 = await _create_run(session, kind="synthesize")
     await session.commit()
-    result = await _run(session, run_id2, use_batches=False, prompt_version="2")
+    result = await _run(session, run_id2, prompt_version="2")
 
     assert (result.new, result.refreshed, result.failed) == (0, 0, 0)
     row = (
@@ -303,14 +288,14 @@ async def test_prompt_version_bump_does_not_refresh_existing(session):
 class _FailOneCompleter(FakeSummaryClient):
     """Raises for the event whose film title starts 'FAIL', succeeds otherwise."""
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        payload = json.loads(messages[0]["content"])
+    async def complete_call(self, *, model, prompt, calls):
+        payload = json.loads(prompt.user)
         if payload["film"].startswith("FAIL"):
             raise RuntimeError("boom")
-        return json.dumps({"summary": self._summary}), Usage()
+        return calls.record(CallResult(text=json.dumps({"summary": self._summary})))
 
 
-async def test_sequential_failure_is_isolated_per_event(session):
+async def test_failure_is_isolated_per_event(session):
     ok_film = await _film(session, tmdb_id=1, title="Runner")
     fail_film = await _film(session, tmdb_id=2, title="FAIL Movie")
     ok_event = await _event_with_story(session, ok_film)
@@ -319,7 +304,7 @@ async def test_sequential_failure_is_isolated_per_event(session):
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=False, client=_FailOneCompleter())
+    result = await _run(session, run_id, client=_FailOneCompleter())
 
     assert (result.new, result.failed) == (1, 1)
     summarized = {
@@ -346,116 +331,75 @@ async def test_sequential_failure_is_isolated_per_event(session):
     assert run.items_failed == 1
 
 
-@pytest.mark.parametrize("use_batches", [False, True])
-async def test_both_paths_summarize_new_event(session, use_batches):
+# ---------------------------------------------------------------------------
+# NEU-986: a total summarize failure finalizes the run `failed`
+# ---------------------------------------------------------------------------
+
+
+class _TotalOutageCompleter(FakeSummaryClient):
+    """Every call raises — a total LLM outage, so every pending event fails."""
+
+    async def complete_call(self, *, model, prompt, calls):
+        raise RuntimeError("boom")
+
+
+async def test_total_summarize_failure_finalizes_run_failed(session):
+    """Summarize is self-healing (a failed event is retried next run), but a run that
+    summarized nothing at all must not report `succeeded` — run_daily pings the deadman
+    green off that status, which would be a lie about the day's output.
+
+    Two events, because self-healing stages require a denominator (NEU-987)."""
     film = await _film(session)
-    event = await _event_with_story(session, film)
+    other = await _film(session, tmdb_id=2, title="Blade")
+    await _event_with_story(session, film)
+    await _event_with_story(session, other)
     await session.commit()
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    result = await _run(session, run_id, use_batches=use_batches)
+    result = await _run(session, run_id, client=_TotalOutageCompleter())
 
-    assert (result.new, result.refreshed, result.failed) == (1, 0, 0)
-    row = (
+    assert (result.new, result.refreshed, result.failed) == (0, 0, 2)
+    run = (
         await session.execute(
-            select(EventSummary).where(EventSummary.event_id == event.id),
+            select(IngestRun).where(IngestRun.id == run_id),
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
-    assert row.summary == "A neutral update."
+    assert run.status == "failed"
+    assert run.error and "summarize stage" in run.error
 
 
-async def test_batched_request_mapping(session):
-    film = await _film(session)
-    event = await _event_with_story(session, film)
-    await session.commit()
-    run_id = await _create_run(session, kind="synthesize")
-    await session.commit()
-
-    client = FakeSummaryClient()
-    await _run(session, run_id, use_batches=True, client=client)
-
-    reqs = client.batch_requests
-    assert reqs is not None
-    assert {r.custom_id for r in reqs} == {str(event.id)}  # one request per event, keyed by id
-    assert reqs[0].model == "claude-haiku-4-5"
-    assert reqs[0].max_tokens == 256
-    assert client.complete_calls == 0  # batched path never calls complete()
-
-
-class _BatchFailOne:
-    """Fails the request whose event payload's film starts 'FAIL'; succeeds otherwise."""
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        out = {}
-        for r in requests:
-            payload = json.loads(r.messages[0]["content"])
-            if payload["film"].startswith("FAIL"):
-                out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id, ok=False, error_type="errored", error_message="boom"
-                )
-            else:
-                out[r.custom_id] = BatchResult(
-                    custom_id=r.custom_id,
-                    ok=True,
-                    text=json.dumps({"summary": "ok."}),
-                    usage=Usage(),
-                )
-        return out
-
-
-async def test_batched_failure_is_isolated_per_event(session):
-    ok_film = await _film(session, tmdb_id=1, title="Runner")
-    fail_film = await _film(session, tmdb_id=2, title="FAIL Movie")
-    ok_event = await _event_with_story(session, ok_film)
-    fail_event = await _event_with_story(session, fail_film)
-    await session.commit()
-    run_id = await _create_run(session, kind="synthesize")
-    await session.commit()
-
-    result = await _run(session, run_id, use_batches=True, client=_BatchFailOne())
-
-    assert (result.new, result.failed) == (1, 1)
-    summarized = {
-        r.event_id
-        for r in (
-            await session.execute(
-                select(EventSummary), execution_options={"populate_existing": True}
-            )
-        )
-        .scalars()
-        .all()
-    }
-    assert ok_event.id in summarized
-    assert fail_event.id not in summarized
-
-
-class _RaisingBatchClient:
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        raise TimeoutError("batch never reached 'ended'")
-
-
-async def test_batched_whole_submit_failure_propagates(session):
-    """A per-event failure is isolated (see test_sequential_failure_is_isolated_per_event),
-    but a whole-batch failure produces no summaries at all. It must propagate so the stage
-    runner marks the run failed, rather than finalizing 'succeeded' with nothing written and
-    pinging the daily deadman green."""
+async def test_single_summarize_failure_does_not_fail_the_run(session):
+    """NEU-987: one permanently unsummarizable event on an otherwise empty backlog is a bad
+    item, not an outage. The event stays pending and is retried next run, so failing here
+    would only ping the deadman `/fail` every day for a self-healing condition."""
     film = await _film(session)
     await _event_with_story(session, film)
     await session.commit()
     run_id = await _create_run(session, kind="synthesize")
     await session.commit()
 
-    with pytest.raises(TimeoutError):
-        await _run(session, run_id, use_batches=True, client=_RaisingBatchClient())
+    result = await _run(session, run_id, client=_TotalOutageCompleter())
 
-    rows = (
-        (await session.execute(select(EventSummary), execution_options={"populate_existing": True}))
-        .scalars()
-        .all()
-    )
-    assert rows == []  # nothing summarized; events retried next run
+    assert (result.new, result.refreshed, result.failed) == (0, 0, 1)
+    run = (
+        await session.execute(
+            select(IngestRun).where(IngestRun.id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+    assert run.error is None
+    assert run.items_failed == 1  # still counted — only the terminal status is relaxed
+
+
+async def test_run_with_nothing_pending_still_succeeds(session):
+    """Zero summarized with zero failed is an idempotent no-op, not an outage."""
+    run_id = await _create_run(session, kind="synthesize")
+    await session.commit()
+
+    await _run(session, run_id, client=_TotalOutageCompleter())
 
     run = (
         await session.execute(
@@ -463,8 +407,23 @@ async def test_batched_whole_submit_failure_propagates(session):
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
-    assert run.status == "running"  # the stage runner finalizes, not the pipeline
-    assert run.items_failed == 1
+    assert run.status == "succeeded"
+    assert run.error is None
+
+
+async def test_summary_request_mapping(session):
+    film = await _film(session)
+    await _event_with_story(session, film)
+    await session.commit()
+    run_id = await _create_run(session, kind="synthesize")
+    await session.commit()
+
+    client = FakeSummaryClient()
+    await _run(session, run_id, client=client)
+
+    assert len(client.requests) == 1  # one call per pending event
+    assert client.requests[0]["model"] == "claude-haiku-4-5"
+    assert client.requests[0]["prompt"].max_tokens == 256  # == summarizer._MAX_TOKENS
 
 
 async def test_synthesize_invokes_url_resolution_for_run_events(session, monkeypatch):
@@ -559,11 +518,10 @@ async def test_detail_reports_marked_google_news_story(session):
 
     await run_synthesize_ingest(
         session_factory=lambda: session,
-        client=FakeSummaryClient(),
+        gateway=StubGateway(FakeSummaryClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version="1",
-        use_batches=False,
         url_resolve_delay_seconds=0.0,
         url_resolve_resolver=fake_resolver,
     )

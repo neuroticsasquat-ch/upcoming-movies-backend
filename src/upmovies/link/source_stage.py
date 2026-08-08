@@ -9,13 +9,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import UUID
 
 import httpx
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.link.linker import Completer
-from upmovies.llm.client import Usage
+from upmovies.ingest.runs import record_llm_calls
+from upmovies.llm.types import CallLog, Completer, StageGateway, Usage
 from upmovies.news.models import EventStory, Story
 from upmovies.news.resolve import is_google_news_url, resolve_google_news_url
 from upmovies.news.source_quality import (
@@ -66,11 +67,15 @@ async def _linked_unclustered(session: AsyncSession) -> list[Story]:
 async def run_source_quality_stage(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
+    run_id: UUID,
     judge_model: str,
     resolver: Resolver = resolve_google_news_url,
     unresolved_tier: str = "acceptable",
 ) -> tuple[SourceQualityResult, Usage]:
+    """The `source_judge` stage. It runs inside `run_link_ingest` but resolves its own
+    provider: three stages sharing one client instance is precisely what the gateway
+    replaced (spec §5.3)."""
     # 1. Resolve Google-News URLs for the linked batch so we know the publisher domain.
     async with _owned_session(session_factory) as s:
         stories = await _linked_unclustered(s)
@@ -117,7 +122,30 @@ async def run_source_quality_stage(
     judged = 0
     if unknown:
         items = [{"domain": d, "sample_headline": sample_by_domain[d]} for d in unknown]
-        verdicts, usage = await judge_domains(client=client, model=judge_model, items=items)
+        # This sub-stage is not wrapped in per-item isolation by `run_link_ingest` — a judge
+        # failure propagates and fails the run — so the telemetry write goes in a `finally`,
+        # which is what makes a failed call still leave an `llm_call` row (NEU-975).
+        calls = CallLog()
+        try:
+            verdicts = await judge_domains(
+                client=gateway.for_stage("source_judge"),
+                model=judge_model,
+                items=items,
+                calls=calls,
+            )
+        finally:
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s,
+                        run_id,
+                        stage="source_judge",
+                        provider=gateway.provider_for("source_judge"),
+                        model=judge_model,
+                        results=calls.results,
+                    )
+                    await s.commit()
+        usage = calls.usage
         async with _owned_session(session_factory) as s:
             judged = await upsert_judgements(s, verdicts, model=judge_model, now=datetime.now(UTC))
             await s.commit()
@@ -160,7 +188,10 @@ async def backfill_source_domains(
     """One-off: judge every already-resolved publisher domain that has no source_domain row
     yet, so the admin Sources page is populated without waiting for domains to re-resolve
     during future ingest runs (NEU-460). Idempotent — judges only still-unknown domains.
-    Returns the number of new rows inserted."""
+    Returns the number of new rows inserted.
+
+    Its calls go to a throwaway `CallLog`: this is a script, not a run, so there is no
+    `run_id` to attribute `llm_call` rows to."""
     async with _owned_session(session_factory) as s:
         stories = list((await s.execute(select(Story))).scalars().all())
         sample_by_domain = collect_domain_samples(stories)
@@ -170,7 +201,7 @@ async def backfill_source_domains(
     if not unknown:
         return 0
     items = [{"domain": d, "sample_headline": sample_by_domain[d]} for d in unknown]
-    verdicts, _usage = await judge_domains(client=client, model=judge_model, items=items)
+    verdicts = await judge_domains(client=client, model=judge_model, items=items, calls=CallLog())
     async with _owned_session(session_factory) as s:
         judged = await upsert_judgements(s, verdicts, model=judge_model, now=datetime.now(UTC))
         await s.commit()

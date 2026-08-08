@@ -13,24 +13,37 @@ from uuid import UUID
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
-from upmovies.link.cluster import (
-    ClusterPlan,
-    apply_cluster_decisions,
-    build_cluster_batch_request,
-    cluster_film_events,
+from upmovies.ingest.runs import (
+    StageCounts,
+    finalize_run,
+    record_llm_calls,
+    record_llm_usage,
+    record_progress,
+    total_failure_error,
 )
+from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import (
-    BatchCompleter,
-    Completer,
-    LinkClient,
-    apply_link_decisions,
-    build_batch_request,
-    link_story_batch,
+    StoryCandidates,
+    link_retrieval_story_batch,
+    reject_zero_candidate_stories,
+    story_dek,
 )
-from upmovies.link.roster import Roster, build_roster
+from upmovies.link.retrieval.health import (
+    MAX_ZERO_CANDIDATE_RATE,
+    MIN_STORIES_FOR_BREACH,
+    RetrievalTally,
+    hard_breach_error,
+    record_retrieval_health,
+)
+from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
+from upmovies.link.retrieval.select import (
+    DEFAULT_CANDIDATE_LIMIT,
+    DEFAULT_SCORE_THRESHOLD,
+    CandidateSet,
+    select_candidates,
+)
 from upmovies.link.source_stage import run_source_quality_stage
-from upmovies.llm.client import BatchRequest, Usage
+from upmovies.llm.types import CallLog, StageGateway, Usage
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -54,133 +67,134 @@ def _chunks(seq: Sequence[UUID], size: int) -> list[list[UUID]]:
     return [list(seq[i : i + size]) for i in range(0, len(seq), size)]
 
 
-async def _link_stage_sequential(
+async def _link_stage_retrieval(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
-    roster: Roster,
+    index: CandidateIndex,
     pending_ids: Sequence[UUID],
     batch_size: int,
     floor: float,
     run_date: date,
-) -> tuple[int, int, Usage]:
-    linked = rejected = 0
+    threshold: float,
+    limit: int,
+    tally: RetrievalTally,
+) -> tuple[int, int, Usage, StageCounts]:
+    """The link stage: retrieve per story, reject the ones with no candidates without a
+    model call, and classify the rest against their own lists.
+
+    Per-batch failure isolation, with one deliberate wrinkle: the zero-candidate rejects
+    **commit before the classifier call** and are counted as committed straight away. No
+    model decided them, so no model failure may take them back — which is what makes an
+    outage's tally `0 processed / N failed` rather than a partial success (ADR-0009), and
+    what the outage test in `test_pipeline_retrieval.py` pins."""
+    # One resolution for the whole stage: the provider is a property of the stage, not of a
+    # batch, and resolving per batch would let a mid-run config change split one stage's rows
+    # across two providers.
+    client = gateway.for_stage("link")
+    provider = gateway.provider_for("link")
+    linked = classified_rejected = zero_candidate_rejected = failed_stories = 0
     total_usage = Usage()
     for batch_ids in _chunks(pending_ids, batch_size):
+        # Owned outside the try so a batch that fails *after* its call still records what
+        # that call cost — both as an `llm_call` row and in the stage aggregate (NEU-975).
+        calls = CallLog()
+        # What is still at risk if this batch fails, decremented as work commits.
+        at_risk = len(batch_ids)
         try:
             async with _owned_session(session_factory) as s:
                 stories = (
                     (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
                 )
-                batch, usage = await link_story_batch(
+                batch = [
+                    StoryCandidates(
+                        story=story,
+                        candidates=_retrieve(index, story, threshold=threshold, limit=limit),
+                    )
+                    for story in stories
+                ]
+                for entry in batch:
+                    tally.add(entry.candidates)
+
+                no_candidates = [e.story for e in batch if e.candidates.is_empty]
+                to_classify = [e for e in batch if not e.candidates.is_empty]
+                if no_candidates:
+                    rejected_here = reject_zero_candidate_stories(no_candidates)
+                    # Counted into the *run row* — the stage really did dispose of these
+                    # stories — but pointedly not into `StageCounts` below.
+                    await record_progress(s, run_id, processed_delta=rejected_here)
+                    await s.commit()
+                    zero_candidate_rejected += rejected_here
+                    at_risk -= rejected_here
+
+                result = await link_retrieval_story_batch(
                     client=client,
                     model=model,
-                    roster=roster,
-                    stories=list(stories),
+                    batch=to_classify,
                     floor=floor,
                     run_date=run_date,
+                    calls=calls,
                 )
-                await record_progress(s, run_id, processed_delta=batch.linked + batch.rejected)
-                await s.commit()
-            linked += batch.linked
-            rejected += batch.rejected
-            total_usage += usage
+                if to_classify:
+                    await record_progress(
+                        s, run_id, processed_delta=result.linked + result.rejected
+                    )
+                    await s.commit()
+            linked += result.linked
+            classified_rejected += result.rejected
         except Exception:
-            log.exception("link batch of %d stories failed", len(batch_ids))
+            # `at_risk`, not the batch size: the zero-candidate rejects in this batch have
+            # already committed, and logging them as failed would misreport the outage the
+            # counters below describe correctly.
+            log.exception("link batch of %d stories failed", at_risk)
             async with _owned_session(session_factory) as s:
-                await record_progress(s, run_id, failed_delta=len(batch_ids))
+                await record_progress(s, run_id, failed_delta=at_risk)
                 await s.commit()
-    return linked, rejected, total_usage
+            failed_stories += at_risk
+        finally:
+            total_usage += calls.usage
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s,
+                        run_id,
+                        stage="link",
+                        provider=provider,
+                        model=model,
+                        results=calls.results,
+                    )
+                    await s.commit()
+    return (
+        linked,
+        classified_rejected + zero_candidate_rejected,
+        total_usage,
+        # **`processed` is classifier output only.** `total_failure` returns False the
+        # instant `processed > 0`, so folding the zero-candidate rejects in here would let a
+        # total Anthropic outage report ~30% processed, finalize the run `succeeded`, and let
+        # the fail-fast daily chain proceed — while the stories the outage cost aged out of
+        # the recency window unrecoverably, `link` being the repo's one lossy stage. The
+        # rejects feed retrieval health instead, via `tally` (ADR-0009, NEU-999).
+        StageCounts(processed=linked + classified_rejected, failed=failed_stories),
+    )
 
 
-async def _link_stage_batched(
-    *,
-    session_factory: SessionFactory,
-    client: BatchCompleter,
-    run_id: UUID,
-    model: str,
-    roster: Roster,
-    pending_ids: Sequence[UUID],
-    batch_size: int,
-    floor: float,
-    run_date: date,
-) -> tuple[int, int, Usage]:
-    chunks = _chunks(pending_ids, batch_size)
-
-    # Build phase: one read-only session; ORM rows are dropped once serialized into requests,
-    # so no session is held open across the (possibly long) batch poll.
-    requests = []
-    async with _owned_session(session_factory) as s:
-        for i, batch_ids in enumerate(chunks):
-            stories = (
-                (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
-            )
-            requests.append(
-                build_batch_request(
-                    custom_id=str(i),
-                    model=model,
-                    roster=roster,
-                    stories=list(stories),
-                    run_date=run_date,
-                )
-            )
-
-    if not requests:
-        return 0, 0, Usage()
-
-    try:
-        results = await client.complete_batch(requests)
-    except Exception:
-        # Whole-batch submit/poll failed: no chunk got a result, so unlike a per-chunk
-        # failure below there is nothing to salvage and nothing to isolate. Record the
-        # counters and re-raise — returning normally here would let run_link_ingest
-        # finalize 'succeeded' with 0 linked, which lets run_daily proceed to synthesize
-        # over unlinked stories and ping the deadman green. Stories stay pending, so a
-        # later run retries them.
-        log.exception("link batch submit of %d stories failed", len(pending_ids))
-        async with _owned_session(session_factory) as s:
-            await record_progress(s, run_id, failed_delta=len(pending_ids))
-            await s.commit()
-        raise
-
-    linked = rejected = 0
-    total_usage = Usage()
-    for i, batch_ids in enumerate(chunks):
-        result = results.get(str(i))
-        try:
-            if result is None or not result.ok:
-                detail = result.error_type if result else "missing"
-                raise RuntimeError(f"batch chunk {i} unavailable: {detail}")
-            async with _owned_session(session_factory) as s:
-                # Re-query: build-phase session closed before polling; fresh ORM objects required.
-                stories = (
-                    (await s.execute(select(Story).where(Story.id.in_(batch_ids)))).scalars().all()
-                )
-                # apply_link_decisions calls json.loads; this try/except owns failure isolation.
-                applied = apply_link_decisions(
-                    raw=result.text, stories=list(stories), roster=roster, floor=floor
-                )
-                await record_progress(s, run_id, processed_delta=applied.linked + applied.rejected)
-                await s.commit()
-            linked += applied.linked
-            rejected += applied.rejected
-            if result.usage is not None:
-                total_usage += result.usage
-        except Exception:
-            log.exception("link batch chunk %d of %d stories failed", i, len(batch_ids))
-            async with _owned_session(session_factory) as s:
-                await record_progress(s, run_id, failed_delta=len(batch_ids))
-                await s.commit()
-
-    return linked, rejected, total_usage
+def _retrieve(index: CandidateIndex, story: Story, *, threshold: float, limit: int) -> CandidateSet:
+    """One story's candidate set, scored on the headline + dek the classifier is shown."""
+    return select_candidates(
+        index,
+        headline=story.title,
+        dek=story_dek(story),
+        threshold=threshold,
+        limit=limit,
+    )
 
 
 async def _cluster_stage_sequential(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     film_ids: Sequence[UUID],
@@ -190,13 +204,20 @@ async def _cluster_stage_sequential(
     dedup_days: int = 14,
     release_change_window_days: int = 14,
     run_date: date,
-) -> tuple[int, int, int, Usage]:
+) -> tuple[int, int, int, Usage, StageCounts]:
+    # `cluster`, not `link` — the same run_link_ingest call that resolved the link stage above
+    # resolves a second, independently configured provider here. That is the whole reason one
+    # `AnthropicClient` threaded down from `run_link_stage` had to go (spec §5.3).
+    client = gateway.for_stage("cluster")
+    provider = gateway.provider_for("cluster")
     events_created = stories_clustered = stories_rejected = 0
+    films_ok = films_failed = 0
     total_usage = Usage()
     for film_id in film_ids:
+        calls = CallLog()  # see `_link_stage_retrieval` — owned outside the try on purpose
         try:
             async with _owned_session(session_factory) as s:
-                cluster, usage = await cluster_film_events(
+                cluster = await cluster_film_events(
                     s,
                     client=client,
                     model=model,
@@ -207,106 +228,54 @@ async def _cluster_stage_sequential(
                     dedup_days=dedup_days,
                     release_change_window_days=release_change_window_days,
                     run_date=run_date,
+                    calls=calls,
                 )
+                # One film, counted the same way the catch-block counts a failure, so a clean
+                # cluster stage no longer persists as 0 processed / 0 failed — which on the
+                # run row was indistinguishable from a stage that never ran (NEU-987). These
+                # counters remain a whole-run total across both stages, so they still cannot
+                # reproduce the per-stage decision; the guard reads the in-memory counts.
+                await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
             events_created += cluster.events_created
             stories_clustered += cluster.stories_clustered
             stories_rejected += cluster.stories_rejected
-            total_usage += usage
+            films_ok += 1
         except Exception:
             log.exception("clustering failed for film %s", film_id)
             async with _owned_session(session_factory) as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
-    return events_created, stories_clustered, stories_rejected, total_usage
-
-
-async def _cluster_stage_batched(
-    *,
-    session_factory: SessionFactory,
-    client: BatchCompleter,
-    run_id: UUID,
-    model: str,
-    film_ids: Sequence[UUID],
-    attach_limit: int,
-    cluster_max_tokens: int,
-    unresolved_tier: str = "acceptable",
-    dedup_days: int = 14,
-    release_change_window_days: int = 14,
-    run_date: date,
-) -> tuple[int, int, int, Usage]:
-    # Build phase: one read-only session; ORM rows are dropped once serialized, so no session
-    # is held open across the batch poll. The per-film plans (tiny UUID lists) are kept.
-    requests: list[BatchRequest] = []
-    plans: dict[str, ClusterPlan] = {}
-    async with _owned_session(session_factory) as s:
-        for film_id in film_ids:
-            built = await build_cluster_batch_request(
-                s,
-                custom_id=str(film_id),
-                model=model,
-                film_id=film_id,
-                attach_limit=attach_limit,
-                max_tokens=cluster_max_tokens,
-                run_date=run_date,
-            )
-            if built is None:
-                continue
-            request, plan = built
-            requests.append(request)
-            plans[request.custom_id] = plan
-
-    if not requests:
-        return 0, 0, 0, Usage()
-
-    try:
-        results = await client.complete_batch(requests)
-    except Exception:
-        # Whole-batch failure: no film got a result, so unlike the per-film failures below
-        # there is nothing to isolate. Record the counters and re-raise so the run is marked
-        # failed rather than finalizing 'succeeded' with zero events clustered.
-        log.exception("cluster batch submit of %d films failed", len(requests))
-        async with _owned_session(session_factory) as s:
-            await record_progress(s, run_id, failed_delta=len(requests))
-            await s.commit()
-        raise
-
-    events_created = stories_clustered = stories_rejected = 0
-    total_usage = Usage()
-    for custom_id, plan in plans.items():
-        result = results.get(custom_id)
-        try:
-            if result is None or not result.ok:
-                detail = result.error_type if result else "missing"
-                raise RuntimeError(f"cluster film {custom_id} unavailable: {detail}")
-            async with _owned_session(session_factory) as s:
-                applied = await apply_cluster_decisions(
-                    s,
-                    plan=plan,
-                    raw=result.text,
-                    unresolved_tier=unresolved_tier,
-                    dedup_days=dedup_days,
-                    release_change_window_days=release_change_window_days,
-                )
-                await s.commit()
-            events_created += applied.events_created
-            stories_clustered += applied.stories_clustered
-            stories_rejected += applied.stories_rejected
-            if result.usage is not None:
-                total_usage += result.usage
-        except Exception:
-            log.exception("clustering failed for film %s", custom_id)
-            async with _owned_session(session_factory) as s:
-                await record_progress(s, run_id, failed_delta=1)
-                await s.commit()
-
-    return events_created, stories_clustered, stories_rejected, total_usage
+            films_failed += 1
+        finally:
+            total_usage += calls.usage
+            if calls.results:
+                async with _owned_session(session_factory) as s:
+                    await record_llm_calls(
+                        s,
+                        run_id,
+                        stage="cluster",
+                        provider=provider,
+                        model=model,
+                        results=calls.results,
+                    )
+                    await s.commit()
+    return (
+        events_created,
+        stories_clustered,
+        stories_rejected,
+        total_usage,
+        # Counted in films, not events: a film can cluster fine and yield no new event. What a
+        # lone failure means here is settled once by STAGE_KINDS["cluster"] (NEU-987/NEU-988):
+        # an unclustered film is re-selected every run until it clusters.
+        StageCounts(processed=films_ok, failed=films_failed),
+    )
 
 
 async def run_link_ingest(
     *,
     session_factory: SessionFactory,
-    client: LinkClient,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     cluster_model: str,
@@ -314,18 +283,17 @@ async def run_link_ingest(
     attach_limit: int = 25,
     batch_size: int,
     floor: float,
-    use_batches: bool = False,
-    cluster_use_batches: bool = False,
     cluster_max_tokens: int = 4096,
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
     source_gate_enabled: bool = False,
     source_judge_model: str = "claude-haiku-4-5",
+    retrieval_threshold: float = DEFAULT_SCORE_THRESHOLD,
+    retrieval_max_candidates: int = DEFAULT_CANDIDATE_LIMIT,
+    retrieval_max_zero_candidate_rate: float = MAX_ZERO_CANDIDATE_RATE,
+    retrieval_health_min_stories: int = MIN_STORIES_FOR_BREACH,
 ) -> LinkIngestResult:
-    async with _owned_session(session_factory) as s:
-        roster = await build_roster(s)
-
     run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
     async with _owned_session(session_factory) as s:
@@ -337,21 +305,48 @@ async def run_link_ingest(
         )
         pending_ids = [row[0] for row in result.all()]
 
-    stage = _link_stage_batched if use_batches else _link_stage_sequential
-    linked, rejected, link_usage = await stage(
+    # The link path owns the catalog read it needs. **No roster is built at all** — deleting
+    # that ~50k-token prefix was the project's whole point (spec §1) — and a failed index
+    # build is deliberately *not* caught: with no roster left to fall back to (NEU-1004,
+    # spec §5.5), an unbuildable index would zero-candidate the whole backlog and reject it,
+    # so the run must crash and finalize `failed` instead.
+    async with _owned_session(session_factory) as s:
+        index = await build_candidate_index(s)
+    tally = RetrievalTally()
+    linked, rejected, link_usage, link_counts = await _link_stage_retrieval(
         session_factory=session_factory,
-        client=client,
+        gateway=gateway,
         run_id=run_id,
         model=model,
-        roster=roster,
+        index=index,
         pending_ids=pending_ids,
         batch_size=batch_size,
         floor=floor,
         run_date=run_date,
+        threshold=retrieval_threshold,
+        limit=retrieval_max_candidates,
+        tally=tally,
     )
+    # Immediately after the stage that produced the numbers: a *missing* health row is how
+    # "retrieval did not run at all" is told apart from a run whose retrieval found nothing.
+    await record_retrieval_health(session_factory, run_id=run_id, tally=tally)
+    # Read off the tally rather than the row just written: that write is best-effort by
+    # contract, and an outage that swallowed it must not also disarm the guard.
+    retrieval_breach = hard_breach_error(
+        tally,
+        max_zero_candidate_rate=retrieval_max_zero_candidate_rate,
+        min_stories=retrieval_health_min_stories,
+    )
+    if retrieval_breach:
+        log.error("%s", retrieval_breach)
     async with _owned_session(session_factory) as s:
         await record_llm_usage(
-            s, run_id, stage="link", model=model, batched=use_batches, usage=link_usage
+            s,
+            run_id,
+            stage="link",
+            provider=gateway.provider_for("link"),
+            model=model,
+            usage=link_usage,
         )
         await s.commit()
 
@@ -359,7 +354,8 @@ async def run_link_ingest(
     if source_gate_enabled:
         source_result, source_usage = await run_source_quality_stage(
             session_factory=session_factory,
-            client=client,
+            gateway=gateway,
+            run_id=run_id,
             judge_model=source_judge_model,
             unresolved_tier=unresolved_tier,
         )
@@ -368,8 +364,8 @@ async def run_link_ingest(
                 s,
                 run_id,
                 stage="source_judge",
+                provider=gateway.provider_for("source_judge"),
                 model=source_judge_model,
-                batched=False,
                 usage=source_usage,
             )
             await s.commit()
@@ -401,10 +397,15 @@ async def run_link_ingest(
             if fid is not None
         ]
 
-    cluster_stage = _cluster_stage_batched if cluster_use_batches else _cluster_stage_sequential
-    events_created, stories_clustered, stories_rejected, cluster_usage = await cluster_stage(
+    (
+        events_created,
+        stories_clustered,
+        stories_rejected,
+        cluster_usage,
+        cluster_counts,
+    ) = await _cluster_stage_sequential(
         session_factory=session_factory,
-        client=client,
+        gateway=gateway,
         run_id=run_id,
         model=cluster_model,
         film_ids=film_ids,
@@ -420,17 +421,31 @@ async def run_link_ingest(
             s,
             run_id,
             stage="cluster",
+            provider=gateway.provider_for("cluster"),
             model=cluster_model,
-            batched=use_batches,
             usage=cluster_usage,
         )
         await s.commit()
 
+    # Two independent guards, joined only here. `total_failure_error` watches model
+    # availability on its narrow "produced nothing at all" rule; the breach watches the rate
+    # at which retrieval disposes of stories no model ever sees (ADR-0010). A run can trip
+    # both — an outage on a broken index does — and the error names each one that fired.
+    error = (
+        "; ".join(
+            filter(
+                None,
+                (total_failure_error(link=link_counts, cluster=cluster_counts), retrieval_breach),
+            )
+        )
+        or None
+    )
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,
             run_id,
-            status="succeeded",
+            status="failed" if error else "succeeded",
+            error=error,
             detail=(
                 f"linked {linked}, rejected {rejected}; "
                 f"{events_created} events from {stories_clustered} stories "

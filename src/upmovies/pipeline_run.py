@@ -7,10 +7,10 @@ rather than duplicating the wiring.
 
 `run_daily` / `run_hourly` run the stages **sequentially in one process**: because each
 stage is awaited to completion before the next begins, `synthesize` cannot start until
-`link` has fully finished — there is no HTTP poll window to time out, so slow Anthropic
-Message Batches no longer fail the pipeline. The daily chain is fail-fast: the first stage
-that does not reach `succeeded` aborts the rest. A best-effort healthchecks.io deadman ping
-(`/start` at the top, base URL on success, `/fail` on any failure) drives alerting.
+`link` has fully finished — there is no HTTP poll window to time out. The daily chain is
+fail-fast: the first stage that does not reach `succeeded` aborts the rest. A best-effort
+healthchecks.io deadman ping (`/start` at the top, base URL on success, `/fail` on any
+failure) drives alerting.
 
 Entry point: `python -m upmovies.pipeline_run {daily|hourly}`.
 """
@@ -32,7 +32,7 @@ from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import Gateway, validate_stage_configuration
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -101,10 +101,13 @@ async def run_feeds_stage(
 
 async def run_link_stage(run_id: UUID, settings: Settings) -> None:
     try:
-        async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
+        # One gateway, three stages: `link`, `source_judge` and `cluster` all run inside
+        # `run_link_ingest` and each resolves its own provider from it. This used to be one
+        # `AnthropicClient` opened here and threaded down to all three (NEU-980, spec §5.3).
+        async with Gateway(settings) as gateway:
             await run_link_ingest(
                 session_factory=_session_factory,
-                client=client,
+                gateway=gateway,
                 run_id=run_id,
                 model=settings.link_model,
                 cluster_model=settings.cluster_model,
@@ -112,14 +115,16 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
                 attach_limit=settings.link_cluster_attach_limit,
                 batch_size=settings.link_batch_size,
                 floor=settings.link_confidence_floor,
-                use_batches=settings.link_use_batches,
-                cluster_use_batches=settings.cluster_use_batches,
                 cluster_max_tokens=settings.link_cluster_max_tokens,
                 source_gate_enabled=settings.source_gate_enabled,
                 source_judge_model=settings.source_judge_model,
                 unresolved_tier=settings.source_unresolved_tier,
                 dedup_days=settings.link_singular_dedup_days,
                 release_change_window_days=settings.link_release_change_window_days,
+                retrieval_threshold=settings.link_retrieval_threshold,
+                retrieval_max_candidates=settings.link_retrieval_max_candidates,
+                retrieval_max_zero_candidate_rate=settings.link_retrieval_max_zero_candidate_rate,
+                retrieval_health_min_stories=settings.link_retrieval_health_min_stories,
             )
     except Exception as e:
         log.exception("link ingest crashed")
@@ -128,14 +133,13 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
 
 async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
     try:
-        async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
+        async with Gateway(settings) as gateway:
             await run_synthesize_ingest(
                 session_factory=_session_factory,
-                client=client,
+                gateway=gateway,
                 run_id=run_id,
                 model=settings.summary_model,
                 prompt_version=settings.summary_prompt_version,
-                use_batches=settings.summary_use_batches,
                 url_resolve_per_run=settings.url_resolve_per_run,
                 url_resolve_max_attempts=settings.url_resolve_max_attempts,
                 url_resolve_delay_seconds=settings.url_resolve_delay_seconds,
@@ -226,6 +230,12 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%Y-%m-%dT%H:%M:%S",
         force=True,
     )
+    # The same guard the app's lifespan runs, for the process that actually pays for the
+    # failure: a scheduled task is a separate `python -m upmovies.pipeline_run` invocation,
+    # so the app having booted proves nothing about the env this one was handed (CLAUDE.md's
+    # "a long-running container holds the env it was created with"). Checked before the first
+    # run row exists, so an unroutable stage costs no half-published run (NEU-981).
+    validate_stage_configuration(settings)
     if mode == "daily":
         ok = asyncio.run(run_daily(settings))
     elif mode == "hourly":

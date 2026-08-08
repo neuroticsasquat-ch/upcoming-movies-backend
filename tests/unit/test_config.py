@@ -1,7 +1,16 @@
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from upmovies.config import Settings
+from upmovies.config import Provider, Settings
+from upmovies.link.retrieval import (
+    DEFAULT_CANDIDATE_LIMIT,
+    DEFAULT_SCORE_THRESHOLD,
+    MAX_ZERO_CANDIDATE_RATE,
+    MIN_STORIES_FOR_BREACH,
+)
+from upmovies.llm.registry import PROVIDERS
 
 _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
@@ -74,25 +83,12 @@ def test_settings_ingestion_overrides_from_env(monkeypatch):
     assert s.tmdb_release_window_future_days == 365
 
 
-def test_settings_link_use_batches_defaults_true(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.delenv("LINK_USE_BATCHES", raising=False)
-    s = Settings()  # type: ignore[call-arg]
-    assert s.link_use_batches is True
-
-
-def test_settings_link_use_batches_override_from_env(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("LINK_USE_BATCHES", "true")
-    s = Settings()  # type: ignore[call-arg]
-    assert s.link_use_batches is True
-
-
 def test_settings_link_batch_size_default(monkeypatch):
+    """20, re-derived at NEU-1001 — the reply ceiling sets it now, not a cached prefix."""
     _set_required(monkeypatch)
     monkeypatch.delenv("LINK_BATCH_SIZE", raising=False)
     s = Settings()  # type: ignore[call-arg]
-    assert s.link_batch_size == 15
+    assert s.link_batch_size == 20
 
 
 def test_settings_link_batch_size_override_from_env(monkeypatch):
@@ -102,39 +98,100 @@ def test_settings_link_batch_size_override_from_env(monkeypatch):
     assert s.link_batch_size == 10
 
 
-def test_settings_cluster_use_batches_defaults_true(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.delenv("CLUSTER_USE_BATCHES", raising=False)
-    s = Settings()  # type: ignore[call-arg]
-    assert s.cluster_use_batches is True
-
-
-def test_settings_cluster_use_batches_override_from_env(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("CLUSTER_USE_BATCHES", "false")
-    s = Settings()  # type: ignore[call-arg]
-    assert s.cluster_use_batches is False
-
-
 def test_settings_summary_defaults(monkeypatch):
     _set_required(monkeypatch)
-    for key in ("SUMMARY_MODEL", "SUMMARY_USE_BATCHES", "SUMMARY_PROMPT_VERSION"):
+    for key in ("SUMMARY_MODEL", "SUMMARY_PROMPT_VERSION"):
         monkeypatch.delenv(key, raising=False)
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-haiku-4-5"
-    assert s.summary_use_batches is True
     assert s.summary_prompt_version == "9"
 
 
 def test_settings_summary_overrides_from_env(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("SUMMARY_MODEL", "claude-sonnet-4-6")
-    monkeypatch.setenv("SUMMARY_USE_BATCHES", "false")
     monkeypatch.setenv("SUMMARY_PROMPT_VERSION", "2")
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-sonnet-4-6"
-    assert s.summary_use_batches is False
     assert s.summary_prompt_version == "2"
+
+
+_PROVIDER_ENV = (
+    "LINK_PROVIDER",
+    "CLUSTER_PROVIDER",
+    "SOURCE_JUDGE_PROVIDER",
+    "SUMMARY_PROVIDER",
+    "DEEPINFRA_API_KEY",
+    "DEEPSEEK_API_KEY",
+)
+
+
+def _clear_providers(monkeypatch):
+    for key in _PROVIDER_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_defaults_every_stage_to_anthropic(monkeypatch):
+    """Default config must reproduce today's behaviour exactly — the gateway's exit criterion
+    is capability, and nothing migrates (design §1)."""
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_provider == "anthropic"
+    assert s.cluster_provider == "anthropic"
+    assert s.source_judge_provider == "anthropic"
+    assert s.summary_provider == "anthropic"
+
+
+def test_settings_reads_per_stage_providers_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    monkeypatch.setenv("CLUSTER_PROVIDER", "deepinfra")
+    monkeypatch.setenv("SUMMARY_PROVIDER", "deepseek")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.cluster_provider == "deepinfra"
+    assert s.summary_provider == "deepseek"
+    assert s.link_provider == "anthropic"  # untouched stages stay put
+
+
+@pytest.mark.parametrize(
+    "key", ["LINK_PROVIDER", "CLUSTER_PROVIDER", "SOURCE_JUDGE_PROVIDER", "SUMMARY_PROVIDER"]
+)
+def test_settings_rejects_an_unknown_provider(monkeypatch, key):
+    """What the `Literal` buys: a typo fails the container at boot rather than the stage at
+    its first call, halfway through a nightly publish."""
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    monkeypatch.setenv(key, "anthropik")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_provider_literal_matches_the_registry():
+    """`Provider` restates `llm.registry.PROVIDERS` because `config` cannot import the `llm`
+    package — `llm.gateway` reads `Settings`, so the import would be circular. Same bind as
+    the retrieval constants, same pinning test."""
+    assert set(get_args(Provider)) == set(PROVIDERS)
+
+
+def test_settings_provider_credentials_are_optional(monkeypatch):
+    """Adding these as required fields would break every deploy that does not use them
+    (design §8) — which today is all of them."""
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.deepinfra_api_key is None
+    assert s.deepseek_api_key is None
+
+
+def test_settings_reads_provider_credentials_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    monkeypatch.setenv("DEEPINFRA_API_KEY", "di-xxx")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-xxx")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.deepinfra_api_key == "di-xxx"
+    assert s.deepseek_api_key == "ds-xxx"
 
 
 def test_settings_requires_tmdb_api_key(monkeypatch):
@@ -240,3 +297,109 @@ def test_settings_link_release_change_window_days_override_from_env(monkeypatch)
     monkeypatch.setenv("LINK_RELEASE_CHANGE_WINDOW_DAYS", "3")
     s = Settings()  # type: ignore[call-arg]
     assert s.link_release_change_window_days == 3
+
+
+_RETRIEVAL_ENV = (
+    "LINK_RETRIEVAL_THRESHOLD",
+    "LINK_RETRIEVAL_MAX_CANDIDATES",
+    "LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE",
+    "LINK_RETRIEVAL_HEALTH_MIN_STORIES",
+)
+
+
+def _clear_retrieval(monkeypatch):
+    for key in _RETRIEVAL_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_link_retrieval_tuning_defaults(monkeypatch):
+    """Both settings default, so no local or test run needs new env (NEU-995)."""
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    # Tuned at NEU-1001 against 98,662 real stories and a 1,226-film catalog: T=0.5 is the
+    # top of the flat region (every reachable roster pick scores 0.5 or better) and K=25
+    # clears both the p99 candidate set of 18 and the deepest pick seen, at rank 21.
+    assert s.link_retrieval_threshold == 0.5
+    assert s.link_retrieval_max_candidates == 25
+
+
+def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
+    """The tuning defaults must not drift from `link.retrieval.select`'s own.
+
+    They are duplicated rather than shared because `config` cannot import the selector:
+    `retrieval/index.py` reads settings, so the import would be circular. This pins them.
+    """
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_threshold == DEFAULT_SCORE_THRESHOLD
+    assert s.link_retrieval_max_candidates == DEFAULT_CANDIDATE_LIMIT
+
+
+def test_settings_link_retrieval_tuning_overrides_from_env(monkeypatch):
+    """T and K move by config, not by deploy — which is what made NEU-1001 a config change,
+    and what lets the next catalog expansion be answered the same way."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_THRESHOLD", "0.34")
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "10")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_threshold == 0.34
+    assert s.link_retrieval_max_candidates == 10
+
+
+@pytest.mark.parametrize("threshold", ["-0.1", "1.5"])
+def test_settings_link_retrieval_threshold_rejects_out_of_range(monkeypatch, threshold):
+    """Scores are token fractions, so a threshold outside 0..1 can only mean a mistake —
+    above 1.0 nothing ever clears it and every story becomes a zero-candidate reject."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_THRESHOLD", threshold)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_link_retrieval_max_candidates_rejects_zero(monkeypatch):
+    """A cap of zero offers the model nothing while retrieval still reports a hit —
+    a story that is neither linked nor a zero-candidate reject."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "0")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_retrieval_health_guard_defaults_match_the_rule(monkeypatch):
+    """The hard-breach constants, duplicated into config for the same reason T and K are —
+    `config` cannot import `link.retrieval` without a cycle — and pinned here (NEU-1002)."""
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_max_zero_candidate_rate == MAX_ZERO_CANDIDATE_RATE
+    assert s.link_retrieval_health_min_stories == MIN_STORIES_FOR_BREACH
+
+
+def test_settings_retrieval_health_guard_overrides_from_env(monkeypatch):
+    """A guard that can only be retuned by a deploy is one that gets switched off instead —
+    and 1.0 is how it *is* switched off, no rate being above it."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", "1.0")
+    monkeypatch.setenv("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "200")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_max_zero_candidate_rate == 1.0
+    assert s.link_retrieval_health_min_stories == 200
+
+
+@pytest.mark.parametrize("rate", ["-0.1", "1.5"])
+def test_settings_retrieval_max_zero_candidate_rate_rejects_out_of_range(monkeypatch, rate):
+    """It is a share of the run's stories, so anything outside 0..1 can only be a mistake —
+    and above 1.0 the guard is unreachable rather than merely lenient."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", rate)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_retrieval_health_min_stories_rejects_negative(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "-1")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]

@@ -1,23 +1,45 @@
 """Pre-fill the hand-labeling draft with *candidate* labels so building the validation set
-is a review-and-correct pass instead of labeling 490 rows from scratch.
+is a review-and-correct pass instead of labeling thousands of rows from scratch.
 
 Run in the container with a real key in .env (writes JSON to stdout, logs to stderr):
     task shell
-    python scripts/propose_validation_labels.py < tests/fixtures/link/validation_draft.json \
+    python scripts/propose_validation_labels.py --as-of 2026-08-08 \
+        < tests/fixtures/link/validation_draft.json \
         > tests/fixtures/link/validation_candidates.json
 
-Then open validation_candidates.json, correct the proposals (see the anchoring note below),
-keep ~150-200 rows, and save the curated result as tests/fixtures/link/validation_set.json.
+Then review every proposal (see the anchoring note below), keep the rows you want, and save
+the curated result as tests/fixtures/link/validation_set.json.
 
 Anti-anchoring: candidates are proposed by a STRONGER model (Sonnet) than the production
 Stage-1 linker (Haiku, `link_model`). The validation set then measures the Haiku linker
 against a Sonnet-proposed, human-corrected ground truth — not against its own output. Still
 read every proposal: a model-assisted set inherits the proposer's blind spots if you
-rubber-stamp it. Pay special attention to the about/mention boundary and the film id."""
+rubber-stamp it. Pay special attention to the about/mention boundary and the film id.
 
+**`--as-of` is the fixture's pin, and it is not optional for a pinned set.** The film list
+shown to the proposer defines what may be labeled `about`; the harness later scores the
+fixture against the catalog as of the fixture's `as_of_date` and **aborts** if a labeled film
+is not reachable there (spec §5.1a). Building that list at wall clock while the fixture is
+pinned to some other date puts the two sets out of step — a film that released between the
+pin and today is offered to the proposer and filtered out for the harness, and the row it
+produces fails the coverage check. Passing the pin here makes the labelable set and the
+scoreable set the same set by construction, which is what turns the pin's one-day coverage
+margin into no margin needed at all.
+
+**The list comes from the retrieval index, not the deleted roster (NEU-1004).** Both read
+the same `active_film_clause` at the same `as_of`, so the labelable set is unchanged — what
+moved is only which module owns the read. Note this script still sends its whole film list as
+its `Prompt.stable_prefix`: production's prefixes are all under the cache floor now, but here
+the prefix is large and reused byte-identically across ~160 batches in one sitting, which is
+exactly the shape prompt caching pays for — and the shape the stable-prefix contract names."""
+
+import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Iterable, Mapping
+from datetime import date
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -25,15 +47,22 @@ from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.linker import _extract_json_array
-from upmovies.link.roster import build_roster
-from upmovies.llm.client import AnthropicClient, cached_system_block
+from upmovies.link.retrieval.index import IndexedFilm, build_candidate_index, indexed_tmdb_ids
+from upmovies.llm import AnthropicClient, Prompt
 
 # A strong model, deliberately distinct from settings.link_model (the Haiku linker under
-# test) so the human reviews independent proposals. Override with the first CLI arg.
+# test) so the human reviews independent proposals. Override with --model.
 PROPOSAL_MODEL = "claude-sonnet-4-6"
 BATCH_SIZE = 25
 MAX_TOKENS = 4096
 SUMMARY_MAX = 500
+# The overview trim the deleted roster applied to every line it rendered. Kept here because
+# the retrieval index carries overviews untrimmed — trimming is a prompt-size decision.
+_OVERVIEW_MAX = 120
+# Batches are independent, so the draft's size is a latency problem rather than a design
+# one: a 4,000-row draft is 160 calls, and sequentially that is hours of wall clock for work
+# the API will happily do in parallel.
+CONCURRENCY = 8
 
 EVENT_TYPES = (
     "announced",
@@ -55,7 +84,7 @@ EXCLUSION_CATEGORIES = (
 )
 
 
-def _proposal_to_row(row: dict, proposal: dict | None, roster_tmdb_ids: set[int]) -> dict:
+def _proposal_to_row(row: dict, proposal: dict | None, labelable: set[int]) -> dict:
     """Build one fixture row from a draft row + the model's proposal. Sets the production-news
     axis only for 'about' proposals; exclusion_category only when is_production_news is False."""
     relation, tmdb_id, event_type = "TODO", None, None
@@ -68,9 +97,11 @@ def _proposal_to_row(row: dict, proposal: dict | None, roster_tmdb_ids: set[int]
         )
         if relation == "about":
             tmdb_id = proposal.get("tmdb_id")
-            if tmdb_id not in roster_tmdb_ids:  # hallucinated / out-of-roster id
+            if tmdb_id not in labelable:  # hallucinated / not in the labelable set
                 tmdb_id = None
-            event_type = proposal.get("event_type") if proposal.get("event_type") in EVENT_TYPES else None
+            event_type = (
+                proposal.get("event_type") if proposal.get("event_type") in EVENT_TYPES else None
+            )
             is_production_news = proposal.get("is_production_news")
             if not isinstance(is_production_news, bool):
                 is_production_news = None
@@ -122,70 +153,120 @@ null>, "event_type": <one of the types above, or null>, "is_production_news": <t
 null>, "exclusion_category": <category or null>}}]"""
 
 
-def _roster_text(entries, tmdb_by_film_id) -> str:
-    """Render roster lines keyed by TMDB id (the fixture's film key), reusing the same
-    title/year/orig/genres/overview content the production roster builds."""
+def _film_list_text(films: Iterable[IndexedFilm], tmdb_by_film_id: Mapping[UUID, int]) -> str:
+    """Render the labelable film list keyed by TMDB id (the fixture's film key).
+
+    The prompt still calls this block `ROSTER:` — that is the *prompt's* word, and moving it
+    would edit a prompt whose output is hand-reviewed ground truth. The module that used to
+    build a roster is gone (NEU-1004); these rows come from the retrieval index instead. The
+    line format is byte-for-byte what the roster rendered, including the 120-character
+    overview trim, so a re-proposal against the same pin sees the same prefix it always did
+    — `test_propose_validation_labels` pins that."""
     lines = []
-    for e in entries:
-        tmdb_id = tmdb_by_film_id.get(e.film_id)
+    for f in films:
+        tmdb_id = tmdb_by_film_id.get(f.film_id)
         if tmdb_id is None:
             continue
-        parts = [f'tmdb={tmdb_id} "{e.title}"']
-        if e.year is not None:
-            parts.append(f"({e.year})")
-        if e.original_title and e.original_title != e.title:
-            parts.append(f"[orig: {e.original_title}]")
-        if e.genres:
-            parts.append(f"genres: {', '.join(e.genres)}")
+        parts = [f'tmdb={tmdb_id} "{f.title}"']
+        if f.year is not None:
+            parts.append(f"({f.year})")
+        if f.original_title and f.original_title != f.title:
+            parts.append(f"[orig: {f.original_title}]")
+        if f.genres:
+            parts.append(f"genres: {', '.join(f.genres)}")
         line = " ".join(parts)
-        if e.overview:
-            line += f" — {e.overview}"
+        if f.overview:
+            line += f" — {f.overview[:_OVERVIEW_MAX]}"
         lines.append(line)
     return "\n".join(lines)
 
 
-async def main(model: str) -> None:
+async def _propose_batch(
+    client: AnthropicClient,
+    *,
+    model: str,
+    stable_prefix: str,
+    draft: list[dict],
+    start: int,
+    semaphore: asyncio.Semaphore,
+    progress: list[int],
+) -> dict[str, dict]:
+    """One batch of proposals, keyed by draft index.
+
+    A batch that fails or returns unparseable JSON yields nothing rather than killing the
+    run: at 160 batches a single bad reply should cost 25 undecided rows the human can see
+    in the output, not four thousand rows of re-proposal."""
+    chunk = draft[start : start + BATCH_SIZE]
+    payload = [
+        {
+            "id": str(start + i),
+            "title": row["title"],
+            "summary": (row.get("summary") or "")[:SUMMARY_MAX],
+        }
+        for i, row in enumerate(chunk)
+    ]
+    async with semaphore:
+        try:
+            raw = await client.complete(
+                model=model,
+                prompt=Prompt(
+                    stable_prefix=stable_prefix,
+                    user=json.dumps(payload),
+                    max_tokens=MAX_TOKENS,
+                ),
+            )
+            batch = {str(d.get("id")): d for d in json.loads(_extract_json_array(raw))}
+        except Exception as exc:  # reported, and the rows stay undecided
+            print(f"  batch at {start} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            batch = {}
+    # A one-element list is the counter: batches run concurrently but asyncio only
+    # switches at awaits, and there is none between the read and the write.
+    progress[0] += len(chunk)
+    print(f"  proposed {progress[0]}/{len(draft)}", file=sys.stderr)
+    return batch
+
+
+async def main(args: argparse.Namespace) -> None:
     draft = json.load(sys.stdin)
     print(f"loaded {len(draft)} draft rows", file=sys.stderr)
 
     settings = get_settings()
     async with SessionLocal() as s:
-        roster = await build_roster(s)
+        index = await build_candidate_index(s, as_of=args.as_of)
         tmdb_by_film_id = {
             row.id: row.tmdb_id for row in (await s.execute(select(Film))).scalars().all()
         }
-    roster_tmdb_ids = set(tmdb_by_film_id.values())
-    system = [
-        cached_system_block(
-            f"{_INSTRUCTIONS}\n\nROSTER:\n{_roster_text(roster.entries, tmdb_by_film_id)}"
-        )
-    ]
-    print(f"roster: {len(roster_tmdb_ids)} films | proposer model: {model}", file=sys.stderr)
+    labelable = indexed_tmdb_ids(index.films, tmdb_by_film_id)
+    stable_prefix = (
+        f"{_INSTRUCTIONS}\n\nROSTER:\n{_film_list_text(index.films, tmdb_by_film_id)}"
+    )
+    print(
+        f"labelable: {len(labelable)} films as of {args.as_of or 'today'} "
+        f"({len(tmdb_by_film_id)} in catalog) | proposer model: {args.model}",
+        file=sys.stderr,
+    )
 
     # id == draft index, so proposals map back unambiguously regardless of model ordering.
-    proposals: dict[str, dict] = {}
+    semaphore = asyncio.Semaphore(args.concurrency)
+    progress = [0]
     async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
-        for start in range(0, len(draft), BATCH_SIZE):
-            chunk = draft[start : start + BATCH_SIZE]
-            payload = [
-                {
-                    "id": str(start + i),
-                    "title": row["title"],
-                    "summary": (row.get("summary") or "")[:SUMMARY_MAX],
-                }
-                for i, row in enumerate(chunk)
-            ]
-            raw = await client.complete(
-                model=model,
-                system=system,
-                messages=[{"role": "user", "content": json.dumps(payload)}],
-                max_tokens=MAX_TOKENS,
+        batches = await asyncio.gather(
+            *(
+                _propose_batch(
+                    client,
+                    model=args.model,
+                    stable_prefix=stable_prefix,
+                    draft=draft,
+                    start=start,
+                    semaphore=semaphore,
+                    progress=progress,
+                )
+                for start in range(0, len(draft), BATCH_SIZE)
             )
-            for d in json.loads(_extract_json_array(raw)):
-                proposals[str(d.get("id"))] = d
-            print(f"  proposed {min(start + BATCH_SIZE, len(draft))}/{len(draft)}", file=sys.stderr)
+        )
+    proposals: dict[str, dict] = {k: v for batch in batches for k, v in batch.items()}
 
-    out = [_proposal_to_row(row, proposals.get(str(i)), roster_tmdb_ids) for i, row in enumerate(draft)]
+    out = [_proposal_to_row(row, proposals.get(str(i)), labelable) for i, row in enumerate(draft)]
     missing = sum(1 for i in range(len(draft)) if proposals.get(str(i)) is None)
 
     n_about = sum(1 for r in out if r["relation"] == "about")
@@ -200,5 +281,18 @@ async def main(model: str) -> None:
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default=PROPOSAL_MODEL, help="the proposing model")
+    parser.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        default=None,
+        help="read the catalog as of this date — the fixture's pin (default: today)",
+    )
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="batches in flight")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else PROPOSAL_MODEL))
+    asyncio.run(main(_parse_args()))

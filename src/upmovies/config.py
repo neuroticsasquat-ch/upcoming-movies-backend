@@ -1,7 +1,18 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The host a stage's model is served by — the gateway's second axis, alongside the per-stage
+# model settings that were already here (design §8). A `Literal` rather than a bare `str` so a
+# misspelled provider fails the container at boot rather than the stage at its first call: the
+# same discipline `rates_for` applies to an unknown `(provider, model)`.
+#
+# The names are duplicated from `llm.registry.PROVIDERS` rather than imported. `llm.gateway`
+# reads `Settings`, so importing the `llm` package here would be a cycle — the same bind the
+# retrieval constants below are in, and a test pins the two together the same way.
+Provider = Literal["anthropic", "deepinfra", "deepseek"]
 
 
 class Settings(BaseSettings):
@@ -29,24 +40,62 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
+    # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
+    # for all four stages, and requiring these would break every one of them for a capability
+    # none of them uses (design §8). Boot-time validation (NEU-981) is what makes optional
+    # safe — it asserts a credential exists for each *configured* provider, at startup.
+    deepinfra_api_key: str | None = Field(default=None, alias="DEEPINFRA_API_KEY")
+    deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
     link_model: str = Field(default="claude-haiku-4-5", alias="LINK_MODEL")
+    link_provider: Provider = Field(default="anthropic", alias="LINK_PROVIDER")
     cluster_model: str = Field(default="claude-sonnet-4-6", alias="CLUSTER_MODEL")
+    cluster_provider: Provider = Field(default="anthropic", alias="CLUSTER_PROVIDER")
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
-    link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
-    link_use_batches: bool = Field(default=True, alias="LINK_USE_BATCHES")
-    cluster_use_batches: bool = Field(default=True, alias="CLUSTER_USE_BATCHES")
+    # Re-derived at NEU-1001. The old 15 was chosen when a ~46k-token roster prefix was
+    # cached and amortized across the batch; the retrieval path sends no prefix, so what
+    # bounds the batch now is the **reply**: `_MAX_TOKENS` caps it at 2048, and a batch
+    # whose reply is truncated fails to parse and takes every story in it down. At 20 the
+    # worst-case reply measures 1,183 tok (58% of the ceiling) while the instruction block
+    # falls to 11.4% of the request, against 14.7% at 15. A batch of 40 overruns the reply
+    # ceiling outright.
+    link_batch_size: int = Field(default=20, alias="LINK_BATCH_SIZE")
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
     link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
     link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
     link_release_change_window_days: int = Field(
         default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
     )
+    # T and K for `link.retrieval.select`, tuned at NEU-1001 over 98,662 real stories
+    # against the 1,226-film production catalog (design spec §5.2). They stay settings so
+    # the next catalog expansion is answered by config rather than by a deploy. They mirror
+    # the selector's own module defaults; `config` cannot import those (retrieval/index.py
+    # reads settings, so it would be a cycle), so a test pins the two together instead.
+    link_retrieval_threshold: float = Field(
+        default=0.5, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
+    )
+    link_retrieval_max_candidates: int = Field(
+        default=25, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
+    )
+    # The hard-breach guard (NEU-1002, ADR-0010): a zero-candidate rate above the ceiling
+    # finalizes the run `failed`, which aborts the daily chain and pings the deadman. Mirrors
+    # `link.retrieval.health`'s own constants — same duplication, same pinning test, same
+    # reason — and both stay settings so an incident is answered from env: 1.0 disarms the
+    # guard, and the minimum denominator is what stops a quiet news day tripping it.
+    link_retrieval_max_zero_candidate_rate: float = Field(
+        default=0.25, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE"
+    )
+    link_retrieval_health_min_stories: int = Field(
+        default=50, ge=0, alias="LINK_RETRIEVAL_HEALTH_MIN_STORIES"
+    )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
+    source_judge_provider: Provider = Field(default="anthropic", alias="SOURCE_JUDGE_PROVIDER")
     source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
-    summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
+    # Named for the setting beside it, not for the stage: the stage is `summarize`, and
+    # `Gateway` owns that one-line mapping rather than renaming a live env var.
+    summary_provider: Provider = Field(default="anthropic", alias="SUMMARY_PROVIDER")
     summary_prompt_version: str = Field(default="9", alias="SUMMARY_PROMPT_VERSION")
     url_resolve_per_run: int = Field(default=500, alias="URL_RESOLVE_PER_RUN")
     url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")

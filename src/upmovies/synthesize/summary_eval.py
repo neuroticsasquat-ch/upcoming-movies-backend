@@ -6,9 +6,11 @@ the live orchestration lives in the script."""
 import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any
 
+from upmovies.llm.types import Prompt
 from upmovies.synthesize.summarizer import EventInput, StoryInput
+
+_JUDGE_MAX_TOKENS = 256
 
 _JUDGE_INSTRUCTIONS = """You grade a one-sentence news blurb for an upcoming-movies tracker on \
 temporal and attribution correctness only. You are given today's date (`as_of_date`), the \
@@ -68,10 +70,7 @@ def event_for_case(case: SummaryCase) -> EventInput:
     )
 
 
-def build_judge_request(
-    case: SummaryCase, blurb: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    system = [{"type": "text", "text": _JUDGE_INSTRUCTIONS}]
+def build_judge_request(case: SummaryCase, blurb: str) -> Prompt:
     payload = {
         "as_of_date": case.as_of_date.isoformat(),
         "event_type": case.event_type,
@@ -80,8 +79,9 @@ def build_judge_request(
         "blurb": blurb,
         "criteria": case.criteria,
     }
-    messages = [{"role": "user", "content": json.dumps(payload)}]
-    return system, messages
+    return Prompt(
+        stable_prefix=_JUDGE_INSTRUCTIONS, user=json.dumps(payload), max_tokens=_JUDGE_MAX_TOKENS
+    )
 
 
 def parse_judge_verdict(raw: str) -> JudgeVerdict:

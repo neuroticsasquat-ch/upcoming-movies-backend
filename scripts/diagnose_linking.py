@@ -1,39 +1,62 @@
-"""Explain the linking baseline's misses and sweep the confidence floor. Runs the linker
-once at floor 0.0 (so every story carries the model's raw pick + confidence), then classifies
-at the real floor and prints each false negative / false positive with a diagnosis, plus a
+"""Explain the link path's misses and sweep the confidence floor. Runs the linker once at
+floor 0.0 (so every story carries the model's raw pick + confidence), then classifies at the
+real floor and prints each false negative / false positive with a diagnosis, plus a
 precision/recall sweep across candidate floors.
 
     task shell
-    python scripts/diagnose_linking.py [tests/fixtures/link/validation_set.json]"""
+    python scripts/diagnose_linking.py
+    python scripts/diagnose_linking.py tests/fixtures/link/validation_set.json
 
+**One run answers the whole floor question.** The floor is a post-hoc threshold on the
+confidence the model already returned, so classifying one floor-0.0 run at each candidate
+floor costs nothing extra. That is what makes this the cheap first move when precision is
+the thing under investigation (NEU-1011) — `validate_linking` prices one floor per run.
+
+The catalog is read as of the fixture's `as_of_date`, for the reason NEU-1010 records: a
+dated fixture scored against today's catalog loses its own subjects and reads that loss as
+the path's failure. The `--mode roster` baseline this once carried went with the roster
+itself (NEU-1004)."""
+
+import argparse
 import asyncio
-import sys
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import select
 
+from scripts.validate_linking import _predicted_tmdb_ids
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
-from upmovies.link.linker import link_story_batch
+from upmovies.link.linker import (
+    StoryCandidates,
+    link_retrieval_story_batch,
+    reject_zero_candidate_stories,
+    story_dek,
+)
 from upmovies.link.metrics import compute_link_metrics
-from upmovies.link.roster import build_roster
-from upmovies.link.validation import load_validation_set
-from upmovies.llm.client import AnthropicClient
+from upmovies.link.retrieval.index import build_candidate_index
+from upmovies.link.retrieval.select import select_candidates
+from upmovies.link.validation import films_ingested_after, load_validation_set
+from upmovies.llm import AnthropicClient, CallLog
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
 SWEEP = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 
-async def main(path: str) -> None:
+async def main(path: str, *, threshold: float, limit: int) -> None:
     settings = get_settings()
-    items = load_validation_set(path)
+    validation_set = load_validation_set(path)
+    items = validation_set.items
+    catalog_date = validation_set.as_of_date or datetime.now(UTC).date()
 
     async with SessionLocal() as s:
-        roster = await build_roster(s)
+        index = await build_candidate_index(s, as_of=catalog_date)
         films = (await s.execute(select(Film))).scalars().all()
+    unscoreable = films_ingested_after(
+        validation_set.as_of_date, {f.tmdb_id: f.created_at.date() for f in films}
+    )
     tmdb_by_film_id = {f.id: f.tmdb_id for f in films}
     label_by_tmdb = {
         f.tmdb_id: (f"{f.title} ({f.release_date.year})" if f.release_date else f.title)
@@ -49,26 +72,54 @@ async def main(path: str) -> None:
     # floor=0.0 so the model's pick + confidence is captured for every story.
     async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
         for i in range(0, len(stories), settings.link_batch_size):
-            await link_story_batch(
+            chunk = stories[i : i + settings.link_batch_size]
+            batch = [
+                StoryCandidates(
+                    story=story,
+                    candidates=select_candidates(
+                        index,
+                        headline=story.title,
+                        dek=story_dek(story),
+                        threshold=threshold,
+                        limit=limit,
+                    ),
+                )
+                for story in chunk
+            ]
+            reject_zero_candidate_stories([e.story for e in batch if e.candidates.is_empty])
+            await link_retrieval_story_batch(
                 client=client,
                 model=settings.link_model,
-                roster=roster,
-                stories=stories[i : i + settings.link_batch_size],
+                batch=[e for e in batch if not e.candidates.is_empty],
                 floor=0.0,
-                run_date=datetime.now(UTC).date(),
+                run_date=catalog_date,
+                calls=CallLog(),
             )
 
     floor = settings.link_confidence_floor
+    # Shared with validate_linking so the two tools cannot disagree about which picks are
+    # scoreable — post-labeling films read as "no link" in both (NEU-1011).
+    pick_by_story = dict(
+        zip(
+            (str(st.id) for st in stories),
+            _predicted_tmdb_ids(stories, tmdb_by_film_id, unscoreable=unscoreable),
+            strict=True,
+        )
+    )
     rows = []  # (item, pick_tmdb, conf, note)
     for st in stories:
         it = item_by_id[str(st.id)]
-        pick = tmdb_by_film_id.get(st.film_id) if st.film_id is not None else None
-        rows.append((it, pick, st.link_confidence, st.link_note))
+        rows.append((it, pick_by_story[str(st.id)], st.link_confidence, st.link_note))
 
     def label(t):
         return label_by_tmdb.get(t, "?") if t is not None else "—"
 
-    print(f"fixture: {len(items)} items | model={settings.link_model} | real floor={floor}\n")
+    print(
+        f"fixture: {len(items)} items | model={settings.link_model} | "
+        f"real floor={floor} | catalog as of {catalog_date}"
+    )
+    print(f"retrieval: threshold={threshold} max_candidates={limit}")
+    print()
 
     print("=== FALSE NEGATIVES (should link, missed at real floor) ===")
     fn_below = fn_wrong = fn_declined = 0
@@ -100,7 +151,8 @@ async def main(path: str) -> None:
         linked = pick is not None and conf is not None and conf >= floor
         if linked and pick != exp:
             print(
-                f"    picked: {label(pick)} (conf={conf:.2f}) | expected: {label(exp)} | relation={it.relation}"
+                f"    picked: {label(pick)} (conf={conf:.2f}) | "
+                f"expected: {label(exp)} | relation={it.relation}"
             )
             print(f"    story:  {it.title[:90]}")
             print(f"    {it.url}")
@@ -119,9 +171,16 @@ async def main(path: str) -> None:
         m = compute_link_metrics(pairs)
         star = "  <- current" if abs(f - floor) < 1e-9 else ""
         print(
-            f"  {f:>6.2f} {m.precision:>6.3f} {m.recall:>6.3f} {m.f1:>6.3f} {m.false_positives:>4} {m.false_negatives:>4}{star}"
+            f"  {f:>6.2f} {m.precision:>6.3f} {m.recall:>6.3f} {m.f1:>6.3f} "
+            f"{m.false_positives:>4} {m.false_negatives:>4}{star}"
         )
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FIXTURE))
+    _settings = get_settings()
+    _parser = argparse.ArgumentParser(description=__doc__)
+    _parser.add_argument("fixture", nargs="?", default=DEFAULT_FIXTURE)
+    _parser.add_argument("--threshold", type=float, default=_settings.link_retrieval_threshold)
+    _parser.add_argument("--limit", type=int, default=_settings.link_retrieval_max_candidates)
+    _args = _parser.parse_args()
+    asyncio.run(main(_args.fixture, threshold=_args.threshold, limit=_args.limit))

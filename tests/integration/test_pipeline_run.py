@@ -1,13 +1,20 @@
 """In-process ingestion orchestration (upmovies.pipeline_run): the shared stage runners and
 the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 
+from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
 from upmovies import pipeline_run
+from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
+from upmovies.link.pipeline import run_link_ingest
+from upmovies.llm import StageConfigurationError
+from upmovies.news.models import Story
 
 
 async def _run_row(session, run_id) -> IngestRun:
@@ -52,12 +59,12 @@ async def test_feeds_stage_marks_run_failed_on_crash(session, monkeypatch):
     assert row.error and "simulated feeds crash" in row.error
 
 
-async def test_link_stage_marks_run_failed_on_batch_timeout(session, monkeypatch):
-    """An Anthropic Message Batch that outlives complete_batch's poll deadline must fail the
-    link run, so run_daily aborts before synthesize instead of summarizing unlinked stories."""
+async def test_link_stage_marks_run_failed_on_crash(session, monkeypatch):
+    """A link run that crashes must be finalized `failed`, so run_daily aborts before
+    synthesize instead of summarizing unlinked stories."""
 
     async def boom(**kwargs):
-        raise TimeoutError("batch msgbatch_x did not reach 'ended' within 3600.0s")
+        raise RuntimeError("simulated link crash")
 
     monkeypatch.setattr("upmovies.pipeline_run.run_link_ingest", boom)
     run_id = await create_run(session, kind="link")
@@ -67,7 +74,7 @@ async def test_link_stage_marks_run_failed_on_batch_timeout(session, monkeypatch
 
     row = await _run_row(session, run_id)
     assert row.status == "failed"
-    assert row.error and "did not reach 'ended'" in row.error
+    assert row.error and "simulated link crash" in row.error
 
 
 async def test_tmdb_stage_passes_excluded_statuses(session, monkeypatch):
@@ -185,6 +192,144 @@ async def test_run_daily_fails_fast_on_stage_failure(session, spy_stages):
     assert pings == ["/start", "/fail"]
 
 
+async def test_run_daily_aborts_when_link_stage_totally_fails(
+    session, session_factory, monkeypatch
+):
+    """NEU-986, end to end through the real link pipeline: a total LLM outage fails every
+    chunk, so the run finalizes `failed` off its counters alone (no crash propagates out of
+    the stage). That status is what makes the chain stop before `synthesize` and ping the
+    deadman `/fail` — the incident NEU-743 fixed, where it pinged green instead."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add(
+        Story(
+            source="X",
+            url="https://e/outage",
+            title="Runner news",
+            published_at=datetime.now(UTC),
+            link_status="pending",
+            raw={"summary": ""},
+        )
+    )
+    await session.commit()
+
+    class _OutageClient:
+        async def complete_call(self, **kwargs):
+            raise RuntimeError("total outage")
+
+    order: list[str] = []
+    pings: list[str] = []
+
+    def _make(kind: str):
+        async def fake(run_id, settings, *args, **kwargs):
+            order.append(kind)
+            async with pipeline_run.SessionLocal() as s:
+                await finalize_run(s, run_id, status="succeeded")
+                await s.commit()
+
+        return fake
+
+    for kind in ("tmdb", "feeds", "synthesize"):
+        monkeypatch.setattr(pipeline_run, f"run_{kind}_stage", _make(kind))
+
+    async def real_link_stage(run_id, settings, *args, **kwargs):
+        order.append("link")
+        await run_link_ingest(
+            session_factory=session_factory,
+            gateway=StubGateway(_OutageClient()),
+            run_id=run_id,
+            model="claude-haiku-4-5",
+            cluster_model="claude-sonnet-4-6",
+            recency_days=45,
+            batch_size=10,
+            floor=0.7,
+        )
+
+    monkeypatch.setattr(pipeline_run, "run_link_stage", real_link_stage)
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append(suffix)
+
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+
+    ok = await pipeline_run.run_daily(get_settings())
+
+    assert ok is False
+    assert order == ["tmdb", "feeds", "link"]  # synthesize never ran
+    assert pings == ["/start", "/fail"]
+
+
+async def test_run_daily_continues_past_a_lone_cluster_failure(
+    session, session_factory, monkeypatch
+):
+    """NEU-987, the counterpart to the test above: clustering is self-healing, so one
+    pathological film on an otherwise empty backlog must NOT abort the chain. Before the
+    denominator, `cluster` reporting 0 processed / 1 failed failed the link run, and because
+    `run_daily` is fail-fast that meant `synthesize` never ran and the deadman got `/fail`
+    every day for as long as the film stayed unclusterable."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    session.add(
+        Story(
+            source="X",
+            url="https://e/linked-unclustered",
+            title="Runner news",
+            published_at=datetime.now(UTC),
+            link_status="linked",  # nothing pending → the link stage is a legitimate no-op
+            film_id=film.id,
+            raw={"summary": ""},
+        )
+    )
+    await session.commit()
+
+    class _OutageClient:
+        async def complete_call(self, **kwargs):
+            raise RuntimeError("this one film never clusters")
+
+    order: list[str] = []
+    pings: list[str] = []
+
+    def _make(kind: str):
+        async def fake(run_id, settings, *args, **kwargs):
+            order.append(kind)
+            async with pipeline_run.SessionLocal() as s:
+                await finalize_run(s, run_id, status="succeeded")
+                await s.commit()
+
+        return fake
+
+    for kind in ("tmdb", "feeds", "synthesize"):
+        monkeypatch.setattr(pipeline_run, f"run_{kind}_stage", _make(kind))
+
+    async def real_link_stage(run_id, settings, *args, **kwargs):
+        order.append("link")
+        await run_link_ingest(
+            session_factory=session_factory,
+            gateway=StubGateway(_OutageClient()),
+            run_id=run_id,
+            model="claude-haiku-4-5",
+            cluster_model="claude-sonnet-4-6",
+            recency_days=45,
+            batch_size=10,
+            floor=0.7,
+        )
+
+    monkeypatch.setattr(pipeline_run, "run_link_stage", real_link_stage)
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append(suffix)
+
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+
+    ok = await pipeline_run.run_daily(get_settings())
+
+    assert ok is True
+    assert order == ["tmdb", "feeds", "link", "synthesize"]  # the chain ran to completion
+    assert pings == ["/start", ""]  # green, not /fail
+
+
 async def test_run_daily_synthesize_waits_for_link(session, monkeypatch):
     """Sequential await: synthesize's runner cannot begin until link's has returned."""
     events: list[str] = []
@@ -283,3 +428,46 @@ async def test_ping_swallows_network_errors(monkeypatch):
     monkeypatch.setattr("upmovies.pipeline_run.httpx.AsyncClient", BoomClient)
     # Must not raise despite the POST failing.
     await pipeline_run._ping("https://hc.example/abc", "/fail")
+
+
+# --- the scheduled task refuses an unroutable stage before it starts ------------
+
+
+def _stub_daily(*, ok: bool):
+    async def _run(settings):
+        return ok
+
+    return _run
+
+
+def test_main_validates_the_llm_routing_before_running_anything(monkeypatch):
+    """A scheduled task is its own process, so the app's lifespan check does not cover it —
+    and this is the process the mid-publish `KeyError` was costing (NEU-981, spec §7). It
+    must refuse before the chain opens its first run, not partway through it."""
+    settings = get_settings().model_copy(
+        update={
+            **DEFAULT_ROUTING,
+            "summary_provider": "deepseek",
+            "summary_model": "deepseek-v4-flash",
+            "deepseek_api_key": None,
+        }
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the daily chain must not start on an unroutable stage")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", must_not_run)
+    with pytest.raises(StageConfigurationError, match="DEEPSEEK_API_KEY"):
+        pipeline_run.main(["daily"])
+
+
+def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
+    """The guard is a gate, not a wall: the default all-Anthropic routing still reaches the
+    chain, and `main` still reports its outcome as the exit code."""
+    settings = get_settings().model_copy(update=DEFAULT_ROUTING)
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", _stub_daily(ok=True))
+    assert pipeline_run.main(["daily"]) == 0
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", _stub_daily(ok=False))
+    assert pipeline_run.main(["daily"]) == 1

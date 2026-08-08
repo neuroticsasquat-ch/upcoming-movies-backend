@@ -31,7 +31,7 @@ from sqlalchemy import delete, exists, select
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.cluster import build_cluster_request
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient
 from upmovies.news.models import Event, EventStory, Story
 
 
@@ -58,15 +58,16 @@ async def run_model(model: str, attach_limit: int, max_tokens: int, limit: int |
             film_ids = film_ids[:limit]
         for fid in film_ids:
             built = await build_cluster_request(
-                s, film_id=fid, attach_limit=attach_limit,
+                s,
+                film_id=fid,
+                attach_limit=attach_limit,
                 run_date=datetime.now(UTC).date(),
+                max_tokens=max_tokens,
             )
             if built is None:
                 continue
-            system, messages, plan = built
-            raw = await client.complete(
-                model=model, system=system, messages=messages, max_tokens=max_tokens
-            )
+            prompt, plan = built
+            raw = await client.complete(model=model, prompt=prompt)
             out[str(fid)] = {
                 "raw": raw,
                 "n_unclustered": len(plan.unclustered_story_ids),

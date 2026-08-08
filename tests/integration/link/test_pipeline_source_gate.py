@@ -2,32 +2,28 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import Usage
+from upmovies.llm import CallLog, CallResult, Prompt
 from upmovies.news.models import Event, SourceDomain, Story
 
 
 class _StubClient:
-    """LinkClient stub: linking is skipped (no pending stories), cluster returns one event."""
+    """Completer stub: linking is skipped (no pending stories), cluster returns one event."""
 
-    async def complete_with_usage(
-        self, *, model: str, system: list, messages: list, max_tokens: int = 4096
-    ) -> tuple[str, Usage]:
+    async def complete_call(self, *, model: str, prompt: Prompt, calls: CallLog) -> CallResult:
         # Domain judge for unknown domains -> mshale.com low.
-        if "source-quality rater" in system[0]["text"]:
-            return '[{"domain": "mshale.com", "tier": "low", "reason": "farm"}]', Usage()
+        if "source-quality rater" in prompt.stable_prefix:
+            return calls.record(
+                CallResult(text='[{"domain": "mshale.com", "tier": "low", "reason": "farm"}]')
+            )
         # Cluster call -> one confirmed casting event over story n=1.
         cluster_resp = (
             '{"events": [{"existing": null, "type": "casting",'
             ' "confidence": "confirmed", "cast": ["Test Performer"], "stories": [1]}]}'
         )
-        return cluster_resp, Usage()
-
-    async def complete_batch(
-        self, requests: list, *, poll_interval: float = 15.0, timeout: float = 3600.0
-    ) -> dict:
-        return {}
+        return calls.record(CallResult(text=cluster_resp))
 
 
 async def test_pipeline_gate_downgrades_low_trust(session_factory, session):
@@ -61,7 +57,7 @@ async def test_pipeline_gate_downgrades_low_trust(session_factory, session):
         await session.commit()
         await run_link_ingest(
             session_factory=session_factory,
-            client=_StubClient(),
+            gateway=StubGateway(_StubClient()),
             run_id=run_id,
             model="claude-haiku-4-5",
             cluster_model="claude-haiku-4-5",
