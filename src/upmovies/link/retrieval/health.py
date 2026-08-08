@@ -5,17 +5,15 @@ That denominator is the whole point — the zero-candidate majority (ADR-0009) i
 to `ingest.link_retrieval_probe` by design, and it is precisely the population a retrieval
 bug shows up in.
 
-**Both retrieval paths write this row.** In `shadow` the roster still decides and the tally
-measures what retrieval *would* have offered; under `on` the same numbers describe what it
-actually offered. Keeping them one shape is what lets a shadow period and the live stage be
-read against each other — and is why this lives here rather than in `link/shadow.py`, which
-M4 deletes along with the roster path (NEU-1004) while the health row must survive to feed
+**One shape across the rollout.** The shadow observer wrote this same row while the roster
+still decided, which is what let the shadow period and the live stage be read against each
+other. That is why the row lived here rather than in `link/shadow.py` — M4 deleted that
+module with the rest of the roster path (NEU-1004), and the health row survived it to feed
 the hard-breach guard (NEU-1002).
 
 **The write never raises.** A telemetry row is not worth failing a run whose stories are
-already decided, and under `on` those decisions are final — `link` is lossy, so a run failed
-after the fact would re-run over an empty backlog and change nothing. Stated once here so
-neither caller has to restate it.
+already decided, and those decisions are final — `link` is lossy, so a run failed after the
+fact would re-run over an empty backlog and change nothing.
 
 **`hard_breach_error` is the other half** — the hard tier of ADR-0010's two-tier guard, and
 the replacement for the cache read/write ratio alerting the project brief mandated. It reads

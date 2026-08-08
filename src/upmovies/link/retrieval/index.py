@@ -1,12 +1,12 @@
 """The in-memory token → film candidate index. Built once per run, then pure lookups.
 
-Mirrors what `link/roster.py` does today — one read of the active catalog — minus the
-rendering, and minus sending any of it to the model. `build_candidate_index` is the only
-thing here that touches the database; everything below it (`build_index`, `indexed_film`,
-and every lookup on `CandidateIndex`) is pure, so the scorer in `select.py` and the recall
-oracle test can work against a hand-built index with no session at all.
+One read of the active catalog, minus the rendering the deleted roster did and minus
+sending any of it to the model. `build_candidate_index` is the only thing here that touches
+the database; everything below it (`build_index`, `indexed_film`, and every lookup on
+`CandidateIndex`) is pure, so the scorer in `select.py` and the recall oracle test can work
+against a hand-built index with no session at all.
 
-**Search scope is unchanged.** The same `active_film_clause` the roster uses gates the
+**Search scope is unchanged from the roster's.** The same `active_film_clause` gates the
 index: released and canceled films stay out. That is a product decision about what the
 site tracks, not a prefix-size workaround, so shrinking the prompt does not get to widen it.
 
@@ -202,6 +202,21 @@ def indexed_film(
         cast=tuple(cast),
         collection=collection,
     )
+
+
+def indexed_tmdb_ids(films: Iterable[IndexedFilm], tmdb_by_film_id: Mapping[UUID, int]) -> set[int]:
+    """The TMDB ids of the **indexed** films — not the whole catalog's.
+
+    These differ whenever the active-film filter excludes anything: at any date later than
+    the catalog's earliest release date the table holds films the index does not, and the
+    offline tooling has to agree with retrieval about which films exist. The labeling
+    scripts use this to bound what may be labeled `about`, so that the labelable set and the
+    set the eval harness can score are the same set (spec §5.1a, §5.11).
+
+    Inherited from `link/roster.py`'s `roster_tmdb_ids` when the roster was deleted
+    (NEU-1004): the two read the same active set, so the bound the labeling scripts enforce
+    is unchanged."""
+    return {tmdb_id for film in films if (tmdb_id := tmdb_by_film_id.get(film.film_id)) is not None}
 
 
 def build_index(films: Iterable[IndexedFilm]) -> CandidateIndex:

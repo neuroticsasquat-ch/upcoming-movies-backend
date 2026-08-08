@@ -1,21 +1,21 @@
-"""Explain a link path's misses and sweep the confidence floor. Runs the linker once at
+"""Explain the link path's misses and sweep the confidence floor. Runs the linker once at
 floor 0.0 (so every story carries the model's raw pick + confidence), then classifies at the
 real floor and prints each false negative / false positive with a diagnosis, plus a
 precision/recall sweep across candidate floors.
 
     task shell
-    python scripts/diagnose_linking.py --mode retrieval
-    python scripts/diagnose_linking.py --mode roster tests/fixtures/link/validation_set.json
+    python scripts/diagnose_linking.py
+    python scripts/diagnose_linking.py tests/fixtures/link/validation_set.json
 
 **One run answers the whole floor question.** The floor is a post-hoc threshold on the
 confidence the model already returned, so classifying one floor-0.0 run at each candidate
 floor costs nothing extra. That is what makes this the cheap first move when precision is
 the thing under investigation (NEU-1011) — `validate_linking` prices one floor per run.
 
-**`--mode retrieval` is the path that ships.** The roster mode is the incumbent baseline and
-goes away with it (NEU-1004). Both read the catalog as of the fixture's `as_of_date`, for the
-reason NEU-1010 records: a dated fixture scored against today's catalog loses its own
-subjects and reads that loss as the path's failure."""
+The catalog is read as of the fixture's `as_of_date`, for the reason NEU-1010 records: a
+dated fixture scored against today's catalog loses its own subjects and reads that loss as
+the path's failure. The `--mode roster` baseline this once carried went with the roster
+itself (NEU-1004)."""
 
 import argparse
 import asyncio
@@ -31,14 +31,12 @@ from upmovies.db import SessionLocal
 from upmovies.link.linker import (
     StoryCandidates,
     link_retrieval_story_batch,
-    link_story_batch,
     reject_zero_candidate_stories,
     story_dek,
 )
 from upmovies.link.metrics import compute_link_metrics
 from upmovies.link.retrieval.index import build_candidate_index
 from upmovies.link.retrieval.select import select_candidates
-from upmovies.link.roster import build_roster
 from upmovies.link.validation import films_ingested_after, load_validation_set
 from upmovies.llm.client import AnthropicClient, CallLog
 from upmovies.news.models import Story
@@ -47,15 +45,14 @@ DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
 SWEEP = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 
-async def main(path: str, *, mode: str, threshold: float, limit: int) -> None:
+async def main(path: str, *, threshold: float, limit: int) -> None:
     settings = get_settings()
     validation_set = load_validation_set(path)
     items = validation_set.items
     catalog_date = validation_set.as_of_date or datetime.now(UTC).date()
 
     async with SessionLocal() as s:
-        roster = await build_roster(s, as_of=catalog_date) if mode == "roster" else None
-        index = await build_candidate_index(s, as_of=catalog_date) if mode == "retrieval" else None
+        index = await build_candidate_index(s, as_of=catalog_date)
         films = (await s.execute(select(Film))).scalars().all()
     unscoreable = films_ingested_after(
         validation_set.as_of_date, {f.tmdb_id: f.created_at.date() for f in films}
@@ -76,18 +73,6 @@ async def main(path: str, *, mode: str, threshold: float, limit: int) -> None:
     async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
         for i in range(0, len(stories), settings.link_batch_size):
             chunk = stories[i : i + settings.link_batch_size]
-            if roster is not None:
-                await link_story_batch(
-                    client=client,
-                    model=settings.link_model,
-                    roster=roster,
-                    stories=chunk,
-                    floor=0.0,
-                    run_date=catalog_date,
-                    calls=CallLog(),
-                )
-                continue
-            assert index is not None
             batch = [
                 StoryCandidates(
                     story=story,
@@ -130,11 +115,10 @@ async def main(path: str, *, mode: str, threshold: float, limit: int) -> None:
         return label_by_tmdb.get(t, "?") if t is not None else "—"
 
     print(
-        f"fixture: {len(items)} items | mode={mode} | model={settings.link_model} | "
+        f"fixture: {len(items)} items | model={settings.link_model} | "
         f"real floor={floor} | catalog as of {catalog_date}"
     )
-    if mode == "retrieval":
-        print(f"retrieval: threshold={threshold} max_candidates={limit}")
+    print(f"retrieval: threshold={threshold} max_candidates={limit}")
     print()
 
     print("=== FALSE NEGATIVES (should link, missed at real floor) ===")
@@ -196,8 +180,7 @@ if __name__ == "__main__":
     _settings = get_settings()
     _parser = argparse.ArgumentParser(description=__doc__)
     _parser.add_argument("fixture", nargs="?", default=DEFAULT_FIXTURE)
-    _parser.add_argument("--mode", choices=("roster", "retrieval"), default="retrieval")
     _parser.add_argument("--threshold", type=float, default=_settings.link_retrieval_threshold)
     _parser.add_argument("--limit", type=int, default=_settings.link_retrieval_max_candidates)
     _args = _parser.parse_args()
-    asyncio.run(main(_args.fixture, mode=_args.mode, threshold=_args.threshold, limit=_args.limit))
+    asyncio.run(main(_args.fixture, threshold=_args.threshold, limit=_args.limit))

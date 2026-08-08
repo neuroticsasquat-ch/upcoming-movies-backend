@@ -123,8 +123,8 @@ def drop_stale(entries: Sequence[StoryEntry], *, cutoff: datetime) -> list[Story
 
 
 async def _film_titles(session_factory: SessionFactory) -> list[str]:
-    """Lightweight roster read for per-film queries — the deliberate news→catalog
-    coupling. Title column only (not link.roster.build_roster's heavier rows).
+    """Lightweight catalog read for per-film queries — the deliberate news→catalog
+    coupling. Title column only (not link.retrieval.index's heavier per-film rows).
     Released/canceled films are excluded so we stop searching news for them (NEU-286)."""
     excluded = get_settings().tmdb_excluded_statuses
     today = datetime.now(UTC).date()

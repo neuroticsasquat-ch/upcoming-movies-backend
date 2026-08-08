@@ -22,8 +22,8 @@ common case rather than the edge one.
 262 of the 361 roster picks retrieval reaches rank first and the p99 rank is 8: misses are
 score-zero misses, not ranking failures, so there is nothing for a more elaborate ranker to
 recover. What the order does have to be is *deterministic* — score, then title, then id —
-because shadow telemetry records the rank of the roster's pick and a rank that moved
-between runs for no reason would be unreadable.
+because the offline harnesses record the rank the expected film landed at, and a rank that
+moved between runs for no reason would be unreadable.
 
 **The constants below are tuned, not assumed** (NEU-1001, design spec §5.2). Measured over
 that corpus, against 365 roster picks whose film is still in the active catalog:
@@ -111,9 +111,9 @@ class CandidateSet:
     def film_id_for_index(self, index: object) -> UUID | None:
         """The film at 1-based `index` in *this story's* offered set, or None.
 
-        The local counterpart to `Roster.film_id_for_index`, and the reason an out-of-list
-        reply is expressible at all: numbering restarts at 1 per story, so a number that
-        overruns this set names no film here even when it names one in another story's
+        Story-local where the deleted roster's index was global, which is why an
+        out-of-list reply is expressible at all: numbering restarts at 1 per story, so a
+        number that overruns this set names no film here even when it names one in another story's
         (spec §4.2). None is a rejection upstream, never a coercion to a neighbouring
         candidate — `link` is lossy, and a wrong link is worse than no link.
 
@@ -140,8 +140,8 @@ class CandidateSet:
         """The score of `film_id`, or None if it never cleared the threshold.
 
         Answers for films the cap discarded as well as for those offered — that pairing
-        is what shadow telemetry needs. A roster pick with a score but no rank was lost
-        to the cap; one with neither was a lexical miss, which is a different failure
+        is what the recall harnesses need. An expected film with a score but no rank was
+        lost to the cap; one with neither was a lexical miss, which is a different failure
         with a different fix (§3.1, §4.5)."""
         for candidate in self.scored:
             if candidate.film.film_id == film_id:
@@ -205,7 +205,7 @@ def select_candidates(
         if score >= threshold:
             scored.append(ScoredCandidate(film=film, score=score))
 
-    # Title then id after score, so the order never depends on set iteration — shadow
-    # telemetry records ranks, and a rank that moves between runs is unreadable.
+    # Title then id after score, so the order never depends on set iteration — the recall
+    # harnesses record ranks, and a rank that moves between runs is unreadable.
     scored.sort(key=lambda c: (-c.score, c.film.title, str(c.film.film_id)))
     return CandidateSet(scored=tuple(scored), limit=limit)

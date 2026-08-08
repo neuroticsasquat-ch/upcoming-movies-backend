@@ -208,10 +208,11 @@ async def test_a_failed_call_still_writes_a_row(session):
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
-    await _story(session, "https://variety.com/1", title="FAIL me")
+    # "Runner" so retrieval offers a candidate and the call is actually made.
+    await _story(session, "https://variety.com/1", title="FAIL me Runner")
     await session.commit()
 
-    run_id = await _run(session, _FakeClient(fail_titles=frozenset({"FAIL me"})))
+    run_id = await _run(session, _FakeClient(fail_titles=frozenset({"FAIL me Runner"})))
 
     (row,) = [r for r in await _calls(session, run_id) if r.stage == "link"]
     assert row.ok is False

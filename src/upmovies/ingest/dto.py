@@ -96,7 +96,7 @@ class RunOut(BaseModel):
     llm_usage: list[RunLLMUsageOut] = []
     retrieval_health: RetrievalHealthOut | None = None
     """None for every run that did not run candidate retrieval — which is every run of every
-    other kind, and any `link` run from before shadow was switched on.
+    other kind, and any `link` run from before retrieval was switched on.
 
     Assembled by the reader, not extracted from the run: half of it is an aggregate over
     `ingest.link_retrieval_probe`. The ORM side is deliberately named `retrieval_health_row`

@@ -16,21 +16,30 @@ against a Sonnet-proposed, human-corrected ground truth — not against its own 
 read every proposal: a model-assisted set inherits the proposer's blind spots if you
 rubber-stamp it. Pay special attention to the about/mention boundary and the film id.
 
-**`--as-of` is the fixture's pin, and it is not optional for a pinned set.** The roster shown
-to the proposer defines what may be labeled `about`; the harness later scores the fixture
-against the catalog as of the fixture's `as_of_date` and **aborts** if a labeled film is not
-reachable there (spec §5.1a). Building the proposer's roster at wall clock while the fixture
-is pinned to some other date puts those two sets out of step — a film that released between
-the pin and today is rostered for the proposer and filtered out for the harness, and the row
-it produces fails the coverage check. Passing the pin here makes the labelable set and the
+**`--as-of` is the fixture's pin, and it is not optional for a pinned set.** The film list
+shown to the proposer defines what may be labeled `about`; the harness later scores the
+fixture against the catalog as of the fixture's `as_of_date` and **aborts** if a labeled film
+is not reachable there (spec §5.1a). Building that list at wall clock while the fixture is
+pinned to some other date puts the two sets out of step — a film that released between the
+pin and today is offered to the proposer and filtered out for the harness, and the row it
+produces fails the coverage check. Passing the pin here makes the labelable set and the
 scoreable set the same set by construction, which is what turns the pin's one-day coverage
-margin into no margin needed at all."""
+margin into no margin needed at all.
+
+**The list comes from the retrieval index, not the deleted roster (NEU-1004).** Both read
+the same `active_film_clause` at the same `as_of`, so the labelable set is unchanged — what
+moved is only which module owns the read. Note this script still sends its whole film list as
+a **cached** prefix: it is the one remaining `cached_system_block` caller now that production
+has stopped caching, and here the prefix is large and reused across ~160 batches in one
+sitting, which is exactly the shape caching pays for."""
 
 import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Iterable, Mapping
 from datetime import date
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -38,7 +47,7 @@ from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.linker import _extract_json_array
-from upmovies.link.roster import build_roster, roster_tmdb_ids
+from upmovies.link.retrieval.index import IndexedFilm, build_candidate_index, indexed_tmdb_ids
 from upmovies.llm.client import AnthropicClient, cached_system_block
 
 # A strong model, deliberately distinct from settings.link_model (the Haiku linker under
@@ -47,6 +56,9 @@ PROPOSAL_MODEL = "claude-sonnet-4-6"
 BATCH_SIZE = 25
 MAX_TOKENS = 4096
 SUMMARY_MAX = 500
+# The overview trim the deleted roster applied to every line it rendered. Kept here because
+# the retrieval index carries overviews untrimmed — trimming is a prompt-size decision.
+_OVERVIEW_MAX = 120
 # Batches are independent, so the draft's size is a latency problem rather than a design
 # one: a 4,000-row draft is 160 calls, and sequentially that is hours of wall clock for work
 # the API will happily do in parallel.
@@ -85,7 +97,7 @@ def _proposal_to_row(row: dict, proposal: dict | None, labelable: set[int]) -> d
         )
         if relation == "about":
             tmdb_id = proposal.get("tmdb_id")
-            if tmdb_id not in labelable:  # hallucinated / out-of-roster id
+            if tmdb_id not in labelable:  # hallucinated / not in the labelable set
                 tmdb_id = None
             event_type = (
                 proposal.get("event_type") if proposal.get("event_type") in EVENT_TYPES else None
@@ -141,24 +153,28 @@ null>, "event_type": <one of the types above, or null>, "is_production_news": <t
 null>, "exclusion_category": <category or null>}}]"""
 
 
-def _roster_text(entries, tmdb_by_film_id) -> str:
-    """Render roster lines keyed by TMDB id (the fixture's film key), reusing the same
-    title/year/orig/genres/overview content the production roster builds."""
+def _roster_text(films: Iterable[IndexedFilm], tmdb_by_film_id: Mapping[UUID, int]) -> str:
+    """Render the labelable film list keyed by TMDB id (the fixture's film key).
+
+    "Roster" is the *prompt's* word for this list — the module that used to build one is
+    gone (NEU-1004), and the rows are rendered here from the retrieval index instead. The
+    line format is unchanged, including the 120-character overview trim the roster applied,
+    so a re-proposal against the same pin sees the same prefix it always did."""
     lines = []
-    for e in entries:
-        tmdb_id = tmdb_by_film_id.get(e.film_id)
+    for f in films:
+        tmdb_id = tmdb_by_film_id.get(f.film_id)
         if tmdb_id is None:
             continue
-        parts = [f'tmdb={tmdb_id} "{e.title}"']
-        if e.year is not None:
-            parts.append(f"({e.year})")
-        if e.original_title and e.original_title != e.title:
-            parts.append(f"[orig: {e.original_title}]")
-        if e.genres:
-            parts.append(f"genres: {', '.join(e.genres)}")
+        parts = [f'tmdb={tmdb_id} "{f.title}"']
+        if f.year is not None:
+            parts.append(f"({f.year})")
+        if f.original_title and f.original_title != f.title:
+            parts.append(f"[orig: {f.original_title}]")
+        if f.genres:
+            parts.append(f"genres: {', '.join(f.genres)}")
         line = " ".join(parts)
-        if e.overview:
-            line += f" — {e.overview}"
+        if f.overview:
+            line += f" — {f.overview[:_OVERVIEW_MAX]}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -212,18 +228,18 @@ async def main(args: argparse.Namespace) -> None:
 
     settings = get_settings()
     async with SessionLocal() as s:
-        roster = await build_roster(s, as_of=args.as_of)
+        index = await build_candidate_index(s, as_of=args.as_of)
         tmdb_by_film_id = {
             row.id: row.tmdb_id for row in (await s.execute(select(Film))).scalars().all()
         }
-    labelable = roster_tmdb_ids(roster.entries, tmdb_by_film_id)
+    labelable = indexed_tmdb_ids(index.films, tmdb_by_film_id)
     system = [
         cached_system_block(
-            f"{_INSTRUCTIONS}\n\nROSTER:\n{_roster_text(roster.entries, tmdb_by_film_id)}"
+            f"{_INSTRUCTIONS}\n\nROSTER:\n{_roster_text(index.films, tmdb_by_film_id)}"
         )
     ]
     print(
-        f"roster: {len(labelable)} films as of {args.as_of or 'today'} "
+        f"labelable: {len(labelable)} films as of {args.as_of or 'today'} "
         f"({len(tmdb_by_film_id)} in catalog) | proposer model: {args.model}",
         file=sys.stderr,
     )
@@ -270,7 +286,7 @@ def _parse_args() -> argparse.Namespace:
         "--as-of",
         type=date.fromisoformat,
         default=None,
-        help="build the roster as of this date — the fixture's pin (default: today)",
+        help="read the catalog as of this date — the fixture's pin (default: today)",
     )
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY, help="batches in flight")
     return parser.parse_args()
