@@ -31,6 +31,7 @@ import json
 import pathlib
 import sys
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import httpx
 
@@ -41,6 +42,8 @@ from upmovies.llm.pricing import price, rates_for
 from upmovies.llm.registry import DEEPINFRA, DEEPSEEK, base_url_for
 from upmovies.llm.types import Prompt, Usage
 from upmovies.news.source_quality import build_judge_request, judge_output_parses
+from upmovies.synthesize.summarizer import EventInput, build_summary_request, parse_summary
+from upmovies.synthesize.summary_eval import load_summary_cases
 
 # The flash tier at each provider: the cheap model a high-volume stage would actually route to,
 # and the one the eval matrix (NEU-985) starts from.
@@ -65,6 +68,15 @@ _JUDGE_ITEMS = [
 ]
 
 _COMPLIANCE_RUNS = 10
+
+# The summarize probe's own ceiling, deliberately far above the stage's `_MAX_TOKENS` of 256.
+# Probing at the production cap would measure the cap rather than the need: a reasoning model
+# spends tokens inside `completion_tokens` that never appear in the text, so the question this
+# probe exists to answer — "what ceiling does summarize actually need here?" — is unanswerable
+# from a run that was truncated by the ceiling under test.
+_SUMMARIZE_PROBE_MAX_TOKENS = 2048
+
+_SUMMARY_FIXTURE = "tests/fixtures/synthesize/summary_cases.json"
 
 _FIXTURES = pathlib.Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "llm"
 
@@ -248,6 +260,103 @@ async def probe_json_compliance(client: httpx.AsyncClient, provider: str, model:
         )
 
 
+# --- 4. summarize without the assistant prefill ---------------------------------------------
+
+
+async def probe_summarize_without_prefill(
+    client: httpx.AsyncClient, provider: str, model: str
+) -> None:
+    """Can `summarize` run on this provider at all, and at what reply ceiling?
+
+    `build_summary_request` seeds the assistant turn with `{"summary": "` so the model continues
+    a JSON envelope rather than preambling. The OpenAI chat-completions API has no slot for
+    that — a trailing assistant message is history, not a prefix to continue — so `_to_wire`
+    refuses the prompt and the stage cannot run here at all (observed in production 2026-08-08:
+    0 processed, 1 failed, zero tokens).
+
+    Dropping the prefill is viable in principle because `parse_summary` tries a **full JSON
+    envelope first** and only falls back to reconstructing one from `_PREFILL`. So the question
+    is empirical: without the prefill, does the model still return an envelope this stage's own
+    parser accepts, and does `response_format` help or hurt? Graded by `parse_summary` itself —
+    a probe with its own notion of valid output would be grading a stage that does not ship.
+
+    Deliberately confined to the OpenAI-compatible surface. Vendor prefix-continuation
+    extensions (DeepSeek's beta `prefix` flag and its separate base URL) are out of scope: the
+    gateway speaks one wire format to every OpenAI-compatible provider, and a per-provider
+    escape hatch would put that back.
+
+    Also reports the reply length distribution, because the stage's `_MAX_TOKENS = 256` was
+    chosen for a model whose output was all visible text."""
+    print(
+        f"\n{'=' * 78}\n4. SUMMARIZE WITHOUT PREFILL ({_COMPLIANCE_RUNS} runs each)"
+        f" — {provider} / {model}\n{'=' * 78}"
+    )
+    cases = load_summary_cases(_SUMMARY_FIXTURE)
+    print(f"  {len(cases)} real cases from {_SUMMARY_FIXTURE}")
+    totals = Usage()
+
+    for label, wants_json in (("no prefill, plain", False), ("no prefill + response_format", True)):
+        ok = 0
+        attempted = 0
+        errors: list[str] = []
+        failures: list[str] = []
+        completions: list[int] = []
+        truncated = 0
+        # Cycle the fixture rather than truncating to it: the fixture is small (4 cases) and a
+        # 4-run verdict is thin evidence for a format decision. Repeating a case is not a wasted
+        # run — the reply is resampled, which is exactly the variance being measured.
+        for i in range(_COMPLIANCE_RUNS):
+            case = cases[i % len(cases)]
+            event = EventInput(
+                event_type=case.event_type,
+                film_title=case.film_title,
+                source_updated_at=datetime.now(UTC),
+                stories=case.stories,
+            )
+            base = build_summary_request(event, case.as_of_date)
+            # The whole point: strip the one field the OpenAI shape cannot carry.
+            prompt = replace(
+                base,
+                prefill=None,
+                json_object=wants_json,
+                max_tokens=_SUMMARIZE_PROBE_MAX_TOKENS,
+            )
+            attempted += 1
+            response = await _post(client, model, prompt)
+            if response.status_code != 200:
+                errors.append(f"HTTP {response.status_code}: {response.text[:120]}")
+                continue
+            payload = response.json()
+            totals += _usage_from(payload.get("usage") or {})
+            completions.append(int((payload.get("usage") or {}).get("completion_tokens") or 0))
+            if (payload.get("choices") or [{}])[0].get("finish_reason") == "length":
+                truncated += 1
+            text = _text_from(payload)
+            try:
+                parse_summary(text)
+                ok += 1
+            except Exception as exc:  # noqa: BLE001 — the stage's own rejection is the verdict
+                failures.append(f"{type(exc).__name__}: {text[:300]}")
+        print(f"  [{label}] parse_summary ok {ok}/{attempted}, truncated {truncated}")
+        if completions:
+            completions.sort()
+            print(
+                f"    completion_tokens: min={completions[0]} "
+                f"median={completions[len(completions) // 2]} max={completions[-1]} "
+                f"(stage ships max_tokens=256)"
+            )
+        for err in errors[:3]:
+            print(f"    error: {err}")
+        for sample in failures[:2]:
+            print(f"    rejected: {sample!r}")
+
+    try:
+        cost = price(totals, rates_for(provider, model), batch=False)
+        print(f"\n  tokens across this probe: {totals}\n  priced at the table's rates: ${cost:.6f}")
+    except KeyError:
+        print(f"\n  tokens across this probe: {totals}\n  no _RATES entry")
+
+
 async def verify(provider: str, model: str, *, capture: bool = False) -> bool:
     """Run all three probes against one provider. False if it was skipped or mismapped.
 
@@ -267,6 +376,7 @@ async def verify(provider: str, model: str, *, capture: bool = False) -> bool:
         disjoint = await probe_cache(client, provider, model, capture=capture)
         await probe_response_format(client, provider, model)
         await probe_json_compliance(client, provider, model)
+        await probe_summarize_without_prefill(client, provider, model)
     return disjoint
 
 

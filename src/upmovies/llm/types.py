@@ -28,11 +28,25 @@ class Prompt:
     success, not a failure (spec §3). It costs nothing and engages by itself if a prefix grows.
 
     `prefill` seeds the assistant turn to force a continuation rather than a preamble;
-    `summarize` relies on it to get a JSON envelope back, and `parse_summary` is written to
-    read that continuation. An adapter whose provider cannot prefill must therefore raise
-    `UnsupportedPromptError` rather than drop it: honouring the rest of the request and
-    silently discarding this part would hand the parser a shape it does not expect, at the one
-    stage that recovers from bad JSON rather than failing loudly.
+    `summarize` uses it to suppress the reasoning Haiku otherwise narrates into a stored
+    summary. Anthropic can express it — a trailing assistant turn is a prefix to continue — and
+    the OpenAI chat-completions API cannot: there, a trailing assistant message is conversation
+    *history*, and the model answers it with a fresh turn.
+
+    `prefill_required` is how a caller says which of those it can live with, and it is a claim
+    about **its own parser**, not about any vendor. Default `True`: an adapter that cannot
+    prefill raises `UnsupportedPromptError` rather than dropping it, because handing a
+    continuation-only parser a fresh assistant turn answers a question nobody asked.
+
+    `summarize` sets it `False`, and the evidence is in its parser: `parse_summary` tries a full
+    JSON envelope on its *primary* path and only falls back to reconstructing one from the
+    prefill. Measured against that parser, DeepInfra returns an acceptable envelope 10/10 with
+    the prefill dropped (`scripts/verify_provider_capabilities.py` probe 4, 2026-08-08). Keeping
+    the refusal absolute would have stranded a stage on a provider that serves it perfectly
+    well — which it did, in production, on 2026-08-08 (ADR-0012).
+
+    A provider that *can* prefill still gets it either way. `False` says the caller copes
+    without it, not that it stopped being worth having.
 
     `json_object` asks for JSON rather than prose. It is a *request*, not a guarantee — it
     becomes `response_format` on an OpenAI-compatible provider and is ignored by Anthropic,
@@ -60,6 +74,7 @@ class Prompt:
     stable_prefix: str
     user: str
     prefill: str | None = None
+    prefill_required: bool = True
     max_tokens: int = 4096
     json_object: bool = False
 

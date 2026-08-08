@@ -449,3 +449,23 @@ async def test_a_call_that_never_returned_reports_truncated_as_unknown():
     (failed,) = calls.results
     assert failed.ok is False
     assert failed.truncated is None
+
+
+@respx.mock
+async def test_an_optional_prefill_is_still_sent_to_a_provider_that_supports_it():
+    """`prefill_required=False` says the caller can cope without it — not that it stopped being
+    worth having. Anthropic can seed the assistant turn, so it still does: the prefill is what
+    stops Haiku narrating its reasoning into a stored summary (`summarizer.py`)."""
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=_message_response([{"type": "text", "text": 'ok"}'}])
+    )
+    async with AnthropicClient(api_key="test-key") as c:
+        await c.complete(
+            model="claude-haiku-4-5",
+            prompt=Prompt(
+                stable_prefix="I", user="hi", prefill='{"summary": "', prefill_required=False
+            ),
+        )
+
+    messages = json.loads(route.calls.last.request.content)["messages"]
+    assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}

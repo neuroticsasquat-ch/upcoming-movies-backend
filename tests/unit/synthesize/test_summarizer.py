@@ -103,6 +103,19 @@ def test_build_summary_request_seeds_assistant_prefill():
     assert prompt.prefill == '{"summary": "'
 
 
+def test_build_summary_request_marks_the_prefill_optional():
+    """What lets this stage run on an OpenAI-compatible provider at all. The claim is about
+    *this builder's parser*, not about any vendor: `parse_summary` reads a full envelope on its
+    primary path, so a provider that cannot seed the assistant turn is still serving the request
+    that was asked for."""
+    assert build_summary_request(_event(), date(2026, 6, 25)).prefill_required is False
+
+
+def test_parse_summary_reads_an_unprefilled_envelope():
+    # The primary path, and the one an OpenAI-compatible provider's reply lands on.
+    assert parse_summary('{"summary": "A neutral update."}') == "A neutral update."
+
+
 def test_parse_summary_handles_prefilled_continuation():
     # With the prefill, the model's reply has no leading brace — it continues the envelope.
     assert parse_summary('A neutral update."}') == "A neutral update."

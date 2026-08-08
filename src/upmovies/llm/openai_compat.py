@@ -34,10 +34,15 @@ def _to_wire(model: str, prompt: Prompt) -> dict[str, Any]:
     *position* — the stable prefix leads as the system message, unmodified, and the varying
     payload follows. Nothing here decides whether caching engages, and nothing can: that
     depends on each provider's minimum cacheable prefix (spec §5.1)."""
-    if prompt.prefill is not None:
+    # A trailing assistant message is history to this API, not a prefix to continue, so there
+    # is nothing to map a prefill onto. Whether that is fatal is the caller's to declare: a
+    # parser that only reads continuations gets a refusal, and one that reads a whole envelope
+    # gets served without it (`types.Prompt`).
+    if prompt.prefill is not None and prompt.prefill_required:
         raise UnsupportedPromptError(
-            "the OpenAI chat completions API has no assistant-prefill equivalent; "
-            "this prompt cannot be served by an OpenAI-compatible provider"
+            "the OpenAI chat completions API has no assistant-prefill equivalent, and this "
+            "prompt marks its prefill required; it cannot be served by an OpenAI-compatible "
+            "provider"
         )
     body: dict[str, Any] = {
         "model": model,
