@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from upmovies.llm import AnthropicClient, OpenAICompatClient
+from upmovies.llm import AnthropicClient, OpenAICompatClient, price, rates_for
 from upmovies.llm.retry import RetryPolicy
 from upmovies.llm.types import CallLog, Completer, Prompt, UnsupportedPromptError, Usage
 
@@ -147,7 +147,11 @@ def test_an_unknown_provider_is_refused_at_construction():
 @respx.mock
 async def test_deepseek_cached_tokens_map_onto_usage():
     """DeepSeek reports the hit/miss split directly, so `input_tokens` is its miss count — not
-    `prompt_tokens`, which is the inclusive total."""
+    `prompt_tokens`, which is the inclusive total (4608 + 119 = 4727 in the captured body).
+
+    Note `completion_tokens` is 40 against 38 `reasoning_tokens`: on a reasoning model most of
+    the output is thinking, and it is billed at the output rate like any other output token.
+    `output_tokens` takes the total, so nothing has to be added back."""
     respx.post(DEEPSEEK_URL).mock(
         return_value=httpx.Response(200, json=_recorded("deepseek_chat_completion"))
     )
@@ -156,10 +160,10 @@ async def test_deepseek_cached_tokens_map_onto_usage():
             model="deepseek-v4-flash", prompt=Prompt(stable_prefix="I", user="hi")
         )
 
-    assert json.loads(text)[0]["kind"] == "casting"
+    assert text == "OK"
     assert usage == Usage(
-        input_tokens=392,
-        output_tokens=120,
+        input_tokens=119,
+        output_tokens=40,
         cache_read_input_tokens=4608,
         cache_creation_input_tokens=0,
     )
@@ -169,21 +173,75 @@ async def test_deepseek_cached_tokens_map_onto_usage():
 async def test_deepinfra_cached_tokens_map_onto_usage():
     """DeepInfra reports the OpenAI shape, where `prompt_tokens` *includes* the cached tokens.
     Mapping that total straight onto `input_tokens` would price every cached token twice —
-    once at base and once at the cache-read rate (see `Rates` in `pricing.py`)."""
+    once at base and once at the cache-read rate (see `Rates` in `pricing.py`).
+
+    The captured body also carries `prompt_tokens_details.cache_write_tokens`, which is
+    deliberately not mapped — see `_usage_from`."""
     respx.post(DEEPINFRA_URL).mock(
         return_value=httpx.Response(200, json=_recorded("deepinfra_chat_completion"))
+    )
+    async with OpenAICompatClient(provider="deepinfra", api_key="k") as c:
+        text, usage = await c.complete_with_usage(
+            model="deepseek-ai/DeepSeek-V4-Flash", prompt=Prompt(stable_prefix="I", user="hi")
+        )
+
+    assert text == "OK."
+    assert usage == Usage(
+        input_tokens=296,  # 4648 inclusive total - 4352 cached
+        output_tokens=3,
+        cache_read_input_tokens=4352,
+        cache_creation_input_tokens=0,
+    )
+
+
+@respx.mock
+async def test_the_deepinfra_rates_reproduce_the_providers_own_estimated_cost():
+    """DeepInfra returns `estimated_cost` in its usage block — its own arithmetic on its own
+    published rates. Pricing the mapped `Usage` through our table has to land on the same
+    number, and that single assertion checks three things at once: the `(deepinfra, …)` rates
+    entry, the cache-read multiplier, and the disjointness of the mapping. Any of the three
+    being wrong shows up as a mismatch here rather than as a quietly wrong cost column.
+
+    `estimated_cost` is *not* mapped into `Usage` and must not be — raw token counts are the
+    recorded source of truth (spec §7), and only one of the two providers reports a cost at all.
+    It is used here as an oracle, which is a different job.
+
+    If this fails after a fixture re-capture, DeepInfra changed its prices: update `_RATES`."""
+    body = _recorded("deepinfra_chat_completion")
+    respx.post(DEEPINFRA_URL).mock(return_value=httpx.Response(200, json=body))
+    async with OpenAICompatClient(provider="deepinfra", api_key="k") as c:
+        _text, usage = await c.complete_with_usage(
+            model="deepseek-ai/DeepSeek-V4-Flash", prompt=Prompt(stable_prefix="I", user="hi")
+        )
+
+    ours = price(usage, rates_for("deepinfra", "deepseek-ai/DeepSeek-V4-Flash"), batch=False)
+    assert ours == pytest.approx(body["usage"]["estimated_cost"], rel=1e-9)
+
+
+@respx.mock
+async def test_a_null_cache_write_tokens_does_not_become_a_cache_write():
+    """DeepInfra reports `prompt_tokens_details.cache_write_tokens`, observed only as `null`.
+    A null must not be coerced into a count, and the field is not mapped even when populated:
+    its tokens are already inside `prompt_tokens`, so adding them to
+    `cache_creation_input_tokens` without also subtracting them would break the disjointness
+    `price` depends on. At `cache_write_mult=1.0` — no write premium, which is the whole point
+    of automatic caching — it prices identically either way."""
+    respx.post(DEEPINFRA_URL).mock(
+        return_value=_completion(
+            "ok",
+            usage={
+                "prompt_tokens": 1000,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
+            },
+        )
     )
     async with OpenAICompatClient(provider="deepinfra", api_key="k") as c:
         _text, usage = await c.complete_with_usage(
             model="deepseek-ai/DeepSeek-V4-Flash", prompt=Prompt(stable_prefix="I", user="hi")
         )
 
-    assert usage == Usage(
-        input_tokens=648,  # 5000 total - 4352 cached
-        output_tokens=64,
-        cache_read_input_tokens=4352,
-        cache_creation_input_tokens=0,
-    )
+    assert usage == Usage(input_tokens=1000, output_tokens=5)
 
 
 @respx.mock

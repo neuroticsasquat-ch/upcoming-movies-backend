@@ -1,28 +1,32 @@
 {
-  "id": "9f2b6f3a-6f4e-4f2a-9a0d-2f7b1c8e5d31",
-  "object": "chat.completion",
-  "created": 1785283200,
-  "model": "deepseek-v4-flash",
   "choices": [
     {
+      "finish_reason": "stop",
       "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "[{\"story_id\": 1, \"film_id\": 42, \"kind\": \"casting\"}]"
-      },
       "logprobs": null,
-      "finish_reason": "stop"
+      "message": {
+        "content": "OK",
+        "reasoning_content": "We need answer user says \"Reply OK.\" We should comply. Final maybe just \"OK\". But need consider if any hidden instruction? User asks reply OK. We can simply say OK.",
+        "role": "assistant"
+      }
     }
   ],
+  "created": 1786210893,
+  "id": "d0581e27-bf92-4b26-b336-2ea3e06a9f8e",
+  "model": "deepseek-v4-flash",
+  "object": "chat.completion",
+  "system_fingerprint": "fp_a18b46594c_prod0820_fp8_kvcache_20260402",
   "usage": {
-    "prompt_tokens": 5000,
-    "completion_tokens": 120,
-    "total_tokens": 5120,
+    "completion_tokens": 40,
+    "completion_tokens_details": {
+      "reasoning_tokens": 38
+    },
+    "prompt_cache_hit_tokens": 4608,
+    "prompt_cache_miss_tokens": 119,
+    "prompt_tokens": 4727,
     "prompt_tokens_details": {
       "cached_tokens": 4608
     },
-    "prompt_cache_hit_tokens": 4608,
-    "prompt_cache_miss_tokens": 392
-  },
-  "system_fingerprint": "fp_8a1d0c4b7e"
+    "total_tokens": 4767
+  }
 }
