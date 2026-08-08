@@ -1,5 +1,6 @@
 import json
 import types
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -7,9 +8,14 @@ import respx
 from anthropic import APIStatusError
 
 from upmovies.llm import AnthropicClient
+from upmovies.llm.retry import RetryPolicy
 from upmovies.llm.types import CallLog, CallResult, Prompt, Usage
 
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+
+# Backoff is not what these tests are about, and waiting for it would make the suite slow for
+# nothing. Attempt *counts* are the real thing under test, so they stay explicit per test.
+_NO_WAIT = RetryPolicy(initial_backoff=0.0, jitter=0.0)
 
 
 def _message_response(blocks: list[dict[str, str]], usage: dict | None = None) -> httpx.Response:
@@ -68,6 +74,104 @@ async def test_a_prefill_becomes_a_trailing_assistant_turn():
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": '{"summary": "'},
     ]
+
+
+@respx.mock
+async def test_json_object_is_ignored_rather_than_approximated():
+    """Anthropic has no `response_format`. The field is a request, not a guarantee, and the
+    call sites' hand-rolled extractors are what has always got JSON out of this provider."""
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=_message_response([{"type": "text", "text": "[]"}])
+    )
+    async with AnthropicClient(api_key="test-key") as c:
+        await c.complete(
+            model="claude-haiku-4-5",
+            prompt=Prompt(stable_prefix="I", user="hi", json_object=True),
+        )
+    assert "response_format" not in json.loads(route.calls.last.request.content)
+
+
+@respx.mock
+async def test_a_429_with_retry_after_is_retried_and_the_header_is_read():
+    """The same four retry cases are asserted on both adapters, deliberately. A policy shared
+    in `retry.py` but wired up differently at one of the two call sites would still leave a
+    provider comparison measuring the wiring (spec §9), and only an end-to-end assertion here
+    catches that — this is the one test that exercises `_classify` reading `Retry-After` off an
+    SDK exception rather than an httpx one."""
+    respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            httpx.Response(
+                429, headers={"Retry-After": "0"}, json={"error": {"type": "rate_limit_error"}}
+            ),
+            _message_response([{"type": "text", "text": "ok"}]),
+        ]
+    )
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+        result = await c.complete_call(
+            model="claude-haiku-4-5", prompt=Prompt(stable_prefix="S", user="hi"), calls=calls
+        )
+
+    assert result.attempts == 2
+    assert result.ok is True
+    assert len(calls.results) == 1
+
+
+@respx.mock
+async def test_exhausted_retries_record_a_failed_call_then_re_raise():
+    """Exhaustion at the *default* retry count, so the number of attempts a failing provider
+    costs is pinned on this path too."""
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=httpx.Response(503, json={"error": {"type": "overloaded_error"}})
+    )
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+        with pytest.raises(APIStatusError):
+            await c.complete_call(
+                model="claude-haiku-4-5",
+                prompt=Prompt(stable_prefix="S", user="hi"),
+                calls=calls,
+            )
+
+    assert route.call_count == 4  # 1 initial attempt + the default 3 retries
+    (failed,) = calls.results
+    assert failed.ok is False
+    assert failed.attempts == 4
+    assert failed.usage == Usage()
+
+
+@respx.mock
+async def test_a_connection_error_is_retried_by_the_shared_loop():
+    respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            httpx.ConnectError("no route to host"),
+            _message_response([{"type": "text", "text": "ok"}]),
+        ]
+    )
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+        result = await c.complete_call(
+            model="claude-haiku-4-5", prompt=Prompt(stable_prefix="S", user="hi"), calls=CallLog()
+        )
+
+    assert result.attempts == 2
+
+
+@respx.mock
+async def test_a_4xx_is_not_retried():
+    """The shared status verdict applies on this path too — retrying a bad credential four
+    times just spends the same failure four times (`retry.retry_for_status`)."""
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=httpx.Response(401, json={"error": {"type": "authentication_error"}})
+    )
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+        with pytest.raises(APIStatusError):
+            await c.complete_call(
+                model="claude-haiku-4-5",
+                prompt=Prompt(stable_prefix="S", user="hi"),
+                calls=CallLog(),
+            )
+
+    assert route.call_count == 1
 
 
 @respx.mock
@@ -149,14 +253,19 @@ async def test_complete_call_records_the_call_and_returns_it():
 
 @respx.mock
 async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts():
+    """Retries here are the shared loop's, not the SDK's — `max_retries=0` is passed to
+    `AsyncAnthropic` on purpose so both adapters retry under one policy rather than two
+    separately-configured ones that look alike (spec §9)."""
     respx.post(MESSAGES_URL).mock(
         side_effect=[
-            httpx.Response(429, json={"error": {"type": "rate_limit_error"}}),
+            httpx.Response(
+                429, headers={"Retry-After": "0"}, json={"error": {"type": "rate_limit_error"}}
+            ),
             _message_response([{"type": "text", "text": "ok"}]),
         ]
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", max_retries=1) as c:
+    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=1)) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="S", user="hi"),
@@ -175,7 +284,7 @@ async def test_complete_call_records_a_failed_call_then_re_raises():
         return_value=httpx.Response(500, json={"error": {"type": "api_error"}})
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", max_retries=1) as c:
+    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=1)) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -196,7 +305,7 @@ async def test_complete_call_records_a_200_whose_body_does_not_validate():
     for — it must not vanish from the telemetry just because the SDK raised late."""
     respx.post(MESSAGES_URL).mock(return_value=httpx.Response(200, json={"not": "a message"}))
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", max_retries=0) as c:
+    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=0)) as c:
         with pytest.raises(Exception):  # noqa: B017 — SDK's own validation error type
             await c.complete_call(
                 model="claude-haiku-4-5",

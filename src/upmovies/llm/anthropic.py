@@ -3,13 +3,24 @@ data. Self-contained (no DB); mirrors the TMDB client's shape as an async contex
 
 This module is the *only* place Anthropic's wire format appears. Callers hand it a `Prompt`
 and never name `system` blocks, `cache_control` or assistant turns — see `types.Prompt` for
-the contract that replaced them."""
+the contract that replaced them.
+
+(The module-level `from anthropic import ...` below resolves to the SDK, not to this file:
+Python 3 has no implicit relative imports, so `upmovies.llm.anthropic` does not shadow it.)"""
 
 import time
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import APIConnectionError, APIStatusError, AsyncAnthropic
 
+from upmovies.llm.retry import (
+    DEFAULT_RETRY_POLICY,
+    Attempts,
+    Retry,
+    RetryPolicy,
+    call_with_retry,
+    retry_for_status,
+)
 from upmovies.llm.types import CallLog, CallResult, Prompt, Usage
 
 
@@ -22,7 +33,11 @@ def _to_wire(prompt: Prompt) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
     below it — so deciding whether to mark would mean estimating token counts here, or worse,
     asking each builder to estimate its own, which is exactly the vendor knowledge the `Prompt`
     DTO exists to delete from them. Marking always is free when it no-ops and correct when a
-    prefix grows past the floor."""
+    prefix grows past the floor.
+
+    `prompt.json_object` has no counterpart here — Anthropic has no `response_format` — so it is
+    ignored rather than approximated. The call sites' hand-rolled JSON extractors are what has
+    always got them JSON out of this provider, and they stay."""
     system = [
         {"type": "text", "text": prompt.stable_prefix, "cache_control": {"type": "ephemeral"}}
     ]
@@ -41,27 +56,30 @@ def _concat_text(blocks: list[Any]) -> str:
     return "".join(block.text for block in blocks if block.type == "text")
 
 
-def _attempts_from_error(exc: BaseException) -> int:
-    """How many HTTP attempts a failed call made. The SDK owns the retry loop until the shared
-    policy lands (spec §9) and stamps every attempt's request with `x-stainless-retry-count`;
-    reading it back off the failed request is the only place that count survives an exception.
-    Falls back to 1 when no request is attached."""
-    request = getattr(exc, "request", None)
-    header = getattr(request, "headers", {}).get("x-stainless-retry-count")
-    if not isinstance(header, str):
-        return 1
-    try:
-        return int(header) + 1
-    except ValueError:
-        return 1
+def _classify(exc: BaseException) -> Retry | None:
+    """Which SDK failures are worth another attempt. The status verdict is deferred to
+    `retry_for_status` so it is literally the same judgement the OpenAI-compatible adapter
+    makes — see `retry.py` for why sharing it, rather than matching it, is the point."""
+    if isinstance(exc, APIStatusError):
+        return retry_for_status(exc.status_code, exc.response.headers)
+    if isinstance(exc, APIConnectionError):
+        # Timeouts arrive as `APITimeoutError`, a subclass: the request never got an answer, so
+        # nothing is known about whether it would fail again.
+        return Retry()
+    return None
 
 
 class AnthropicClient:
     """Async context manager over `AsyncAnthropic`. Call surfaces: `complete`,
     `complete_with_usage`, and `complete_call` (the telemetry-bearing one)."""
 
-    def __init__(self, api_key: str, *, max_retries: int = 3, timeout: float = 60.0):
-        self._client = AsyncAnthropic(api_key=api_key, max_retries=max_retries, timeout=timeout)
+    def __init__(self, api_key: str, *, policy: RetryPolicy = DEFAULT_RETRY_POLICY):
+        self._policy = policy
+        # `max_retries=0` disables the SDK's own retry loop deliberately. It is a perfectly
+        # good loop — it was this path's retry policy until now — but leaving it in place would
+        # mean the two adapters retried under separately-configured policies that merely looked
+        # alike, and a provider comparison would then be partly measuring the loops (spec §9).
+        self._client = AsyncAnthropic(api_key=api_key, max_retries=0, timeout=policy.timeout)
 
     async def __aenter__(self) -> "AnthropicClient":
         return self
@@ -74,31 +92,37 @@ class AnthropicClient:
 
         A provider failure is recorded with `ok=False` and an `error_type` *before* the
         exception is re-raised, so the caller's failure handling is unchanged and the call
-        still leaves a telemetry row. Timing spans the whole logical call, SDK retries
-        included; `with_raw_response` is what makes the retry count observable."""
+        still leaves a telemetry row. Timing spans the whole logical call, retries and their
+        backoff included."""
         system, messages = _to_wire(prompt)
+        attempts = Attempts()
         started = time.perf_counter()
         try:
-            raw = await self._client.messages.with_raw_response.create(
-                model=model,
-                system=system,  # type: ignore[arg-type]
-                messages=messages,  # type: ignore[arg-type]
-                max_tokens=prompt.max_tokens,
+            resp = await call_with_retry(
+                # Deserialization happens inside the SDK call, and therefore inside the try, on
+                # purpose: a 200 whose body doesn't validate is still a call that was made,
+                # took time and cost tokens.
+                lambda: self._client.messages.create(
+                    model=model,
+                    system=system,  # type: ignore[arg-type]
+                    messages=messages,  # type: ignore[arg-type]
+                    max_tokens=prompt.max_tokens,
+                ),
+                policy=self._policy,
+                classify=_classify,
+                attempts=attempts,
             )
-            # Deserialization is inside the try on purpose: a 200 whose body doesn't validate
-            # is still a call that was made, took time and cost tokens.
-            resp = raw.parse()
             result = CallResult(
                 text=_concat_text(resp.content),
                 usage=Usage.from_sdk(resp.usage),
                 latency_ms=_elapsed_ms(started),
-                attempts=raw.retries_taken + 1,
+                attempts=attempts.made,
             )
         except Exception as exc:
             calls.record(
                 CallResult(
                     latency_ms=_elapsed_ms(started),
-                    attempts=_attempts_from_error(exc),
+                    attempts=max(attempts.made, 1),
                     ok=False,
                     error_type=type(exc).__name__,
                 )

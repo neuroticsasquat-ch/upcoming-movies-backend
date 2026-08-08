@@ -1,11 +1,15 @@
-from upmovies.llm.client import AnthropicClient as AnthropicClient
+from upmovies.llm.anthropic import AnthropicClient as AnthropicClient
+from upmovies.llm.openai_compat import OpenAICompatClient as OpenAICompatClient
 from upmovies.llm.pricing import HAIKU_4_5 as HAIKU_4_5
 from upmovies.llm.pricing import SONNET_4_6 as SONNET_4_6
 from upmovies.llm.pricing import Rates as Rates
 from upmovies.llm.pricing import price as price
 from upmovies.llm.pricing import rates_for as rates_for
+from upmovies.llm.retry import DEFAULT_RETRY_POLICY as DEFAULT_RETRY_POLICY
+from upmovies.llm.retry import RetryPolicy as RetryPolicy
 from upmovies.llm.types import CallLog as CallLog
 from upmovies.llm.types import CallResult as CallResult
 from upmovies.llm.types import Completer as Completer
 from upmovies.llm.types import Prompt as Prompt
+from upmovies.llm.types import UnsupportedPromptError as UnsupportedPromptError
 from upmovies.llm.types import Usage as Usage

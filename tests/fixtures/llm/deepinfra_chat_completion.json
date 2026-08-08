@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-6d0f1b2c9a7e4d38b5c1f0a2e7d94b60",
+  "object": "chat.completion",
+  "created": 1785283200,
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"clusters\": [{\"kind\": \"trailer\", \"story_ids\": [7, 9]}]}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 5000,
+    "completion_tokens": 64,
+    "total_tokens": 5064,
+    "prompt_tokens_details": {
+      "cached_tokens": 4352
+    },
+    "estimated_cost": 0.00048
+  }
+}
