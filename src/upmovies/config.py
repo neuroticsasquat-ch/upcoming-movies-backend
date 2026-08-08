@@ -71,6 +71,17 @@ class Settings(BaseSettings):
     link_retrieval_max_candidates: int = Field(
         default=25, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
     )
+    # The hard-breach guard (NEU-1002, ADR-0010): a zero-candidate rate above the ceiling
+    # finalizes the run `failed`, which aborts the daily chain and pings the deadman. Mirrors
+    # `link.retrieval.health`'s own constants — same duplication, same pinning test, same
+    # reason — and both stay settings so an incident is answered from env: 1.0 disarms the
+    # guard, and the minimum denominator is what stops a quiet news day tripping it.
+    link_retrieval_max_zero_candidate_rate: float = Field(
+        default=0.25, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE"
+    )
+    link_retrieval_health_min_stories: int = Field(
+        default=50, ge=0, alias="LINK_RETRIEVAL_HEALTH_MIN_STORIES"
+    )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
     source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")

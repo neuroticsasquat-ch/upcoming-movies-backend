@@ -2,7 +2,12 @@ import pytest
 from pydantic import ValidationError
 
 from upmovies.config import Settings
-from upmovies.link.retrieval import DEFAULT_CANDIDATE_LIMIT, DEFAULT_SCORE_THRESHOLD
+from upmovies.link.retrieval import (
+    DEFAULT_CANDIDATE_LIMIT,
+    DEFAULT_SCORE_THRESHOLD,
+    MAX_ZERO_CANDIDATE_RATE,
+    MIN_STORIES_FOR_BREACH,
+)
 
 _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
@@ -217,6 +222,8 @@ _RETRIEVAL_ENV = (
     "LINK_RETRIEVAL_MODE",
     "LINK_RETRIEVAL_THRESHOLD",
     "LINK_RETRIEVAL_MAX_CANDIDATES",
+    "LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE",
+    "LINK_RETRIEVAL_HEALTH_MIN_STORIES",
 )
 
 
@@ -294,5 +301,43 @@ def test_settings_link_retrieval_max_candidates_rejects_zero(monkeypatch):
     a story that is neither linked nor a zero-candidate reject."""
     _set_required(monkeypatch)
     monkeypatch.setenv("LINK_RETRIEVAL_MAX_CANDIDATES", "0")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_retrieval_health_guard_defaults_match_the_rule(monkeypatch):
+    """The hard-breach constants, duplicated into config for the same reason T and K are —
+    `config` cannot import `link.retrieval` without a cycle — and pinned here (NEU-1002)."""
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_max_zero_candidate_rate == MAX_ZERO_CANDIDATE_RATE
+    assert s.link_retrieval_health_min_stories == MIN_STORIES_FOR_BREACH
+
+
+def test_settings_retrieval_health_guard_overrides_from_env(monkeypatch):
+    """A guard that can only be retuned by a deploy is one that gets switched off instead —
+    and 1.0 is how it *is* switched off, no rate being above it."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", "1.0")
+    monkeypatch.setenv("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "200")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_max_zero_candidate_rate == 1.0
+    assert s.link_retrieval_health_min_stories == 200
+
+
+@pytest.mark.parametrize("rate", ["-0.1", "1.5"])
+def test_settings_retrieval_max_zero_candidate_rate_rejects_out_of_range(monkeypatch, rate):
+    """It is a share of the run's stories, so anything outside 0..1 can only be a mistake —
+    and above 1.0 the guard is unreachable rather than merely lenient."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", rate)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_settings_retrieval_health_min_stories_rejects_negative(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "-1")
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]

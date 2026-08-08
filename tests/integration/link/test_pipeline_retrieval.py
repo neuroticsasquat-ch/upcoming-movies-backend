@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from upmovies.catalog.models import Film
+from upmovies.config import LinkRetrievalMode
 from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
@@ -85,7 +86,7 @@ async def _catalog(session, *, films: dict[int, str], stories: dict[str, str]) -
     return by_title
 
 
-async def _run(session, *, client=None, batch_size=10, **kwargs):
+async def _run(session, *, client=None, batch_size=10, mode: LinkRetrievalMode = "on", **kwargs):
     run_id = await create_run(session, kind="link")
     await session.commit()
     await run_link_ingest(
@@ -97,7 +98,7 @@ async def _run(session, *, client=None, batch_size=10, **kwargs):
         recency_days=45,
         batch_size=batch_size,
         floor=0.7,
-        retrieval_mode="on",
+        retrieval_mode=mode,
         **kwargs,
     )
     return run_id
@@ -252,7 +253,7 @@ class TestZeroCandidateRejectsAreNotProcessed:
     async def test_a_run_of_nothing_but_zero_candidate_stories_is_not_an_outage(self, session):
         """0 processed / 0 failed is an idempotent no-op, which `StageCounts` reads correctly.
         An index build that broke and zeroed every story is the *retrieval-health* hard
-        breach's job (M4) — two different failures, two different guards."""
+        breach's job — two different failures, two different guards (see `TestHardBreach`)."""
         await _catalog(
             session,
             films={1: "Runner"},
@@ -311,3 +312,129 @@ class TestRetrievalHealth:
         health = await _health(session, run_id)
         assert health is not None
         assert (health.stories_retrieved, health.mean_candidates) == (0, None)
+
+
+class TestHardBreach:
+    """The hard tier of the two-tier guard (ADR-0010, NEU-1002): a zero-candidate rate past
+    threshold finalizes the run `failed`, which is what makes `run_daily` abort and ping the
+    deadman `/fail` — the pipeline's only alerting channel."""
+
+    async def test_a_breaching_rate_fails_the_run(self, session):
+        await _catalog(
+            session,
+            films={1: "Runner"},
+            stories={
+                "https://e/hit": "Runner wraps filming",
+                "https://e/miss-a": "Unrelated television coverage",
+                "https://e/miss-b": "A games console retrospective",
+            },
+        )
+
+        run_id = await _run(
+            session, retrieval_max_zero_candidate_rate=0.5, retrieval_health_min_stories=3
+        )
+
+        run = await _run_row(session, run_id)
+        assert run.status == "failed"
+        assert run.error and "no candidates" in run.error
+
+    async def test_the_stories_it_did_link_still_stand(self, session):
+        """A breach is an alert, not a rollback. `link` is lossy, so a run undone after the
+        fact would re-run over an empty backlog — the links that committed are the best
+        outcome available, and the `failed` status is what stops the chain publishing on top
+        of them."""
+        films = await _catalog(
+            session,
+            films={1: "Runner"},
+            stories={
+                "https://e/hit": "Runner wraps filming",
+                "https://e/miss-a": "Unrelated television coverage",
+                "https://e/miss-b": "A games console retrospective",
+            },
+        )
+
+        await _run(session, retrieval_max_zero_candidate_rate=0.5, retrieval_health_min_stories=3)
+
+        rows = await _stories(session)
+        assert (rows["https://e/hit"].link_status, rows["https://e/hit"].film_id) == (
+            "linked",
+            films["Runner"].id,
+        )
+        assert rows["https://e/miss-a"].link_note == "no-candidates"
+
+    async def test_a_thin_backlog_does_not_fail_the_chain(self, session):
+        """The minimum-denominator rule. Every one of these stories is a zero-candidate
+        reject — a 100% rate — and the run still succeeds, because three stories cannot tell
+        a retrieval collapse from a quiet news day."""
+        await _catalog(
+            session,
+            films={1: "Runner"},
+            stories={
+                "https://e/miss-a": "Unrelated television coverage",
+                "https://e/miss-b": "A games console retrospective",
+            },
+        )
+
+        run_id = await _run(
+            session, retrieval_max_zero_candidate_rate=0.25, retrieval_health_min_stories=50
+        )
+
+        assert (await _run_row(session, run_id)).status == "succeeded"
+
+    async def test_a_healthy_run_is_untouched(self, session):
+        await _catalog(
+            session, films={1: "Runner"}, stories={"https://e/hit": "Runner wraps filming"}
+        )
+
+        run_id = await _run(
+            session, retrieval_max_zero_candidate_rate=0.25, retrieval_health_min_stories=1
+        )
+
+        assert (await _run_row(session, run_id)).status == "succeeded"
+
+    async def test_an_outage_and_a_breach_are_both_reported(self, session):
+        """Two guards, kept separate (spec §8): `total_failure` still watches model
+        availability on its own narrow "produced nothing at all" rule, and retrieval health
+        watches the rate. A run can trip both, and the error says so."""
+        await _catalog(
+            session,
+            films={1: "Runner"},
+            stories={
+                "https://e/hit": "Runner wraps filming",
+                "https://e/miss-a": "Unrelated television coverage",
+                "https://e/miss-b": "A games console retrospective",
+            },
+        )
+
+        run_id = await _run(
+            session,
+            client=_OutageClient(),
+            retrieval_max_zero_candidate_rate=0.5,
+            retrieval_health_min_stories=3,
+        )
+
+        run = await _run_row(session, run_id)
+        assert run.status == "failed"
+        assert run.error and "link stage produced nothing" in run.error
+        assert "no candidates" in run.error
+
+    async def test_the_guard_does_not_read_the_roster_path(self, session):
+        """Under `shadow` the roster still decides, so retrieval offering nothing costs no
+        story a link — failing the run on it would abort the daily chain over a measurement.
+        The guard is scoped to the mode where retrieval is the path."""
+        await _catalog(
+            session,
+            films={1: "Runner"},
+            stories={
+                "https://e/miss-a": "Unrelated television coverage",
+                "https://e/miss-b": "A games console retrospective",
+            },
+        )
+        run_id = await _run(
+            session,
+            mode="shadow",
+            retrieval_max_zero_candidate_rate=0.0,
+            retrieval_health_min_stories=1,
+        )
+
+        assert (await _run_row(session, run_id)).status == "succeeded"
