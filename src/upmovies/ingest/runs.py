@@ -96,8 +96,13 @@ class StageCounts:
 
 def total_failure_error(**stages: StageCounts) -> str | None:
     """Describe every stage that ended in a `total_failure`, keyed by stage name, or None
-    when none did. A pipeline finalizes `failed` iff this returns a message — that is the
-    whole of the finalize decision, so it reads the counters rather than assuming success.
+    when none did. A message here always finalizes the run `failed` — this reads the counters
+    rather than assuming success — but it is no longer the *whole* of that decision. `link`
+    joins it with the retrieval-health hard breach (`link/retrieval/health.py`, ADR-0010),
+    which fails a run on a *rate*, and fires precisely where this rule is silent: a stage that
+    disposed of its whole backlog without a model call is 0 processed / 0 failed here. The two
+    are deliberately not generalized into one — this one keeps its narrow, denominator-free
+    "produced nothing at all" question, and answers it for model availability alone.
 
     Each keyword must name a stage classified in `STAGE_KINDS`; an unknown one raises."""
     outages = [

@@ -31,8 +31,14 @@ services:
       # than a redeploy. The fallbacks repeat the code defaults deliberately, same reason as
       # PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail to boot.
       LINK_RETRIEVAL_MODE: "${LINK_RETRIEVAL_MODE:-off}"
-      LINK_RETRIEVAL_THRESHOLD: "${LINK_RETRIEVAL_THRESHOLD:-0.34}"
-      LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-10}"
+      LINK_RETRIEVAL_THRESHOLD: "${LINK_RETRIEVAL_THRESHOLD:-0.5}"
+      LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-25}"
+      # The retrieval-health hard breach (NEU-1002): above this zero-candidate rate the link
+      # run finalizes `failed`, aborting the daily chain and pinging the deadman. Here for the
+      # same reason as T and K — an incident is answered from Coolify env, not a redeploy.
+      # 1.0 disarms it; the minimum denominator is what keeps a quiet day from tripping it.
+      LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE: "${LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE:-0.25}"
+      LINK_RETRIEVAL_HEALTH_MIN_STORIES: "${LINK_RETRIEVAL_HEALTH_MIN_STORIES:-50}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

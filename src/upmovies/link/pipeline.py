@@ -31,7 +31,13 @@ from upmovies.link.linker import (
     reject_zero_candidate_stories,
     story_dek,
 )
-from upmovies.link.retrieval.health import RetrievalTally, record_retrieval_health
+from upmovies.link.retrieval.health import (
+    MAX_ZERO_CANDIDATE_RATE,
+    MIN_STORIES_FOR_BREACH,
+    RetrievalTally,
+    hard_breach_error,
+    record_retrieval_health,
+)
 from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
 from upmovies.link.retrieval.select import (
     DEFAULT_CANDIDATE_LIMIT,
@@ -335,6 +341,8 @@ async def run_link_ingest(
     retrieval_mode: LinkRetrievalMode = "off",
     retrieval_threshold: float = DEFAULT_SCORE_THRESHOLD,
     retrieval_max_candidates: int = DEFAULT_CANDIDATE_LIMIT,
+    retrieval_max_zero_candidate_rate: float = MAX_ZERO_CANDIDATE_RATE,
+    retrieval_health_min_stories: int = MIN_STORIES_FOR_BREACH,
 ) -> LinkIngestResult:
     # Alongside the catalog read below and on the same once-per-run terms: one query, then
     # pure lookups. None unless the mode is `shadow` (or the build failed) — see
@@ -363,6 +371,10 @@ async def run_link_ingest(
     # §1) — and a failed index build is deliberately *not* caught: with no roster to fall
     # back to, an unbuildable index would zero-candidate the whole backlog and reject it, so
     # the run must crash and finalize `failed` instead. M4 (NEU-1004) deletes the `else`.
+    # Only the live path arms the hard-breach guard. Under `shadow` the roster still decides,
+    # so retrieval offering nothing costs no story its link — failing the daily chain over a
+    # measurement would be the guard firing at the one time it has nothing to protect.
+    retrieval_breach: str | None = None
     if retrieval_mode == "on":
         async with _owned_session(session_factory) as s:
             index = await build_candidate_index(s)
@@ -385,6 +397,15 @@ async def run_link_ingest(
         # records its own: a *missing* health row is how "retrieval did not run at all" is
         # told apart from a run whose retrieval found nothing.
         await record_retrieval_health(session_factory, run_id=run_id, tally=tally)
+        # Read off the tally rather than the row just written: that write is best-effort by
+        # contract, and an outage that swallowed it must not also disarm the guard.
+        retrieval_breach = hard_breach_error(
+            tally,
+            max_zero_candidate_rate=retrieval_max_zero_candidate_rate,
+            min_stories=retrieval_health_min_stories,
+        )
+        if retrieval_breach:
+            log.error("%s", retrieval_breach)
     else:
         async with _owned_session(session_factory) as s:
             roster = await build_roster(s)
@@ -474,7 +495,19 @@ async def run_link_ingest(
         await record_llm_usage(s, run_id, stage="cluster", model=cluster_model, usage=cluster_usage)
         await s.commit()
 
-    error = total_failure_error(link=link_counts, cluster=cluster_counts)
+    # Two independent guards, joined only here. `total_failure_error` watches model
+    # availability on its narrow "produced nothing at all" rule; the breach watches the rate
+    # at which retrieval disposes of stories no model ever sees (ADR-0010). A run can trip
+    # both — an outage on a broken index does — and the error names each one that fired.
+    error = (
+        "; ".join(
+            filter(
+                None,
+                (total_failure_error(link=link_counts, cluster=cluster_counts), retrieval_breach),
+            )
+        )
+        or None
+    )
     async with _owned_session(session_factory) as s:
         await finalize_run(
             s,

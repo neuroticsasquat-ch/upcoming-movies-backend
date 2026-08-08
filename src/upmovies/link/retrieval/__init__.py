@@ -1,3 +1,5 @@
+from upmovies.link.retrieval.health import MAX_ZERO_CANDIDATE_RATE as MAX_ZERO_CANDIDATE_RATE
+from upmovies.link.retrieval.health import MIN_STORIES_FOR_BREACH as MIN_STORIES_FOR_BREACH
 from upmovies.link.retrieval.index import CandidateIndex as CandidateIndex
 from upmovies.link.retrieval.index import FoldedTitle as FoldedTitle
 from upmovies.link.retrieval.index import IndexedFilm as IndexedFilm

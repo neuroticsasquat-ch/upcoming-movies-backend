@@ -121,6 +121,8 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
                 retrieval_mode=settings.link_retrieval_mode,
                 retrieval_threshold=settings.link_retrieval_threshold,
                 retrieval_max_candidates=settings.link_retrieval_max_candidates,
+                retrieval_max_zero_candidate_rate=settings.link_retrieval_max_zero_candidate_rate,
+                retrieval_health_min_stories=settings.link_retrieval_health_min_stories,
             )
     except Exception as e:
         log.exception("link ingest crashed")

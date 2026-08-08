@@ -22,8 +22,10 @@ exactly what the denominator is for. That row is written by both paths and so li
 **Reading the output.** Recall here is measured against roster picks, and the roster makes
 false positives — so retrieval declining to surface one is a win that a bare percentage
 scores as a loss. The hand-adjudication step in M4 exists for that; the raw rate is not truth.
-The hard-breach guard is deliberately absent (ADR-0010): it lands in M4 so it cannot fail runs
-while T and K are still untuned."""
+The hard-breach guard does not read this path (ADR-0010, NEU-1002). It is armed only under
+`on`: here the roster still decides, so retrieval offering nothing costs no story its link,
+and failing the daily chain over a measurement would be the guard firing at the one time it
+has nothing to protect."""
 
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence

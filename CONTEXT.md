@@ -115,6 +115,17 @@ guardrail (ADR-0010).
 _Avoid_: retrieval metrics (that's the offline F1 gate), recall (health says nothing about
 whether the right film was found).
 
+**Hard breach**:
+A run whose zero-candidate rate exceeds the ceiling, finalizing it `failed` so the daily
+chain aborts and the deadman is pinged — **retrieval health**'s hard tier, and the thing that
+was built instead of the briefed cache-ratio alert (ADR-0010). Read only under
+`LINK_RETRIEVAL_MODE=on`, where retrieval decides, and only above a minimum story count,
+because a rate over a handful of stories cannot tell a collapse from a quiet news day. It
+watches a *rate*, which is exactly what a **total stage failure** refuses to do — two guards,
+kept apart on purpose.
+_Avoid_: alert (nothing is sent; the deadman notices a ping that never came), threshold
+breach (ambiguous with **T**, retrieval's score threshold).
+
 ### News sources
 
 **Trade feed**:

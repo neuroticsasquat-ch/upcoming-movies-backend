@@ -1,7 +1,9 @@
 """Reads that assemble candidate-retrieval health for the admin surface (NEU-997).
 
 The soft tier of the two-tier guard (ADR-0010): drift that does not warrant failing a run
-still needs somewhere to be visible. The hard-breach tier lands in M4.
+still needs somewhere to be visible. The hard tier is `link/retrieval/health.py`'s
+`hard_breach_error`, which fails the run outright — and is deliberately set to catch a
+collapse rather than drift, which is what leaves this surface a job to do.
 
 **Two tables, one figure.** `RunRetrievalHealth` carries the per-run rates, counted over
 every story retrieval ran over. Recall cannot come from there — it is measured against the
