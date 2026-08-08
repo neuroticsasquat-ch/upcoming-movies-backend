@@ -40,9 +40,19 @@ def _none(url: str = "u0") -> ValidationItem:
     )
 
 
-def _metrics(precision: float, recall: float) -> LinkMetrics:
+def _counts(tp: int, fp: int, *, about: int = 94) -> LinkMetrics:
+    """Metrics from whole-item counts, which is what the restated gate scores on.
+
+    `about` defaults to the fixture's own 94 scoreable items so the numbers in these tests
+    read against spec §5.8 directly."""
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / about
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-    return LinkMetrics(0, 0, 0, 0, precision, recall, f1)
+    return LinkMetrics(tp, fp, about - tp, 0, precision, recall, f1)
+
+
+def _coverage(hits: int, total: int) -> RetrievalCoverage:
+    return RetrievalCoverage(hits=hits, total=total, misses=(), out_of_catalog=0)
 
 
 def test_link_pairs_zips_predictions_onto_expected_ids():
@@ -85,42 +95,86 @@ def test_retrieval_report_names_misses_and_flags_the_aged_out_films():
     assert "3 more expected film(s) have aged out" in report
 
 
-def test_gate_passes_when_f1_holds_and_precision_holds():
-    verdict = evaluate_gate(_metrics(0.90, 0.80), _metrics(0.895, 0.80))
+def test_gate_passes_at_the_shipped_configuration():
+    """Spec §5.7 run D, the numbers ADR-0011 accepts: retrieval keeps every link the roster
+    made and adds exactly the ceiling's worth of false positives."""
+    verdict = evaluate_gate(_counts(67, 2), _counts(68, 5), coverage=_coverage(94, 94))
     assert verdict.passed
-    assert not verdict.masked_precision_loss
+    # One link gained, three wrong ones bought with it — the trade ADR-0011 accepts.
+    assert (verdict.excess_false_positives, verdict.lost_true_positives) == (3, -1)
+    assert verdict.at_the_boundary
+    assert not verdict.narrowing_regression
 
 
 def test_gate_passes_when_retrieval_beats_the_baseline():
-    """A gain is not a breach — gate #3 is one-sided ('within ~1 point of the baseline')."""
-    assert evaluate_gate(_metrics(0.80, 0.80), _metrics(0.90, 0.90)).passed
+    """A gain is not a breach — gate #3 is one-sided, and stays one-sided in items."""
+    assert evaluate_gate(_counts(60, 8), _counts(70, 2), coverage=_coverage(94, 94)).passed
 
 
-def test_gate_fails_when_f1_drops_past_the_tolerance():
-    verdict = evaluate_gate(_metrics(0.90, 0.90), _metrics(0.80, 0.80))
+def test_gate_fails_when_retrieval_adds_false_positives_past_the_ceiling():
+    verdict = evaluate_gate(_counts(67, 2), _counts(68, 6), coverage=_coverage(94, 94))
     assert not verdict.passed
-    assert verdict.f1_delta < -1.0
+    assert verdict.excess_false_positives == 4
+    assert not verdict.at_the_boundary
 
 
-def test_gate_fails_when_precision_falls_behind_a_steady_f1():
-    """The regression a naive F1 gate waves through: the model shown one film and a headline
-    about that film's untracked sibling links it anyway — precision down, recall up."""
-    verdict = evaluate_gate(_metrics(0.95, 0.70), _metrics(0.85, 0.766))
-    assert abs(verdict.f1_delta) < 1.0
-    assert verdict.masked_precision_loss
+def test_gate_fails_when_retrieval_loses_a_link_the_roster_made():
+    """3b. Losing links is the failure the item gate must not let a precision gain mask —
+    `link` is lossy, so a link not made today is never made."""
+    verdict = evaluate_gate(_counts(67, 2), _counts(66, 0), coverage=_coverage(94, 94))
+    assert not verdict.passed
+    assert verdict.lost_true_positives == 1
+
+
+def test_gate_fails_when_retrieval_never_offered_the_right_film():
+    """3a. The only part of gate #3 that is actually about the retrieval stage."""
+    verdict = evaluate_gate(_counts(67, 2), _counts(68, 5), coverage=_coverage(93, 94))
+    assert not verdict.passed
+    assert verdict.coverage_complete is False
+
+
+def test_gate_names_the_narrowing_regression_it_was_written_to_catch():
+    """Spec §4.3's failure, in items: retrieval links at least as much as the roster while
+    linking more stories it should not have. The points form of this test asserted a steady
+    F1 masking a precision fall; the item form is the same event, one resolution coarser."""
+    verdict = evaluate_gate(_counts(68, 12), _counts(70, 20), coverage=_coverage(94, 94))
+    assert verdict.narrowing_regression
     assert not verdict.passed
 
 
-def test_comparison_report_breaks_out_precision_and_flags_the_masked_loss():
+def test_gate_leaves_coverage_unscored_when_it_was_not_measured():
+    """`--mode retrieval` has no baseline and never reaches the gate; a verdict built without
+    coverage must say so rather than silently credit 3a."""
+    verdict = evaluate_gate(_counts(67, 2), _counts(68, 5))
+    assert verdict.coverage_complete is None
+
+
+def test_comparison_report_keeps_the_points_deltas_and_prints_the_item_verdict():
+    """ADR-0011: the points deltas stay in the report because §5.1a and §5.7 are written in
+    them, but they stop being the pass condition."""
+    nv = compute_news_value_metrics([(True, False, "reaction")])
+    report = format_comparison(
+        baseline=_counts(67, 2),
+        candidate=_counts(68, 5),
+        baseline_nv=nv,
+        candidate_nv=nv,
+        coverage=_coverage(94, 94),
+    )
+    assert "precision" in report and "recall" in report and "f1" in report
+    assert "false positives" in report and "candidate coverage" in report
+    assert "GATE: PASS" in report
+    assert "reaction" in report  # leaks broken out by category, both paths side by side
+
+
+def test_comparison_report_still_computes_metrics_from_scored_pairs():
+    """The scorer feeding the gate is unchanged — only what the gate does with it moved."""
     baseline = compute_link_metrics([(1, 1), (2, 2), (3, None)])
     candidate = compute_link_metrics([(1, 1), (2, 2), (3, None), (4, None)])
     nv = compute_news_value_metrics([(True, False, "reaction")])
     report = format_comparison(
         baseline=baseline, candidate=candidate, baseline_nv=nv, candidate_nv=nv
     )
-    assert "precision" in report and "recall" in report and "f1" in report
     assert "GATE" in report
-    assert "reaction" in report  # leaks broken out by category, both paths side by side
 
 
 class _LinkFirstCandidate:
