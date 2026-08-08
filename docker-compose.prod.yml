@@ -7,7 +7,34 @@ services:
       DATABASE_URL: "${DATABASE_URL}"
       ADMIN_TOKEN: "${ADMIN_TOKEN}"
       TMDB_API_KEY: "${TMDB_API_KEY}"
+      # Kept populated even though no stage routes here today: rollback off DeepInfra is then
+      # eight Coolify env vars and a restart, with no redeploy and no key to go and find.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      DEEPINFRA_API_KEY: "${DEEPINFRA_API_KEY}"
+      # All four stages run on DeepInfra (ADR-0012). The fallbacks below are the production
+      # values, not the code defaults — the code still defaults to Anthropic, because that is
+      # what a test or a script with no environment should get. Overriding any of these in
+      # Coolify is the rollback path, and boot-time validation (NEU-981) refuses an unknown
+      # `(provider, model)` pair or a missing credential rather than failing mid-publish.
+      #
+      # `cluster` is the one stage on the Pro tier. It carries the highest quality bar —
+      # ADR-0004, seven jobs in one call — and its failure mode is asymmetric: an over-merge
+      # swallows a beat out of the timeline entirely rather than showing something wrong.
+      LINK_PROVIDER: "${LINK_PROVIDER:-deepinfra}"
+      LINK_MODEL: "${LINK_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      CLUSTER_PROVIDER: "${CLUSTER_PROVIDER:-deepinfra}"
+      CLUSTER_MODEL: "${CLUSTER_MODEL:-deepseek-ai/DeepSeek-V4-Pro}"
+      SOURCE_JUDGE_PROVIDER: "${SOURCE_JUDGE_PROVIDER:-deepinfra}"
+      SOURCE_JUDGE_MODEL: "${SOURCE_JUDGE_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      SUMMARY_PROVIDER: "${SUMMARY_PROVIDER:-deepinfra}"
+      SUMMARY_MODEL: "${SUMMARY_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      # Both providers in scope are reasoning models, and reasoning tokens count against the
+      # reply ceiling while staying invisible in the returned text. The batch size of 20 was
+      # derived from a worst-case *Haiku* reply (config.py), so it is the number most likely to
+      # be wrong here: a truncated reply fails to parse and takes every story in the batch with
+      # it. Here as a knob so the answer is an env change, and `ingest.llm_call.truncated`
+      # (NEU-1014) is what says whether it needs turning.
+      LINK_BATCH_SIZE: "${LINK_BATCH_SIZE:-10}"
       LOG_LEVEL: "INFO"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
       # BE PUBLIC_BASE_URL must equal the FE public origin (VITE_PUBLIC_SITE_URL / Cloudflare
