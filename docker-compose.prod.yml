@@ -25,12 +25,11 @@ services:
       # makes the ping a no-op (the pipeline still runs).
       HEALTHCHECK_DAILY_URL: "${HEALTHCHECK_DAILY_URL:-}"
       HEALTHCHECK_HOURLY_URL: "${HEALTHCHECK_HOURLY_URL:-}"
-      # Candidate-retrieval rollout: `off` runs the roster path alone, `shadow` runs retrieval
-      # beside it recording what it would have offered, `on` lets retrieval decide. Passed
-      # through so the cutover — and the tuning of T and K — is a Coolify env change rather
-      # than a redeploy. The fallbacks repeat the code defaults deliberately, same reason as
-      # PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail to boot.
-      LINK_RETRIEVAL_MODE: "${LINK_RETRIEVAL_MODE:-off}"
+      # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
+      # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
+      # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
+      # to boot. `LINK_RETRIEVAL_MODE` was retired with the roster path (NEU-1004) — retrieval
+      # is now the only link path, and rollback is a revert and redeploy (spec §5.5).
       LINK_RETRIEVAL_THRESHOLD: "${LINK_RETRIEVAL_THRESHOLD:-0.5}"
       LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-25}"
       # The retrieval-health hard breach (NEU-1002): above this zero-candidate rate the link

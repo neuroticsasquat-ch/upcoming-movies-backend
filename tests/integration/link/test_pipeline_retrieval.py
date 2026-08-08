@@ -1,7 +1,7 @@
-"""The retrieval link path in the `link` pipeline (NEU-999): `LINK_RETRIEVAL_MODE=on`
-decides from each story's own candidate set, rejects the zero-candidate majority without a
-model call, and keeps those rejects out of `StageCounts.processed` so the one guard on the
-one lossy stage survives an outage."""
+"""The retrieval link path in the `link` pipeline (NEU-999) — since NEU-1004 the *only*
+link path. It decides from each story's own candidate set, rejects the zero-candidate
+majority without a model call, and keeps those rejects out of `StageCounts.processed` so the
+one guard on the one lossy stage survives an outage."""
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -10,7 +10,6 @@ import pytest
 from sqlalchemy import select
 
 from upmovies.catalog.models import Film
-from upmovies.config import LinkRetrievalMode
 from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
@@ -86,7 +85,7 @@ async def _catalog(session, *, films: dict[int, str], stories: dict[str, str]) -
     return by_title
 
 
-async def _run(session, *, client=None, batch_size=10, mode: LinkRetrievalMode = "on", **kwargs):
+async def _run(session, *, client=None, batch_size=10, **kwargs):
     run_id = await create_run(session, kind="link")
     await session.commit()
     await run_link_ingest(
@@ -98,7 +97,6 @@ async def _run(session, *, client=None, batch_size=10, mode: LinkRetrievalMode =
         recency_days=45,
         batch_size=batch_size,
         floor=0.7,
-        retrieval_mode=mode,
         **kwargs,
     )
     return run_id
@@ -417,24 +415,3 @@ class TestHardBreach:
         assert run.status == "failed"
         assert run.error and "link stage produced nothing" in run.error
         assert "no candidates" in run.error
-
-    async def test_the_guard_does_not_read_the_roster_path(self, session):
-        """Under `shadow` the roster still decides, so retrieval offering nothing costs no
-        story a link — failing the run on it would abort the daily chain over a measurement.
-        The guard is scoped to the mode where retrieval is the path."""
-        await _catalog(
-            session,
-            films={1: "Runner"},
-            stories={
-                "https://e/miss-a": "Unrelated television coverage",
-                "https://e/miss-b": "A games console retrospective",
-            },
-        )
-        run_id = await _run(
-            session,
-            mode="shadow",
-            retrieval_max_zero_candidate_rate=0.0,
-            retrieval_health_min_stories=1,
-        )
-
-        assert (await _run_row(session, run_id)).status == "succeeded"

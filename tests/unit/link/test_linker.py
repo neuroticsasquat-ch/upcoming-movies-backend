@@ -6,17 +6,13 @@ import pytest
 
 from upmovies.link.linker import (
     StoryCandidates,
-    apply_link_decisions,
     apply_retrieval_link_decisions,
-    build_link_request,
     build_retrieval_link_request,
     link_retrieval_story_batch,
-    link_story_batch,
     reject_zero_candidate_stories,
 )
 from upmovies.link.retrieval.index import indexed_film
 from upmovies.link.retrieval.select import CandidateSet, ScoredCandidate
-from upmovies.link.roster import Roster, RosterEntry
 from upmovies.llm.client import CallLog
 from upmovies.news.models import Story
 
@@ -33,166 +29,16 @@ class FakeClient:
         return calls.record(CallResult(text=self._response))
 
 
-def _roster(film_id):
-    entry = RosterEntry(
-        film_id=film_id, title="Runner", original_title=None, year=2026, overview=None, genres=[]
-    )
-    return Roster(entries=[entry], text='#1 "Runner" (2026)')
-
-
 def _story(title="A headline", summary=""):
     return Story(
         id=uuid4(), source="X", url=f"https://e/{uuid4()}", title=title, raw={"summary": summary}
     )
 
 
-async def _run(response, *, floor=0.7):
-    film_id = uuid4()
-    story = _story()
-    client = FakeClient(response(str(story.id)))
-    result = await link_story_batch(
-        client=client,
-        model="m",
-        roster=_roster(film_id),
-        stories=[story],
-        floor=floor,
-        run_date=date(2026, 6, 25),
-        calls=CallLog(),
-    )
-    return story, film_id, client, result
-
-
-async def test_about_high_confidence_links():
-    story, film_id, _, result = await _run(
-        lambda sid: json.dumps([{"id": sid, "film": 1, "confidence": 0.95, "reason": "about"}])
-    )
-    assert result.linked == 1 and result.rejected == 0
-    assert story.link_status == "linked"
-    assert story.film_id == film_id
-    assert story.link_confidence == 0.95
-    assert story.linked_at is not None
-    assert story.link_note is None
-
-
-async def test_mention_is_rejected():
-    story, _, _, result = await _run(
-        lambda sid: json.dumps([{"id": sid, "film": 1, "confidence": 0.9, "reason": "mention"}])
-    )
-    assert result.rejected == 1
-    assert story.link_status == "rejected"
-    assert story.film_id is None
-    assert story.link_confidence is None
-    assert story.link_note == "mention"
-
-
-async def test_below_floor_is_rejected():
-    story, _, _, _ = await _run(
-        lambda sid: json.dumps([{"id": sid, "film": 1, "confidence": 0.4, "reason": "about"}])
-    )
-    assert story.link_status == "rejected"
-    assert story.link_note == "below-floor"
-
-
-async def test_no_match_is_rejected():
-    story, _, _, _ = await _run(
-        lambda sid: json.dumps([{"id": sid, "film": None, "confidence": 0.0, "reason": "no-match"}])
-    )
-    assert story.link_status == "rejected"
-    assert story.link_note == "no-match"
-
-
-async def test_roster_is_sent_as_cached_system_block():
-    _, _, client, _ = await _run(
-        lambda sid: json.dumps([{"id": sid, "film": None, "confidence": 0.0, "reason": "no-match"}])
-    )
-    system = client.requests[0]["system"]
-    assert system[0]["cache_control"] == {"type": "ephemeral"}
-    assert "Runner" in system[0]["text"]
-
-
-async def test_response_wrapped_in_prose_is_still_parsed():
-    story, film_id, _, result = await _run(
-        lambda sid: (
-            "Here you go:\n```json\n"
-            + json.dumps([{"id": sid, "film": 1, "confidence": 0.9, "reason": "about"}])
-            + "\n```"
-        )
-    )
-    assert result.linked == 1
-    assert story.link_status == "linked"
-
-
-async def test_omitted_story_is_rejected_no_decision():
-    story, _, _, result = await _run(lambda sid: json.dumps([]))  # model returned nothing
-    assert result.rejected == 1
-    assert story.link_status == "rejected"
-    assert story.link_note == "no-decision"
-
-
-def test_build_link_request_uses_cached_roster_and_story_payload():
-    roster = _roster(uuid4())
-    stories = [_story(title="Runner news")]
-    system, messages = build_link_request(roster, stories, date(2026, 6, 25))
-    # cached roster system block unchanged apart from the constant's new sentence
-    assert system[0]["cache_control"] == {"type": "ephemeral"}
-    payload = json.loads(messages[0]["content"])
-    assert payload["as_of_date"] == "2026-06-25"
-    assert isinstance(payload["stories"], list)
-    assert payload["stories"][0]["title"] == "Runner news"
-
-
-def test_apply_link_decisions_links_about_high_confidence():
-    film_id = uuid4()
-    story = _story()
-    raw = json.dumps([{"id": str(story.id), "film": 1, "confidence": 0.95, "reason": "about"}])
-    result = apply_link_decisions(raw=raw, stories=[story], roster=_roster(film_id), floor=0.7)
-    assert result.linked == 1
-    assert story.link_status == "linked"
-    assert story.film_id == film_id
-
-
-async def test_not_news_with_category_is_rejected():
-    story, _, _, result = await _run(
-        lambda sid: json.dumps(
-            [
-                {
-                    "id": sid,
-                    "film": 1,
-                    "confidence": 0.9,
-                    "reason": "not-news",
-                    "category": "reaction",
-                }
-            ]
-        )
-    )
-    assert result.rejected == 1 and result.linked == 0
-    assert story.link_status == "rejected"
-    assert story.film_id is None
-    assert story.link_confidence is None
-    assert story.link_note == "not-news:reaction"
-
-
-async def test_not_news_without_category_is_rejected():
-    story, _, _, _ = await _run(
-        lambda sid: json.dumps([{"id": sid, "film": 1, "confidence": 0.9, "reason": "not-news"}])
-    )
-    assert story.link_status == "rejected"
-    assert story.link_note == "not-news"
-
-
-async def test_not_news_unknown_category_falls_back_to_bare_note():
-    story, _, _, _ = await _run(
-        lambda sid: json.dumps(
-            [{"id": sid, "film": 1, "confidence": 0.9, "reason": "not-news", "category": "bogus"}]
-        )
-    )
-    assert story.link_note == "not-news"
-
-
 def test_instructions_warn_against_interview_enthusiasm_headlines():
-    from upmovies.link.linker import _INSTRUCTIONS
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
-    lowered = _INSTRUCTIONS.lower()
+    lowered = _RETRIEVAL_INSTRUCTIONS.lower()
     assert "teases" in lowered
     assert "reacts to" in lowered
     assert "no new production fact" in lowered
@@ -200,23 +46,10 @@ def test_instructions_warn_against_interview_enthusiasm_headlines():
     assert "do not currently hold" in lowered
 
 
-async def test_not_news_downstream_recirculation_is_rejected():
-    film_id = uuid4()
-    story = _story(title="Kim Kardashian's son Psalm makes acting debut in Angry Birds Movie 3")
-    raw = (
-        '[{"id": "' + str(story.id) + '", "film": 1, "confidence": 0.0, '
-        '"reason": "not-news", "category": "downstream"}]'
-    )
-    result = apply_link_decisions(raw=raw, stories=[story], roster=_roster(film_id), floor=0.7)
-    assert result.linked == 0
-    assert story.link_status == "rejected"
-    assert story.link_note == "not-news:downstream"
-
-
 def test_instructions_flag_recirculated_old_news():
-    from upmovies.link.linker import _INSTRUCTIONS
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
-    text = _INSTRUCTIONS.lower()
+    text = _RETRIEVAL_INSTRUCTIONS.lower()
     assert "recirculat" in text or "re-report" in text or "already-known" in text
     assert "publication date does not make it new" in text or "fresh publication date" in text
 
@@ -225,29 +58,29 @@ def test_instructions_flag_release_calendar_listicles():
     """NEU-451: weekly/monthly release-calendar listicles (a multi-film list where the
     tracked film is one entry among many) are not-news:roundup even when they state a
     release date — a calendar restating a scheduled date is not an announcement."""
-    from upmovies.link.linker import _INSTRUCTIONS
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
-    text = _INSTRUCTIONS.lower()
+    text = _RETRIEVAL_INSTRUCTIONS.lower()
     assert "listicle" in text
     assert "one entry among many" in text
     assert "release-date announcement" in text
 
 
 def test_instructions_cover_sibling_spinoff_trap():
-    from upmovies.link.linker import _INSTRUCTIONS
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
-    lowered = _INSTRUCTIONS.lower()
+    lowered = _RETRIEVAL_INSTRUCTIONS.lower()
     # A distinct, identified sibling film (spin-off/sequel/prequel) that is not
-    # itself in the roster must be named as a no-match trap, distinct from the
+    # itself among the story's candidates must be named as a no-match trap, distinct from the
     # existing "the next Batman" generic-reference rule.
     assert "spin-off" in lowered
     assert "not itself tracked" in lowered
 
 
 def test_instructions_cover_original_to_sequel_trap():
-    from upmovies.link.linker import _INSTRUCTIONS
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
-    lowered = _INSTRUCTIONS.lower()
+    lowered = _RETRIEVAL_INSTRUCTIONS.lower()
     # The sibling trap must run BOTH directions: a story about the original/earlier film
     # is not its tracked sequel merely because they share a title stem.
     assert "title stem" in lowered
@@ -255,9 +88,9 @@ def test_instructions_cover_original_to_sequel_trap():
 
 
 def test_instructions_cover_medium_mismatch_trap():
-    from upmovies.link.linker import _INSTRUCTIONS
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
-    lowered = _INSTRUCTIONS.lower()
+    lowered = _RETRIEVAL_INSTRUCTIONS.lower()
     # NEU-483 #5: a story about a same-franchise TV series/game is not "about" the
     # tracked film merely because it shares characters — that's a different production.
     assert "different medium" in lowered
@@ -348,8 +181,9 @@ def test_retrieval_instructions_ask_for_a_per_story_index():
 
 def test_retrieval_instructions_retain_the_franchise_traps_in_full():
     """The ticket is explicit: a smaller candidate set makes these paragraphs more
-    necessary, not less. Both prompts render from one shared block so they cannot drift."""
-    from upmovies.link.linker import _INSTRUCTIONS, _RETRIEVAL_INSTRUCTIONS
+    necessary, not less. Rendered from `_CLASSIFICATION_RULES`, which outlived the roster
+    prompt it was shared with (NEU-1004) — the text is unchanged."""
+    from upmovies.link.linker import _RETRIEVAL_INSTRUCTIONS
 
     lowered = _RETRIEVAL_INSTRUCTIONS.lower()
     for phrase in (
@@ -365,10 +199,8 @@ def test_retrieval_instructions_retain_the_franchise_traps_in_full():
         "one entry among many",
     ):
         assert phrase in lowered, phrase
-    # And the definitions block is the same one, word for word: both prompts render from
-    # `_CLASSIFICATION_RULES`, so this is the shared text, not a second copy of it.
     assert "the story is not about any tracked film. most stories are no-match" in lowered
-    assert _INSTRUCTIONS.count("franchise trap runs in BOTH directions") == 1
+    assert _RETRIEVAL_INSTRUCTIONS.count("franchise trap runs in BOTH directions") == 1
 
 
 def test_retrieval_request_does_not_escape_non_latin_titles():
@@ -404,8 +236,8 @@ class TestRetrievalIndexIsLocalToTheStory:
         )
 
         assert result.linked == 2
-        # The whole difference from the global roster index: the same number names a
-        # different film in each story's list.
+        # The whole difference from the deleted global roster index: the same number
+        # names a different film in each story's list.
         assert first.film_id == runner.film_ids[0]
         assert second.film_id == sunup.film_ids[0]
         assert first.film_id != second.film_id
@@ -467,7 +299,7 @@ class TestRetrievalIndexIsLocalToTheStory:
         assert story.link_note == "no-match"
 
 
-class TestRetrievalSharesTheRosterRules:
+class TestDecisionRules:
     def test_below_floor_is_rejected(self):
         story = _story()
         batch = _batch((story, _candidates("Runner")))
@@ -478,6 +310,22 @@ class TestRetrievalSharesTheRosterRules:
 
         assert story.link_status == "rejected"
         assert story.link_note == "below-floor"
+
+    def test_not_news_downstream_recirculation_is_rejected(self):
+        story = _story(title="Kim Kardashian's son Psalm makes acting debut in Angry Birds Movie 3")
+        batch = _batch((story, _candidates("The Angry Birds Movie 3")))
+
+        result = apply_retrieval_link_decisions(
+            raw=_reply(
+                _decision(story, 1, confidence=0.0, reason="not-news", category="downstream")
+            ),
+            batch=batch,
+            floor=0.7,
+        )
+
+        assert result.linked == 0
+        assert story.link_status == "rejected"
+        assert story.link_note == "not-news:downstream"
 
     def test_not_news_keeps_its_category(self):
         story = _story()
@@ -565,8 +413,8 @@ class TestLinkRetrievalStoryBatch:
         assert client.requests == []
 
     async def test_an_unusable_reply_is_recorded_as_a_parse_failure_and_raised(self):
-        # Same contract as the roster path: `link` raises on unusable output rather than
-        # swallowing it, and the parse outcome is recorded either way.
+        # `link` raises on unusable output rather than swallowing it, and the parse
+        # outcome is recorded either way.
         story = _story()
         calls = CallLog()
         client = FakeClient("not json at all")

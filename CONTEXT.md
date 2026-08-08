@@ -76,6 +76,15 @@ distinguishable from the `no-match` the model never actually reached. Expressibl
 because numbering is per story; the global roster had no local scope to fall outside of.
 _Avoid_: invalid index, hallucinated film (it may name a real film — just not this story's).
 
+**Labelable set**:
+The films a validation-fixture row may name as its `about` subject: the tracked films active
+on the fixture's pin date, and no others. It exists because it must equal the set the eval
+harness can *score* against — label a film outside it and `validate_linking` aborts rather than
+report a miss it would read as the link path's failure. Enforced by one shared
+`indexed_tmdb_ids`, so the labeling scripts and the harness cannot drift apart.
+_Avoid_: roster (that was the full-catalog prompt prefix, and it is deleted), tracked films
+(the catalog holds released ones too), candidate set (that is per story, and narrower).
+
 **Retrieval miss**:
 The correct film absent from a story's candidate set. The failure mode retrieval introduces,
 and an unforgiving one: **link** is lossy, so a missed story is not linked late, it is lost.
@@ -91,20 +100,24 @@ instead. (The run row's own `items_processed` does count it: the stage really di
 the story. Only the total-failure guard reads `StageCounts`.)
 _Avoid_: auto-reject, unmatched, filtered.
 
-**Shadow mode**:
-The middle state of `LINK_RETRIEVAL_MODE`, between `off` and `on`: the roster path still
-decides, while retrieval runs beside it and records what it *would* have offered. Because
-retrieval is pure and needs no model call, this measures recall against the incumbent on live
-traffic at full scale for no added cost — it is where the cutover evidence comes from.
-_Avoid_: dry run (it records, and the records are the point), dark launch, A/B test (nothing is
-split — both paths see every story).
+**Shadow mode** (historical):
+The middle state of the retired `LINK_RETRIEVAL_MODE`, between `off` and `on`: the roster path
+still decided, while retrieval ran beside it and recorded what it *would* have offered. Because
+retrieval is pure and needs no model call, this measured recall against the incumbent on live
+traffic at full scale for no added cost — it is where the cutover evidence came from. The mode,
+the flag and the roster were all deleted at NEU-1004; the term survives because the evidence and
+the **retrieval probe** rows it produced are still read.
+_Avoid_: dry run (it recorded, and the records were the point), dark launch, A/B test (nothing
+was split — both paths saw every story).
 
-**Retrieval probe**:
+**Retrieval probe** (historical):
 One shadow-mode observation: for a story the **roster linked**, where retrieval put that pick —
 retrieved or not, at what rank, at what score, out of how many candidates. One row per linked
 story, because a story both paths rejected is agreement with nothing to adjudicate. Its recall
 rate is *not* truth on its own: the roster makes false positives, so retrieval declining to
-surface one is a win that a bare percentage scores as a loss.
+surface one is a win that a bare percentage scores as a loss. Nothing has written one since the
+cutover — there is no second opinion left to adjudicate against — but `/admin/runs` still reads
+the rows for the runs that produced them.
 _Avoid_: sample, trace, shadow result (too vague — health is a shadow result too).
 
 **Retrieval health**:
@@ -118,9 +131,9 @@ whether the right film was found).
 **Hard breach**:
 A run whose zero-candidate rate exceeds the ceiling, finalizing it `failed` so the daily
 chain aborts and the deadman is pinged — **retrieval health**'s hard tier, and the thing that
-was built instead of the briefed cache-ratio alert (ADR-0010). Read only under
-`LINK_RETRIEVAL_MODE=on`, where retrieval decides, and only above a minimum story count,
-because a rate over a handful of stories cannot tell a collapse from a quiet news day. It
+was built instead of the briefed cache-ratio alert (ADR-0010). Read on every `link` run —
+retrieval is the only link path since NEU-1004 — and only above a minimum story count, because
+a rate over a handful of stories cannot tell a collapse from a quiet news day. It
 watches a *rate*, which is exactly what a **total stage failure** refuses to do — two guards,
 kept apart on purpose.
 _Avoid_: alert (nothing is sent; the deadman notices a ping that never came), threshold

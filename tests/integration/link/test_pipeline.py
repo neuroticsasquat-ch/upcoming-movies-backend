@@ -217,7 +217,9 @@ async def test_failed_chunk_stays_pending_others_commit(session, unparseable):
     session.add_all(
         [
             await _story("https://e/good", published_offset_days=1, title="Runner news"),
-            await _story("https://e/bad", published_offset_days=1, title="FAIL news"),
+            # "Runner" so retrieval offers a candidate and the call is actually made —
+            # a zero-candidate story is rejected without one (ADR-0009).
+            await _story("https://e/bad", published_offset_days=1, title="FAIL Runner news"),
         ]
     )
     await session.commit()
@@ -433,7 +435,10 @@ async def test_link_request_mapping(session):
     for c in calls:
         assert c["model"] == "claude-haiku-4-5"
         assert c["max_tokens"] == 2048  # == linker._MAX_TOKENS
-        assert c["system"][0]["cache_control"] == {"type": "ephemeral"}
+        # Not cached: the retrieval prefix is instructions only, ~1.5k tokens, below Haiku
+        # 4.5's 4096-token cache floor. Prompt caching left production with the roster
+        # (NEU-1004, spec §5.5).
+        assert "cache_control" not in c["system"][0]
 
 
 async def test_cluster_request_mapping(session):

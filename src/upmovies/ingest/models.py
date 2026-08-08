@@ -170,6 +170,11 @@ class LinkRetrievalProbe(Base):
     """One row per story the **roster linked**, recording what candidate retrieval would
     have offered for it while running in shadow.
 
+    **Historical from the cutover on.** NEU-1004 deleted the roster path and the shadow
+    observer with it, so nothing writes this table any more. It is kept because the rows are
+    the cutover evidence and `/admin/runs` still reads them for the runs that produced them;
+    dropping the table is a separate decision from deleting the code that filled it.
+
     Grain follows the `LLMCall` precedent rather than the per-run aggregate shape of
     `RunLLMUsage`, because the cutover gate commits to hand-adjudicating a sample of
     disagreements — the roster makes false positives, so retrieval declining to surface one
@@ -251,8 +256,8 @@ class RunRetrievalHealth(Base):
     while every figure here is drawn from *all* stories retrieval ran over — the
     zero-candidate majority (ADR-0009) contributes nothing to the probe by design.
 
-    Measurement only. The hard-breach guard that fails a run on these rates is held to M4
-    so it cannot start failing runs while T and K are still untuned (ADR-0010)."""
+    Unlike `LinkRetrievalProbe`, this row outlived the roster: every `link` run still writes
+    one, and the hard-breach guard (NEU-1002, ADR-0010) reads the same numbers."""
 
     __tablename__ = "run_retrieval_health"
     __table_args__ = (

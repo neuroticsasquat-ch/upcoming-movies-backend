@@ -219,7 +219,6 @@ def test_settings_link_release_change_window_days_override_from_env(monkeypatch)
 
 
 _RETRIEVAL_ENV = (
-    "LINK_RETRIEVAL_MODE",
     "LINK_RETRIEVAL_THRESHOLD",
     "LINK_RETRIEVAL_MAX_CANDIDATES",
     "LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE",
@@ -232,12 +231,11 @@ def _clear_retrieval(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def test_settings_link_retrieval_defaults_to_off(monkeypatch):
-    """All three settings default, so no local or test run needs new env (NEU-995)."""
+def test_settings_link_retrieval_tuning_defaults(monkeypatch):
+    """Both settings default, so no local or test run needs new env (NEU-995)."""
     _set_required(monkeypatch)
     _clear_retrieval(monkeypatch)
     s = Settings()  # type: ignore[call-arg]
-    assert s.link_retrieval_mode == "off"
     # Tuned at NEU-1001 against 98,662 real stories and a 1,226-film catalog: T=0.5 is the
     # top of the flat region (every reachable roster pick scores 0.5 or better) and K=25
     # clears both the p99 candidate set of 18 and the deepest pick seen, at rank 21.
@@ -256,23 +254,6 @@ def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.link_retrieval_threshold == DEFAULT_SCORE_THRESHOLD
     assert s.link_retrieval_max_candidates == DEFAULT_CANDIDATE_LIMIT
-
-
-@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
-def test_settings_link_retrieval_mode_accepts_each_state(monkeypatch, mode):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("LINK_RETRIEVAL_MODE", mode)
-    s = Settings()  # type: ignore[call-arg]
-    assert s.link_retrieval_mode == mode
-
-
-@pytest.mark.parametrize("mode", ["enabled", "true", "Shadow", ""])
-def test_settings_link_retrieval_mode_rejects_anything_else(monkeypatch, mode):
-    """A typo'd mode must fail at startup, not silently fall back to the roster path."""
-    _set_required(monkeypatch)
-    monkeypatch.setenv("LINK_RETRIEVAL_MODE", mode)
-    with pytest.raises(ValidationError):
-        Settings()  # type: ignore[call-arg]
 
 
 def test_settings_link_retrieval_tuning_overrides_from_env(monkeypatch):

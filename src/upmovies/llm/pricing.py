@@ -1,6 +1,7 @@
-"""Single source of truth for Claude API cost math. Lifted verbatim from the
+"""Single source of truth for Claude API cost math. Lifted out of the offline
 `measure_link_cost` script (NEU-297) so the measurement harness and production telemetry
-(NEU-375) price identical dollars from the same constants. Adding a new model means adding
+(NEU-375) would price identical dollars from the same constants; that script was retired
+with the roster path (NEU-1004) and the constants stay here. Adding a new model means adding
 its `Rates` to `_RATES` — `rates_for` raises `KeyError` on an unknown model rather than
 silently mispricing it."""
 

@@ -6,17 +6,19 @@ still needs somewhere to be visible. The hard tier is `link/retrieval/health.py`
 collapse rather than drift, which is what leaves this surface a job to do.
 
 **Two tables, one figure.** `RunRetrievalHealth` carries the per-run rates, counted over
-every story retrieval ran over. Recall cannot come from there — it is measured against the
+every story retrieval ran over. Recall cannot come from there — it was measured against the
 roster's picks, which live one row per story in `LinkRetrievalProbe`. So the recall half is
-a grouped aggregate, joined back in here, rather than a column.
+a grouped aggregate, joined back in here, rather than a column. That half is **historical**:
+the roster path was deleted at NEU-1004, so no run since the cutover writes a probe row and
+recall reads `None` for all of them. The rates carry on.
 
 **The health row is what the surface keys off.** It is written even for a run with nothing
 pending, so a run with no row almost always did not run retrieval at all — and gets `None`,
 not a row of zeroes that would read as a run whose retrieval found nothing. The exception is
-that `ShadowObserver.record_health` is best-effort by contract: a run whose health write
-failed leaves probe rows behind an absent row, and reads here as a run shadow never touched.
-Accepted rather than papered over — the writer's degradation is deliberate, and the same
-outage would have taken the probe writes with it.
+that the health write is best-effort by contract: a run whose write failed leaves probe rows
+behind an absent row, and reads here as a run retrieval never touched. Accepted rather than
+papered over — the writer's degradation is deliberate, and the same outage would have taken
+the probe writes with it.
 
 Counting the probes in SQL rather than loading them: a page of 200 runs at tens of probe
 rows each is thousands of rows fetched to be immediately reduced to two integers per run.

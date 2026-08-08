@@ -1,18 +1,7 @@
 from functools import lru_cache
-from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# The candidate-retrieval rollout states (NEU-995). Three rather than a boolean because the
-# middle one is where the cutover evidence comes from: retrieval is pure and free, so it can
-# run beside the incumbent on live traffic at no added LLM cost.
-#
-#   off     roster path only — current behaviour.
-#   shadow  the roster path still decides; retrieval runs beside it and records what it
-#           *would* have offered. No behaviour change.
-#   on      retrieval decides; the roster path is not built.
-LinkRetrievalMode = Literal["off", "shadow", "on"]
 
 
 class Settings(BaseSettings):
@@ -58,8 +47,6 @@ class Settings(BaseSettings):
     link_release_change_window_days: int = Field(
         default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
     )
-    # Defaults to `off`, so no local or test run needs new env to keep current behaviour.
-    link_retrieval_mode: LinkRetrievalMode = Field(default="off", alias="LINK_RETRIEVAL_MODE")
     # T and K for `link.retrieval.select`, tuned at NEU-1001 over 98,662 real stories
     # against the 1,226-film production catalog (design spec §5.2). They stay settings so
     # the next catalog expansion is answered by config rather than by a deploy. They mirror

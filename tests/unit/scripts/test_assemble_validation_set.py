@@ -1,14 +1,14 @@
 """Assembling a re-pinned, enlarged validation set out of old labels and new proposals.
 
 Two things this has to get right, and both are about the pin. Carried-forward `about` rows
-whose film has released since are no longer labelable as `about` — the roster excludes the
-film, so neither link path can reach it and the row would score as a miss for whichever path
-is under test. And the `none` class has to be subsampled deterministically, or the fixture
+whose film has released since are no longer labelable as `about` — the active-film filter
+excludes the film, so the link path cannot reach it and the row would score as a miss for the
+path under test. And the `none` class has to be subsampled deterministically, or the fixture
 stops being reproducible from its recipe.
 """
 
 from scripts.assemble_validation_set import (
-    demote_unrostered,
+    demote_unlabelable,
     select_none_rows,
     summarize,
 )
@@ -30,18 +30,18 @@ def _about(tmdb_id: int, **kw) -> dict:
     }
 
 
-def test_an_about_row_whose_film_is_still_rostered_is_untouched():
+def test_an_about_row_whose_film_is_still_labelable_is_untouched():
     row = _about(111)
 
-    assert demote_unrostered(row, {111}) == row
+    assert demote_unlabelable(row, {111}) == row
 
 
 def test_an_about_row_whose_film_has_released_becomes_an_untracked_none():
-    """Not a relabel of convenience: at the new pin the film genuinely is not in the roster,
-    and the fixture's own definition of `none` is roster-relative. The row keeps its text and
+    """Not a relabel of convenience: at the new pin the film genuinely is not tracked, and
+    the fixture's own definition of `none` is relative to that set. The row keeps its text and
     becomes a hard negative that exercises scope filtering — which the 2026-07-01 pin could
     not, since at that date `active_film_clause` excluded nothing (spec §5.1a)."""
-    row = demote_unrostered(_about(222), {111})
+    row = demote_unlabelable(_about(222), {111})
 
     assert row["relation"] == "none"
     assert row["expected_film_tmdb_id"] is None
@@ -53,7 +53,7 @@ def test_demotion_clears_every_about_only_field():
     """The schema refuses a non-`about` row carrying them, so a partial demotion fails to
     load rather than mislabeling quietly — but failing to load a 1,000-row fixture is a bad
     way to find out."""
-    row = demote_unrostered(
+    row = demote_unlabelable(
         _about(222, is_production_news=False, exclusion_category="reaction"), set()
     )
 
@@ -66,7 +66,7 @@ def test_demotion_clears_every_about_only_field():
 def test_a_row_that_is_already_none_is_left_alone():
     row = {"url": "https://e/x", "relation": "none", "expected_film_tmdb_id": None}
 
-    assert demote_unrostered(row, set()) == row
+    assert demote_unlabelable(row, set()) == row
 
 
 def test_none_rows_are_subsampled_to_the_target_count():

@@ -19,13 +19,13 @@ production-news axis where the real corpus was thin.
 **Re-pinning is what makes carrying non-trivial.** The pin moves forward to the labeling
 date, which is the only date at which no story in the corpus is in the fixture's future and
 at which `films_ingested_after` is empty. But a later pin excludes more films: everything
-that released between the old pin and the new one leaves the roster. An `about` row naming
-one of those is unscoreable — both link paths filter the film out, so the row reads as a
-recall failure of whichever path is under test, and `validate_linking._check_coverage` aborts
-the run rather than report it. Those rows are **demoted to `none`**, which is not a
+that released between the old pin and the new one leaves the labelable set. An `about` row
+naming one of those is unscoreable — the link path filters the film out, so the row reads as
+a recall failure of the path under test, and `validate_linking._check_coverage` aborts the
+run rather than report it. Those rows are **demoted to `none`**, which is not a
 convenience: `none` means "not about any film tracked *at labeling time*", and at the new pin
 that is exactly true of them. They become hard negatives — real movie news, lexically strong
-against a title the roster no longer holds — and they are the first rows this fixture has
+against a title the catalog no longer tracks — and they are the first rows this fixture has
 ever had that exercise scope filtering at all (spec §5.1a: at the 2026-07-01 pin
 `active_film_clause` excluded nothing).
 """
@@ -44,11 +44,11 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.db import SessionLocal
 
-# NEU-1004 deletes `build_roster`. Both this script and the proposer read the roster to decide
-# what may be labeled, so both follow it to the ported implementation — one import site each,
-# and `roster_tmdb_ids` shared rather than copied, so the deletion surface is as small as the
-# job allows.
-from upmovies.link.roster import build_roster, roster_tmdb_ids
+# NEU-1004 deleted `build_roster`. Both this script and the proposer read the active catalog
+# to decide what may be labeled, so both followed it to the retrieval index — one import site
+# each, and `indexed_tmdb_ids` shared rather than copied. Same `active_film_clause`, same
+# `as_of`, so the labelable set is unchanged.
+from upmovies.link.retrieval.index import build_candidate_index, indexed_tmdb_ids
 
 # `about : none` in the assembled set. Held near the 94:193 the 302-row fixture carried so
 # the new numbers stay readable against §5.7/§5.8's, which were taken at that mix.
@@ -58,13 +58,13 @@ DEFAULT_SEED = "neu-1012"
 _ABOUT_ONLY_FIELDS = ("event_type", "event_group", "is_production_news", "exclusion_category")
 
 
-def demote_unrostered(row: dict, rostered: set[int]) -> dict:
+def demote_unlabelable(row: dict, labelable: set[int]) -> dict:
     """An `about` row whose film the pin excludes becomes an `untracked_film` `none` row.
 
     Every `about`-only field is cleared, not just the film id: `ValidationItem` rejects a
     non-`about` row that still carries `is_production_news` or `exclusion_category`, and a
     fixture that fails to load is a poor way to discover a half-finished demotion."""
-    if row.get("relation") != "about" or row.get("expected_film_tmdb_id") in rostered:
+    if row.get("relation") != "about" or row.get("expected_film_tmdb_id") in labelable:
         return row
     return to_untracked_none(row)
 
@@ -120,22 +120,22 @@ def summarize(rows: Iterable[dict]) -> dict[str, int]:
     }
 
 
-async def _rostered_tmdb_ids(as_of: date) -> set[int]:
+async def _labelable_tmdb_ids(as_of: date) -> set[int]:
     async with SessionLocal() as session:
-        roster = await build_roster(session, as_of=as_of)
+        index = await build_candidate_index(session, as_of=as_of)
         tmdb_by_film_id = {
             f.id: f.tmdb_id for f in (await session.execute(select(Film))).scalars().all()
         }
-    return roster_tmdb_ids(roster.entries, tmdb_by_film_id)
+    return indexed_tmdb_ids(index.films, tmdb_by_film_id)
 
 
 async def main(args: argparse.Namespace) -> None:
-    rostered = await _rostered_tmdb_ids(args.as_of)
-    print(f"roster at {args.as_of}: {len(rostered)} films", file=sys.stderr)
+    labelable = await _labelable_tmdb_ids(args.as_of)
+    print(f"labelable at {args.as_of}: {len(labelable)} films", file=sys.stderr)
 
     carried_raw = json.loads(Path(args.carry).read_text())
     carried_rows = carried_raw["items"] if isinstance(carried_raw, dict) else carried_raw
-    carried = [demote_unrostered(row, rostered) for row in carried_rows]
+    carried = [demote_unlabelable(row, labelable) for row in carried_rows]
     # Counted by comparing input to output rather than by testing `untracked_film` on the
     # result: the carried set already holds `untracked_film` rows of its own, so carrying the
     # flag is not the same as having been demoted by this run.
@@ -151,7 +151,7 @@ async def main(args: argparse.Namespace) -> None:
     proposed = [row for row in proposed if row["url"] not in seen]
 
     positives = [row for row in proposed if row["relation"] in ("about", "mention")]
-    # An `about` proposal the roster guard stripped is unusable as-is: the schema requires a
+    # An `about` proposal the labelable-set guard stripped is unusable as-is: the schema requires a
     # film id. Keep it for review rather than dropping it — it is usually a real story about
     # an untracked film, which is the `untracked_film` coverage signal.
     positives = [

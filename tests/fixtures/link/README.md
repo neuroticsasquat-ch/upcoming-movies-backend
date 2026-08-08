@@ -20,10 +20,11 @@ and the re-label six weeks later, that was 42 of 94 `about` items naming films t
 the active set — unlinkable by **either** link path, and scored as recall failures of the path
 under test rather than as drift.
 
-`scripts/validate_linking.py` reads the date from the file, applies it to the roster *and* the
-retrieval index, and uses it as the prompt's own `as_of_date` so recency reasoning is
-reproducible too. It **exits with an error** if a pinned set still names an unreachable film —
-that means the pin has drifted from the labels, and the resulting numbers would look plausible
+`scripts/validate_linking.py` reads the date from the file, applies it to the retrieval index
+(and, until NEU-1004 deleted it, to the roster), and uses it as the prompt's own `as_of_date`
+so recency reasoning is reproducible too. It **exits with an error** if a pinned set still
+names an unreachable film — that means the pin has drifted from the labels, and the numbers
+would look plausible
 while measuring decay.
 
 `--as-of` overrides the file's date; it is an escape hatch for re-pinning, not routine use.
