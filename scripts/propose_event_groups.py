@@ -23,7 +23,7 @@ from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.linker import _extract_json_array
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient, Prompt
 
 PROPOSAL_MODEL = "claude-opus-4-8"  # stronger than cluster_model (Sonnet); override via argv[1]
 MAX_TOKENS = 2048
@@ -79,9 +79,11 @@ async def main(model: str) -> None:
                     "stories": payload}
             raw = await client.complete(
                 model=model,
-                system=[{"type": "text", "text": _INSTRUCTIONS}],
-                messages=[{"role": "user", "content": json.dumps(user)}],
-                max_tokens=MAX_TOKENS,
+                prompt=Prompt(
+                    stable_prefix=_INSTRUCTIONS,
+                    user=json.dumps(user),
+                    max_tokens=MAX_TOKENS,
+                ),
             )
             try:
                 proposals = {int(d["n"]): d.get("beat") for d in json.loads(_extract_json_array(raw))}

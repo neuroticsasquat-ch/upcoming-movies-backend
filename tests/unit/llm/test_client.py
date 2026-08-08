@@ -6,13 +6,8 @@ import pytest
 import respx
 from anthropic import APIStatusError
 
-from upmovies.llm.client import (
-    AnthropicClient,
-    CallLog,
-    CallResult,
-    Usage,
-    cached_system_block,
-)
+from upmovies.llm import AnthropicClient
+from upmovies.llm.types import CallLog, CallResult, Prompt, Usage
 
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 
@@ -34,22 +29,45 @@ def _message_response(blocks: list[dict[str, str]], usage: dict | None = None) -
 
 
 @respx.mock
-async def test_complete_returns_text_and_sends_cache_control():
+async def test_the_stable_prefix_becomes_the_leading_cached_system_block():
+    """The adapter — not the builder — is what knows Anthropic caches explicitly. It marks
+    the stable prefix unconditionally: deciding *when* caching is worth it would mean
+    guessing token counts against a per-model floor, which is the vendor leak the DTO
+    removes. Below the floor `cache_control` silently no-ops, so an inert contract costs
+    nothing (spec §3)."""
     route = respx.post(MESSAGES_URL).mock(
         return_value=_message_response([{"type": "text", "text": "hello"}])
     )
     async with AnthropicClient(api_key="test-key") as c:
         out = await c.complete(
             model="claude-haiku-4-5",
-            system=[cached_system_block("ROSTER")],
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=16,
+            prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
         )
     assert out == "hello"
     body = json.loads(route.calls.last.request.content)
     assert body["model"] == "claude-haiku-4-5"
-    assert body["system"][0]["text"] == "ROSTER"
-    assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert body["max_tokens"] == 16
+    assert body["system"] == [
+        {"type": "text", "text": "INSTRUCTIONS", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+
+@respx.mock
+async def test_a_prefill_becomes_a_trailing_assistant_turn():
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=_message_response([{"type": "text", "text": 'ok"}'}])
+    )
+    async with AnthropicClient(api_key="test-key") as c:
+        await c.complete(
+            model="claude-haiku-4-5",
+            prompt=Prompt(stable_prefix="I", user="hi", prefill='{"summary": "'),
+        )
+    body = json.loads(route.calls.last.request.content)
+    assert body["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": '{"summary": "'},
+    ]
 
 
 @respx.mock
@@ -61,9 +79,7 @@ async def test_complete_concatenates_text_blocks():
     )
     async with AnthropicClient(api_key="test-key") as c:
         out = await c.complete(
-            model="claude-haiku-4-5",
-            system=[cached_system_block("X")],
-            messages=[{"role": "user", "content": "hi"}],
+            model="claude-haiku-4-5", prompt=Prompt(stable_prefix="X", user="hi")
         )
     assert out == "foobar"
 
@@ -84,9 +100,7 @@ async def test_complete_with_usage_returns_text_and_usage():
     async with AnthropicClient(api_key="test-key") as c:
         text, usage = await c.complete_with_usage(
             model="claude-haiku-4-5",
-            system=[cached_system_block("ROSTER")],
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=16,
+            prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
         )
     assert text == "hi there"
     assert usage == Usage(
@@ -114,9 +128,7 @@ async def test_complete_call_records_the_call_and_returns_it():
     async with AnthropicClient(api_key="test-key") as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
-            system=[cached_system_block("ROSTER")],
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=16,
+            prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
             calls=calls,
         )
 
@@ -147,8 +159,7 @@ async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts
     async with AnthropicClient(api_key="test-key", max_retries=1) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
-            system=[{"type": "text", "text": "S"}],
-            messages=[{"role": "user", "content": "hi"}],
+            prompt=Prompt(stable_prefix="S", user="hi"),
             calls=calls,
         )
 
@@ -168,8 +179,7 @@ async def test_complete_call_records_a_failed_call_then_re_raises():
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
-                system=[{"type": "text", "text": "S"}],
-                messages=[{"role": "user", "content": "hi"}],
+                prompt=Prompt(stable_prefix="S", user="hi"),
                 calls=calls,
             )
 
@@ -190,8 +200,7 @@ async def test_complete_call_records_a_200_whose_body_does_not_validate():
         with pytest.raises(Exception):  # noqa: B017 — SDK's own validation error type
             await c.complete_call(
                 model="claude-haiku-4-5",
-                system=[{"type": "text", "text": "S"}],
-                messages=[{"role": "user", "content": "hi"}],
+                prompt=Prompt(stable_prefix="S", user="hi"),
                 calls=calls,
             )
 

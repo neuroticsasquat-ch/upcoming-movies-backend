@@ -9,9 +9,9 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol
+from typing import Any
 
-from upmovies.llm.client import CallLog, CallResult
+from upmovies.llm.types import CallLog, Completer, Prompt
 
 _DEK_MAX = 500
 _MAX_TOKENS = 256
@@ -122,21 +122,6 @@ class SummaryResult:
     source_updated_at: datetime
 
 
-class Completer(Protocol):
-    """Structurally identical to `link.linker.Completer` — see its docstring for why usage
-    rides inside the recorded `CallResult`."""
-
-    async def complete_call(
-        self,
-        *,
-        model: str,
-        system: list[dict[str, Any]],
-        messages: list[dict[str, Any]],
-        max_tokens: int = ...,
-        calls: CallLog,
-    ) -> "CallResult": ...
-
-
 def _event_payload(event: EventInput, run_date: date) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "as_of_date": run_date.isoformat(),
@@ -210,18 +195,15 @@ def parse_summary(raw: str) -> str:
     return summary
 
 
-def build_summary_request(
-    event: EventInput, run_date: date
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The plain instructions system block + the JSON event payload for one event. Truncates
-    each dek."""
-    system = [{"type": "text", "text": _INSTRUCTIONS}]
-    messages = [
-        {"role": "user", "content": json.dumps(_event_payload(event, run_date))},
-        # Assistant prefill: forces a JSON-envelope continuation (no preamble/reasoning).
-        {"role": "assistant", "content": _PREFILL},
-    ]
-    return system, messages
+def build_summary_request(event: EventInput, run_date: date) -> Prompt:
+    """The instructions as the stable prefix + the JSON event payload for one event, with the
+    assistant prefill that forces a JSON-envelope continuation. Truncates each dek."""
+    return Prompt(
+        stable_prefix=_INSTRUCTIONS,
+        user=json.dumps(_event_payload(event, run_date)),
+        prefill=_PREFILL,
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 async def summarize_event(
@@ -233,14 +215,12 @@ async def summarize_event(
     run_date: date,
     calls: CallLog,
 ) -> SummaryResult:
-    """Build the request, call `complete_call` (max_tokens pinned to `_MAX_TOKENS`), parse the
+    """Build the request (max_tokens pinned to `_MAX_TOKENS`), call `complete_call`, parse the
     JSON envelope, and bundle the provenance the caller persists into `event_summary`. The
     call — and its parse outcome, counting `parse_summary`'s recovery path as a success — is
     recorded into `calls`."""
-    system, messages = build_summary_request(event, run_date)
-    result = await client.complete_call(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS, calls=calls
-    )
+    prompt = build_summary_request(event, run_date)
+    result = await client.complete_call(model=model, prompt=prompt, calls=calls)
     try:
         summary = parse_summary(result.text)
     except (json.JSONDecodeError, ValueError):

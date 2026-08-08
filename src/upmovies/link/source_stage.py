@@ -16,8 +16,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import record_llm_calls
-from upmovies.link.linker import Completer
-from upmovies.llm.client import CallLog, Usage
+from upmovies.llm.types import CallLog, Completer, Usage
 from upmovies.news.models import EventStory, Story
 from upmovies.news.resolve import is_google_news_url, resolve_google_news_url
 from upmovies.news.source_quality import (

@@ -5,7 +5,7 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.ingest.runs import create_run
 from upmovies.link.source_stage import run_source_quality_stage
-from upmovies.llm.client import CallResult, Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.news.models import SourceDomain, Story
 
 
@@ -14,7 +14,7 @@ class _FakeClient:
         self._text = text
         self.n_calls = 0
 
-    async def complete_call(self, *, model, system, messages, max_tokens: int = 1024, calls):
+    async def complete_call(self, *, model, prompt, calls):
         self.n_calls += 1
         return calls.record(
             CallResult(text=self._text, usage=Usage(input_tokens=1, output_tokens=1))
@@ -194,12 +194,12 @@ async def test_backfill_judges_all_resolved_domains(session_factory, session):
     await session.commit()
 
     class _Client:
-        async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        async def complete_call(self, *, model, prompt, calls):
             import json
 
-            from upmovies.llm.client import CallResult, Usage
+            from upmovies.llm import CallResult, Usage
 
-            items = json.loads(messages[0]["content"])
+            items = json.loads(prompt.user)
             arr = [{"domain": it["domain"], "tier": "acceptable", "reason": "ok"} for it in items]
             return calls.record(CallResult(text=json.dumps(arr), usage=Usage(output_tokens=3)))
 

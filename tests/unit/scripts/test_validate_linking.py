@@ -14,7 +14,7 @@ from scripts.validate_linking import (
 from upmovies.link.retrieval.health import RetrievalTally
 from upmovies.link.retrieval.index import build_index, indexed_film
 from upmovies.link.validation import ValidationItem
-from upmovies.llm.client import CallResult
+from upmovies.llm import CallResult
 from upmovies.news.models import Story
 
 
@@ -110,8 +110,8 @@ class _LinkFirstCandidate:
     def __init__(self):
         self.seen_story_ids: list[str] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        stories = json.loads(messages[0]["content"])["stories"]
+    async def complete_call(self, *, model, prompt, calls):
+        stories = json.loads(prompt.user)["stories"]
         self.seen_story_ids += [s["id"] for s in stories]
         return calls.record(
             CallResult(

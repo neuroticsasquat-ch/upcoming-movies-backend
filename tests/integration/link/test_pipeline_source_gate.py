@@ -4,18 +4,16 @@ from sqlalchemy import select
 
 from upmovies.catalog.models import Film
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import CallLog, CallResult
+from upmovies.llm import CallLog, CallResult, Prompt
 from upmovies.news.models import Event, SourceDomain, Story
 
 
 class _StubClient:
     """Completer stub: linking is skipped (no pending stories), cluster returns one event."""
 
-    async def complete_call(
-        self, *, model: str, system: list, messages: list, max_tokens: int = 4096, calls: CallLog
-    ) -> CallResult:
+    async def complete_call(self, *, model: str, prompt: Prompt, calls: CallLog) -> CallResult:
         # Domain judge for unknown domains -> mshale.com low.
-        if "source-quality rater" in system[0]["text"]:
+        if "source-quality rater" in prompt.stable_prefix:
             return calls.record(
                 CallResult(text='[{"domain": "mshale.com", "tier": "low", "reason": "farm"}]')
             )

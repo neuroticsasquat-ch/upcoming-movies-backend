@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.models import IngestRun, LLMCall, RunLLMUsage
-from upmovies.llm.client import CallResult, Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.llm.pricing import price, rates_for
 
 # Every new usage row is sequential — the Message Batches path is gone (ADR-0005).

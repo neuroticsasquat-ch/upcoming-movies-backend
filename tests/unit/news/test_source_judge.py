@@ -1,7 +1,7 @@
 import json
 import logging
 
-from upmovies.llm.client import CallLog, CallResult, Usage
+from upmovies.llm import CallLog, CallResult, Usage
 from upmovies.news.source_quality import (
     build_judge_request,
     judge_domains,
@@ -11,12 +11,9 @@ from upmovies.news.source_quality import (
 
 
 def test_build_judge_request_shape():
-    system, messages = build_judge_request(
-        [{"domain": "mshale.com", "sample_headline": "New trailer!"}]
-    )
-    assert isinstance(system, list) and system[0]["type"] == "text"
-    assert len(messages) == 1 and messages[0]["role"] == "user"
-    payload = json.loads(messages[0]["content"])
+    prompt = build_judge_request([{"domain": "mshale.com", "sample_headline": "New trailer!"}])
+    assert "source-quality rater" in prompt.stable_prefix
+    payload = json.loads(prompt.user)
     assert payload == [{"domain": "mshale.com", "sample_headline": "New trailer!"}]
 
 
@@ -39,9 +36,7 @@ class _FakeClient:
     def __init__(self, text: str):
         self._text = text
 
-    async def complete_call(
-        self, *, model: str, system: list, messages: list, max_tokens: int = 4096, calls: CallLog
-    ):
+    async def complete_call(self, *, model: str, prompt, calls):
         return calls.record(
             CallResult(text=self._text, usage=Usage(input_tokens=5, output_tokens=3))
         )
@@ -77,10 +72,8 @@ class _RecordingClient:
     def __init__(self):
         self.requests: list[list[dict]] = []
 
-    async def complete_call(
-        self, *, model: str, system: list, messages: list, max_tokens: int = 4096, calls: CallLog
-    ):
-        items = json.loads(messages[0]["content"])
+    async def complete_call(self, *, model: str, prompt, calls):
+        items = json.loads(prompt.user)
         self.requests.append(items)
         arr = [{"domain": it["domain"], "tier": "acceptable", "reason": "ok"} for it in items]
         return calls.record(
@@ -108,9 +101,9 @@ async def test_judge_domains_logs_when_a_chunk_yields_no_verdicts(caplog):
         def __init__(self):
             self.n = 0
 
-        async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+        async def complete_call(self, *, model, prompt, calls):
             self.n += 1
-            items = json.loads(messages[0]["content"])
+            items = json.loads(prompt.user)
             if self.n == 1:
                 return calls.record(
                     CallResult(

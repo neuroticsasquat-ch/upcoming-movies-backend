@@ -6,7 +6,7 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
-from upmovies.llm.client import CallResult, Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -15,7 +15,7 @@ class UsageSummaryClient:
     def __init__(self, usage: Usage):
         self._usage = usage
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+    async def complete_call(self, *, model, prompt, calls):
         return calls.record(
             CallResult(text=json.dumps({"summary": "A neutral update."}), usage=self._usage)
         )

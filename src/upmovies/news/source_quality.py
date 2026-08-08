@@ -7,14 +7,12 @@ import json
 import logging
 from collections.abc import Collection, Iterable
 from datetime import datetime
-from typing import Any
 
 import tldextract
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.link.linker import Completer
-from upmovies.llm.client import CallLog
+from upmovies.llm.types import CallLog, Completer, Prompt
 from upmovies.news.models import SourceDomain, Story
 from upmovies.news.resolve import is_google_news_url
 
@@ -192,14 +190,13 @@ def _extract_json_array(text: str) -> str:
     return text[start : end + 1]
 
 
-def build_judge_request(
-    items: list[dict[str, str]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """System + user blocks for the domain judge. Plain (uncached) system block: the
-    instructions are well under every model's cache floor."""
-    system = [{"type": "text", "text": _JUDGE_INSTRUCTIONS}]
-    messages = [{"role": "user", "content": json.dumps(items)}]
-    return system, messages
+def build_judge_request(items: list[dict[str, str]]) -> Prompt:
+    """The judge instructions as the stable prefix + the domains to rate as the payload."""
+    return Prompt(
+        stable_prefix=_JUDGE_INSTRUCTIONS,
+        user=json.dumps(items),
+        max_tokens=_JUDGE_MAX_TOKENS,
+    )
 
 
 def judge_output_parses(raw: str) -> bool:
@@ -252,13 +249,8 @@ async def judge_domains(
     verdicts: dict[str, tuple[str, str]] = {}
     for start in range(0, len(items), _JUDGE_BATCH_SIZE):
         chunk = items[start : start + _JUDGE_BATCH_SIZE]
-        system, messages = build_judge_request(chunk)
         result = await client.complete_call(
-            model=model,
-            system=system,
-            messages=messages,
-            max_tokens=_JUDGE_MAX_TOKENS,
-            calls=calls,
+            model=model, prompt=build_judge_request(chunk), calls=calls
         )
         domains = {item["domain"] for item in chunk}
         chunk_verdicts = parse_judge_verdicts(result.text, domains=domains)

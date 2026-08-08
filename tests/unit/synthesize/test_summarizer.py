@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from upmovies.llm.client import CallLog
+from upmovies.llm import CallLog
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
@@ -27,31 +27,28 @@ class FakeCompleter:
         self._response = response
         self.requests: list[dict] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        from upmovies.llm.client import CallResult
+    async def complete_call(self, *, model, prompt, calls):
+        from upmovies.llm import CallResult
 
-        self.requests.append(
-            {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
-        )
+        self.requests.append({"model": model, "prompt": prompt})
         return calls.record(CallResult(text=self._response))
 
 
-def test_build_summary_request_plain_block_and_payload():
+def test_build_summary_request_stable_prefix_and_payload():
     event = _event(
         stories=[
             StoryInput(title="Casting news", dek="Star joins the film.", source="Variety"),
             StoryInput(title="More", dek="Another report.", source="THR"),
         ]
     )
-    system, messages = build_summary_request(event, date(2026, 6, 25))
-    # plain block — NO caching (short prompt, sub-minimum cacheable size)
-    assert "cache_control" not in system[0]
-    assert "paraphrase" in system[0]["text"].lower()
-    assert "as_of_date" in system[0]["text"]  # instructions point at the field
+    prompt = build_summary_request(event, date(2026, 6, 25))
+    assert prompt.max_tokens == 256  # == summarizer._MAX_TOKENS
+    assert "paraphrase" in prompt.stable_prefix.lower()
+    assert "as_of_date" in prompt.stable_prefix  # instructions point at the field
     # NEU-453: the beat is dated by its own date, not another date in the sources.
     # (verbatim substring of the new rule — case-sensitive)
-    assert "OWN date" in system[0]["text"]
-    payload = json.loads(messages[0]["content"])
+    assert "OWN date" in prompt.stable_prefix
+    payload = json.loads(prompt.user)
     assert payload["as_of_date"] == "2026-06-25"
     assert payload["film"] == "Runner"
     assert payload["event_type"] == "casting"
@@ -61,17 +58,17 @@ def test_build_summary_request_plain_block_and_payload():
 
 
 def test_build_summary_request_carries_as_of_date():
-    _system, messages = build_summary_request(_event(), date(2026, 6, 25))
-    assert json.loads(messages[0]["content"])["as_of_date"] == "2026-06-25"
+    prompt = build_summary_request(_event(), date(2026, 6, 25))
+    assert json.loads(prompt.user)["as_of_date"] == "2026-06-25"
 
 
 def test_build_summary_request_truncates_dek():
     long_dek = "x" * 1000
-    _system, messages = build_summary_request(
+    prompt = build_summary_request(
         _event(stories=[StoryInput(title="t", dek=long_dek, source="Deadline")]),
         date(2026, 6, 25),
     )
-    payload = json.loads(messages[0]["content"])
+    payload = json.loads(prompt.user)
     assert len(payload["stories"][0]["dek"]) == 500
 
 
@@ -100,9 +97,10 @@ def test_parse_summary_raises_on_malformed():
 
 
 def test_build_summary_request_seeds_assistant_prefill():
-    # The assistant turn is prefilled so the model continues a JSON envelope (no preamble).
-    _system, messages = build_summary_request(_event(), date(2026, 6, 25))
-    assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}
+    # The prefill is a request property now; the adapter is what turns it into an assistant
+    # turn (see test_client.test_a_prefill_becomes_a_trailing_assistant_turn).
+    prompt = build_summary_request(_event(), date(2026, 6, 25))
+    assert prompt.prefill == '{"summary": "'
 
 
 def test_parse_summary_handles_prefilled_continuation():
@@ -138,7 +136,7 @@ async def test_summarize_event_returns_result_with_provenance():
     assert result.prompt_version == "1"
     assert result.source_updated_at == event.source_updated_at
     # max_tokens is pinned to the summarizer's own ceiling, not the client default
-    assert client.requests[0]["max_tokens"] == 256
+    assert client.requests[0]["prompt"].max_tokens == 256
 
 
 async def test_summarize_event_prompt_includes_every_member_story():
@@ -158,7 +156,7 @@ async def test_summarize_event_prompt_includes_every_member_story():
         run_date=date(2026, 6, 25),
         calls=CallLog(),
     )
-    payload = json.loads(client.requests[0]["messages"][0]["content"])
+    payload = json.loads(client.requests[0]["prompt"].user)
     assert [s["title"] for s in payload["stories"]] == ["A", "B", "C"]
     assert [s["source"] for s in payload["stories"]] == ["Deadline", "Variety", "THR"]
 

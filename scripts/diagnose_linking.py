@@ -38,7 +38,7 @@ from upmovies.link.metrics import compute_link_metrics
 from upmovies.link.retrieval.index import build_candidate_index
 from upmovies.link.retrieval.select import select_candidates
 from upmovies.link.validation import films_ingested_after, load_validation_set
-from upmovies.llm.client import AnthropicClient, CallLog
+from upmovies.llm import AnthropicClient, CallLog
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"

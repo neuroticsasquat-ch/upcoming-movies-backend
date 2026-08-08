@@ -8,7 +8,7 @@ from sqlalchemy import select
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import LLMCall, RunLLMUsage
 from upmovies.ingest.runs import create_run
-from upmovies.llm.client import CallResult, Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -28,8 +28,8 @@ class _FakeClient:
         self._fail_films = fail_films
         self._unparseable_films = unparseable_films
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        film = json.loads(messages[0]["content"])["film"]
+    async def complete_call(self, *, model, prompt, calls):
+        film = json.loads(prompt.user)["film"]
         if film in self._fail_films:
             calls.record(
                 CallResult(latency_ms=3, attempts=3, ok=False, error_type="APITimeoutError")

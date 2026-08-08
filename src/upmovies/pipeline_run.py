@@ -32,7 +32,7 @@ from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 

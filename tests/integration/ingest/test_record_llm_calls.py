@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from upmovies.ingest import runs
 from upmovies.ingest.models import LLMCall
-from upmovies.llm.client import CallLog, CallResult, Usage
+from upmovies.llm import CallLog, CallResult, Usage
 from upmovies.llm.pricing import HAIKU_4_5, price
 
 

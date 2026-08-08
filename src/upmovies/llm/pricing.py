@@ -7,7 +7,7 @@ silently mispricing it."""
 
 from dataclasses import dataclass
 
-from upmovies.llm.client import Usage
+from upmovies.llm.types import Usage
 
 # Cache pricing multipliers (relative to base input): 5-min ephemeral write = 1.25x,
 # read = 0.10x. Batch path applies a flat 50% discount on the whole total.

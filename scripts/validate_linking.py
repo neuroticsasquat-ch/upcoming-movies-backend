@@ -34,7 +34,6 @@ from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.linker import (
-    Completer,
     StoryCandidates,
     link_retrieval_story_batch,
     reject_zero_candidate_stories,
@@ -58,7 +57,7 @@ from upmovies.link.validation import (
     films_ingested_after,
     load_validation_set,
 )
-from upmovies.llm.client import AnthropicClient, CallLog
+from upmovies.llm import AnthropicClient, CallLog, Completer
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"

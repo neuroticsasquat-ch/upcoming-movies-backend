@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from upmovies.llm.client import Usage
+from upmovies.llm import Usage
 from upmovies.llm.pricing import (
     HAIKU_4_5,
     SONNET_4_6,

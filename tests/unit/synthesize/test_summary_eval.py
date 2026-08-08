@@ -34,9 +34,9 @@ def test_event_for_case_builds_event_input():
 
 def test_build_judge_request_includes_blurb_and_criteria():
     case = load_summary_cases(FIXTURE)[0]
-    system, messages = build_judge_request(case, "A trailer was released on July 10.")
-    assert isinstance(system, list) and system[0]["type"] == "text"
-    payload = json.loads(messages[0]["content"])
+    prompt = build_judge_request(case, "A trailer was released on July 10.")
+    assert "grade" in prompt.stable_prefix.lower()
+    payload = json.loads(prompt.user)
     assert payload["blurb"] == "A trailer was released on July 10."
     assert payload["as_of_date"] == "2026-07-01"
     assert payload["criteria"] == case.criteria

@@ -7,7 +7,7 @@ import upmovies.synthesize.pipeline as pipeline_mod
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run as _create_run
-from upmovies.llm.client import CallResult
+from upmovies.llm import CallResult
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.synthesize.pipeline import _select_pending, _upsert_summary, run_synthesize_ingest
 from upmovies.synthesize.summarizer import SummaryResult
@@ -200,8 +200,8 @@ class FakeSummaryClient:
         self._summary = summary
         self.requests: list[dict] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        self.requests.append({"model": model, "messages": messages, "max_tokens": max_tokens})
+    async def complete_call(self, *, model, prompt, calls):
+        self.requests.append({"model": model, "prompt": prompt})
         return calls.record(CallResult(text=json.dumps({"summary": self._summary})))
 
 
@@ -287,8 +287,8 @@ async def test_prompt_version_bump_does_not_refresh_existing(session):
 class _FailOneCompleter(FakeSummaryClient):
     """Raises for the event whose film title starts 'FAIL', succeeds otherwise."""
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        payload = json.loads(messages[0]["content"])
+    async def complete_call(self, *, model, prompt, calls):
+        payload = json.loads(prompt.user)
         if payload["film"].startswith("FAIL"):
             raise RuntimeError("boom")
         return calls.record(CallResult(text=json.dumps({"summary": self._summary})))
@@ -338,7 +338,7 @@ async def test_failure_is_isolated_per_event(session):
 class _TotalOutageCompleter(FakeSummaryClient):
     """Every call raises — a total LLM outage, so every pending event fails."""
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+    async def complete_call(self, *, model, prompt, calls):
         raise RuntimeError("boom")
 
 
@@ -422,7 +422,7 @@ async def test_summary_request_mapping(session):
 
     assert len(client.requests) == 1  # one call per pending event
     assert client.requests[0]["model"] == "claude-haiku-4-5"
-    assert client.requests[0]["max_tokens"] == 256  # == summarizer._MAX_TOKENS
+    assert client.requests[0]["prompt"].max_tokens == 256  # == summarizer._MAX_TOKENS
 
 
 async def test_synthesize_invokes_url_resolution_for_run_events(session, monkeypatch):

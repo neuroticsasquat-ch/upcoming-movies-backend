@@ -10,7 +10,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import LLMCall, RunLLMUsage
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import CallResult, Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.news.models import SourceDomain, Story
 
 _USAGE = Usage(input_tokens=100, output_tokens=10, cache_read_input_tokens=900)
@@ -24,11 +24,11 @@ class _FakeClient:
         self._fail_titles = fail_titles
         self.n_calls = 0
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+    async def complete_call(self, *, model, prompt, calls):
         self.n_calls += 1
-        prompt = system[0]["text"]
-        if "source-quality rater" in prompt:
-            items = json.loads(messages[0]["content"])
+        instructions = prompt.stable_prefix
+        if "source-quality rater" in instructions:
+            items = json.loads(prompt.user)
             return calls.record(
                 CallResult(
                     text=json.dumps(
@@ -41,8 +41,8 @@ class _FakeClient:
                     latency_ms=7,
                 )
             )
-        if "entity-linking classifier" in prompt:
-            stories = json.loads(messages[0]["content"])["stories"]
+        if "entity-linking classifier" in instructions:
+            stories = json.loads(prompt.user)["stories"]
             if any(s["title"] in self._fail_titles for s in stories):
                 # Recorded then raised — exactly what AnthropicClient does on a provider error.
                 calls.record(
@@ -61,7 +61,7 @@ class _FakeClient:
                     latency_ms=11,
                 )
             )
-        new_ns = [s["n"] for s in json.loads(messages[0]["content"])["new_stories"]]
+        new_ns = [s["n"] for s in json.loads(prompt.user)["new_stories"]]
         return calls.record(
             CallResult(
                 text=json.dumps(
