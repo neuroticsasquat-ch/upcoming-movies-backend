@@ -176,3 +176,50 @@ async def test_per_call_tokens_sum_to_what_the_stage_aggregate_records(session):
     assert sum(r.input_tokens for r in rows) == 30
     assert sum(r.output_tokens for r in rows) == 3
     assert calls.usage == Usage(input_tokens=30, output_tokens=3)
+
+
+async def test_records_truncated_including_the_unknown_case(session):
+    """Three distinct answers, and the NULL is the load-bearing one: a call that never returned
+    cannot say whether its reply was cut off, and storing False there would assert it was not
+    (NEU-1014)."""
+    run_id = await runs.create_run(session, kind="link")
+    calls = CallLog()
+    calls.record(CallResult(latency_ms=100, truncated=True))
+    calls.record(CallResult(latency_ms=200, truncated=False))
+    calls.record(CallResult(latency_ms=300, ok=False, error_type="APIStatusError"))
+
+    await runs.record_llm_calls(
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=calls.results,
+    )
+    await session.commit()
+
+    assert [r.truncated for r in await _rows(session, run_id)] == [True, False, None]
+
+
+async def test_a_truncated_reply_that_failed_to_parse_is_separable_in_sql(session):
+    """The whole point of the column: `parse_ok=False` alone cannot tell "ran out of room" from
+    "cannot emit JSON", and those have opposite fixes."""
+    run_id = await runs.create_run(session, kind="link")
+    calls = CallLog()
+    calls.record(CallResult(latency_ms=100, truncated=True))
+    calls.set_parse_ok(False)
+    calls.record(CallResult(latency_ms=200, truncated=False))
+    calls.set_parse_ok(False)
+
+    await runs.record_llm_calls(
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=calls.results,
+    )
+    await session.commit()
+
+    rows = await _rows(session, run_id)
+    assert [(r.parse_ok, r.truncated) for r in rows] == [(False, True), (False, False)]

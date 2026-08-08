@@ -266,6 +266,7 @@ async def record_llm_calls(
             ok=r.ok,
             error_type=r.error_type,
             parse_ok=r.parse_ok,
+            truncated=r.truncated,
             cost_usd=Decimal(str(price(r.usage, rates, batch=_BATCHED))),
         )
         for r in results

@@ -159,6 +159,11 @@ class LLMCall(Base):
     error_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     parse_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     """NULL when the caller performs no JSON parse — distinct from a parse that failed."""
+    truncated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """Whether the reply stopped at the `max_tokens` ceiling. What makes `parse_ok=False`
+    actionable: truncated and unparseable means raise the ceiling or shrink the batch, while
+    not-truncated and unparseable means the model cannot hold the output format. NULL when no
+    reply arrived to have been cut off (NEU-1014)."""
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

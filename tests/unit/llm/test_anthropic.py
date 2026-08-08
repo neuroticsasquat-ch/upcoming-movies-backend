@@ -18,7 +18,12 @@ MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _NO_WAIT = RetryPolicy(initial_backoff=0.0, jitter=0.0)
 
 
-def _message_response(blocks: list[dict[str, str]], usage: dict | None = None) -> httpx.Response:
+def _message_response(
+    blocks: list[dict[str, str]],
+    usage: dict | None = None,
+    *,
+    stop_reason: str = "end_turn",
+) -> httpx.Response:
     return httpx.Response(
         200,
         json={
@@ -27,7 +32,7 @@ def _message_response(blocks: list[dict[str, str]], usage: dict | None = None) -
             "role": "assistant",
             "model": "claude-haiku-4-5",
             "content": blocks,
-            "stop_reason": "end_turn",
+            "stop_reason": stop_reason,
             "stop_sequence": None,
             "usage": usage or {"input_tokens": 10, "output_tokens": 3},
         },
@@ -395,3 +400,52 @@ def test_usage_add_sums_componentwise():
 def test_usage_sum_with_zero_start():
     items = [Usage(input_tokens=1), Usage(input_tokens=2), Usage(input_tokens=3)]
     assert sum(items, Usage()).input_tokens == 6
+
+
+@respx.mock
+async def test_a_reply_cut_off_at_the_ceiling_is_recorded_as_truncated():
+    """Anthropic spells it `stop_reason: "max_tokens"` where the OpenAI-compatible providers
+    say `finish_reason: "length"`. Both are the same provider-neutral predicate — the reply hit
+    the ceiling — which is why `CallResult` carries the predicate and not either spelling
+    (NEU-1014)."""
+    respx.post(MESSAGES_URL).mock(
+        return_value=_message_response(
+            [{"type": "text", "text": '[{"id": "a", "fi'}], stop_reason="max_tokens"
+        )
+    )
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key") as c:
+        result = await c.complete_call(
+            model="claude-haiku-4-5", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
+        )
+
+    assert result.truncated is True
+    assert result.ok is True
+
+
+@respx.mock
+async def test_a_reply_that_stopped_on_its_own_is_not_truncated():
+    respx.post(MESSAGES_URL).mock(return_value=_message_response([{"type": "text", "text": "hi"}]))
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key") as c:
+        result = await c.complete_call(
+            model="claude-haiku-4-5", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
+        )
+
+    assert result.truncated is False
+
+
+@respx.mock
+async def test_a_call_that_never_returned_reports_truncated_as_unknown():
+    """None rather than False: no reply arrived, so "was it cut off" has no answer."""
+    respx.post(MESSAGES_URL).mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    calls = CallLog()
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+        with pytest.raises(APIStatusError):
+            await c.complete_call(
+                model="claude-haiku-4-5", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
+            )
+
+    (failed,) = calls.results
+    assert failed.ok is False
+    assert failed.truncated is None

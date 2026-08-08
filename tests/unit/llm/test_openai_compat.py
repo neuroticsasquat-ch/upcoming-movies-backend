@@ -31,7 +31,9 @@ def _recorded(name: str) -> dict:
     return json.loads((_FIXTURES / f"{name}.json").read_text())
 
 
-def _completion(content: str, usage: dict | None = None) -> httpx.Response:
+def _completion(
+    content: str, usage: dict | None = None, *, finish_reason: str = "stop"
+) -> httpx.Response:
     return httpx.Response(
         200,
         json={
@@ -43,7 +45,7 @@ def _completion(content: str, usage: dict | None = None) -> httpx.Response:
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": usage or {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
@@ -320,6 +322,84 @@ async def test_complete_call_records_the_call_and_returns_it():
     assert result.attempts == 1
     assert result.latency_ms >= 0
     assert calls.results == (result,)
+
+
+# --- truncation -----------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_reply_cut_off_at_the_ceiling_is_recorded_as_truncated():
+    """`finish_reason: "length"` is the only thing that separates "the model ran out of room"
+    from "the model cannot hold the output format" — and the two have opposite fixes (raise
+    `max_tokens` / lower the batch size, versus change model). Both otherwise arrive as
+    `parse_ok=False` and nothing else (NEU-1014)."""
+    respx.post(DEEPINFRA_URL).mock(
+        return_value=_completion('[{"id": "a", "fi', finish_reason="length")
+    )
+    calls = CallLog()
+    async with OpenAICompatClient(provider="deepinfra", api_key="k") as c:
+        result = await c.complete_call(
+            model="deepseek-ai/DeepSeek-V4-Flash",
+            prompt=Prompt(stable_prefix="I", user="hi"),
+            calls=calls,
+        )
+
+    assert result.truncated is True
+    assert result.ok is True
+
+
+@respx.mock
+async def test_a_reply_that_stopped_on_its_own_is_not_truncated():
+    """Pinned against the recorded DeepInfra body rather than a hand-written one: the happy
+    path has to agree with a real `finish_reason`, not with an assumed spelling of it."""
+    respx.post(DEEPINFRA_URL).mock(
+        return_value=httpx.Response(200, json=_recorded("deepinfra_chat_completion"))
+    )
+    calls = CallLog()
+    async with OpenAICompatClient(provider="deepinfra", api_key="k") as c:
+        result = await c.complete_call(
+            model="deepseek-ai/DeepSeek-V4-Flash",
+            prompt=Prompt(stable_prefix="I", user="hi"),
+            calls=calls,
+        )
+
+    assert result.truncated is False
+
+
+@respx.mock
+async def test_a_call_that_never_returned_reports_truncated_as_unknown():
+    """None rather than False, for the same reason `parse_ok` is nullable: no reply arrived, so
+    "was it cut off" has no answer, and recording False would assert one."""
+    respx.post(DEEPSEEK_URL).mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    calls = CallLog()
+    async with OpenAICompatClient(provider="deepseek", api_key="k", policy=_NO_WAIT) as c:
+        with pytest.raises(httpx.HTTPStatusError):
+            await c.complete_call(
+                model="deepseek-v4-flash", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
+            )
+
+    (failed,) = calls.results
+    assert failed.ok is False
+    assert failed.truncated is None
+
+
+@respx.mock
+async def test_a_response_with_no_choices_reports_truncated_as_unknown():
+    """`_text_from` already tolerates a choice-less body by handing back "". The same body
+    cannot answer how generation ended, so it must not claim it did."""
+    respx.post(DEEPSEEK_URL).mock(
+        return_value=httpx.Response(
+            200, json={"id": "x", "choices": [], "usage": {"prompt_tokens": 1}}
+        )
+    )
+    calls = CallLog()
+    async with OpenAICompatClient(provider="deepseek", api_key="k") as c:
+        result = await c.complete_call(
+            model="deepseek-v4-flash", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
+        )
+
+    assert result.text == ""
+    assert result.truncated is None
 
 
 # --- retries ------------------------------------------------------------------------------

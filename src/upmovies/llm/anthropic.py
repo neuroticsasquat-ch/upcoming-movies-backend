@@ -56,6 +56,17 @@ def _concat_text(blocks: list[Any]) -> str:
     return "".join(block.text for block in blocks if block.type == "text")
 
 
+def _truncated_from(resp: Any) -> bool | None:
+    """Whether the reply stopped because it hit `max_tokens`, or None when the message does not
+    say. Anthropic's `stop_reason: "max_tokens"` is the same predicate the OpenAI-compatible
+    providers spell `finish_reason: "length"` — see `CallResult.truncated` for why the predicate
+    is what gets stored rather than either spelling (NEU-1014)."""
+    reason = getattr(resp, "stop_reason", None)
+    if reason is None:
+        return None
+    return reason == "max_tokens"
+
+
 def _classify(exc: BaseException) -> Retry | None:
     """Which SDK failures are worth another attempt. The status verdict is deferred to
     `retry_for_status` so it is literally the same judgement the OpenAI-compatible adapter
@@ -123,6 +134,7 @@ class AnthropicClient:
                 usage=Usage.from_sdk(resp.usage),
                 latency_ms=_elapsed_ms(started),
                 attempts=attempts.made,
+                truncated=_truncated_from(resp),
             )
         except Exception as exc:
             calls.record(
