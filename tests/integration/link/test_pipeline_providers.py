@@ -55,10 +55,7 @@ class _StageClient:
         if self.stage == "link":
             stories = json.loads(prompt.user)["stories"]
             return json.dumps(
-                [
-                    {"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"}
-                    for s in stories
-                ]
+                [{"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"} for s in stories]
             )
         if self.stage == "source_judge":
             items = json.loads(prompt.user)
