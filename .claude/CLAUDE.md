@@ -58,6 +58,8 @@ DB is split into Postgres **schemas**: `app`, `catalog`, `news`, `ingest`. Tests
 
 - **Running a single integration test file in isolation errors** with a pytest-asyncio session-loop warning — this is a known quirk, not your bug. Run the whole suite, or scope to a directory.
 - If the long-running container starts throwing async-fixture errors across the whole suite, it's stale state: `docker compose restart upmovies-backend`.
+- **`task db:refresh` silently reverts migrations while Alembic still reports head.** It restores `catalog`/`news`/`ingest` from prod but leaves `app` alone — and `alembic_version` lives in `app`. So after a refresh the local DB carries prod's (older) content schemas while `alembic current` reads head, and any table or column a recent migration added to those three schemas is simply gone. Re-apply with `alembic stamp <prod's revision> && task migrate`; don't trust `alembic current` after a refresh.
+- **A long-running container holds the env it was created with.** Editing `docker-compose.yml` does not change a running container, so `printenv` inside it can disagree with the compose file for hours. `docker compose up -d --force-recreate upmovies-backend` after any env change, and `printenv` to confirm rather than reading the compose file.
 - The TMDB client uses v3 `api_key` query auth. `TMDB_API_KEY` must be set or the app won't boot.
 
 ## Commits / PRs

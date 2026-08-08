@@ -9,17 +9,21 @@ Run in the container with a real key in .env:
 
 **Two link paths, measured in the same run.** `--mode both` (the default) sends the same
 fixture down the incumbent roster path and the candidate-retrieval path and prints the
-delta between them. That is cutover gate #3 — offline end-to-end F1 within ~1 point of the
-roster baseline (spec §5) — and running the two together is what makes the comparison
-honest: one fixture, one model, one sitting. The roster path stays until M4 deletes it
-(NEU-1004), so until then it is the baseline this measures against rather than dead weight.
+delta between them. That is cutover gate #3 (spec §5) — and running the two together is what
+makes the comparison honest: one fixture, one model, one sitting. The roster path stays until
+M4 deletes it (NEU-1004), so until then it is the baseline this measures against rather than
+dead weight.
 
-**Precision is reported separately, not folded into F1.** The identified risk of narrowing
-the candidate set is a *precision* loss: a model shown one film and a headline about that
-film's untracked sibling has nothing correct to point at, so it links the sibling's story
-to the tracked film. An F1 that holds steady while precision falls and recall rises is that
-regression, and a naive F1-only gate waves it through — so the gate below fails on a
-precision drop past the same tolerance, and says so in as many words.
+**The gate is scored in whole items, not in points (ADR-0011).** The identified risk of
+narrowing the candidate set is a *precision* loss: a model shown one film and a headline about
+that film's untracked sibling has nothing correct to point at, so it links the sibling's story
+to the tracked film. The gate was originally stated as a ±1-point tolerance on F1 *and* on
+precision, judged separately, because an F1 that holds while precision falls is exactly that
+regression. It caught it — and then NEU-1011 established that ±1 point is finer than this
+fixture can resolve: 94 scoreable `about` items and single-digit false-positive counts put one
+story at ~1.3 precision points, and the roster control's own count wanders by one across
+byte-identical runs. So the same bar is now stated in items — coverage, links kept, false
+positives added — and the points deltas are still printed as the record.
 
 **This costs real API tokens** — `--mode both` costs roughly twice a single path, since it
 classifies the fixture twice. Run it deliberately, record the numbers in the design spec,
@@ -66,9 +70,22 @@ from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
 
-# Cutover gate #3's "~1 point". Points, not fractions: the gate is stated in points and a
-# report that silently switched units would be misread against the spec.
-F1_GATE_POINTS = 1.0
+# Gate #3's pass condition, in whole items (ADR-0011). The fixture has 94 scoreable `about`
+# items and the paths make single-digit numbers of false positives, so one story is worth
+# ~1.3 precision points. Across four runs whose roster prompt is byte-identical, the roster
+# control's own false positives wandered between 1 and 2 and its true positives between 64
+# and 69 (spec §5.7, §5.8) — so a ±1-point gate asked the fixture to resolve far less than
+# the noise it carries.
+#
+# **This ceiling is a relaxation, and it is meant to be read as one.** The original gate had
+# two clauses, and converted to items they disagree. Holding retrieval's 68 true positives
+# against the roster's 67/2: the *F1* clause admits 5 false positives (−0.77 pts) and refuses
+# 6 (−1.26), giving 3 excess; the *precision* clause — which is the load-bearing half —
+# admits only 2, giving **0** excess. Taking 3 therefore relaxes the precision clause rather
+# than restating it. It is taken because 0 excess is not a bar this instrument can express:
+# the control moves by more than that between identical runs. See ADR-0011 for why the
+# residue is accepted rather than certified.
+MAX_EXCESS_FALSE_POSITIVES = 3
 
 
 def news_value_rows(
@@ -162,44 +179,91 @@ def retrieval_coverage(
 
 @dataclass(frozen=True)
 class GateVerdict:
-    """Cutover gate #3, in points, with precision judged on its own terms.
+    """Cutover gate #3 in whole items, with the points deltas kept as the record (ADR-0011).
 
-    One-sided on purpose: retrieval *beating* the baseline is not a breach. Both deltas are
-    held to the same tolerance, because the failure this gate exists to catch is the one
-    where only the F1 delta stays inside it."""
+    Three checks, all one-sided — retrieval *beating* the baseline is never a breach:
+
+    - **3a** retrieval offered the correct film for every scoreable `about` item. The only
+      part of this gate that measures the stage the project actually changed, and the part
+      the fixture resolves cleanly (94/94 in every run taken).
+    - **3b** retrieval's true positives are at least the roster's. An *aggregate* count, not
+      a per-link check: retrieval can drop one of the roster's links and pass by gaining
+      another, and this fixture cannot tell those apart. The point is that `link` is lossy —
+      a precision gain bought by declining to link is not a win.
+    - **3c** retrieval added no more than `MAX_EXCESS_FALSE_POSITIVES` false positives.
+
+    The points deltas are still computed because §5.1a and §5.7 are written in them, but
+    they are the record, not the condition: the fixture's noise floor is several times the
+    ±1-point tolerance they were judged against."""
 
     precision_delta: float
     recall_delta: float
     f1_delta: float
-    tolerance: float = F1_GATE_POINTS
+    excess_false_positives: int
+    lost_true_positives: int
+    coverage: RetrievalCoverage | None = None
+    max_excess_false_positives: int = MAX_EXCESS_FALSE_POSITIVES
 
     @property
-    def f1_within_tolerance(self) -> bool:
-        return self.f1_delta >= -self.tolerance
+    def coverage_complete(self) -> bool | None:
+        """3a, or None when coverage was not measured — `--mode retrieval` has no baseline
+        to compare against and never reaches the gate. None rather than True so an unscored
+        check reads as unscored instead of as a pass."""
+        if self.coverage is None:
+            return None
+        return self.coverage.hits == self.coverage.total
 
     @property
-    def precision_within_tolerance(self) -> bool:
-        return self.precision_delta >= -self.tolerance
+    def keeps_every_link(self) -> bool:
+        """3b — in aggregate. See the class docstring for why that is not per-link."""
+        return self.lost_true_positives <= 0
 
     @property
-    def masked_precision_loss(self) -> bool:
-        """F1 passed and precision did not — the narrowing regression F1 hides (spec §4.3)."""
-        return self.f1_within_tolerance and not self.precision_within_tolerance
+    def excess_within_ceiling(self) -> bool:
+        """3c."""
+        return self.excess_false_positives <= self.max_excess_false_positives
+
+    @property
+    def at_the_boundary(self) -> bool:
+        """3c met with nothing to spare — worth saying out loud, because the ceiling is
+        already a relaxation of the original precision clause and the control moves by more
+        than one item between identical runs. A verdict sitting on it is a judgement being
+        cashed, not a margin being observed (ADR-0011)."""
+        return self.excess_false_positives == self.max_excess_false_positives
+
+    @property
+    def narrowing_regression(self) -> bool:
+        """Spec §4.3's failure, in items: retrieval links at least as much as the roster
+        while linking more stories it should not have. This is what `masked_precision_loss`
+        named in points — the model shown one film and a headline about that film's untracked
+        sibling, linking what it was given."""
+        return self.keeps_every_link and not self.excess_within_ceiling
 
     @property
     def passed(self) -> bool:
-        return self.f1_within_tolerance and self.precision_within_tolerance
+        return (
+            self.coverage_complete is not False
+            and self.keeps_every_link
+            and self.excess_within_ceiling
+        )
 
 
 def evaluate_gate(
-    baseline: LinkMetrics, candidate: LinkMetrics, *, tolerance: float = F1_GATE_POINTS
+    baseline: LinkMetrics,
+    candidate: LinkMetrics,
+    *,
+    coverage: RetrievalCoverage | None = None,
+    max_excess_false_positives: int = MAX_EXCESS_FALSE_POSITIVES,
 ) -> GateVerdict:
-    """Score the candidate path against the roster baseline, in points."""
+    """Score the candidate path against the roster baseline, in items and in points."""
     return GateVerdict(
         precision_delta=(candidate.precision - baseline.precision) * 100,
         recall_delta=(candidate.recall - baseline.recall) * 100,
         f1_delta=(candidate.f1 - baseline.f1) * 100,
-        tolerance=tolerance,
+        excess_false_positives=candidate.false_positives - baseline.false_positives,
+        lost_true_positives=baseline.true_positives - candidate.true_positives,
+        coverage=coverage,
+        max_excess_false_positives=max_excess_false_positives,
     )
 
 
@@ -258,17 +322,35 @@ def format_comparison(
     candidate: LinkMetrics,
     baseline_nv: NewsValueMetrics,
     candidate_nv: NewsValueMetrics,
-    tolerance: float = F1_GATE_POINTS,
+    coverage: RetrievalCoverage | None = None,
+    max_excess_false_positives: int = MAX_EXCESS_FALSE_POSITIVES,
 ) -> str:
     """The roster → retrieval delta, the leak split, and the gate verdict."""
-    verdict = evaluate_gate(baseline, candidate, tolerance=tolerance)
+    verdict = evaluate_gate(
+        baseline,
+        candidate,
+        coverage=coverage,
+        max_excess_false_positives=max_excess_false_positives,
+    )
     lines = [
-        f"=== ROSTER → RETRIEVAL (cutover gate #3: within {tolerance:.1f} point) ===",
+        "=== ROSTER → RETRIEVAL (cutover gate #3, in items — ADR-0011) ===",
         f"{'metric':<10}{'roster':>8}{'retrieval':>11}{'delta':>13}",
         _delta_row("precision", baseline.precision, candidate.precision, verdict.precision_delta),
         _delta_row("recall", baseline.recall, candidate.recall, verdict.recall_delta),
         _delta_row("f1", baseline.f1, candidate.f1, verdict.f1_delta),
+        "  (points, kept as the record — the pass condition is the item counts below)",
+        "",
+        f"{'check':<28}{'roster':>8}{'retrieval':>11}{'delta':>13}",
+        f"{'true positives (3b)':<28}{baseline.true_positives:>8}"
+        f"{candidate.true_positives:>11}{-verdict.lost_true_positives:>+9} items",
+        f"{'false positives (3c)':<28}{baseline.false_positives:>8}"
+        f"{candidate.false_positives:>11}{verdict.excess_false_positives:>+9} items"
+        f"  (ceiling {max_excess_false_positives:+d})",
     ]
+    if coverage is not None:
+        lines.append(
+            f"{'candidate coverage (3a)':<28}{'—':>8}{f'{coverage.hits}/{coverage.total}':>11}"
+        )
 
     categories = sorted(set(baseline_nv.leaks_by_category) | set(candidate_nv.leaks_by_category))
     lines.append("")
@@ -282,22 +364,45 @@ def format_comparison(
     )
 
     lines.append("")
-    if verdict.masked_precision_loss:
+    # 3a, then 3b, then 3c — the order the gate is stated in, so the first failure named is
+    # the earliest stage it happened at. Past 3b, `keeps_every_link` holds, which makes
+    # "3c failed" and `narrowing_regression` the same condition; the branch says the latter
+    # because that is the failure §4.3 predicted and the name a reader needs.
+    if coverage is not None and not verdict.coverage_complete:
         lines.append(
-            f"GATE: FAIL — F1 held ({verdict.f1_delta:+.1f} pts) while precision fell "
-            f"{-verdict.precision_delta:.1f} pts and recall rose {verdict.recall_delta:+.1f}. "
-            "That is the narrowing regression an F1-only gate waves through: shown one film "
-            "and a headline about its untracked sibling, the model links what it was given."
+            f"GATE: FAIL — retrieval never offered the correct film for "
+            f"{coverage.total - coverage.hits} of {coverage.total} scoreable 'about' items. "
+            "That is a retrieval-stage loss, not a classifier one — check T, K and "
+            "normalization before the prompt."
         )
-    elif not verdict.passed:
+    elif not verdict.keeps_every_link:
         lines.append(
-            f"GATE: FAIL — f1 {verdict.f1_delta:+.1f} pts, precision "
-            f"{verdict.precision_delta:+.1f} pts, outside the {tolerance:.1f}-point tolerance."
+            f"GATE: FAIL — retrieval's true positives are {verdict.lost_true_positives} below "
+            "the roster's. `link` is lossy, so links not made age out unlinked; a precision "
+            "gain bought by declining to link is not a win."
+        )
+    elif verdict.narrowing_regression:
+        lines.append(
+            f"GATE: FAIL — retrieval met or beat the roster's true positives and added "
+            f"{verdict.excess_false_positives} false positives, past the "
+            f"{max_excess_false_positives} the gate allows. That is the narrowing regression "
+            "(spec §4.3): shown one film and a headline about its untracked sibling, the "
+            "model links what it was given."
         )
     else:
+        boundary = (
+            " — AT THE CEILING, which is itself a relaxation of the original precision "
+            "clause (0 excess), on a fixture whose control moves by more between identical "
+            "runs. ADR-0011's accepted trade, not a margin"
+            if verdict.at_the_boundary
+            else ""
+        )
         lines.append(
-            f"GATE: PASS — f1 {verdict.f1_delta:+.1f} pts, precision "
-            f"{verdict.precision_delta:+.1f} pts, both within {tolerance:.1f} point."
+            f"GATE: PASS — coverage "
+            f"{f'{coverage.hits}/{coverage.total}' if coverage else 'unscored'}, "
+            f"{-verdict.lost_true_positives:+d} links, "
+            f"{verdict.excess_false_positives:+d} false positives "
+            f"(ceiling {max_excess_false_positives:+d}){boundary}."
         )
     return "\n".join(lines)
 
@@ -451,7 +556,7 @@ async def main(
     limit: int,
     batch_size: int,
     floor: float,
-    tolerance: float,
+    max_excess_false_positives: int,
     as_of: date | None = None,
 ) -> None:
     settings = get_settings()
@@ -522,6 +627,7 @@ async def main(
     run_date = catalog_date
     roster_metrics = retrieval_metrics = None
     roster_nv = retrieval_nv = None
+    coverage: RetrievalCoverage | None = None
     reports: list[str] = []
 
     async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
@@ -602,7 +708,8 @@ async def main(
                 candidate=retrieval_metrics,
                 baseline_nv=roster_nv,
                 candidate_nv=retrieval_nv,
-                tolerance=tolerance,
+                coverage=coverage,
+                max_excess_false_positives=max_excess_false_positives,
             )
         )
 
@@ -623,14 +730,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=settings.link_retrieval_max_candidates)
     parser.add_argument("--batch-size", type=int, default=settings.link_batch_size)
     parser.add_argument("--floor", type=float, default=settings.link_confidence_floor)
-    # The spec states gate #3 as "~1 point" and defers the exact number to observed data
-    # ("Exact numbers are confirmed from observed data before the flip", §5). The default
-    # is that "~1"; the flag is what keeps the report from pinning it harder than the spec.
+    # Gate #3's pass condition, in items (ADR-0011). Overridable for the same reason the old
+    # points tolerance was: the spec sets the bar and the flag keeps the report from pinning
+    # it harder than the spec does — a re-gate against an enlarged `about` population will
+    # want a different number, and should not have to edit the script to try one.
     parser.add_argument(
-        "--tolerance",
-        type=float,
-        default=F1_GATE_POINTS,
-        help="gate tolerance in points, applied to the f1 AND precision deltas alike",
+        "--max-excess-false-positives",
+        type=int,
+        default=MAX_EXCESS_FALSE_POSITIVES,
+        help="gate #3c: how many more false positives than the roster retrieval may add",
     )
     parser.add_argument(
         "--as-of",
@@ -655,7 +763,7 @@ if __name__ == "__main__":
             limit=args.limit,
             batch_size=args.batch_size,
             floor=args.floor,
-            tolerance=args.tolerance,
+            max_excess_false_positives=args.max_excess_false_positives,
             as_of=args.as_of,
         )
     )
