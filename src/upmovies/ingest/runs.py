@@ -193,14 +193,14 @@ async def record_llm_usage(
     usage: Usage,
 ) -> None:
     """UPSERT the per-stage LLM usage + estimated dollar cost for a run. Prices `usage` via
-    the shared pricing module (`rates_for(model)` raises KeyError on an unknown model) and
-    writes one row per (run_id, stage), overwriting on the uq_run_llm_usage_run_stage
+    the shared pricing module (`rates_for(provider, model)` raises KeyError on an unknown pair)
+    and writes one row per (run_id, stage), overwriting on the uq_run_llm_usage_run_stage
     conflict so a stage re-run refreshes rather than duplicates. Caller owns the commit.
 
     `batched` is written as a constant `False`: the Message Batches path was removed
     (ADR-0005) so no new row can be batched, but the column stays because historical rows
     recorded under batch mode must keep pricing correctly."""
-    cost = Decimal(str(price(usage, rates_for(model), batch=_BATCHED)))
+    cost = Decimal(str(price(usage, rates_for(_PROVIDER, model), batch=_BATCHED)))
     stmt = pg_insert(RunLLMUsage).values(
         run_id=run_id,
         stage=stage,
@@ -244,7 +244,7 @@ async def record_llm_calls(
     tokens it managed to burn (zero, when the request never returned)."""
     if not results:
         return
-    rates = rates_for(model)
+    rates = rates_for(_PROVIDER, model)
     session.add_all(
         LLMCall(
             run_id=run_id,

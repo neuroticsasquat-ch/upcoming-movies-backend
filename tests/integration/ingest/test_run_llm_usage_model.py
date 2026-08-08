@@ -52,7 +52,9 @@ async def test_historical_batched_row_still_prices_at_the_batch_discount(session
             batched=True,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            cost_usd=Decimal(str(price(usage, rates_for("claude-haiku-4-5"), batch=True))),
+            cost_usd=Decimal(
+                str(price(usage, rates_for("anthropic", "claude-haiku-4-5"), batch=True))
+            ),
         )
     )
     await session.commit()
@@ -62,8 +64,11 @@ async def test_historical_batched_row_still_prices_at_the_batch_discount(session
     ).scalar_one()
     reconstructed = Usage(input_tokens=got.input_tokens, output_tokens=got.output_tokens)
     # Re-pricing the stored row off its own `batched` flag reproduces the stored cost:
-    # $6.00 at full rate, halved to $3.00 by the batch discount.
-    assert float(got.cost_usd) == price(reconstructed, rates_for(got.model), batch=got.batched)
+    # $6.00 at full rate, halved to $3.00 by the batch discount. `run_llm_usage` carries no
+    # provider column — every row it holds predates the gateway, so they are all Anthropic.
+    assert float(got.cost_usd) == price(
+        reconstructed, rates_for("anthropic", got.model), batch=got.batched
+    )
     assert got.cost_usd == Decimal("3.000000")
 
 

@@ -22,6 +22,15 @@ kept visible separately as `attempts` rather than hidden inside that figure. The
 `ingest.llm_call`, and the unit a `parse_ok` outcome hangs off.
 _Avoid_: request, attempt (that's the retry, not the call), round-trip.
 
+**Provider**:
+The host a stage's model is served by — `anthropic`, `deepinfra`, `deepseek`. It is a
+*separate* axis from the model: the premise of the gateway work is that two providers serve the
+same open weights at different prices and under different cache economics, so a model id alone
+identifies nothing billable. Hence `(provider, model)` is the key everything cost-shaped hangs
+off — `pricing._RATES`, the `ingest.llm_call.provider` column, and the per-stage `*_PROVIDER`
+settings. Rates are never shared across providers, and never defaulted from one.
+_Avoid_: host, vendor, reseller, backend.
+
 **Stable prefix**:
 The part of a stage's request that a builder promises does not vary between calls — in
 practice its instructions. Every adapter must serialize it first and unmodified, which is the
