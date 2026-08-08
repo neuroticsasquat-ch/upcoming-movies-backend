@@ -39,6 +39,7 @@ from upmovies.link.retrieval.index import build_candidate_index
 from upmovies.link.retrieval.select import select_candidates
 from upmovies.link.validation import films_ingested_after, load_validation_set
 from upmovies.llm import AnthropicClient, CallLog
+from upmovies.llm.offline import require_anthropic_stage
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
@@ -47,6 +48,7 @@ SWEEP = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 async def main(path: str, *, threshold: float, limit: int) -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'link')
     validation_set = load_validation_set(path)
     items = validation_set.items
     catalog_date = validation_set.as_of_date or datetime.now(UTC).date()

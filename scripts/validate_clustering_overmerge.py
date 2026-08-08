@@ -29,6 +29,7 @@ from upmovies.link.cluster import assemble_cluster_payload, parse_cluster_groups
 from upmovies.link.metrics import compute_cluster_metrics
 from upmovies.link.validation import load_validation_set
 from upmovies.llm import AnthropicClient
+from upmovies.llm.offline import require_anthropic_stage
 
 FIX = "tests/fixtures/link/validation_set.json"
 _SUMMARY_MAX = 500
@@ -40,6 +41,7 @@ def _gold_key(it) -> str:
 
 async def main(only_tmdb: int | None) -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'cluster')
     items = load_validation_set(FIX).items
     by_film: dict[int, list] = defaultdict(list)
     for it in items:

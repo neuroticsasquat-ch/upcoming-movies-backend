@@ -58,6 +58,7 @@ from upmovies.link.validation import (
     load_validation_set,
 )
 from upmovies.llm import AnthropicClient, CallLog, Completer
+from upmovies.llm.offline import require_anthropic_stage, stage_label
 from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
@@ -349,6 +350,7 @@ async def main(
     as_of: date | None = None,
 ) -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'link')
     validation_set = load_validation_set(path)
     items = validation_set.items
     catalog_date, pinned, pin_source = _resolve_catalog_date(validation_set.as_of_date, as_of)
@@ -358,7 +360,7 @@ async def main(
         f"{len(items) - n_about} mention/none"
     )
     print(f"catalog read as of: {catalog_date} ({pin_source})")
-    print(f"floor={floor}  model={settings.link_model}  batch_size={batch_size}")
+    print(f"floor={floor}  {stage_label(settings, 'link')}  batch_size={batch_size}")
     print(f"retrieval: threshold={threshold}  max_candidates={limit}")
 
     # One session for both catalog reads, so the index and the ingestion dates describe the

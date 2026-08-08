@@ -13,6 +13,7 @@ import sys
 
 from upmovies.config import get_settings
 from upmovies.llm import AnthropicClient
+from upmovies.llm.offline import require_anthropic_stage
 from upmovies.synthesize.summarizer import build_summary_request, parse_summary
 from upmovies.synthesize.summary_eval import (
     build_judge_request,
@@ -26,6 +27,8 @@ DEFAULT_FIXTURE = "tests/fixtures/synthesize/summary_cases.json"
 
 async def main(path: str) -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'summarize')
+    require_anthropic_stage(settings, 'cluster')
     cases = load_summary_cases(path)
     passed = 0
 
