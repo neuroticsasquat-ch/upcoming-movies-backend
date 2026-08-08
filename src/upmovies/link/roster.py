@@ -107,7 +107,5 @@ def roster_tmdb_ids(
     to bound what may be labeled `about`, so that the labelable set and the set the eval
     harness can score are the same set (spec §5.1a, §5.11)."""
     return {
-        tmdb_id
-        for entry in entries
-        if (tmdb_id := tmdb_by_film_id.get(entry.film_id)) is not None
+        tmdb_id for entry in entries if (tmdb_id := tmdb_by_film_id.get(entry.film_id)) is not None
     }
