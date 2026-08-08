@@ -2,7 +2,11 @@ from upmovies.llm.anthropic import AnthropicClient as AnthropicClient
 from upmovies.llm.gateway import STAGES as STAGES
 from upmovies.llm.gateway import Gateway as Gateway
 from upmovies.llm.gateway import MissingCredentialError as MissingCredentialError
+from upmovies.llm.gateway import StageConfigurationError as StageConfigurationError
 from upmovies.llm.gateway import credential_for as credential_for
+from upmovies.llm.gateway import stage_models as stage_models
+from upmovies.llm.gateway import stage_providers as stage_providers
+from upmovies.llm.gateway import validate_stage_configuration as validate_stage_configuration
 from upmovies.llm.openai_compat import OpenAICompatClient as OpenAICompatClient
 from upmovies.llm.pricing import HAIKU_4_5 as HAIKU_4_5
 from upmovies.llm.pricing import SONNET_4_6 as SONNET_4_6

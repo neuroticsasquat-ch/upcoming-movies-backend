@@ -38,8 +38,12 @@ The one object a pipeline holds instead of a client: it answers "which **provide
 never carry three independently configured providers. Its clients are pooled per provider, not
 per stage, and it **never falls back**: a stage whose provider has no credential fails, because
 answering it from another provider would attribute that provider's cost, latency and coverage
-to the one that never ran. It resolves the provider only; the model stays an argument, so the
-eval harnesses keep sweeping models without going through config.
+to the one that never ran. Failing is a *startup* event, not a run one — both
+entrypoints (the app's lifespan and the scheduled-task process) assert every stage's
+`(provider, model)` is priced and credentialed before any work begins, so a misconfiguration
+costs a container that will not start rather than a publish half-committed when it stops. It
+resolves the provider only; the model stays an argument, so the eval harnesses keep sweeping
+models without going through config.
 _Avoid_: router, proxy, factory, client (that's the thing it hands out).
 
 **Stable prefix**:

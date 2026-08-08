@@ -16,8 +16,10 @@ What lazy building does *not* buy is isolation. A stage resolves before its own 
 outside the `try` that isolates a failed chunk, so a `MissingCredentialError` propagates out of
 the pipeline and the stages after it never run. That is the intended shape: §9's "a failing
 provider means a failing chunk" is about a provider that answers badly, and a stage with no
-credential is a configuration error to fail the run on, not a chunk to skip. NEU-981 moves the
-detection to boot, where it belongs.
+credential is a configuration error to fail the run on, not a chunk to skip. In practice a run
+should never reach that raise: `validate_stage_configuration` below runs at startup and refuses
+the configuration there (NEU-981), leaving `_build`'s guard as the backstop for a settings
+object assembled outside an entrypoint — a script, or a test.
 
 `model` is deliberately *not* resolved here. It stays an explicit argument on both pipeline
 signatures because `scripts/eval_cluster_diff.py`'s entire A/B mechanism is `--model X` then
@@ -31,6 +33,7 @@ from contextlib import AsyncExitStack
 from upmovies.config import Settings
 from upmovies.llm.anthropic import AnthropicClient
 from upmovies.llm.openai_compat import OpenAICompatClient
+from upmovies.llm.pricing import rates_for
 from upmovies.llm.registry import ANTHROPIC, DEEPINFRA, DEEPSEEK, PROVIDERS
 from upmovies.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
 from upmovies.llm.types import Completer
@@ -41,6 +44,37 @@ from upmovies.llm.types import Completer
 # (`ingest.runs.STAGE_KINDS` is a different, narrower list: it classifies the three stages the
 # total-failure guard reads counters for, and `source_judge` keeps none.)
 STAGES: tuple[str, ...] = ("link", "cluster", "source_judge", "summarize")
+
+
+def stage_providers(settings: Settings) -> dict[str, str]:
+    """Which provider each stage is configured for.
+
+    Written out rather than resolved by `getattr(settings, f"{stage}_provider")`: the
+    summarize stage reads `SUMMARY_PROVIDER`, so there is no name to compute, and an
+    explicit map is what makes that mismatch visible instead of surprising."""
+    return {
+        "link": settings.link_provider,
+        "cluster": settings.cluster_provider,
+        "source_judge": settings.source_judge_provider,
+        "summarize": settings.summary_provider,
+    }
+
+
+def stage_models(settings: Settings) -> dict[str, str]:
+    """Which model each stage is *configured* for — what `pipeline_run` passes down, and so
+    what boot validation prices.
+
+    This does not make the gateway resolve models: `model` stays an explicit argument on both
+    pipeline signatures, because `scripts/eval_cluster_diff.py`'s A/B mechanism is `--model X`
+    then `--model Y` against a fixed corpus (design §5.3). An eval run passing a model these
+    settings do not name therefore steps outside what was checked at boot — deliberately. Such
+    a run is attended, and `rates_for` still raises on a pair with no entry."""
+    return {
+        "link": settings.link_model,
+        "cluster": settings.cluster_model,
+        "source_judge": settings.source_judge_model,
+        "summarize": settings.summary_model,
+    }
 
 
 class MissingCredentialError(RuntimeError):
@@ -71,6 +105,49 @@ def credential_for(settings: Settings, provider: str) -> str | None:
     return keys[provider] or None
 
 
+class StageConfigurationError(RuntimeError):
+    """A stage is configured for a `(provider, model)` pair that cannot be served: no rates
+    entry, no credential, or both.
+
+    Raised at startup so a misconfiguration fails the container rather than the run (spec §7).
+    The alternative is not "no error" but a *later* one — `rates_for` raises `KeyError` on an
+    unknown pair by design, and the stages commit per item, so that `KeyError` lands partway
+    through a nightly publish with earlier work already committed. Same class of guard as
+    `TMDB_API_KEY` being required for the app to boot at all."""
+
+
+def validate_stage_configuration(settings: Settings) -> None:
+    """Assert every stage's configured `(provider, model)` is priced and has a credential.
+
+    Both halves are one check because they fail the same way: a stage that cannot be priced
+    and a stage that cannot authenticate are each a `(provider, model)` this deployment
+    cannot run, and neither should be discovered by running it.
+
+    Every stage is checked and every fault reported together — a deploy that moves two stages
+    at once should learn about both from one failed boot rather than from two."""
+    providers = stage_providers(settings)
+    models = stage_models(settings)
+    problems: list[str] = []
+    for stage in STAGES:
+        provider, model = providers[stage], models[stage]
+        try:
+            rates_for(provider, model)
+        except KeyError:
+            problems.append(
+                f"stage {stage!r} is configured for provider {provider!r} and model {model!r}, "
+                f"which has no pricing entry — add one to `llm.pricing._RATES`"
+            )
+        if credential_for(settings, provider) is None:
+            problems.append(
+                f"stage {stage!r} is configured for provider {provider!r} (model {model!r}) "
+                f"but {provider.upper()}_API_KEY is unset"
+            )
+    if problems:
+        raise StageConfigurationError(
+            "LLM stage configuration is unusable:\n  " + "\n  ".join(problems)
+        )
+
+
 class Gateway:
     """Resolves a `Completer` per stage, and owns the clients it builds doing so.
 
@@ -90,15 +167,9 @@ class Gateway:
     ):
         self._settings = settings
         self._policy = policy
-        # Written out rather than resolved by `getattr(settings, f"{stage}_provider")`: the
-        # summarize stage reads `SUMMARY_PROVIDER`, so there is no name to compute, and an
-        # explicit map is what makes that mismatch visible instead of surprising.
-        self._providers: dict[str, str] = {
-            "link": settings.link_provider,
-            "cluster": settings.cluster_provider,
-            "source_judge": settings.source_judge_provider,
-            "summarize": settings.summary_provider,
-        }
+        # Shared with `validate_stage_configuration`, deliberately: a boot check that read a
+        # second copy of this map could pass while the gateway routes somewhere else.
+        self._providers: dict[str, str] = stage_providers(settings)
         for stage, provider in (overrides or {}).items():
             # Both halves are validated here because both bypass the `Literal` that validates
             # the settings at boot. An override that is quietly ignored is worse than one that

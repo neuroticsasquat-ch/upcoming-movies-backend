@@ -11,6 +11,21 @@ from collections.abc import Mapping
 
 from upmovies.llm.types import Completer
 
+# Every stage on Anthropic at the models `pricing._RATES` prices — production's routing, and
+# what `validate_stage_configuration` must let through. Applied with `Settings.model_copy` by
+# the startup tests rather than read from the container's env, so a locally retuned
+# `CLUSTER_MODEL` cannot decide whether a happy-path test passes.
+DEFAULT_ROUTING: dict[str, str] = {
+    "link_provider": "anthropic",
+    "cluster_provider": "anthropic",
+    "source_judge_provider": "anthropic",
+    "summary_provider": "anthropic",
+    "link_model": "claude-haiku-4-5",
+    "cluster_model": "claude-sonnet-4-6",
+    "source_judge_model": "claude-haiku-4-5",
+    "summary_model": "claude-haiku-4-5",
+}
+
 
 class StubGateway:
     """Resolves every stage to `client`, or to its own entry in `per_stage` when given one.

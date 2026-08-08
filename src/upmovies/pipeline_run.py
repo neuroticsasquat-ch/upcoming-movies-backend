@@ -32,7 +32,7 @@ from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm import Gateway
+from upmovies.llm import Gateway, validate_stage_configuration
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -230,6 +230,12 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%Y-%m-%dT%H:%M:%S",
         force=True,
     )
+    # The same guard the app's lifespan runs, for the process that actually pays for the
+    # failure: a scheduled task is a separate `python -m upmovies.pipeline_run` invocation,
+    # so the app having booted proves nothing about the env this one was handed (CLAUDE.md's
+    # "a long-running container holds the env it was created with"). Checked before the first
+    # run row exists, so an unroutable stage costs no half-published run (NEU-981).
+    validate_stage_configuration(settings)
     if mode == "daily":
         ok = asyncio.run(run_daily(settings))
     elif mode == "hourly":
