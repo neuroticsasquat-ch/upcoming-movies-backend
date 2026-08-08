@@ -11,12 +11,85 @@
     ]
   },
   {
+    "tmdb_id": 458896,
+    "title": "The Nightingale",
+    "original_title": "The Nightingale",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 532652,
+    "title": "The Resurrection of the Christ: Part One",
+    "original_title": "The Resurrection of the Christ: Part One",
+    "alternative_titles": [
+      "A Ressurreição de Cristo - Parte 1",
+      "The Passion of the Christ: Resurrection – Chapter I"
+    ]
+  },
+  {
     "tmdb_id": 556682,
     "title": "F.A.S.T.",
     "original_title": "F.A.S.T.",
     "alternative_titles": [
       "Fast",
       "粉红巴比伦"
+    ]
+  },
+  {
+    "tmdb_id": 615121,
+    "title": "The Thomas Crown Affair",
+    "original_title": "The Thomas Crown Affair",
+    "alternative_titles": [
+      "Aféra Thomase Crowna",
+      "偷天遊戲"
+    ]
+  },
+  {
+    "tmdb_id": 621304,
+    "title": "Children of Blood and Bone",
+    "original_title": "Children of Blood and Bone",
+    "alternative_titles": [
+      "Děti krve a kostí",
+      "Le Royaume d'Orïsha"
+    ]
+  },
+  {
+    "tmdb_id": 656908,
+    "title": "Ramayana",
+    "original_title": "रामायण",
+    "alternative_titles": [
+      "Namit Malhotra's Ramayana",
+      "Ramayana: Chapter 1",
+      "ராமாயணம்"
+    ]
+  },
+  {
+    "tmdb_id": 755679,
+    "title": "Fast Forever",
+    "original_title": "Fast Forever",
+    "alternative_titles": [
+      "A todo gas 10 - Parte 2",
+      "Fast and Furious 11",
+      "Fast & Furious 11",
+      "Fast X: Part 2",
+      "Hızlı ve Öfkeli 11",
+      "Quá Nhanh Quá Nguy Hiểm 11",
+      "Rapido X: Parte 2",
+      "Velozes e Furiosos 10: Parte 2",
+      "Velozes e Furiosos 11",
+      "Velozes & Furiosos 11"
+    ]
+  },
+  {
+    "tmdb_id": 791523,
+    "title": "Wildwood",
+    "original_title": "Wildwood",
+    "alternative_titles": [
+      "El Bosque Salvaje: Wildwood",
+      "Vahşi Orman",
+      "Wildwood : La prophétie de la forêt",
+      "Wildwood: Tajemství zakázaného lesa",
+      "Дикий лес",
+      "Дикий ліс"
     ]
   },
   {
@@ -30,19 +103,67 @@
     ]
   },
   {
-    "tmdb_id": 969681,
-    "title": "Spider-Man: Brand New Day",
-    "original_title": "Spider-Man: Brand New Day",
+    "tmdb_id": 843352,
+    "title": "Legend of the White Dragon",
+    "original_title": "Legend of the White Dragon",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 858035,
+    "title": "Klara and the Sun",
+    "original_title": "Klara and the Sun",
     "alternative_titles": [
-      "스파이더맨 4",
-      "Homem-Aranha 4",
-      "Marvel Studios' Spider-Man: Brand New Day",
-      "Spider-Man 4",
-      "Spider-Man: Nov dan",
-      "Человек-паук 4",
-      "ספיידרמן 4",
-      "สไปเดอร์-แมน แบรนด์ นิว เดย์",
-      "មនុស្សពីងពាង: ថ្ងៃថ្មីសន្លាង"
+      "Klára a slunce",
+      "Klara və Günəş"
+    ]
+  },
+  {
+    "tmdb_id": 860508,
+    "title": "The Whisper Man",
+    "original_title": "The Whisper Man",
+    "alternative_titles": [
+      "O Homem que Sussurra",
+      "耳语人"
+    ]
+  },
+  {
+    "tmdb_id": 911916,
+    "title": "Spider-Man: Beyond the Spider-Verse",
+    "original_title": "Spider-Man: Beyond the Spider-Verse",
+    "alternative_titles": [
+      "스파이더맨: 비욘드 더 유니버스",
+      "Beyond the Spider-Verse",
+      "Homem-Aranha: Através do Aranhaverso",
+      "Người Nhện: Bên Kia Vũ Trụ Nhện",
+      "Spider-Man: Across the Spider-Verse Parte 2",
+      "Spider-Man: Across the Spider-Verse Part II",
+      "Spider-Man: Across the Spider-Verse (Part Two)",
+      "Spider-Man: Across the Spider-Verse – Part Two",
+      "Spider-Man : Au-delà du Spider-Verse",
+      "Spider-Man: Más Allá del Spider-Verso",
+      "Человек-паук: Паутина вселенных. Часть вторая",
+      "Человек-паук: Через вселенные 3",
+      "スパイダーマン ビヨンド・ザ・スパイダーバース",
+      "蜘蛛侠3：超越宇宙 (迈尔斯·莫拉斯)"
+    ]
+  },
+  {
+    "tmdb_id": 940009,
+    "title": "Ray Gunn",
+    "original_title": "Ray Gunn",
+    "alternative_titles": [
+      "레이 건",
+      "Ρέι Γκαν",
+      "Рей Ганн",
+      "Рей Гън",
+      "Рэй Ганн",
+      "ריי גאן",
+      "راي غان",
+      "ری گان",
+      "रे गन",
+      "เรย์ กันน์",
+      "レイ・ガン",
+      "雷·冈恩"
     ]
   },
   {
@@ -69,6 +190,34 @@
       "復仇者聯盟5",
       "復仇者聯盟：末日崛起",
       "復仇者聯盟：末日降臨"
+    ]
+  },
+  {
+    "tmdb_id": 1003598,
+    "title": "Avengers: Secret Wars",
+    "original_title": "Avengers: Secret Wars",
+    "alternative_titles": [
+      "어벤져스 6",
+      "Avengers 6",
+      "Avengers: Tajné vojny",
+      "Bosszúállók: Titkos háború",
+      "Marvel Studios' Avengers: Secret Wars",
+      "Vingadores 6",
+      "Мстители 6"
+    ]
+  },
+  {
+    "tmdb_id": 1032863,
+    "title": "The Love Hypothesis",
+    "original_title": "The Love Hypothesis",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1078446,
+    "title": "Violent Night 2",
+    "original_title": "Violent Night 2",
+    "alternative_titles": [
+      "Noite Infeliz 2"
     ]
   },
   {
@@ -108,11 +257,71 @@
     ]
   },
   {
-    "tmdb_id": 1122030,
-    "title": "Alpha",
-    "original_title": "ऐल्फा",
+    "tmdb_id": 1110132,
+    "title": "Donkey",
+    "original_title": "Donkey",
     "alternative_titles": [
-      "Alpha"
+      "Donkey"
+    ]
+  },
+  {
+    "tmdb_id": 1117898,
+    "title": "The Cat in the Hat",
+    "original_title": "The Cat in the Hat",
+    "alternative_titles": [
+      "Dr. Seuss' The Cat in the Hat",
+      "Katten med Hatten",
+      "O Gatola da Cartola",
+      "חתול תעלול הסרט",
+      "القط فى القبعه",
+      "เดอะแคตอินเดอะแฮต"
+    ]
+  },
+  {
+    "tmdb_id": 1134437,
+    "title": "Dada - The Sourav Ganguly Story",
+    "original_title": "दादा - द सौरव गांगुली स्टोरी",
+    "alternative_titles": [
+      "দাদা: দ্য সৌরভ গাঙ্গুলি স্টোরি",
+      "கங்குலி",
+      "గంగూలీ"
+    ]
+  },
+  {
+    "tmdb_id": 1137844,
+    "title": "Mayday",
+    "original_title": "Mayday",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1150369,
+    "title": "John Rambo",
+    "original_title": "John Rambo",
+    "alternative_titles": [
+      "Rambo"
+    ]
+  },
+  {
+    "tmdb_id": 1169537,
+    "title": "Batwara 1947",
+    "original_title": "बटवारा १९४७",
+    "alternative_titles": [
+      "Lahore 1947",
+      "Production no. 27"
+    ]
+  },
+  {
+    "tmdb_id": 1170608,
+    "title": "Dune: Part Three",
+    "original_title": "Dune: Part Three",
+    "alternative_titles": [
+      "듄 3",
+      "Duna 3",
+      "Duna: Parte 3",
+      "Dune 3",
+      "Dune: Bagian Tiga",
+      "Dune: Part 3",
+      "חולית 3"
     ]
   },
   {
@@ -132,24 +341,66 @@
     ]
   },
   {
-    "tmdb_id": 1202033,
-    "title": "Enola Holmes 3",
-    "original_title": "Enola Holmes 3",
+    "tmdb_id": 1204680,
+    "title": "Coyote vs. Acme",
+    "original_title": "Coyote vs. Acme",
     "alternative_titles": [
-      "Енола Голмс 3"
+      "Koijots pret Acme",
+      "Kojotas prieš Akmę",
+      "Kojot proti sistemu",
+      "Pera Kojot protiv sistema",
+      "Ptica trkačica: Kojot protiv sustava"
     ]
   },
   {
-    "tmdb_id": 1212763,
-    "title": "Evil Dead Burn",
-    "original_title": "Evil Dead Burn",
+    "tmdb_id": 1213243,
+    "title": "Toxic",
+    "original_title": "ಟಾಕ್ಸಿಕ್",
     "alternative_titles": [
-      "Evil Dead: Burn",
-      "Evil Dead: En llamas",
-      "Kötü Ruh: Cehennem Ateşi",
-      "L'opéra de la terreur: l'embrasement",
-      "Smrtelné zlo: V plamenech",
-      "ผีอมตะแผดเผา"
+      "Toksyczny: Bajka dla dorosłych",
+      "Toxic: A Fairy Tale for Grown-ups",
+      "Toxický: Pohádka pro dospělé",
+      "Toxický: Rozprávka pre dospelých",
+      "टॉक्सिकः ए फेयरी टेल फॉर ग्रोन-अप्स",
+      "টক্সিক: আ ফেয়ারি টেল ফর গ্রোন-আপস",
+      "ടോക്സിക്ക്ഃ എ ഫെയറി ടെയിൽ ഫോർ ഗ്രോവ്സ്"
+    ]
+  },
+  {
+    "tmdb_id": 1221973,
+    "title": "Untitled Ocean's Prequel",
+    "original_title": "Untitled Ocean's Prequel",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1226699,
+    "title": "The Wrong Girls",
+    "original_title": "The Wrong Girls",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1228834,
+    "title": "The Fix",
+    "original_title": "The Fix",
+    "alternative_titles": [
+      "Hotel Tehran"
+    ]
+  },
+  {
+    "tmdb_id": 1234139,
+    "title": "Jailer 2",
+    "original_title": "ஜெயிலர் 2",
+    "alternative_titles": [
+      "Rajini The Jailer 2",
+      "Thalaivar 172"
+    ]
+  },
+  {
+    "tmdb_id": 1235057,
+    "title": "Love and War",
+    "original_title": "Love & War",
+    "alternative_titles": [
+      "Love and War"
     ]
   },
   {
@@ -159,6 +410,39 @@
     "alternative_titles": [
       "A Truly Wonderful Life",
       "James Stewart biopic"
+    ]
+  },
+  {
+    "tmdb_id": 1241803,
+    "title": "Les Misérables",
+    "original_title": "Les Misérables",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1244523,
+    "title": "Beware Boiúna",
+    "original_title": "Beware Boiúna",
+    "alternative_titles": [
+      "Boiúna: Legend of the Amazon",
+      "Titan"
+    ]
+  },
+  {
+    "tmdb_id": 1247606,
+    "title": "The Beatles: Ringo",
+    "original_title": "The Beatles: Ringo",
+    "alternative_titles": [
+      "The Beatles – A Four-Film Cinematic Event"
+    ]
+  },
+  {
+    "tmdb_id": 1248832,
+    "title": "Digger",
+    "original_title": "Digger",
+    "alternative_titles": [
+      "Judy",
+      "डिगर",
+      "ดิกเกอร์"
     ]
   },
   {
@@ -173,12 +457,44 @@
     ]
   },
   {
+    "tmdb_id": 1257973,
+    "title": "Fauzi",
+    "original_title": "ఫౌజి",
+    "alternative_titles": [
+      "Fauji",
+      "Untitled Prabhas/Hanu Raghavapudi Project"
+    ]
+  },
+  {
     "tmdb_id": 1263337,
     "title": "Heart of the Beast",
     "original_title": "Heart of the Beast",
     "alternative_titles": [
       "V srdci divočiny",
       "หัวใจผจญภัย"
+    ]
+  },
+  {
+    "tmdb_id": 1269325,
+    "title": "Drishyam 3",
+    "original_title": "दृश्यम् 3",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1273739,
+    "title": "The Catch",
+    "original_title": "The Catch",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1280608,
+    "title": "Evil Dead Wrath",
+    "original_title": "Evil Dead Wrath",
+    "alternative_titles": [
+      "La Colère d'Evil Dead",
+      "Mal Muerto Ira",
+      "Ond Død Vrede",
+      "злы мёртвы гнеў"
     ]
   },
   {
@@ -196,16 +512,59 @@
     ]
   },
   {
-    "tmdb_id": 1284041,
-    "title": "The Last House",
-    "original_title": "The Last House",
-    "alternative_titles": []
-  },
-  {
     "tmdb_id": 1284046,
     "title": "Onslaught",
     "original_title": "Onslaught",
     "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1286656,
+    "title": "I Play Rocky",
+    "original_title": "I Play Rocky",
+    "alternative_titles": [
+      "Eu Sou Rocky",
+      "Já, Rocky",
+      "Yo Soy Rocky"
+    ]
+  },
+  {
+    "tmdb_id": 1288438,
+    "title": "Godzilla x Kong: Supernova",
+    "original_title": "Godzilla x Kong: Supernova",
+    "alternative_titles": [
+      "Godzilla e Kong: Supernova",
+      "Godzilla x Kong 2",
+      "Godzilla y Kong: Supernova",
+      "고질라 X 콩: 수퍼노바"
+    ]
+  },
+  {
+    "tmdb_id": 1288445,
+    "title": "Mutiny",
+    "original_title": "Mutiny",
+    "alternative_titles": [
+      "Código: Venganza",
+      "คนระห่ำห้ามรอด"
+    ]
+  },
+  {
+    "tmdb_id": 1291595,
+    "title": "Insidious: Out of the Further",
+    "original_title": "Insidious: Out of the Further",
+    "alternative_titles": [
+      "인시디어스 6",
+      "Astralna Podmuklost: Izvan Daljine",
+      "Insidieux: hors du plus loin",
+      "Insidious 6",
+      "Insidious: Fuera del Más Allá",
+      "Insidious - Fuori dall'altrove",
+      "Insidious: Jsou mezi námi",
+      "Insidious: The Bleeding World",
+      "La noche del demonio: Están entre nosotros",
+      "Sobrenatural 6",
+      "Sobrenatural: Agora Entre Nós",
+      "วิญญาณตามติด หลุดจากนรก"
+    ]
   },
   {
     "tmdb_id": 1300926,
@@ -214,6 +573,29 @@
     "alternative_titles": [
       "Angry Birds : La Grande Envolée",
       "Angry Birds ve filmu 3"
+    ]
+  },
+  {
+    "tmdb_id": 1300968,
+    "title": "The Hunger Games: Sunrise on the Reaping",
+    "original_title": "The Hunger Games: Sunrise on the Reaping",
+    "alternative_titles": [
+      "Os Jogos da Fome: Amanhecer na Ceifa",
+      "The Hunger Games 6",
+      "შიმშილის თამაშები: მზის ამოსვლა მკისას",
+      "饥饿游戏：收获日出"
+    ]
+  },
+  {
+    "tmdb_id": 1302904,
+    "title": "Practical Magic 2",
+    "original_title": "Practical Magic 2",
+    "alternative_titles": [
+      "프랙티컬 매직 2",
+      "Amour et magie 2",
+      "Les ensorceleuses 2",
+      "Magická posedlost 2",
+      "สองสาวพลังรัก เมจิกมนตราเสน่หา"
     ]
   },
   {
@@ -229,13 +611,79 @@
     ]
   },
   {
-    "tmdb_id": 1368337,
-    "title": "The Odyssey",
-    "original_title": "The Odyssey",
+    "tmdb_id": 1307247,
+    "title": "OK! Madam: Bon Voyage",
+    "original_title": "오케이 마담 2",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1313587,
+    "title": "GROTESQQQUE",
+    "original_title": "GROTESQQQUE -グロテスク-",
     "alternative_titles": [
-      "Одиссея",
-      "האודיסיאה",
-      "มหากาพย์โอดิสซี"
+      "4649Girl",
+      "Æliens",
+      "GROTESQUE",
+      "Nocturn: En Cette Nuit Grotesque",
+      "エリィアンズ",
+      "ノクターン～このグロテスクな夜に～",
+      "夜露死駆★少女"
+    ]
+  },
+  {
+    "tmdb_id": 1324923,
+    "title": "A Quiet Place Part III",
+    "original_title": "A Quiet Place Part III",
+    "alternative_titles": [
+      "Ciche Miejsce 3",
+      "f A Quiet Place Part 3",
+      "Um Lugar Silencioso 3",
+      "Um Lugar Silencioso – Parte 3"
+    ]
+  },
+  {
+    "tmdb_id": 1356563,
+    "title": "Tumbbad II",
+    "original_title": "तुम्बाड 2",
+    "alternative_titles": [
+      "Tumbbad 2"
+    ]
+  },
+  {
+    "tmdb_id": 1375161,
+    "title": "Don't Move",
+    "original_title": "Don't Move",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1376856,
+    "title": "The Paradise",
+    "original_title": "ది ప్యారడైస్",
+    "alternative_titles": [
+      "El Paraiso",
+      "The Paradise",
+      "The पेरडाइस",
+      "The প্যারাডাইস",
+      "The பாரடைஸ்",
+      "The ಪ್ಯಾರಡೈಸ್",
+      "The പാരഡൈസ്"
+    ]
+  },
+  {
+    "tmdb_id": 1377237,
+    "title": "Runner",
+    "original_title": "Runner",
+    "alternative_titles": [
+      "Entrega Al Límite"
+    ]
+  },
+  {
+    "tmdb_id": 1378537,
+    "title": "Mirzapur: The Movie",
+    "original_title": "मिर्ज़ापुर",
+    "alternative_titles": [
+      "Mirzapur",
+      "মির্জাপুর"
     ]
   },
   {
@@ -248,6 +696,90 @@
     ]
   },
   {
+    "tmdb_id": 1381071,
+    "title": "Godzilla Minus Zero",
+    "original_title": "ゴジラ-0.0",
+    "alternative_titles": [
+      "고지라 마이너스 제로",
+      "고지라-0.0",
+      "고질라-0.0",
+      "G-0.0",
+      "Godzilla -0.0",
+      "Gojira -0.0",
+      "גודזילה מינוס אפס",
+      "ゴジラ-0.0（ゴジラマイナスゼロ）",
+      "ゴジラマイナスゼロ",
+      "超大作怪獣映画"
+    ]
+  },
+  {
+    "tmdb_id": 1383750,
+    "title": "Rise of the Footsoldier: Retribution",
+    "original_title": "Rise of the Footsoldier: Retribution",
+    "alternative_titles": [
+      "Rise of the Footsoldier: Ibiza"
+    ]
+  },
+  {
+    "tmdb_id": 1384216,
+    "title": "The Dog Stars",
+    "original_title": "The Dog Stars",
+    "alternative_titles": [
+      "Köpek ve Yıldızlar",
+      "La Constellation du chien",
+      "La guerra de los últimos",
+      "Vzhlížet ke hvězdám",
+      "Собачьи звёзды",
+      "Созвездие Большого Пса",
+      "เดอะ ด็อก สตาร์"
+    ]
+  },
+  {
+    "tmdb_id": 1384514,
+    "title": "The Vvaan",
+    "original_title": "वन",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1384528,
+    "title": "OM Chapter 1: Udhiram - The Blood Wood",
+    "original_title": "ஓம் : Chapter 1",
+    "alternative_titles": [
+      "D55",
+      "Dhanush 55",
+      "OM – Chapter 1: Udhiram – The Blood Wood"
+    ]
+  },
+  {
+    "tmdb_id": 1386618,
+    "title": "Black Panther 3",
+    "original_title": "Black Panther 3",
+    "alternative_titles": [
+      "Black Panther III",
+      "Marvel Studios' Black Panther 3"
+    ]
+  },
+  {
+    "tmdb_id": 1389379,
+    "title": "Ranabaali",
+    "original_title": "రణబాలి",
+    "alternative_titles": [
+      "Raanabali",
+      "Ranabali"
+    ]
+  },
+  {
+    "tmdb_id": 1400336,
+    "title": "Focker-in-Law",
+    "original_title": "Focker-in-Law",
+    "alternative_titles": [
+      "Entrando Na Maior Fria",
+      "Entrando Numa Fria 4",
+      "Meet the Parents 4",
+      "Zor Baba 4"
+    ]
+  },
+  {
     "tmdb_id": 1400940,
     "title": "Clayface",
     "original_title": "Clayface",
@@ -256,9 +788,52 @@
     ]
   },
   {
+    "tmdb_id": 1401586,
+    "title": "Sonic the Hedgehog 4",
+    "original_title": "Sonic the Hedgehog 4",
+    "alternative_titles": [
+      "Ježek Sonic 4",
+      "Sonic 4",
+      "Sonic 4: Η Ταινία",
+      "Sonic Movie 4"
+    ]
+  },
+  {
+    "tmdb_id": 1408162,
+    "title": "Vishwanath & Sons",
+    "original_title": "விஸ்வநாத் & சன்ஸ்",
+    "alternative_titles": [
+      "Suriya 46"
+    ]
+  },
+  {
     "tmdb_id": 1417668,
     "title": "Star Wars: Starfighter",
     "original_title": "Star Wars: Starfighter",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1421903,
+    "title": "Werwulf",
+    "original_title": "Werwulf",
+    "alternative_titles": [
+      "Werwulf : la bête maudite"
+    ]
+  },
+  {
+    "tmdb_id": 1423191,
+    "title": "Resident Evil",
+    "original_title": "Resident Evil",
+    "alternative_titles": [
+      "Biohazard",
+      "Nevidno zlo",
+      "เรสซิเดนท์ อีวิล"
+    ]
+  },
+  {
+    "tmdb_id": 1437396,
+    "title": "Your Mother Your Mother Your Mother",
+    "original_title": "Your Mother Your Mother Your Mother",
     "alternative_titles": []
   },
   {
@@ -271,19 +846,45 @@
     ]
   },
   {
-    "tmdb_id": 1442396,
-    "title": "Nagabandham",
-    "original_title": "నాగబంధం",
+    "tmdb_id": 1440769,
+    "title": "The Beekeeper 2",
+    "original_title": "The Beekeeper 2",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1444466,
+    "title": "Awarapan 2",
+    "original_title": "आवारापन २",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1447853,
+    "title": "Don't Look Back in Anger",
+    "original_title": "Don't Look Back in Anger",
     "alternative_titles": [
-      "Nagabandham: The Secret Treasure"
+      "Oasis: Don’t Look Back in Anger"
     ]
   },
   {
-    "tmdb_id": 1468683,
-    "title": "Heartstopper Forever",
-    "original_title": "Heartstopper Forever",
+    "tmdb_id": 1457866,
+    "title": "The Adventures of Cliff Booth",
+    "original_title": "The Adventures of Cliff Booth",
     "alternative_titles": [
-      "Heartstopper"
+      "The Continuing Adventures of Cliff Booth"
+    ]
+  },
+  {
+    "tmdb_id": 1458319,
+    "title": "How to Train Your Dragon 2",
+    "original_title": "How to Train Your Dragon 2",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1475768,
+    "title": "Maatrubhumi",
+    "original_title": "मातृभूमि",
+    "alternative_titles": [
+      "Battle of Galwan"
     ]
   },
   {
@@ -296,15 +897,27 @@
     ]
   },
   {
-    "tmdb_id": 1477712,
-    "title": "Ice Cream Man",
-    "original_title": "Ice Cream Man",
+    "tmdb_id": 1489396,
+    "title": "Eetha",
+    "original_title": "ईथा",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1493400,
+    "title": "Camp Rock 3",
+    "original_title": "Camp Rock 3",
     "alternative_titles": [
-      "El Heladero, Dulce Sabor A Muerte",
-      "Eli Roth's Ice Cream Man",
-      "O Sorveteiro",
-      "Zmrzlinář",
-      "หวานเย็น เข็นมาเชือด"
+      "Rock the Boat"
+    ]
+  },
+  {
+    "tmdb_id": 1495141,
+    "title": "ghost - end of night",
+    "original_title": "ghost／夜の果て",
+    "alternative_titles": [
+      "ghost – end of night",
+      "ghost/yoru no hate",
+      "Ghost: Yoru no Hate"
     ]
   },
   {
@@ -320,12 +933,39 @@
     ]
   },
   {
+    "tmdb_id": 1503762,
+    "title": "Sense and Sensibility",
+    "original_title": "Sense and Sensibility",
+    "alternative_titles": [
+      "센스 앤 센서빌리티",
+      "Akal Budi dan Kepekaan",
+      "Järki ja tunteet",
+      "Rozum a cit"
+    ]
+  },
+  {
+    "tmdb_id": 1519320,
+    "title": "AEW All In 2026: London",
+    "original_title": "AEW All In 2026: London",
+    "alternative_titles": [
+      "AEW All In London",
+      "AEW: All In London",
+      "AEW All In London 2026"
+    ]
+  },
+  {
     "tmdb_id": 1523140,
     "title": "Man of Tomorrow",
     "original_title": "Man of Tomorrow",
     "alternative_titles": [
       "Exodus"
     ]
+  },
+  {
+    "tmdb_id": 1532610,
+    "title": "Ink",
+    "original_title": "Ink",
+    "alternative_titles": []
   },
   {
     "tmdb_id": 1538497,
@@ -339,9 +979,156 @@
     ]
   },
   {
-    "tmdb_id": 1656220,
-    "title": "23 000 Lives",
-    "original_title": "23 000 Leben",
+    "tmdb_id": 1544162,
+    "title": "The Conjuring: First Communion",
+    "original_title": "The Conjuring: First Communion",
+    "alternative_titles": [
+      "Obecność: Pierwsza komunia"
+    ]
+  },
+  {
+    "tmdb_id": 1561726,
+    "title": "Masterplan",
+    "original_title": "Masterplan",
     "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1562777,
+    "title": "The Stunt Driver",
+    "original_title": "The Stunt Driver",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1563192,
+    "title": "Lenin Pandiyan",
+    "original_title": "லெனின் பாண்டியன்",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1566920,
+    "title": "The Apothecary Diaries: The Deceased Empress' Treasure",
+    "original_title": "劇場版 薬屋のひとりごと 亡妃の秘宝",
+    "alternative_titles": [
+      "Gekijouban Kusuriya no Hitorigoto: Bouhi no Hihou",
+      "Kusuriya no Hitorigoto: Bouhi no Hihou",
+      "The Apothecary Diaries Movie",
+      "The Apothecary Diaries: The Movie"
+    ]
+  },
+  {
+    "tmdb_id": 1570976,
+    "title": "Baahubali: The Eternal War – Part 1",
+    "original_title": "Bāhubali: The Eternal War — Part 1",
+    "alternative_titles": [
+      "Baahubali - The Eternal War Part 1",
+      "Baahubali: The Eternal War Part 1"
+    ]
+  },
+  {
+    "tmdb_id": 1574840,
+    "title": "Untitled Mummy Sequel",
+    "original_title": "Untitled Mummy Sequel",
+    "alternative_titles": [
+      "A Múmia 4",
+      "The Mummy 4"
+    ]
+  },
+  {
+    "tmdb_id": 1583250,
+    "title": "Untitled A24 Horror Film",
+    "original_title": "Untitled A24 Horror Film",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1594516,
+    "title": "Holiday Ever After: A Disney World Wish Come True",
+    "original_title": "Holiday Ever After: A Disney World Wish Come True",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1595124,
+    "title": "Steps",
+    "original_title": "Steps",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1608787,
+    "title": "Plucked",
+    "original_title": "Plucked",
+    "alternative_titles": [
+      "The Thing with Feathers"
+    ]
+  },
+  {
+    "tmdb_id": 1615938,
+    "title": "The Haunting of Hotel Transylvania",
+    "original_title": "The Haunting of Hotel Transylvania",
+    "alternative_titles": [
+      "Hotel Transylvania 5"
+    ]
+  },
+  {
+    "tmdb_id": 1626806,
+    "title": "Seyon",
+    "original_title": "சேயோன்",
+    "alternative_titles": [
+      "SK 26",
+      "SK26"
+    ]
+  },
+  {
+    "tmdb_id": 1651461,
+    "title": "Untitled Daniels Event Film",
+    "original_title": "Untitled Daniels Event Film",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1658611,
+    "title": "The Comebacker",
+    "original_title": "The Comebacker",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1685097,
+    "title": "Michael: Part Two",
+    "original_title": "Michael: Part Two",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1714880,
+    "title": "She Saw Us",
+    "original_title": "She Saw Us",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1718699,
+    "title": "Not Alone",
+    "original_title": "Not Alone",
+    "alternative_titles": [
+      "Illumination's Not Alone",
+      "Interligados",
+      "Pas si seuls"
+    ]
+  },
+  {
+    "tmdb_id": 1720742,
+    "title": "Chauhaan",
+    "original_title": "Chauhaan",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1726370,
+    "title": "The Greatest Showdown",
+    "original_title": "The Greatest Showdown",
+    "alternative_titles": []
+  },
+  {
+    "tmdb_id": 1738010,
+    "title": "Ghost Rider",
+    "original_title": "Ghost Rider",
+    "alternative_titles": [
+      "Marvel Studios' Ghost Rider",
+      "Motoqueiro Fantasma"
+    ]
   }
 ]

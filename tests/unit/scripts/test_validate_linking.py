@@ -10,6 +10,7 @@ from scripts.validate_linking import (
     format_comparison,
     format_retrieval_report,
     link_pairs,
+    max_excess_false_positives_for,
     retrieval_coverage,
     run_retrieval_path,
 )
@@ -280,3 +281,48 @@ def test_neutralized_pick_scores_a_none_row_as_a_true_negative():
     )
 
     assert scored == [(None, None)]  # a correct decline, not a false positive
+
+
+def test_the_ceiling_is_exact_at_the_population_the_residue_was_accepted_on():
+    """94 items must convert back to the 3 ADR-0011 actually decided on.
+
+    Guards a real trap: `int(3 / 94 * 94)` is 2, so a float rate silently tightens the
+    accepted bar on the very fixture it was agreed against."""
+    assert max_excess_false_positives_for(94) == 3
+
+
+def test_the_ceiling_scales_with_the_about_population():
+    """The residue was accepted as a rate; enlarging the fixture buys resolution, not a
+    5.7x tighter bar (spec §5.11)."""
+    assert max_excess_false_positives_for(538) == 17
+    assert max_excess_false_positives_for(188) == 6
+
+
+def test_the_ceiling_floors_rather_than_rounds_up():
+    """A conversion may cost the candidate path an item; it may never hand it one."""
+    assert max_excess_false_positives_for(60) == 1  # 1.91 -> 1
+    assert max_excess_false_positives_for(31) == 0  # 0.98 -> 0
+
+
+def test_the_gate_sizes_its_ceiling_from_the_coverage_it_was_given():
+    """Same excess, opposite verdicts, because the populations differ. This is the whole
+    point of stating the residue as a rate."""
+    small = evaluate_gate(_counts(67, 2), _counts(68, 12), coverage=_coverage(94, 94))
+    large = evaluate_gate(_counts(319, 14), _counts(381, 24), coverage=_coverage(538, 538))
+
+    assert small.max_excess_false_positives == 3
+    assert not small.excess_within_ceiling  # +10 on 94 items
+    assert large.max_excess_false_positives == 17
+    assert large.excess_within_ceiling  # +10 on 538 items
+
+
+def test_an_explicit_ceiling_overrides_the_derived_one():
+    verdict = evaluate_gate(
+        _counts(319, 14),
+        _counts(381, 31),
+        coverage=_coverage(538, 538),
+        max_excess_false_positives=3,
+    )
+
+    assert verdict.max_excess_false_positives == 3
+    assert not verdict.excess_within_ceiling

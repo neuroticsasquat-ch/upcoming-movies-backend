@@ -122,7 +122,14 @@ def test_exclusion_category_requires_is_production_news_false():
 
 
 _FIXTURE = Path(__file__).parents[2] / "fixtures" / "link" / "validation_set.json"
-_EXCLUSION_CATEGORIES = {"reaction", "roundup", "streaming-move", "interview-quote", "downstream"}
+# The exclusion categories the fixture actually carries. `streaming-move` is deliberately
+# absent, and its absence is a scope fact rather than a labeling gap: a
+# streaming/catalogue-move story is about a film you can already watch, and the fixture is
+# pinned to the *active* catalog, which is upcoming films only. The one such row the 302-row
+# set held named Enola Holmes 3, and it demoted to `none` when the pin moved past that film's
+# release (NEU-1012); the 4,000-row draft that replaced it produced no candidate for the
+# category at all. `other` is in the set because the enlarged corpus supplies it in volume.
+_EXCLUSION_CATEGORIES = {"reaction", "roundup", "interview-quote", "downstream", "other"}
 
 
 def test_fixture_has_curated_not_news_rows():

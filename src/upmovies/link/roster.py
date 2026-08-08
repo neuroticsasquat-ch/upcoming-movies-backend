@@ -3,6 +3,7 @@
 maps the index back to a film_id."""
 
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID
@@ -93,3 +94,18 @@ async def build_roster(session: AsyncSession, *, as_of: date | None = None) -> R
         for f in films
     ]
     return Roster(entries=entries, text=_render(entries))
+
+
+def roster_tmdb_ids(
+    entries: Iterable[RosterEntry], tmdb_by_film_id: Mapping[UUID, int]
+) -> set[int]:
+    """The TMDB ids of the rostered films — the **roster's**, not the whole catalog's.
+
+    These differ whenever the active-film filter excludes anything: at any date later than the
+    catalog's earliest release date the table holds films the roster does not, and the offline
+    tooling has to agree with the roster about which films exist. The labeling scripts use this
+    to bound what may be labeled `about`, so that the labelable set and the set the eval
+    harness can score are the same set (spec §5.1a, §5.11)."""
+    return {
+        tmdb_id for entry in entries if (tmdb_id := tmdb_by_film_id.get(entry.film_id)) is not None
+    }
