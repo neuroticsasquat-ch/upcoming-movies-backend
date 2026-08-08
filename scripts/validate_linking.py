@@ -102,13 +102,14 @@ class RetrievalCoverage:
     are fixed in different files.
 
     **This is not the M1 recall oracle.** That one lives in the suite, runs on every commit
-    at zero token cost, and scores a pinned catalog (spec §6). This one scores whatever the
-    live catalog holds on the day the run is paid for, which is why films that have aged out
-    of the active set are held apart in `out_of_catalog` rather than counted as misses: the
-    fixture outlives the release dates of the films it names, and a film retrieval was never
-    allowed to consider is a scope loss, not a lexical one. Both paths lose those films
-    symmetrically, so the F1 comparison is unaffected either way — it is this number alone
-    that would be misread."""
+    at zero token cost, and scores a pinned catalog (spec §6).
+
+    `out_of_catalog` holds apart expected films the catalog no longer contains, rather than
+    counting them as misses: a film retrieval was never allowed to consider is a scope loss,
+    not a lexical one. Against a **pinned** fixture it should be zero — the pin is chosen so
+    every labeled film was active on that date, and `_check_coverage` aborts the run if it
+    isn't (spec §5.1a). It stays non-zero only for an unpinned fixture read at wall clock,
+    where the set outlives the release dates of the films it names."""
 
     hits: int
     total: int
@@ -391,11 +392,41 @@ async def run_retrieval_path(
     return candidate_sets, tally
 
 
-def _warn_missing(expected_ids: set[int], present: set[int], label: str) -> None:
+def _resolve_catalog_date(
+    fixture_date: date | None, override: date | None
+) -> tuple[date, bool, str]:
+    """Which date the catalog is read as of, whether that counts as pinned, and where it came
+    from — resolved once so the three don't drift apart.
+
+    The fixture's own date wins unless overridden: a dated set scored against today's catalog
+    silently loses its released subjects, which reads as recall failure rather than as drift.
+    Falling back to wall clock keeps pre-pin fixtures runnable, unpinned."""
+    if override is not None:
+        return override, True, "--as-of override"
+    if fixture_date is not None:
+        return fixture_date, True, "from fixture"
+    return datetime.now(UTC).date(), False, "wall clock — fixture declares no as_of_date"
+
+
+def _check_coverage(expected_ids: set[int], present: set[int], label: str, *, pinned: bool) -> None:
     """Flag expected films the path cannot reach at all — a fixture/catalog mismatch that
-    would otherwise read as a recall failure of the path under test."""
-    if missing := expected_ids - present:
-        print(f"WARNING: {len(missing)} expected film(s) are not in the current {label}: {missing}")
+    would otherwise read as a recall failure of the path under test.
+
+    On a *pinned* fixture this aborts rather than warns. The whole point of the pin is that
+    every labeled film was still active on the fixture's `as_of_date`, so a gap means the pin
+    has drifted from the labels and the run is measuring decay again — while producing
+    numbers that look entirely plausible. An unpinned fixture has no such guarantee, so there
+    the gap is only worth a warning."""
+    if not (missing := expected_ids - present):
+        return
+    message = f"{len(missing)} expected film(s) are not in the {label}: {sorted(missing)}"
+    if pinned:
+        raise SystemExit(
+            f"ERROR: {message}\n"
+            "The fixture's as_of_date does not cover every film it labels. Re-pin it to a "
+            "date before the earliest of those films released, or re-label the set."
+        )
+    print(f"WARNING: {message}")
 
 
 async def main(
@@ -407,14 +438,18 @@ async def main(
     batch_size: int,
     floor: float,
     tolerance: float,
+    as_of: date | None = None,
 ) -> None:
     settings = get_settings()
-    items = load_validation_set(path)
+    validation_set = load_validation_set(path)
+    items = validation_set.items
+    catalog_date, pinned, pin_source = _resolve_catalog_date(validation_set.as_of_date, as_of)
     n_about = sum(1 for it in items if it.relation == "about")
     print(
         f"fixture: {len(items)} items total, {n_about} 'about' (linkable), "
         f"{len(items) - n_about} mention/none"
     )
+    print(f"catalog read as of: {catalog_date} ({pin_source})")
     print(f"mode={mode}  floor={floor}  model={settings.link_model}  batch_size={batch_size}")
     if mode in ("retrieval", "both"):
         print(f"retrieval: threshold={threshold}  max_candidates={limit}")
@@ -429,24 +464,29 @@ async def main(
         tmdb_by_film_id = dict(
             (row.id, row.tmdb_id) for row in (await s.execute(select(Film))).scalars().all()
         )
-        roster = await build_roster(s) if wants_roster else None
-        index = await build_candidate_index(s) if wants_retrieval else None
+        roster = await build_roster(s, as_of=catalog_date) if wants_roster else None
+        index = await build_candidate_index(s, as_of=catalog_date) if wants_retrieval else None
 
     expected_ids = {it.expected_film_tmdb_id for it in items if it.expected_film_tmdb_id}
     indexed_tmdb_ids: set[int] = set()
     if roster is not None:
-        _warn_missing(
+        _check_coverage(
             expected_ids,
             {t for e in roster.entries if (t := tmdb_by_film_id.get(e.film_id)) is not None},
             "roster",
+            pinned=pinned,
         )
     if index is not None:
         indexed_tmdb_ids = {
             t for f in index.films if (t := tmdb_by_film_id.get(f.film_id)) is not None
         }
-        _warn_missing(expected_ids, indexed_tmdb_ids, "retrieval index")
+        _check_coverage(expected_ids, indexed_tmdb_ids, "retrieval index", pinned=pinned)
 
-    run_date = datetime.now(UTC).date()
+    # The prompt's own `as_of_date`, which it uses to judge whether a beat is genuinely
+    # recent or re-circulated. It moves with the catalog date for the same reason: a July
+    # story read as of today is stale by construction, and the model would score it
+    # "downstream" on the strength of the clock rather than the copy.
+    run_date = catalog_date
     roster_metrics = retrieval_metrics = None
     roster_nv = retrieval_nv = None
     reports: list[str] = []
@@ -555,6 +595,16 @@ def _parse_args() -> argparse.Namespace:
         default=F1_GATE_POINTS,
         help="gate tolerance in points, applied to the f1 AND precision deltas alike",
     )
+    parser.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        default=None,
+        help=(
+            "read the catalog as of this date instead of the fixture's own as_of_date. "
+            "Counts as pinned, so coverage gaps abort and name the unreachable films — "
+            "which is what you want when searching for a new pin date"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -569,5 +619,6 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             floor=args.floor,
             tolerance=args.tolerance,
+            as_of=args.as_of,
         )
     )

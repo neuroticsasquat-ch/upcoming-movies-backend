@@ -28,7 +28,7 @@ class CatalogFilm(NamedTuple):
 
 def about_items() -> list[ValidationItem]:
     """The labeled `about` rows — the only ones carrying a film to be retrieved."""
-    return [item for item in load_validation_set(VALIDATION_SET) if item.relation == "about"]
+    return [item for item in load_validation_set(VALIDATION_SET).items if item.relation == "about"]
 
 
 def labeled_tmdb_id(item: ValidationItem) -> int:

@@ -1,4 +1,6 @@
-[
+{
+  "as_of_date": "2026-07-01",
+  "items": [
   {
     "url": "https://deadline.com/2026/06/famke-janssen-marvel-made-mistake-avengers-doomsday-1236963165/",
     "source": "Deadline",
@@ -3157,3 +3159,4 @@
     "event_group": null
   }
 ]
+}

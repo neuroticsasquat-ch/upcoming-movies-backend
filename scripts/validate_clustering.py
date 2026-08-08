@@ -48,7 +48,7 @@ def _clustering_rows(items: list[ValidationItem]) -> dict[int, list[ValidationIt
 
 async def main(path: str) -> None:
     settings = get_settings()
-    items = load_validation_set(path)
+    items = load_validation_set(path).items
     by_film = _clustering_rows(items)
 
     async with SessionLocal() as s:

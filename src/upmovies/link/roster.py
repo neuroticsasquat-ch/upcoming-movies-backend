@@ -4,7 +4,7 @@ maps the index back to a film_id."""
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -55,9 +55,12 @@ def _render(entries: list[RosterEntry]) -> str:
     return "\n".join(lines)
 
 
-async def build_roster(session: AsyncSession) -> Roster:
+async def build_roster(session: AsyncSession, *, as_of: date | None = None) -> Roster:
+    """`as_of` reconstructs the active set as it stood on a past date, so the eval harness
+    can score a dated fixture against both paths on the same rewound catalog. Production
+    passes nothing."""
     excluded = get_settings().tmdb_excluded_statuses
-    today = datetime.now(UTC).date()
+    today = as_of or datetime.now(UTC).date()
     films = (
         (
             await session.execute(
