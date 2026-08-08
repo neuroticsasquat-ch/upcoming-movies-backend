@@ -76,6 +76,15 @@ distinguishable from the `no-match` the model never actually reached. Expressibl
 because numbering is per story; the global roster had no local scope to fall outside of.
 _Avoid_: invalid index, hallucinated film (it may name a real film — just not this story's).
 
+**Labelable set**:
+The films a validation-fixture row may name as its `about` subject: the tracked films active
+on the fixture's pin date, and no others. It exists because it must equal the set the eval
+harness can *score* against — label a film outside it and `validate_linking` aborts rather than
+report a miss it would read as the link path's failure. Enforced by one shared
+`indexed_tmdb_ids`, so the labeling scripts and the harness cannot drift apart.
+_Avoid_: roster (that was the full-catalog prompt prefix, and it is deleted), tracked films
+(the catalog holds released ones too), candidate set (that is per story, and narrower).
+
 **Retrieval miss**:
 The correct film absent from a story's candidate set. The failure mode retrieval introduces,
 and an unforgiving one: **link** is lossy, so a missed story is not linked late, it is lost.

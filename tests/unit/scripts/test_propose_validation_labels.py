@@ -11,7 +11,7 @@ inherited unchanged from the deleted roster's `roster_tmdb_ids` (NEU-1004).
 
 from uuid import uuid4
 
-from scripts.propose_validation_labels import _proposal_to_row
+from scripts.propose_validation_labels import _film_list_text, _proposal_to_row
 from upmovies.link.retrieval.index import IndexedFilm, indexed_film, indexed_tmdb_ids
 
 
@@ -109,3 +109,54 @@ def test_a_mention_proposal_carries_no_film_or_event():
     assert row["relation"] == "mention"
     assert row["expected_film_tmdb_id"] is None
     assert row["event_type"] is None
+
+
+class TestFilmListRendering:
+    """The prefix the proposer is shown, pinned line for line.
+
+    NEU-1004 moved this rendering off the deleted roster onto the retrieval index. The
+    fixture's ground truth was proposed against the roster's exact line format, so a
+    re-proposal at the same pin has to see the same prefix — otherwise the corpus is
+    labeled by two different prompts and nobody can tell which rows came from which.
+    """
+
+    def test_a_line_carries_tmdb_id_title_year_original_title_and_genres(self):
+        film_id = uuid4()
+        film = indexed_film(
+            film_id=film_id,
+            title="Runner",
+            original_title="Beguiler",
+            year=2027,
+            genres=("Drama", "Thriller"),
+        )
+
+        assert _film_list_text([film], {film_id: 111}) == (
+            'tmdb=111 "Runner" (2027) [orig: Beguiler] genres: Drama, Thriller'
+        )
+
+    def test_an_original_title_equal_to_the_title_is_not_repeated(self):
+        film_id = uuid4()
+        film = indexed_film(film_id=film_id, title="Runner", original_title="Runner", year=2027)
+
+        assert _film_list_text([film], {film_id: 111}) == 'tmdb=111 "Runner" (2027)'
+
+    def test_the_overview_is_trimmed_to_the_roster_length(self):
+        """120 characters, which the roster applied at build time and this applies at render
+        time. Untrimmed, the index's full overviews would inflate a ~1,200-film prefix."""
+        film_id = uuid4()
+        film = indexed_film(film_id=film_id, title="Runner", year=2027, overview="x" * 200)
+
+        line = _film_list_text([film], {film_id: 111})
+
+        assert line == 'tmdb=111 "Runner" (2027) — ' + "x" * 120
+
+    def test_a_film_with_no_tmdb_id_is_left_out_entirely(self):
+        """The fixture keys films by TMDB id, so a line the model could not name is worse
+        than no line — it invites a proposal there is no way to record."""
+        keyed, unkeyed = uuid4(), uuid4()
+        films = [
+            indexed_film(film_id=keyed, title="Runner", year=2027),
+            indexed_film(film_id=unkeyed, title="Sunup", year=2027),
+        ]
+
+        assert _film_list_text(films, {keyed: 111}) == 'tmdb=111 "Runner" (2027)'

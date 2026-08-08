@@ -153,13 +153,15 @@ null>, "event_type": <one of the types above, or null>, "is_production_news": <t
 null>, "exclusion_category": <category or null>}}]"""
 
 
-def _roster_text(films: Iterable[IndexedFilm], tmdb_by_film_id: Mapping[UUID, int]) -> str:
+def _film_list_text(films: Iterable[IndexedFilm], tmdb_by_film_id: Mapping[UUID, int]) -> str:
     """Render the labelable film list keyed by TMDB id (the fixture's film key).
 
-    "Roster" is the *prompt's* word for this list — the module that used to build one is
-    gone (NEU-1004), and the rows are rendered here from the retrieval index instead. The
-    line format is unchanged, including the 120-character overview trim the roster applied,
-    so a re-proposal against the same pin sees the same prefix it always did."""
+    The prompt still calls this block `ROSTER:` — that is the *prompt's* word, and moving it
+    would edit a prompt whose output is hand-reviewed ground truth. The module that used to
+    build a roster is gone (NEU-1004); these rows come from the retrieval index instead. The
+    line format is byte-for-byte what the roster rendered, including the 120-character
+    overview trim, so a re-proposal against the same pin sees the same prefix it always did
+    — `test_propose_validation_labels` pins that."""
     lines = []
     for f in films:
         tmdb_id = tmdb_by_film_id.get(f.film_id)
@@ -235,7 +237,7 @@ async def main(args: argparse.Namespace) -> None:
     labelable = indexed_tmdb_ids(index.films, tmdb_by_film_id)
     system = [
         cached_system_block(
-            f"{_INSTRUCTIONS}\n\nROSTER:\n{_roster_text(index.films, tmdb_by_film_id)}"
+            f"{_INSTRUCTIONS}\n\nROSTER:\n{_film_list_text(index.films, tmdb_by_film_id)}"
         )
     ]
     print(

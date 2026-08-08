@@ -47,7 +47,11 @@ from upmovies.link.metrics import (
     compute_news_value_metrics,
 )
 from upmovies.link.retrieval.health import RetrievalTally
-from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
+from upmovies.link.retrieval.index import (
+    CandidateIndex,
+    build_candidate_index,
+    indexed_tmdb_ids,
+)
 from upmovies.link.retrieval.select import CandidateSet, select_candidates
 from upmovies.link.validation import (
     ValidationItem,
@@ -386,7 +390,9 @@ async def main(
         )
 
     expected_ids = {it.expected_film_tmdb_id for it in items if it.expected_film_tmdb_id}
-    indexed = {t for f in index.films if (t := tmdb_by_film_id.get(f.film_id)) is not None}
+    # The same helper the labeling scripts bound the labelable set with, so what may be
+    # labeled `about` and what can be scored here cannot drift apart (spec §5.1a, §5.11).
+    indexed = indexed_tmdb_ids(index.films, tmdb_by_film_id)
     _check_coverage(expected_ids, indexed, "retrieval index", pinned=pinned)
 
     # The prompt's own `as_of_date`, which it uses to judge whether a beat is genuinely
