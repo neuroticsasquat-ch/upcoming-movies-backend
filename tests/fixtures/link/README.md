@@ -3,49 +3,72 @@
 `validation_set.json` is the **ground truth** for the NEU-279 accuracy baseline. It is
 produced by hand-labeling a sample of real stories drawn from the current corpus.
 
-## The file is dated: `as_of_date` (NEU-1010)
+## The file is dated: `as_of_date` (NEU-1010, re-pinned NEU-1012)
 
 The set is an envelope, not a bare list:
 
 ```json
-{ "as_of_date": "2026-07-01", "items": [ … ] }
+{ "as_of_date": "2026-08-08", "items": [ … ] }
 ```
 
 `as_of_date` is the date the catalog must be **read as of** when scoring. It is not
 decoration: the fixture's stories are news from the weeks around labeling, and the films they
 name are in the active catalog only until they release. Roughly **22% of the active catalog
 turns over per month** (88 films release within 7 days of any given day, 266 within 30), so a
-set scored against *today's* catalog steadily loses its own subjects. By 2026-08-08 that was
-42 of 94 `about` items naming films that had left the active set — unlinkable by **either**
-link path, and scored as recall failures of the path under test rather than as drift.
+set scored against *today's* catalog steadily loses its own subjects. Between the first pin
+and the re-label six weeks later, that was 42 of 94 `about` items naming films that had left
+the active set — unlinkable by **either** link path, and scored as recall failures of the path
+under test rather than as drift.
 
-Pinned to 2026-07-01, all 34 films the set names are in scope and **94/94 `about` items are
-reachable**. `scripts/validate_linking.py` reads the date from the file, applies it to the
-roster *and* the retrieval index, and uses it as the prompt's own `as_of_date` so recency
-reasoning is reproducible too. It **exits with an error** if a pinned set still names an
-unreachable film — that means the pin has drifted from the labels, and the resulting numbers
-would look plausible while measuring decay.
+`scripts/validate_linking.py` reads the date from the file, applies it to the roster *and* the
+retrieval index, and uses it as the prompt's own `as_of_date` so recency reasoning is
+reproducible too. It **exits with an error** if a pinned set still names an unreachable film —
+that means the pin has drifted from the labels, and the resulting numbers would look plausible
+while measuring decay.
 
 `--as-of` overrides the file's date; it is an escape hatch for re-pinning, not routine use.
 A bare-list fixture (the pre-NEU-1010 shape) still loads and falls back to wall clock.
 
-**What the pin is and isn't.** It rewinds the *active-film filter*, not ingestion history —
-74% of the films now in `catalog.film` were ingested after 2026-07-01, so the pinned catalog
-(1,407 films) is larger than the catalog that literally existed then. The index keeps them:
-both paths see the same films, so the gate's comparison stays like-for-like, and a larger
-catalog means more lexical collisions, which makes retrieval's job harder rather than easier.
-It is a fair comparison, not a historical replay.
+### Why the pin is the *labeling* date, and why that is better than an early one
 
-**But those films are not scoreable, and NEU-1011 found out the hard way.** A `none` label
-means "not about any film tracked **at labeling time**", so a pick naming a film the catalog
-gained later is outside the label space — the link may be perfectly correct and the fixture
-still has no way to credit it. Six of retrieval's thirteen false positives were exactly that.
-`films_ingested_after` therefore neutralizes such a pick to "no link" when scoring, for both
-paths; `validate_linking.py` reports the count and **aborts** if a film the fixture actually
-labels turns out to postdate the pin, since that would silently convert a correct link into a
-false negative. Keeping the films in the index but out of the scoring is what preserves
-production-like scale without inventing errors: excluding them from the index instead would
-drop the catalog to 367 films, a regime the growth curve says behaves nothing like production.
+The first pin (2026-07-01) was chosen to keep the then-labeled films reachable, and it bought
+three problems that the labeling date does not have. NEU-1012 moved it to **2026-08-08**, the
+day the enlarged set was labeled:
+
+- **Coverage stops being a coincidence.** At 2026-07-01, coverage held by *one day* — the
+  earliest film the set named (*Enola Holmes 3*) released exactly on the pin. Now the roster
+  shown to the label proposer **is** the pinned active set (`propose_validation_labels.py
+  --as-of`), so a film that cannot be scored cannot be labeled in the first place. 121 of 121
+  labeled films are reachable, structurally rather than luckily.
+- **No story is in the fixture's future.** The draft is bounded at the pin
+  (`export_link_validation_draft.py --as-of`), so the prompt's `as_of_date` is never earlier
+  than the story it is reasoning about. The old set had one row published five weeks after its
+  pin, recorded as unfixable because the two constraints conflicted; at the labeling date they
+  do not conflict at all.
+- **False positives are counted honestly.** See below.
+
+**What the pin is and isn't.** It rewinds the *active-film filter*, not ingestion history. At
+2026-08-08 that filter is doing real work for the first time: it excludes the 212 films that
+released between the two pins, where at 2026-07-01 it excluded *nothing* (the catalog's
+earliest release date was the pin itself). The eval therefore now exercises scope filtering,
+and 129 rows are marked `untracked_film` — real movie news about films the roster does not
+hold, which is exactly the negative the active-film clause exists to produce.
+
+**Post-labeling films, and why there are none left.** A `none` label means "not about any film
+tracked **at labeling time**", so a pick naming a film the catalog gained *later* is outside
+the label space — the link may be perfectly correct and the fixture still has no way to credit
+it. Six of retrieval's thirteen false positives at the first pin were exactly that, so
+`films_ingested_after` neutralizes such a pick to "no link" when scoring, for both paths.
+
+That neutralization was a necessary correction and also a large one: at the 2026-07-01 pin it
+covered **1,068 of 1,435 films**, three quarters of the catalog, so any false positive naming
+one of them simply did not count. Pinning to the labeling date empties the set — **0 films
+postdate 2026-08-08** — and the machinery stays in place for the next time the two dates
+diverge. The practical consequence is that the false-positive counts gate #3 is stated in are,
+for the first time, counts of every false positive rather than of the quarter that happened to
+be scoreable. `validate_linking.py` still reports the count and **aborts** if a film the
+fixture actually labels turns out to postdate the pin, since that would silently convert a
+correct link into a false negative.
 
 **Except for 9 synthetic rows.** NEU-358 and NEU-367 added hand-written `about` examples to
 exercise the production-news axis where the real corpus was thin. They are identifiable by an
@@ -55,21 +78,26 @@ real rows — but they were never anchored to a real story, which is how the thr
 
 ## Building the set (candidate-assisted)
 
-Labeling 490 rows from scratch is slow, so the workflow is review-and-correct:
+Labeling a thousand rows from scratch is slow, so the workflow is review-and-correct:
 
-1. `scripts/export_link_validation_draft.py` → `validation_draft.json` (rows with
-   `relation: "TODO"`).
-2. `scripts/propose_validation_labels.py` reads the draft and writes
+1. `scripts/export_link_validation_draft.py --target N --as-of <pin> --exclude <current set>`
+   → `validation_draft.json` (rows with `relation: "TODO"`). It **samples** rather than dumps:
+   the retained corpus is ~98k stories, and the draft is a source-stratified, seed-reproducible
+   slice of it bounded at the pin.
+2. `scripts/propose_validation_labels.py --as-of <pin>` reads the draft and writes
    `validation_candidates.json` with proposed `relation` / `expected_film_tmdb_id` /
-   `event_type`.
-3. `scripts/build_review_html.py` turns the candidates into `validation_review.html` — open
-   it in a browser to **review every proposal** with full text + a searchable film picker,
-   then download the corrected `validation_set.json` (keep ~150–200 rows).
-4. `scripts/validate_linking.py` runs the live Stage-1 baseline;
-   `scripts/diagnose_linking.py` explains the misses and sweeps the confidence floor.
+   `event_type`. **Pass the pin** — the roster it shows the proposer is what defines the
+   labelable film set, and it has to be the same set the harness will score against.
+3. `scripts/assemble_validation_set.py` reconciles the proposals with the existing labeled set:
+   it carries the old rows forward, demotes any whose film the new pin excludes, and subsamples
+   the proposed `none` rows to the target class mix.
+4. **Review every row the model proposed** and correct it. `scripts/build_review_html.py` turns
+   candidates into `validation_review.html` with full text and a searchable film picker.
+5. `scripts/validate_linking.py` runs the live Stage-1 gate; `scripts/diagnose_linking.py`
+   explains the misses and sweeps the confidence floor.
 
-`validation_candidates.json` and `validation_review.html` are regenerable intermediates
-(gitignored); only `validation_set.json` is committed.
+`validation_draft.json`, `validation_candidates.json` and `validation_review.html` are
+regenerable intermediates (gitignored); only `validation_set.json` is committed.
 
 **Anchoring caveat:** candidates are proposed by a *stronger* model (Sonnet) than the
 production Stage-1 linker (Haiku, `link_model`), so the set measures the linker against an
@@ -94,7 +122,7 @@ Each item in the JSON array has the following fields:
 | `event_group` | string \| null | no | Gold beat-grouping label, film-namespaced `"{tmdb_id}-{beat}"` (e.g. `"1003596-doctor-doom-casting"`). Used for cluster scoring — see "Event group convention". |
 | `is_production_news` | bool \| null | no (about only) | `false` marks an `about` story that is **not** production news (should not link). `null` = treated as production news (expected to link). |
 | `exclusion_category` | string \| null | no | One of `reaction｜roundup｜streaming-move｜interview-quote｜downstream｜other`. Set only when `is_production_news` is `false`. Diagnoses *why* a story was excluded. |
-| `untracked_film` | bool | no | `true` marks a `none` row that is real movie news about a film **not in the roster** (typically undated / not-yet-ingested). Ignored by the harness (`load_validation_set` drops unknown fields) — captured purely as coverage-gap evidence for NEU-285 (undated capture) / NEU-284 (credits). Omitted when false. |
+| `untracked_film` | bool | no | `true` marks a `none` row that is real movie news about a film **not in the roster**, for either reason: undated / not-yet-ingested (the original sense, coverage-gap evidence for NEU-285 / NEU-284), or **already released** and therefore out of scope at the pin (NEU-1012). Ignored by the harness (`load_validation_set` drops unknown fields). Omitted when false. |
 
 ## Relation labels
 
@@ -121,12 +149,41 @@ UUID. This makes the fixture portable across local databases and environments.
 
 ## Sampling protocol
 
-The labeled set should contain:
-- All stories in the export window that plausibly match a tracked film (the `about` and
-  `mention` candidates).
-- A representative reject sample (`none` items) — roughly equal in size to the positive
-  sample, drawn randomly from the remainder.
-- ~150–200 items total is sufficient for a reliable baseline.
+**The set is enriched, not representative, and that is deliberate.** In the production corpus
+only ~8% of stories are `about` a tracked film. A representative sample large enough to hold
+300 `about` rows would be ~3,700 rows to hand-review. Instead the draft is sampled
+representatively and the *fixture* keeps all of its `about` and `mention` proposals plus a
+subsample of its `none` proposals. Gate #3 is a comparison of two paths on one fixture, so a
+class mix that is the same for both paths does not favour either; what the mix does affect is
+the absolute precision level, which is why absolute numbers here are not production estimates.
+
+Current shape (2026-08-08, NEU-1012):
+
+| | rows |
+|---|---|
+| `about` | 538 — of which **283 linkable**, 255 not-production-news |
+| `mention` | 66 |
+| `none` | 571 — of which 129 marked `untracked_film` |
+| **total** | **1,175** across 121 films and 27 sources |
+
+**The `about` total is what sets the gate's resolution**, and the two axes read it
+differently. `compute_link_metrics` counts a true positive for any `about` row linked to its
+labeled film — including a not-production-news row that leaks, which is simultaneously a
+true positive on the link axis and a false positive on the news-value axis. So the
+true-positive ceiling is 538, not 283. `linkable_about` is the population
+`compute_news_value_metrics` scores recall against, and it is reported separately because it
+moves independently of the total.
+
+**Why enlarging it was the whole point.** At 94 `about` rows and single-digit false-positive
+counts, one story was worth ~1.3 precision points, so cutover gate #3's ±1-point tolerance
+asked the fixture to resolve less than a single row (design spec §5.7). Growing the population
+is the only thing that fixes that — averaging more runs of a small fixture produces more
+numbers and no more resolution.
+
+**Sampling is reproducible.** The draft is drawn by `md5(seed ‖ url)` within each source, so
+the same seed against the same corpus draws the same rows; the recipe, not just the output, is
+the record. NEU-1012's draft was `--target 4000 --as-of 2026-08-08 --seed neu-1012`, excluding
+the 302 urls already labeled.
 
 ## Event group convention
 
@@ -149,11 +206,15 @@ snapshot and does not update automatically as new stories are ingested.
 
 **This matters for retrieval scoring.** Candidate retrieval searches only *active* films
 (`active_film_clause` — released and canceled titles are out of scope), so the catalog the
-fixture is scored against shrinks over time as its films reach release. As of 2026-08-08,
-**40 of the 94** `about` rows (9 of the 34 distinct films) name a film that has since gone
-inactive and is no longer retrievable at all. Any absolute recall number
-is therefore only meaningful alongside the as-of date it was measured at; the fixture is a
-label oracle, not a catalog snapshot.
+fixture is scored against shrinks over time as its films reach release. That is what the
+`as_of_date` pin exists to hold still. Any absolute recall number is only meaningful alongside
+the as-of date it was measured at; the fixture is a label oracle, not a catalog snapshot.
+
+**Expect to re-pin roughly every six weeks.** At ~22% catalog turnover per month, a set left
+at a stale pin is measuring decay within about that long — which is exactly what happened
+between NEU-1010 and NEU-1012. Re-pinning is not re-labeling: carry the set forward with
+`assemble_validation_set.py`, which demotes the rows the new pin strands and leaves the rest
+alone.
 
 ## Label audit (NEU-989)
 
@@ -266,3 +327,51 @@ catalog, not the ticket changing unrelated films.
 Which is also the gate's limit. With no distractors it cannot see a precision regression
 or cap saturation — those belong to the offline F1 cutover gate and to shadow telemetry
 respectively. This one answers recall, which is the question that costs nothing to ask.
+
+## Label audit (NEU-1012)
+
+The 4,000-row draft was proposed by Sonnet and **every proposed row that reached the fixture
+was read and corrected by hand** — 873 rows. 60 corrections, a 6.9% proposal error rate. What
+the errors were is more useful than the rate:
+
+**The film id is where the proposer fails, and it fails by transcription rather than by
+comprehension.** 21 of the 60 corrections were an `about` row naming the wrong film, and
+**16 of those named a film whose TMDB id shares a five-digit prefix with the correct one**:
+
+| rows | proposed | correct | shared prefix |
+|---|---|---|---|
+| 10 | 1170600 *Return of the Living Dead* | 1170608 *Dune: Part Three* | 6 of 7 |
+| 4 | 1389373 *Rowdy Janardhana* | 1389379 *Ranabaali* | 6 of 7 |
+| 1 | 1300926 *The Angry Birds Movie 3* | 1300968 *Hunger Games: Sunrise on the Reaping* | 5 of 7 |
+| 1 | 1375187 *Dumas: Black Devil* | 1375161 *Don't Move* | 5 of 7 |
+
+The model read the story correctly and then copied the id wrong from a 1,223-line roster. This
+is invisible to any end-to-end score — the rows are still `about`, still production news — and
+it is fatal to the retrieval oracle, which is the same defect class NEU-989 repaired by hand.
+**It is caught cheaply**: the audit is "does any significant token of the labeled film's title
+appear in the headline or dek?", run over every `about` row. Re-run it after every proposal
+pass. Use a minimum token length of 4 — short tokens like `in` match as substrings under the
+squash-fold and hide the row.
+
+**The structural fix is to stop asking the model to copy an integer.** Have the proposer return
+the roster line number or the title and resolve the TMDB id in code. Worth doing before the next
+labeling pass; not done here, because this pass was audited by hand instead.
+
+**The second failure mode is the same-title trap, in the direction the prompt warns about.**
+The rest of the wrong-film corrections were stories about video games, businesses and unrelated
+events that share a title with a tracked film — *Resident Evil* (four rows, all about the
+games), *Madden*, *Masterplan* (Italian regional planning), *Verity* (a mining stock),
+*Call of Duty*, *Don't Look Back in Anger* (Liam Gallagher on X), *Zelda* (the game remake).
+These are now `none` rows and they are among the most valuable negatives in the set.
+
+**False negatives were rare.** Reading all 546 proposed `none` rows turned up exactly one row
+that should have been `about` (an OTT/satellite rights deal for *Lenin Pandiyan*). The
+proposer under-calls `about` far less often than it mis-keys the film.
+
+**What the review did not do.** Rows the proposer labeled `none` and the subsample dropped were
+never read, so an `about` story Sonnet missed *and* the subsample excluded is simply absent from
+the fixture. Absent rows bias no score — they are not counted for either path — but they do mean
+the set is easier than the corpus: it under-represents the stories a strong model finds hard.
+Film-existence checks during review were made against a title index only to *confirm* a film the
+row had already been read to be about, never to discover what a row might be about; deriving
+labels from title matching would make the retrieval path's recall true by construction.

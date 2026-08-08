@@ -70,22 +70,40 @@ from upmovies.news.models import Story
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
 
-# Gate #3's pass condition, in whole items (ADR-0011). The fixture has 94 scoreable `about`
-# items and the paths make single-digit numbers of false positives, so one story is worth
-# ~1.3 precision points. Across four runs whose roster prompt is byte-identical, the roster
-# control's own false positives wandered between 1 and 2 and its true positives between 64
-# and 69 (spec §5.7, §5.8) — so a ±1-point gate asked the fixture to resolve far less than
-# the noise it carries.
+# Gate #3's pass condition (ADR-0011), stated as a **rate** rather than an item count.
 #
-# **This ceiling is a relaxation, and it is meant to be read as one.** The original gate had
-# two clauses, and converted to items they disagree. Holding retrieval's 68 true positives
-# against the roster's 67/2: the *F1* clause admits 5 false positives (−0.77 pts) and refuses
-# 6 (−1.26), giving 3 excess; the *precision* clause — which is the load-bearing half —
-# admits only 2, giving **0** excess. Taking 3 therefore relaxes the precision clause rather
-# than restating it. It is taken because 0 excess is not a bar this instrument can express:
-# the control moves by more than that between identical runs. See ADR-0011 for why the
-# residue is accepted rather than certified.
-MAX_EXCESS_FALSE_POSITIVES = 3
+# ADR-0011 accepted a residue of **3 excess false positives on a 94-item `about` population**
+# and expressed it as a bare "3", which was right while the fixture was a fixed 94 rows. It is
+# not right across fixture sizes: NEU-1012 grew the population to 538, and carrying "3" over
+# unchanged would have silently tightened the accepted bar 5.7-fold — a change to what the
+# project decided, disguised as a constant that nobody edited.
+#
+# So the constant is the rate the residue was accepted at, and the item ceiling is derived
+# from whatever fixture is actually being scored. Enlarging the fixture then buys *resolution*
+# — at 94 items one story was ~1.3 precision points, at 538 it is ~0.2 — without moving the
+# bar. That separation is the whole point of NEU-1012; see spec §5.11.
+#
+# **The rate is still a relaxation of the original precision clause, and it is meant to be
+# read as one.** Converted to items at the 94-row fixture, the F1 clause admitted 3 excess
+# false positives and the precision clause — the load-bearing half — admitted **0**. Taking 3
+# relaxed the precision clause rather than restating it, because 0 excess was not a bar that
+# instrument could express. See ADR-0011 for why the residue is accepted rather than certified,
+# and §5.11 for whether a 5.7x larger population says it held.
+#
+# Held as an exact numerator/denominator rather than a float: `int(3 / 94 * 94)` is **2**,
+# so a float rate would quietly tighten the accepted bar on the very fixture it was agreed
+# against. Integer arithmetic makes the conversion a no-op at the original size, which is the
+# least a change of units should promise.
+ACCEPTED_EXCESS_FALSE_POSITIVES = 3
+ACCEPTED_PER_SCOREABLE_ABOUT = 94
+
+
+def max_excess_false_positives_for(scoreable_about: int) -> int:
+    """The accepted residue converted into items for a fixture of this size.
+
+    Floored, so the conversion never rounds the accepted bar upward — and exact at 94, where
+    it returns the 3 ADR-0011 actually decided on."""
+    return scoreable_about * ACCEPTED_EXCESS_FALSE_POSITIVES // ACCEPTED_PER_SCOREABLE_ABOUT
 
 
 def news_value_rows(
@@ -184,17 +202,20 @@ class GateVerdict:
     Three checks, all one-sided — retrieval *beating* the baseline is never a breach:
 
     - **3a** retrieval offered the correct film for every scoreable `about` item. The only
-      part of this gate that measures the stage the project actually changed, and the part
-      the fixture resolves cleanly (94/94 in every run taken).
+      part of this gate that measures the stage the project actually changed. It read 94/94
+      in every run taken against the 94-item fixture and **534/538 against the enlarged
+      one** — the four misses are correct labels naming films lexical matching cannot reach,
+      so this check now fails on a real coverage gap rather than on nothing (spec §5.11).
     - **3b** retrieval's true positives are at least the roster's. An *aggregate* count, not
       a per-link check: retrieval can drop one of the roster's links and pass by gaining
       another, and this fixture cannot tell those apart. The point is that `link` is lossy —
       a precision gain bought by declining to link is not a win.
-    - **3c** retrieval added no more than `MAX_EXCESS_FALSE_POSITIVES` false positives.
+    - **3c** retrieval added no more excess false positives than the accepted rate converts
+      to for this fixture's `about` population — see `max_excess_false_positives`.
 
     The points deltas are still computed because §5.1a and §5.7 are written in them, but
-    they are the record, not the condition: the fixture's noise floor is several times the
-    ±1-point tolerance they were judged against."""
+    they are the record, not the condition: the 94-item fixture's noise floor was several
+    times the ±1-point tolerance they were judged against."""
 
     precision_delta: float
     recall_delta: float
@@ -202,7 +223,9 @@ class GateVerdict:
     excess_false_positives: int
     lost_true_positives: int
     coverage: RetrievalCoverage | None = None
-    max_excess_false_positives: int = MAX_EXCESS_FALSE_POSITIVES
+    # Derived, not literal: a bare 3 here is the 94-item bar, and applying it to a
+    # fixture of any other size is exactly the silent tightening the rate exists to stop.
+    max_excess_false_positives: int = max_excess_false_positives_for(ACCEPTED_PER_SCOREABLE_ABOUT)
 
     @property
     def coverage_complete(self) -> bool | None:
@@ -253,9 +276,21 @@ def evaluate_gate(
     candidate: LinkMetrics,
     *,
     coverage: RetrievalCoverage | None = None,
-    max_excess_false_positives: int = MAX_EXCESS_FALSE_POSITIVES,
+    max_excess_false_positives: int | None = None,
 ) -> GateVerdict:
-    """Score the candidate path against the roster baseline, in items and in points."""
+    """Score the candidate path against the roster baseline, in items and in points.
+
+    `max_excess_false_positives` defaults to the accepted rate converted for this fixture's
+    scoreable `about` population, which `coverage` carries. Pass an int to override it — the
+    flag exists so the report cannot pin the bar harder than the spec does. With no coverage
+    to size it against, it falls back to the item count ADR-0011 recorded, which is only
+    correct for the 94-item fixture that decision was taken on."""
+    if max_excess_false_positives is None:
+        max_excess_false_positives = (
+            max_excess_false_positives_for(coverage.total)
+            if coverage is not None
+            else max_excess_false_positives_for(ACCEPTED_PER_SCOREABLE_ABOUT)
+        )
     return GateVerdict(
         precision_delta=(candidate.precision - baseline.precision) * 100,
         recall_delta=(candidate.recall - baseline.recall) * 100,
@@ -264,6 +299,19 @@ def evaluate_gate(
         lost_true_positives=baseline.true_positives - candidate.true_positives,
         coverage=coverage,
         max_excess_false_positives=max_excess_false_positives,
+    )
+
+
+def _ceiling_note(coverage: RetrievalCoverage | None, override: int | None) -> str:
+    """Say where the ceiling came from. A derived number that looks hand-picked is exactly
+    how ADR-0011's "3" would have been carried into a fixture it was never sized for."""
+    if override is not None:
+        return ", --max-excess-false-positives"
+    if coverage is None:
+        return ", ADR-0011's 94-item count — no coverage to size against"
+    return (
+        f", {ACCEPTED_EXCESS_FALSE_POSITIVES} per {ACCEPTED_PER_SCOREABLE_ABOUT}"
+        f" x {coverage.total} scoreable"
     )
 
 
@@ -323,7 +371,7 @@ def format_comparison(
     baseline_nv: NewsValueMetrics,
     candidate_nv: NewsValueMetrics,
     coverage: RetrievalCoverage | None = None,
-    max_excess_false_positives: int = MAX_EXCESS_FALSE_POSITIVES,
+    max_excess_false_positives: int | None = None,
 ) -> str:
     """The roster → retrieval delta, the leak split, and the gate verdict."""
     verdict = evaluate_gate(
@@ -345,7 +393,8 @@ def format_comparison(
         f"{candidate.true_positives:>11}{-verdict.lost_true_positives:>+9} items",
         f"{'false positives (3c)':<28}{baseline.false_positives:>8}"
         f"{candidate.false_positives:>11}{verdict.excess_false_positives:>+9} items"
-        f"  (ceiling {max_excess_false_positives:+d})",
+        f"  (ceiling {verdict.max_excess_false_positives:+d}"
+        f"{_ceiling_note(coverage, max_excess_false_positives)})",
     ]
     if coverage is not None:
         lines.append(
@@ -385,7 +434,8 @@ def format_comparison(
         lines.append(
             f"GATE: FAIL — retrieval met or beat the roster's true positives and added "
             f"{verdict.excess_false_positives} false positives, past the "
-            f"{max_excess_false_positives} the gate allows. That is the narrowing regression "
+            f"{verdict.max_excess_false_positives} the gate allows. That is the narrowing "
+            "regression "
             "(spec §4.3): shown one film and a headline about its untracked sibling, the "
             "model links what it was given."
         )
@@ -402,7 +452,7 @@ def format_comparison(
             f"{f'{coverage.hits}/{coverage.total}' if coverage else 'unscored'}, "
             f"{-verdict.lost_true_positives:+d} links, "
             f"{verdict.excess_false_positives:+d} false positives "
-            f"(ceiling {max_excess_false_positives:+d}){boundary}."
+            f"(ceiling {verdict.max_excess_false_positives:+d}){boundary}."
         )
     return "\n".join(lines)
 
@@ -556,7 +606,7 @@ async def main(
     limit: int,
     batch_size: int,
     floor: float,
-    max_excess_false_positives: int,
+    max_excess_false_positives: int | None,
     as_of: date | None = None,
 ) -> None:
     settings = get_settings()
@@ -730,15 +780,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=settings.link_retrieval_max_candidates)
     parser.add_argument("--batch-size", type=int, default=settings.link_batch_size)
     parser.add_argument("--floor", type=float, default=settings.link_confidence_floor)
-    # Gate #3's pass condition, in items (ADR-0011). Overridable for the same reason the old
-    # points tolerance was: the spec sets the bar and the flag keeps the report from pinning
-    # it harder than the spec does — a re-gate against an enlarged `about` population will
-    # want a different number, and should not have to edit the script to try one.
+    # Gate #3's pass condition, in items (ADR-0011). Defaults to the accepted *rate* converted
+    # for whatever fixture is being scored, so enlarging the `about` population buys resolution
+    # without silently moving the bar (spec §5.11). Overridable for the same reason the old
+    # points tolerance was: the spec sets the bar, and the flag keeps the report from pinning
+    # it harder than the spec does without anyone having to edit the script to try a number.
     parser.add_argument(
         "--max-excess-false-positives",
         type=int,
-        default=MAX_EXCESS_FALSE_POSITIVES,
-        help="gate #3c: how many more false positives than the roster retrieval may add",
+        default=None,
+        help=(
+            "gate #3c: how many more false positives than the roster retrieval may add. "
+            "Default: the accepted rate (3 per 94 scoreable 'about' items) converted for "
+            "this fixture"
+        ),
     )
     parser.add_argument(
         "--as-of",

@@ -1,6 +1,9 @@
 # Cutover gate #3 is restated in whole items, and its residue is accepted
 
 **Status:** accepted — *backlotter: Entity-Linking Candidate Retrieval* (M4, NEU-1003)
+· **revisited 2026-08-08** (NEU-1012), see *Revisited* below. The judgement stands; the
+constant it was written as does not, the reason 3c's ceiling was not set to zero has expired,
+and gate #3 now fails on 3a.
 
 ## Context
 
@@ -145,3 +148,60 @@ trade for this product.**
 - **A future re-gate is a labeling project, not a tuning one.** Anyone revisiting this should
   start by enlarging the `about` population. Re-running the existing fixture more times will
   produce more numbers and no more resolution.
+
+## Revisited — 2026-08-08 (NEU-1012)
+
+The last consequence above says a future re-gate "is a labeling project, not a tuning one" and
+should start by enlarging the `about` population. That was done: **94 rows over 34 films → 538
+over 121**, re-pinned to the labeling date, hand-reviewed. Design spec §5.11 has the numbers;
+what they mean for this decision:
+
+**The judgement stands; the measurement it now rests on is slightly worse than the bar, not
+inside it.** The residue accepted here was 3 excess false positives per 94 scoreable `about`
+items — 3.19%, which converts to **17.2 items** at the enlarged population. Over three runs
+with nothing changed between them, retrieval runs at **3.35%** (excess 17, 19, 18; mean 18.0).
+Sample sd 1.0, so the standard error of that mean is 0.58: the mean is **1.0 item above the
+converted ceiling, ~1.7 SE, with 2 of 3 runs above it.**
+
+So the accepted trade is confirmed *in magnitude* — 3.35% against 3.19% is agreement to within
+about one story per 538 — and is **not** demonstrated to be within the bar. Do not read this
+section as the gate passing. What changed is that the difference is now measurable at all:
+before, the same question was unanswerable in either direction.
+
+**The instrument is no longer the problem it was — for precision.** The roster control's
+precision spread fell from 1.4 points across three byte-identical runs to **0.2**, and one item
+fell from ~1.3 precision points to 0.22. The quantity 3c is stated in now moves by 2 items
+against a ceiling of 17 (~5%), where it previously moved by about as much as the entire
+allowance. "Zero excess false positives is not a bar this instrument can express" was true of
+the 94-item fixture and is **no longer true**: at 538 items, zero excess is expressible.
+Whether to tighten to it is a product decision this ADR does not pre-empt, but the reason it
+was refused has expired.
+
+**What did not improve: F1.** The control's F1 spread was 3.1 points at 94 items and 3.2 at
+538, because F1 is dominated by recall and recall noise is proportional to the population. The
+original ±1-point F1 clause remains unmeasurable at any fixture size this project will build.
+
+**One correction to this ADR's mechanics.** Stating the residue as the bare integer `3` was
+right for a fixed 94-row fixture and wrong as a durable constant: carried unchanged onto 538
+rows it would have tightened the accepted bar 5.7-fold, as a silent change to what was decided.
+`validate_linking.py` now holds the residue as the rate it was accepted at
+(`ACCEPTED_EXCESS_FALSE_POSITIVES` per `ACCEPTED_PER_SCOREABLE_ABOUT`) and derives the item
+ceiling from whatever fixture is scored — exact at 94, 17 at 538. Enlarging the population then
+buys resolution without moving the bar, which is the separation this ADR needed and did not
+have.
+
+**What newly fails: 3a.** This ADR calls candidate coverage "the only part with real margin",
+at 94/94 in every run ever taken. At 538 items it is **534/538** in every run — four *correct*
+labels naming films lexical retrieval cannot reach (a placeholder title, two cases of subtitle
+dilution, one one-character spelling variant). Retrieval did not regress; the corpus finally
+contained the failure modes. Gate #3 as written therefore fails, on the clause that was
+supposed to be safe, and §5.11 records that rather than restating it away.
+
+**What the enlarged population newly shows.** Retrieval leaks ~50% more not-production-news
+stories than the roster (127 vs 84 per run; news-value precision 0.667 vs 0.739, −7.2 points,
+consistent across all three runs). This *confirms* the "not one of them is a wrong-film pick"
+reading above and shows the effect is systematic and large rather than incidental to five
+items. The asymmetry argument — false positives are visible and remediable, false negatives are
+permanent — is unchanged, but the manual-delink rate deserves closer watching than "the
+discipline to look", and the `link_note = 'not-news:*'` split is where a prompt fix would
+surface first.

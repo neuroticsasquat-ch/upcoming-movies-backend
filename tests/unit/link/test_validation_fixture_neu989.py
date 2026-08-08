@@ -45,9 +45,14 @@ def test_every_starfighter_story_is_labeled_starfighter():
 
 
 def test_every_spaceballs_story_is_labeled_spaceballs():
-    """Same guard for the Spaceballs sequel row, which was labeled Spider-Man."""
+    """Same guard for the Spaceballs sequel row, which was labeled Spider-Man.
+
+    Stated as "at least one, all naming the same film" rather than "exactly one". The count
+    was never the property under test — it was a fact about a 302-row corpus, and enlarging
+    that corpus to 1,175 rows added a second Spaceballs row (NEU-1012). Pinning the count
+    would have made a *bigger* fixture fail a test about label correctness."""
     items = load_validation_set(_FIXTURE).items
     rows = [it for it in items if "spaceballs" in it.title.lower() and it.relation == "about"]
 
-    assert len(rows) == 1, "the Spaceballs story must be in the gold set"
-    assert rows[0].expected_film_tmdb_id == _SPACEBALLS_THE_NEW_ONE
+    assert rows, "the Spaceballs story must be in the gold set"
+    assert all(it.expected_film_tmdb_id == _SPACEBALLS_THE_NEW_ONE for it in rows)
