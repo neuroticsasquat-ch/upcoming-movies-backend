@@ -113,7 +113,21 @@ class CallResult:
 
     `parse_ok` is not the adapter's to fill in — the adapter has no idea whether the caller will
     parse the text, let alone how. The call site stamps it via `CallLog.set_parse_ok` after its
-    own parse, and it stays None where no parse happens."""
+    own parse, and it stays None where no parse happens.
+
+    `truncated` is the adapter's, and it is what makes `parse_ok=False` interpretable. A reply
+    cut off at `max_tokens` and a reply the model simply malformed both arrive as unparseable
+    text, and the fixes are opposite: raise the ceiling (or shrink the batch) versus change
+    model. Providers spell the signal differently — `finish_reason: "length"` on the OpenAI
+    shape, `stop_reason: "max_tokens"` on Anthropic's — so what is stored is the predicate both
+    spell, for the same reason `Prompt` names requirements rather than vendor mechanisms.
+
+    It is deliberately **recorded and not acted on**: the four stages keep their four different
+    parse-failure behaviours, which spec §12 makes an explicit non-goal to unify.
+
+    None on both fields means the question has no answer rather than a negative one — no parse
+    was attempted, or no reply arrived to have been cut off. Storing False there would assert
+    something nobody observed."""
 
     text: str = ""
     usage: Usage = Usage()
@@ -122,6 +136,7 @@ class CallResult:
     ok: bool = True
     error_type: str | None = None
     parse_ok: bool | None = None
+    truncated: bool | None = None
 
 
 class CallLog:

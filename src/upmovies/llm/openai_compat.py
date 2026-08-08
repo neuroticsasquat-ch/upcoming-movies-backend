@@ -69,6 +69,30 @@ def _text_from(payload: Mapping[str, Any]) -> str:
     return (choices[0].get("message") or {}).get("content") or ""
 
 
+def _truncated_from(payload: Mapping[str, Any]) -> bool | None:
+    """Whether generation stopped because it hit `max_tokens`, or None when the body cannot say.
+
+    `finish_reason: "length"` is the OpenAI-shaped spelling of the same thing Anthropic calls
+    `stop_reason: "max_tokens"`. Recording it is what makes a `parse_ok=False` row actionable:
+    truncated means raise the ceiling or shrink the batch, not-truncated means the model cannot
+    hold the output format (NEU-1014).
+
+    This matters more here than it ever did on Anthropic. Both providers in scope are reasoning
+    models — `scripts/verify_provider_capabilities.py` measured a 40-token DeepSeek reply
+    carrying 38 reasoning tokens — and reasoning tokens sit inside `completion_tokens`, counting
+    against the same ceiling while being invisible in the text that comes back.
+
+    A body with no choices returns None for the same reason `_text_from` returns "": it is a
+    response that answers nothing, and inventing False would assert the reply was complete."""
+    choices = payload.get("choices") or []
+    if not choices:
+        return None
+    reason = choices[0].get("finish_reason")
+    if reason is None:
+        return None
+    return reason == "length"
+
+
 def _usage_from(usage: Mapping[str, Any]) -> Usage:
     """Map an OpenAI-compatible `usage` block onto `Usage`, whichever way the provider reports
     cached tokens — the one place the two providers genuinely diverge.
@@ -191,6 +215,7 @@ class OpenAICompatClient:
                 usage=_usage_from(payload.get("usage") or {}),
                 latency_ms=_elapsed_ms(started),
                 attempts=attempts.made,
+                truncated=_truncated_from(payload),
             )
         except Exception as exc:
             calls.record(

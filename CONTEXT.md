@@ -22,6 +22,16 @@ kept visible separately as `attempts` rather than hidden inside that figure. The
 `ingest.llm_call`, and the unit a `parse_ok` outcome hangs off.
 _Avoid_: request, attempt (that's the retry, not the call), round-trip.
 
+**Truncated**:
+A reply that stopped because it reached the `max_tokens` ceiling rather than because the model
+finished. Recorded per logical call, and only meaningful *beside* `parse_ok`: unparseable output
+means two opposite things depending on it — the reply ran out of room (raise the ceiling, or
+shrink the batch), or the model cannot hold the output format (change model). Providers spell
+the signal differently, `finish_reason: "length"` against `stop_reason: "max_tokens"`, so what is
+stored is the predicate rather than either spelling. It is recorded and never acted on: the four
+stages keep their four different parse-failure behaviours.
+_Avoid_: cut off, incomplete, over-length, capped.
+
 **Provider**:
 The host a stage's model is served by — `anthropic`, `deepinfra`, `deepseek`. It is a
 *separate* axis from the model: the premise of the gateway work is that two providers serve the
