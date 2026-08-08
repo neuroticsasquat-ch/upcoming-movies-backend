@@ -60,6 +60,14 @@ equality, and only for titles of at least six folded characters — short ones w
 unrelated words. It is the whole of retrieval's normalization story beyond tokenization.
 _Avoid_: slug, normalize (too broad — tokenization normalizes too), fuzzy match.
 
+**Initialism collapse**:
+A run of two or more `<letter><separator>` pairs — `.` or `/`, letters only — read as one word
+before tokenizing, so `F.A.S.T.` yields `fast` and `S/H/V` yields `shv`. Applied to titles and
+story text alike, because the index can only join spellings both sides tokenize the same way.
+Declines below three collapsed characters: the collapse invents a token the text never
+literally contains, and at two `U.S.` would match every film with `us` in its title.
+_Avoid_: acronym expansion (nothing is expanded), abbreviation handling (too broad).
+
 **Out-of-list reply**:
 A classifier reply naming a candidate number that story's set does not offer — a number
 valid only in another story's list, or none at all. Rejected rather than coerced to the

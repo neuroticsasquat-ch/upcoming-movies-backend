@@ -46,10 +46,11 @@ from upmovies.link.validation import ValidationItem
 # corpus demonstrably sustains 100% at the current constants.
 RECALL_FLOOR = 1.0
 
-# The corpus the floor was measured over, 2026-08-07. A ratio alone cannot tell a fixed
-# retriever from a shrunken denominator: dropping the rows that miss would also read as
-# 100%. The fixture may legitimately grow, so this is a floor rather than an equality.
-MEASURED_ABOUT_ITEMS = 93
+# The corpus the floor was measured over, 2026-08-08 (93 rows at 2026-08-07, plus the
+# NEU-1009 dotted-initialism row). A ratio alone cannot tell a fixed retriever from a
+# shrunken denominator: dropping the rows that miss would also read as 100%. The fixture
+# may legitimately grow, so this is a floor rather than an equality.
+MEASURED_ABOUT_ITEMS = 94
 
 
 async def _seed_catalog(session) -> dict[int, UUID]:

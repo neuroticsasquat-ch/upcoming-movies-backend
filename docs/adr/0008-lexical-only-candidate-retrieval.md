@@ -1,6 +1,7 @@
 # Candidate retrieval is lexical only — no embeddings
 
-**Status:** accepted — implementation tracked in *backlotter: Entity-Linking Candidate Retrieval* (M1)
+**Status:** accepted — implementation tracked in *backlotter: Entity-Linking Candidate Retrieval*
+(M1); normalization refined 2026-08-08 (NEU-1009), see the last two Consequences
 
 ## Context
 
@@ -63,3 +64,31 @@ store, no `pg_trgm` install.
 - Reversing this is cheap on the read side (the scorer is a pure function behind a stable
   candidate-set interface) and expensive on the infrastructure side. The trigger for revisiting
   is a measured recall drop after the undated-film expansion, not a preference for vectors.
+- **Runs of initials collapse before tokenizing** (NEU-1009). A lexical index can only join
+  spellings its tokenizer agrees on, and `F.A.S.T.` had none: every letter is dropped by the
+  `len > 1` rule, on the title *and* on the headline that named it, so the film scored zero at
+  any T and any K. `significant_tokens` now collapses two or more `<letter><separator>` pairs
+  (`.` or `/`, letters only) into one word when the result reaches three characters. Measured
+  2026-08-08 over **98,662 stories, 45-day window, at the operating point** (T=0.5, K=25):
+
+  | | before | after |
+  |---|---|---|
+  | zero-candidate | 6,000 | **5,981** |
+  | index tokens | 3,934 | 3,937 |
+  | roster recall | 0.989 | 0.991 |
+  | median / p90 / p99 / mean offered | 3 / 9 / 17 / 4.10 | unchanged |
+
+  83 stories gain a candidate (89 film-slots), reaching *R.E.M.* (64 stories), *Puro R.A.P.*
+  (13), *F.A.S.T.*, *Fast*, *Fast Forever* and *S/H/V*. Exactly one story loses one: a horror
+  trade piece whose `U.K/France` collapses to `ukfrance`, dropping a spurious *Queen of France*
+  the linker had already rejected. Absolute figures move with the corpus — re-run
+  `scripts/tune_retrieval.py --days 45` rather than trusting these.
+
+  The three-character floor is load-bearing: at two, `U.S.` alone puts 489 headlines against
+  every film with `us` in its title.
+- **The fold route is closed for short titles, permanently.** Relaxing `SQUASH_FOLD_MIN_CHARS`
+  for titles that tokenize to nothing is the obvious cheaper fix and is a trap:
+  `squash_fold("S/H/V")` is `shv`, which occurs inside `nashville`, and a fold rescue is full
+  credit — 104 production stories would rank that film first. The token index matches whole
+  words, so `fast` can never match inside `breakfast`. That asymmetry is why normalization
+  fixes of this shape belong on the token route.

@@ -11,16 +11,22 @@
     ]
   },
   {
+    "tmdb_id": 556682,
+    "title": "F.A.S.T.",
+    "original_title": "F.A.S.T.",
+    "alternative_titles": [
+      "Fast",
+      "粉红巴比伦"
+    ]
+  },
+  {
     "tmdb_id": 806704,
     "title": "The Batman: Part II",
     "original_title": "The Batman: Part II",
     "alternative_titles": [
       "더 배트맨 2",
-      "Batman 2",
       "The Batman 2",
-      "The Batman Part 2",
-      "The Batman - Part II",
-      "The Batman: Part II"
+      "The Batman: Part 2"
     ]
   },
   {
@@ -32,8 +38,10 @@
       "Homem-Aranha 4",
       "Marvel Studios' Spider-Man: Brand New Day",
       "Spider-Man 4",
+      "Spider-Man: Nov dan",
       "Человек-паук 4",
       "ספיידרמן 4",
+      "สไปเดอร์-แมน แบรนด์ นิว เดย์",
       "មនុស្សពីងពាង: ថ្ងៃថ្មីសន្លាង"
     ]
   },
@@ -44,20 +52,23 @@
     "alternative_titles": [
       "어벤져스 5",
       "Avengers 5",
+      "Avengers : Docteur Doom",
       "Avengers: The Kang Dynasty",
       "Bosszúállók: Ítéletnap",
+      "Keršytojai. Daktaro Doomo iškilimas",
       "Marvel Studios' Avengers: Doomsday",
       "Marvel Studios' Avengers: The Kang Dynasty",
       "Qasoskorlar: Kang sulolasi",
+      "Vingadores: Doutor Destino",
       "Мстители 5",
       "Мстители: Судный день",
-      "Վրիժառուները ։ Դումսդեյ",
       "הנוקמים: דומסדיי",
-      "הנוקמים: יום הדין",
       "הנוקמים: עלייתו של דוקטור דום",
-      "הנוקמים: שושלת קאנג",
       "انتقامجویان : روز نابودی",
-      "復仇者聯盟5"
+      "『アベンジャーズ／ドゥームズデイ』",
+      "復仇者聯盟5",
+      "復仇者聯盟：末日崛起",
+      "復仇者聯盟：末日降臨"
     ]
   },
   {
@@ -77,7 +88,10 @@
       "플라워베일 스트리트",
       "Flowervale Street",
       "Konec Oak Street",
+      "O Fim da Rua",
+      "Вулиця Флауервейл",
       "Конец Оук-стрит",
+      "Улица Флауэрвейл",
       "มหาภัยสุดถนนโอ๊ค",
       "橡樹街末日"
     ]
@@ -88,6 +102,8 @@
     "original_title": "Fall 2: Deadpoint",
     "alternative_titles": [
       "A Queda 2",
+      "Padec 2: Brez povratka",
+      "แส่! ท้านรก",
       "坠落2：死点"
     ]
   },
@@ -151,6 +167,7 @@
     "original_title": "Whalefall",
     "alternative_titles": [
       "Balina Düşüşü",
+      "Dentro da Baleia",
       "Velrybí pád",
       "Китова могила"
     ]
@@ -160,7 +177,8 @@
     "title": "Heart of the Beast",
     "original_title": "Heart of the Beast",
     "alternative_titles": [
-      "V srdci divočiny"
+      "V srdci divočiny",
+      "หัวใจผจญภัย"
     ]
   },
   {
@@ -170,6 +188,7 @@
     "alternative_titles": [
       "소셜 네트워크 2",
       "A Rede Social 2",
+      "Mạng Xã Hội 2",
       "The Social Network Part 2",
       "Социальный расчёт",
       "社交清算",
@@ -193,6 +212,7 @@
     "title": "The Angry Birds Movie 3",
     "original_title": "The Angry Birds Movie 3",
     "alternative_titles": [
+      "Angry Birds : La Grande Envolée",
       "Angry Birds ve filmu 3"
     ]
   },
@@ -203,6 +223,7 @@
     "alternative_titles": [
       "스페이스 볼 2",
       "Spaceballs 2",
+      "Spaceballs 2: The New One",
       "Spaceballs 2: The Search for More Money",
       "Spaceballs 3: The Search for Spaceballs 2"
     ]
@@ -212,6 +233,7 @@
     "title": "The Odyssey",
     "original_title": "The Odyssey",
     "alternative_titles": [
+      "Одиссея",
       "האודיסיאה",
       "มหากาพย์โอดิสซี"
     ]
@@ -221,6 +243,7 @@
     "title": "By Any Means",
     "original_title": "By Any Means",
     "alternative_titles": [
+      "A Cualquier Precio",
       "CI34"
     ]
   },
@@ -242,7 +265,10 @@
     "tmdb_id": 1437511,
     "title": "How to Rob a Bank",
     "original_title": "How to Rob a Bank",
-    "alternative_titles": []
+    "alternative_titles": [
+      "Jak udělat banku",
+      "สูตรโกงปล้นแบงก์"
+    ]
   },
   {
     "tmdb_id": 1442396,
@@ -265,6 +291,7 @@
     "title": "Shaun the Sheep: The Beast of Mossy Bottom",
     "original_title": "Shaun the Sheep: The Beast of Mossy Bottom",
     "alternative_titles": [
+      "Shaun, a bárány és Moszatvég szörnye",
       "Shaun das Schaf - Spuk im Kürbisfeld"
     ]
   },
@@ -276,7 +303,8 @@
       "El Heladero, Dulce Sabor A Muerte",
       "Eli Roth's Ice Cream Man",
       "O Sorveteiro",
-      "Zmrzlinář"
+      "Zmrzlinář",
+      "หวานเย็น เข็นมาเชือด"
     ]
   },
   {
@@ -296,8 +324,7 @@
     "title": "Man of Tomorrow",
     "original_title": "Man of Tomorrow",
     "alternative_titles": [
-      "Exodus",
-      "Супермен 2"
+      "Exodus"
     ]
   },
   {
@@ -305,8 +332,10 @@
     "title": "Hexed",
     "original_title": "Hexed",
     "alternative_titles": [
+      "Billie maailmojen välissä",
       "Hexe: Kráľovstvo mágie",
-      "Hexe: Magický svět"
+      "Hexe: Magický svět",
+      "魔法師的袐密王國"
     ]
   },
   {

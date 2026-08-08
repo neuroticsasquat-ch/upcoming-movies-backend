@@ -8,7 +8,13 @@ precision authority on whatever survives.
 
 Tokenization is shared with candidate retrieval rather than duplicated here, so a change to
 `link/retrieval/normalize.significant_tokens` moves this filter's behaviour too — check
-`scripts/measure_title_filter.py` before retuning it."""
+`scripts/measure_title_filter.py` before retuning it.
+
+**Unmeasured since NEU-1009.** The initialism collapse gave a dotted title like `F.A.S.T.`
+its first token, which moves it out of the no-tokens branch below and starts it filtering —
+directionally an improvement, but not measured, because this whole module is dormant:
+`news_google_enabled` defaults to `False` (ADR-0001) and hard-gates the only caller,
+`news/fetcher.py`. Re-run `scripts/measure_title_filter.py` if that flag is ever flipped."""
 
 from upmovies.link.retrieval.normalize import significant_tokens
 
