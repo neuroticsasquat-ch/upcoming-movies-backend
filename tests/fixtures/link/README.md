@@ -105,8 +105,8 @@ snapshot and does not update automatically as new stories are ingested.
 
 **This matters for retrieval scoring.** Candidate retrieval searches only *active* films
 (`active_film_clause` — released and canceled titles are out of scope), so the catalog the
-fixture is scored against shrinks over time as its films reach release. As of 2026-08-07,
-**40 of the 93** `about` rows (9 of the 33 distinct films) name a film that has since gone
+fixture is scored against shrinks over time as its films reach release. As of 2026-08-08,
+**40 of the 94** `about` rows (9 of the 34 distinct films) name a film that has since gone
 inactive and is no longer retrievable at all. Any absolute recall number
 is therefore only meaningful alongside the as-of date it was measured at; the fixture is a
 label oracle, not a catalog snapshot.
@@ -180,7 +180,7 @@ reproducible against this fixture.
 
 `retrieval_catalog.json` is the catalog the recall gate scores against —
 `tests/integration/link/retrieval/test_recall_oracle.py`. It holds the `title`,
-`original_title` and `alternative_titles` of exactly the 33 films the `about` rows label,
+`original_title` and `alternative_titles` of exactly the 34 films the `about` rows label,
 exported from the dev database once by `scripts/export_retrieval_catalog.py` and
 committed. Re-export it when the validation set gains a labeled film; a companion test
 fails with that instruction when the two drift.
@@ -188,7 +188,7 @@ fails with that instruction when the two drift.
 Committing the catalog is what makes the floor reproducible. The measurement is otherwise
 pinned to whatever is ingested locally on the day, and — per *Corpus date* above — to how
 many of the fixture's films have since been released. **The test sidesteps the as-of date
-entirely** by seeding every fixture film with a release date a year out, so all 33 are
+entirely** by seeding every fixture film with a release date a year out, so all 34 are
 active whenever the suite runs.
 
 **Measured 2026-08-07 with the real retriever (NEU-990–992): 93/93, recall 1.000**, at
@@ -201,6 +201,23 @@ films the cap never binds.
 K=25. The test reads the module defaults rather than a frozen pair precisely so a retune
 re-runs it, and this one costs the fixture nothing — every labeled film scores at or above
 0.5, which is the same fact the production sweep found on its own corpus.
+
+**Grown to 94/94 on 2026-08-08 (NEU-1009).** The added row is the real Deadline story
+*Warner Bros' 'F.A.S.T.' Dashes Into Summer 2027* against **F.A.S.T.** (tmdb 556682) — a
+film retrieval could not reach at all, because the headline spells the title the same
+dotted way the title does and the `len > 1` rule dropped every letter on both sides of the
+index. Its dek re-states the initialism, so the row exercises the collapse on headline and
+dek alike. This row is the oracle's coverage of that fix: revert the collapse in
+`link/retrieval/normalize.py` and the gate reads 93/94, red.
+
+**The re-export that added it also picked up unrelated alt-title drift**, and that is worth
+knowing when reading its diff: TMDB's alternative titles move, so re-running
+`export_retrieval_catalog.py` after five weeks rewrote ~25 rows across eight other films —
+*The Batman Part II* lost four spellings and gained one, *Avengers: Doomsday* traded a
+Hebrew and an Armenian title for a Japanese and a Lithuanian one. The drift guard compares
+`tmdb_id` sets only, so nothing flags this; the recall floor is what checks it, and it held
+at 94/94. Expect the same on the next re-export — it is the fixture catching up with the
+catalog, not the ticket changing unrelated films.
 
 Which is also the gate's limit. With no distractors it cannot see a precision regression
 or cap saturation — those belong to the offline F1 cutover gate and to shadow telemetry

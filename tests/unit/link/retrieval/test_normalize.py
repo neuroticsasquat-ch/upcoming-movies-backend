@@ -1,6 +1,7 @@
 import unicodedata
 
 from upmovies.link.retrieval.normalize import (
+    COLLAPSED_INITIALISM_MIN_CHARS,
     SQUASH_FOLD_MIN_CHARS,
     significant_tokens,
     squash_fold,
@@ -51,6 +52,75 @@ class TestSignificantTokens:
 
     def test_empty_text_yields_nothing(self):
         assert significant_tokens("") == []
+
+
+class TestInitialismCollapse:
+    """NEU-1009: a run of initials reads as one word, on both sides of the index."""
+
+    def test_dotted_initialism_collapses_to_one_token(self):
+        # The motivating film. Every letter is dropped by the >1-character rule, so
+        # without the collapse the title has no searchable token at all.
+        assert significant_tokens("F.A.S.T.") == ["fast"]
+
+    def test_slashed_initialism_collapses_to_one_token(self):
+        # The catalog's other tokenless title, separated by slashes rather than periods.
+        assert significant_tokens("S/H/V") == ["shv"]
+
+    def test_the_story_side_collapses_the_same_way(self):
+        # The whole point: the headline spells the film the same dotted way the title
+        # does, so both must reduce to `fast` or the index lookup still cannot join them.
+        headline = "Warner Bros’ ‘F.A.S.T.’ Dashes Into Summer 2027"
+        assert significant_tokens(headline) == [
+            "warner",
+            "bros",
+            "fast",
+            "dashes",
+            "into",
+            "summer",
+            "2027",
+        ]
+        assert set(significant_tokens("F.A.S.T.")) <= set(significant_tokens(headline))
+
+    def test_collapses_mid_sentence_and_keeps_the_surrounding_words(self):
+        assert significant_tokens("R.E.M. Documentary") == ["rem", "documentary"]
+        assert significant_tokens("R.I.P. legend") == ["rip", "legend"]
+        assert significant_tokens("J.R.R. Tolkien") == ["jrr", "tolkien"]
+
+    def test_two_character_runs_are_left_alone(self):
+        # `U.S.` would collapse to `us` and put 489 production headlines against every
+        # film with `us` in its title. The floor is what keeps the collapse targeted.
+        assert significant_tokens("U.S. box office") == ["box", "office"]
+
+    def test_minimum_length_boundary(self):
+        assert len("ab") == COLLAPSED_INITIALISM_MIN_CHARS - 1
+        assert significant_tokens("A.B. release") == ["release"]
+
+        assert len("abc") == COLLAPSED_INITIALISM_MIN_CHARS
+        assert significant_tokens("A.B.C. release") == ["abc", "release"]
+
+    def test_digits_never_participate(self):
+        # With digits in the run, `7/4/2026` and `9.4/10` get chewed into tokens and the
+        # year is destroyed. Letters-only closes that by construction.
+        assert significant_tokens("9/11 anniversary") == ["11", "anniversary"]
+        assert significant_tokens("v1.2.3 release") == ["v1", "release"]
+        assert significant_tokens("out 7/4/2026") == ["out", "2026"]
+
+    def test_a_single_pair_is_not_a_run(self):
+        assert significant_tokens("A/B test") == ["test"]
+
+    def test_a_run_cannot_begin_mid_word(self):
+        # Without the boundary guard the trailing `S.O.S` of `noS.O.S` would collapse and
+        # swallow the word in front of it.
+        assert significant_tokens("noS.O.S") == ["nos"]
+
+    def test_other_separators_are_untouched(self):
+        assert significant_tokens("Spider-Man") == ["spider", "man"]
+
+    def test_a_bare_trailing_letter_may_be_swallowed_by_an_adjacent_word(self):
+        # An accepted cost (NEU-1009 §5): reaching `S/H/V` means admitting a bare trailing
+        # letter, and that letter cannot be told apart from the start of the next word.
+        # Measured over the corpus this costs eleven headline tokens and zero candidates.
+        assert significant_tokens("Y.M.Cinema") == ["ymcinema"]
 
 
 class TestSquashFold:
