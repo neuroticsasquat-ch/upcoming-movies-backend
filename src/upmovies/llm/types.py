@@ -29,16 +29,32 @@ class Prompt:
 
     `prefill` seeds the assistant turn to force a continuation rather than a preamble;
     `summarize` relies on it to get a JSON envelope back, and `parse_summary` is written to
-    read that continuation. An adapter whose provider cannot prefill must therefore **raise**
-    rather than drop it: honouring the rest of the request and silently discarding this part
-    would hand the parser a shape it does not expect, at the one stage that recovers from bad
-    JSON rather than failing loudly.
+    read that continuation. An adapter whose provider cannot prefill must therefore raise
+    `UnsupportedPromptError` rather than drop it: honouring the rest of the request and
+    silently discarding this part would hand the parser a shape it does not expect, at the one
+    stage that recovers from bad JSON rather than failing loudly.
+
+    `json_object` asks for JSON rather than prose. It is a *request*, not a guarantee — it
+    becomes `response_format` on an OpenAI-compatible provider and is ignored by Anthropic,
+    which has no equivalent — so the hand-rolled extractors at the call sites stay as
+    belt-and-braces either way. Whether a provider genuinely honours it, as against merely
+    accepting the field, is one of the things a provider has to be measured on rather than
+    trusted about.
     """
 
     stable_prefix: str
     user: str
     prefill: str | None = None
     max_tokens: int = 4096
+    json_object: bool = False
+
+
+class UnsupportedPromptError(ValueError):
+    """A `Prompt` asks for something this adapter's provider cannot do.
+
+    Raised instead of degrading the request, because a silently dropped field is far worse than
+    a loud refusal: the caller gets a well-formed response to a question it did not ask, and
+    finds out at parse time or, worse, not at all."""
 
 
 @dataclass(frozen=True)

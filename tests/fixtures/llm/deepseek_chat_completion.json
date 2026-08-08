@@ -1,0 +1,28 @@
+{
+  "id": "9f2b6f3a-6f4e-4f2a-9a0d-2f7b1c8e5d31",
+  "object": "chat.completion",
+  "created": 1785283200,
+  "model": "deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "[{\"story_id\": 1, \"film_id\": 42, \"kind\": \"casting\"}]"
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 5000,
+    "completion_tokens": 120,
+    "total_tokens": 5120,
+    "prompt_tokens_details": {
+      "cached_tokens": 4608
+    },
+    "prompt_cache_hit_tokens": 4608,
+    "prompt_cache_miss_tokens": 392
+  },
+  "system_fingerprint": "fp_8a1d0c4b7e"
+}
