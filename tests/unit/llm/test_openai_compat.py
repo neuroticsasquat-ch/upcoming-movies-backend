@@ -105,12 +105,10 @@ async def test_the_api_key_is_sent_as_a_bearer_token():
     assert respx.calls.last.request.headers["authorization"] == "Bearer sekrit"
 
 
-async def test_a_prefill_is_refused_rather_than_silently_dropped():
-    """`summarize` relies on the prefill to force a JSON-envelope continuation, and its parser
-    is written to read that continuation. Honouring the rest of the request while quietly
-    discarding this part would hand that parser a shape it does not expect — at the one stage
-    that recovers from bad JSON instead of failing loudly. So the adapter refuses (`types.Prompt`).
-    """
+async def test_a_required_prefill_is_refused_rather_than_silently_dropped():
+    """A caller whose parser can only read a continuation must not get a fresh assistant turn
+    instead. The OpenAI chat shape has no slot for a prefix to continue, so the adapter refuses
+    rather than answering a question that was not asked (`types.Prompt`)."""
     calls = CallLog()
     async with OpenAICompatClient(provider="deepseek", api_key="k") as c:
         with pytest.raises(UnsupportedPromptError):
@@ -122,6 +120,32 @@ async def test_a_prefill_is_refused_rather_than_silently_dropped():
 
     # Nothing reached the provider, so there is nothing to bill or to record.
     assert calls.results == ()
+
+
+@respx.mock
+async def test_an_optional_prefill_is_dropped_and_the_request_is_served():
+    """`summarize` seeds the assistant turn to suppress preamble, but `parse_summary` tries a
+    full envelope *first* and only falls back to reconstructing one. So the prefill is a
+    preference, not a precondition, and refusing it would strand the stage on a provider that
+    serves it perfectly well — measured 10/10 against DeepInfra on the real prompt
+    (`verify_provider_capabilities.py` probe 4, 2026-08-08)."""
+    route = respx.post(DEEPINFRA_URL).mock(return_value=_completion('{"summary": "A beat."}'))
+    calls = CallLog()
+    async with OpenAICompatClient(provider="deepinfra", api_key="k") as c:
+        result = await c.complete_call(
+            model="deepseek-ai/DeepSeek-V4-Flash",
+            prompt=Prompt(
+                stable_prefix="I", user="hi", prefill='{"summary": "', prefill_required=False
+            ),
+            calls=calls,
+        )
+
+    assert result.text == '{"summary": "A beat."}'
+    body = json.loads(route.calls.last.request.content)
+    # Dropped, not smuggled into a trailing assistant turn: that would be conversation history
+    # to this API, which is a different request than the one intended.
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert '{"summary": "' not in json.dumps(body["messages"])
 
 
 async def test_both_adapters_satisfy_the_completer_protocol():

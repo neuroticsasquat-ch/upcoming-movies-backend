@@ -52,6 +52,32 @@ array-shaped stages on DeepInfra, which answers for one domain instead of five (
 JSON-Schema stub) when forced into an object. Both providers already comply 10/10 with the field
 left alone. Details in `llm/types.Prompt`.
 
+### Probe 4 — summarize without the assistant prefill (added NEU-1016)
+
+`summarize` could not run on an OpenAI-compatible provider at all: `build_summary_request` seeds
+the assistant turn with `{"summary": "`, and the OpenAI chat-completions API has no slot for a
+prefix to continue, so `_to_wire` refused every call. Production observed it on 2026-08-08 —
+0 processed, 1 failed, zero tokens.
+
+The real summarize prompt with the prefill stripped, graded by the stage's own `parse_summary`,
+10 runs per variant against `deepseek-ai/DeepSeek-V4-Flash`, at a 2048-token ceiling chosen to be
+far above the stage's own 256 so the probe measures the *need* rather than the cap:
+
+| variant | `parse_summary` | truncated | completion_tokens |
+|---|---|---|---|
+| no prefill, plain | **10/10** | 0 | min 14 / median 20 / max 27 |
+| no prefill + `response_format` | **10/10** | 0 | min 12 / median 20 / max 25 |
+
+Identical, so **plain wins** on having one less moving part — and it keeps the standing position
+that no builder sets `json_object`. Note this is the one stage where `response_format` would have
+been *safe* (it wants a top-level object, unlike the array-shaped `link` and `source_judge`); it
+is declined because it is unnecessary, not because it is dangerous.
+
+The token figures also settle a separate worry: 12–27 completion tokens against a 256-token
+ceiling is ~10x headroom, so reasoning tokens do **not** threaten this stage. Reasoning effort
+varies by prompt — the ~440-token average below came from the `source_judge` prompt, and does not
+generalize.
+
 Also observed, and relevant to NEU-985's latency numbers: these are reasoning models. A DeepSeek
 reply of 40 completion tokens was 38 reasoning tokens, and the compliance probe averaged ~440
 output tokens per call against a handful of visible ones. Reasoning tokens bill at the output

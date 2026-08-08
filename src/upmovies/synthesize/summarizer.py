@@ -202,6 +202,11 @@ def build_summary_request(event: EventInput, run_date: date) -> Prompt:
         stable_prefix=_INSTRUCTIONS,
         user=json.dumps(_event_payload(event, run_date)),
         prefill=_PREFILL,
+        # Worth having, not required: `parse_summary` reads a full envelope on its primary path
+        # and only falls back to reconstructing one from `_PREFILL`. Marking it optional is what
+        # lets this stage run on an OpenAI-compatible provider, which has no way to express a
+        # prefix to continue (ADR-0012).
+        prefill_required=False,
         max_tokens=_MAX_TOKENS,
     )
 

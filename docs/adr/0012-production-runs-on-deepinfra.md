@@ -90,6 +90,24 @@ production as a hedge, and NEU-1014 added `ingest.llm_call.truncated` so the tel
 whether it needs turning — a truncated unparseable reply and a malformed one look identical
 otherwise, and their fixes are opposite.
 
+**Two stages needed work the cutover did not anticipate, both found on the first production
+run** (2026-08-08) and both recorded here rather than left to be rediscovered:
+
+* `summarize` **could not run on DeepInfra at all.** Its prompt seeds the assistant turn, and the
+  OpenAI chat-completions API has no slot for a prefix to continue, so every call was refused
+  before it was made. Fixed under NEU-1016 by making the prefill a preference the caller declares
+  rather than an absolute precondition — legitimate here because `parse_summary` reads a full
+  envelope on its primary path, measured 10/10 against DeepInfra. Boot validation did not catch
+  it: NEU-981 checks rates and credentials, not whether a provider can serve a stage's prompt
+  *shape*. That is a real gap in the boot check, not a gap in the config.
+* `source_judge` **never runs.** Google News is paused (ADR-0001), so ingestion is trade-feeds-only
+  and no unknown domains reach the judge. Configuring it for DeepInfra is harmless and inert. It
+  becomes live again the moment `NEWS_GOOGLE_ENABLED` is flipped — see NEU-984.
+
+So the switch is really **two** exercised stages, `link` and `cluster`, plus one repaired and one
+dormant. Both exercised stages showed non-zero cache reads on their first run, so DeepInfra's
+prefix caching engaged.
+
 **Rollback is env-only.** `docker-compose.prod.yml` reads all eight stage settings from the
 environment with the DeepInfra values as fallbacks, and `ANTHROPIC_API_KEY` stays populated.
 Reverting is eight Coolify variables and a restart — no redeploy, no key to go and find.
