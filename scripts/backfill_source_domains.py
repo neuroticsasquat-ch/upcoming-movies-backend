@@ -13,10 +13,12 @@ from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.source_stage import backfill_source_domains
 from upmovies.llm import AnthropicClient
+from upmovies.llm.offline import require_anthropic_stage
 
 
 async def main() -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'source_judge')
     async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
         judged = await backfill_source_domains(
             session_factory=SessionLocal,

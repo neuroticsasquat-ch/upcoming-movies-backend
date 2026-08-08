@@ -23,6 +23,7 @@ from upmovies.link.cluster import assemble_cluster_payload, parse_cluster_groups
 from upmovies.link.metrics import compute_cluster_metrics
 from upmovies.link.validation import ValidationItem, load_validation_set
 from upmovies.llm import AnthropicClient
+from upmovies.llm.offline import require_anthropic_stage, stage_label
 
 DEFAULT_FIXTURE = "tests/fixtures/link/validation_set.json"
 _SUMMARY_MAX = 500  # mirror cluster.build_cluster_request's _SUMMARY_MAX
@@ -48,6 +49,7 @@ def _clustering_rows(items: list[ValidationItem]) -> dict[int, list[ValidationIt
 
 async def main(path: str) -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'cluster')
     items = load_validation_set(path).items
     by_film = _clustering_rows(items)
 
@@ -130,7 +132,10 @@ async def main(path: str) -> None:
         verdict = "ESCALATE — below floor; scope NEU-282 (embeddings) per the gate."
 
     print("\n=== STAGE-2 CLUSTERING (gold event_group baseline) ===")
-    print(f"model={settings.cluster_model}  scoreable_films={n_films}  items={m.n_items}")
+    print(
+        f"{stage_label(settings, 'cluster')}  "
+        f"scoreable_films={n_films}  items={m.n_items}"
+    )
     print(
         f"skipped: {n_no_film} film(s) not in DB, {n_unlabeled} unlabeled row(s), "
         f"{n_unparseable} unparseable"
