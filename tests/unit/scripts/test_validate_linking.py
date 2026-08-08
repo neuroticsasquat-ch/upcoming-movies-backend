@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from scripts.validate_linking import (
     RetrievalCoverage,
+    _predicted_tmdb_ids,
     build_stories,
     evaluate_gate,
     format_comparison,
@@ -17,6 +18,7 @@ from upmovies.link.retrieval.health import RetrievalTally
 from upmovies.link.retrieval.index import build_index, indexed_film
 from upmovies.link.validation import ValidationItem
 from upmovies.llm.client import CallResult
+from upmovies.news.models import Story
 
 
 def _about(tmdb_id: int, title: str = "t", **kw) -> ValidationItem:
@@ -188,3 +190,39 @@ async def test_retrieval_path_sends_no_call_for_an_all_zero_candidate_batch():
     )
 
     assert client.seen_story_ids == []
+
+
+def test_predicted_tmdb_ids_neutralizes_post_labeling_picks():
+    """A pick naming a film the catalog gained after labeling reads as "no link" — the
+    counterfactual where it was not there to pick. This is where the exclusion actually
+    reaches the metrics, so a `none` row scores a true negative rather than a false
+    positive (NEU-1011)."""
+    film_a, film_b = uuid4(), uuid4()
+    stories = [
+        Story(id=uuid4(), source="s", url="u1", title="t1", film_id=film_a),
+        Story(id=uuid4(), source="s", url="u2", title="t2", film_id=film_b),
+        Story(id=uuid4(), source="s", url="u3", title="t3", film_id=None),
+    ]
+    tmdb_by_film_id = {film_a: 11, film_b: 22}
+
+    assert _predicted_tmdb_ids(stories, tmdb_by_film_id) == [11, 22, None]
+    assert _predicted_tmdb_ids(stories, tmdb_by_film_id, unscoreable=frozenset({22})) == [
+        11,
+        None,
+        None,
+    ]
+
+
+def test_neutralized_pick_scores_a_none_row_as_a_true_negative():
+    """The point of the neutralization, end to end: the link was real but unlabelable, so it
+    must not land as a false positive against a `none` label."""
+    items = [ValidationItem(url="u", source="s", title="t", relation="none")]
+    film_id = uuid4()
+    stories = [Story(id=uuid4(), source="s", url="u", title="t", film_id=film_id)]
+    tmdb_by_film_id = {film_id: 99}
+
+    scored = link_pairs(
+        items, _predicted_tmdb_ids(stories, tmdb_by_film_id, unscoreable=frozenset({99}))
+    )
+
+    assert scored == [(None, None)]  # a correct decline, not a false positive

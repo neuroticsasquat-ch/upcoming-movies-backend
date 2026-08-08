@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from upmovies.link.validation import ValidationItem, load_validation_set
+from upmovies.link.validation import (
+    ValidationItem,
+    films_ingested_after,
+    load_validation_set,
+)
 
 
 def _item(**overrides) -> dict:
@@ -166,3 +170,19 @@ def test_fixture_has_neu443_aspirational_casting_row():
     assert it.expected_film_tmdb_id == 806704
     assert it.is_production_news is False
     assert it.exclusion_category == "interview-quote"
+
+
+def test_films_ingested_after_the_pin_are_outside_the_label_space():
+    """A `none` row means "not about any film tracked *at labeling time*". A prediction
+    naming a film the catalog only learned about later is something the labels have no
+    opinion on, so it must not score as a false positive (NEU-1011)."""
+    ingested = {1: date(2026, 6, 1), 2: date(2026, 7, 20), 3: date(2026, 7, 1)}
+
+    after = films_ingested_after(date(2026, 7, 1), ingested)
+
+    assert after == frozenset({2})  # 3 was ingested on the pin date, so it counts as known
+
+
+def test_films_ingested_after_is_empty_without_a_pin():
+    """An unpinned fixture has no 'after' — every prediction stays scoreable."""
+    assert films_ingested_after(None, {1: date(2026, 6, 1)}) == frozenset()

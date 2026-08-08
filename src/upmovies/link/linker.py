@@ -44,7 +44,15 @@ in that story's candidate list. A story's candidates are the only tracked films 
 to it — never answer with an index that story does not offer. Each candidate carries its \
 director, top-billed cast, and collection alongside its title, year, genres and overview: \
 use ALL of them to separate a candidate from a same-franchise film that is not tracked \
-here. A shared title stem is not a match; a shared director or lead is not a match either."""
+here. A shared title stem is not a match; a shared director or lead is not a match either.
+
+The candidate list is a LEXICAL PREFILTER, not a shortlist of likely answers. A film appears \
+in it only because its title shares a word with the headline or dek, which is not evidence \
+that the story is about it — a story about an untracked film will still be handed the \
+tracked films whose titles happen to overlap it, and a story that merely lists a candidate \
+among others will still be handed it. Being offered a candidate is never itself a reason to \
+pick one. Classify by the rules below exactly as you would if the entire catalog were in \
+front of you rather than this short list."""
 
 # The classification rules are shared verbatim by both prompts, rendered with the term the
 # path uses for the set of tracked films it shows. Two copies of ~1.4k tokens of prose
