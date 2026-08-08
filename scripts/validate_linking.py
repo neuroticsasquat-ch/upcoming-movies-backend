@@ -56,7 +56,11 @@ from upmovies.link.retrieval.health import RetrievalTally
 from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
 from upmovies.link.retrieval.select import CandidateSet, select_candidates
 from upmovies.link.roster import Roster, build_roster
-from upmovies.link.validation import ValidationItem, load_validation_set
+from upmovies.link.validation import (
+    ValidationItem,
+    films_ingested_after,
+    load_validation_set,
+)
 from upmovies.llm.client import AnthropicClient, CallLog
 from upmovies.news.models import Story
 
@@ -310,9 +314,19 @@ def build_stories(items: Sequence[ValidationItem]) -> list[Story]:
 
 
 def _predicted_tmdb_ids(
-    stories: Sequence[Story], tmdb_by_film_id: dict[UUID, int]
+    stories: Sequence[Story],
+    tmdb_by_film_id: dict[UUID, int],
+    *,
+    unscoreable: frozenset[int] = frozenset(),
 ) -> list[int | None]:
-    return [tmdb_by_film_id.get(s.film_id) if s.film_id is not None else None for s in stories]
+    """Each story's predicted TMDB id, with `unscoreable` picks neutralized to "no link".
+
+    A pick naming a film the catalog only learned about *after* the fixture was labeled is
+    outside the label space — see `films_ingested_after`. Reading it as "no link" replays the
+    counterfactual where the film was not there to pick, which scores a `none` row correct
+    and an `about` row as the miss it would have been."""
+    picked = [tmdb_by_film_id.get(s.film_id) if s.film_id is not None else None for s in stories]
+    return [None if p in unscoreable else p for p in picked]
 
 
 async def run_roster_path(
@@ -461,11 +475,30 @@ async def main(
     # reads of the same active set, and reading them together is what keeps the two paths
     # measured against the same catalog rather than one taken a few seconds later.
     async with SessionLocal() as s:
-        tmdb_by_film_id = dict(
-            (row.id, row.tmdb_id) for row in (await s.execute(select(Film))).scalars().all()
-        )
+        catalog = (await s.execute(select(Film))).scalars().all()
+        tmdb_by_film_id = {row.id: row.tmdb_id for row in catalog}
+        ingested_at = {row.tmdb_id: row.created_at.date() for row in catalog}
         roster = await build_roster(s, as_of=catalog_date) if wants_roster else None
         index = await build_candidate_index(s, as_of=catalog_date) if wants_retrieval else None
+
+    # Picks naming films the catalog gained after labeling are not scoreable against these
+    # labels (NEU-1011). Keyed off the fixture's own date, not the --as-of override: the
+    # labels were written on one day and no flag moves that.
+    unscoreable = films_ingested_after(validation_set.as_of_date, ingested_at)
+    # A film the fixture *labels* must stay scoreable. If one were also post-labeling, its
+    # correct pick would be neutralized to "no link" and score a false negative — depressing
+    # recall with nothing on screen to say why. Zero on today's fixture; the pin can move.
+    if stranded := {it.expected_film_tmdb_id for it in items} & unscoreable:
+        raise SystemExit(
+            f"ERROR: {len(stranded)} expected film(s) postdate the fixture's as_of_date: "
+            f"{sorted(stranded)}\nThe labels name films the catalog gained after that date, so "
+            "the pin and the labels disagree. Re-pin the fixture or re-label those rows."
+        )
+    if unscoreable:
+        print(
+            f"post-labeling films: {len(unscoreable)} of {len(ingested_at)} entered the "
+            f"catalog after {validation_set.as_of_date}; picks naming them read as 'no link'"
+        )
 
     expected_ids = {it.expected_film_tmdb_id for it in items if it.expected_film_tmdb_id}
     indexed_tmdb_ids: set[int] = set()
@@ -504,7 +537,9 @@ async def main(
                 run_date=run_date,
             )
             roster_metrics = compute_link_metrics(
-                link_pairs(items, _predicted_tmdb_ids(stories, tmdb_by_film_id))
+                link_pairs(
+                    items, _predicted_tmdb_ids(stories, tmdb_by_film_id, unscoreable=unscoreable)
+                )
             )
             roster_nv = compute_news_value_metrics(
                 news_value_rows(
@@ -530,7 +565,9 @@ async def main(
                 limit=limit,
             )
             retrieval_metrics = compute_link_metrics(
-                link_pairs(items, _predicted_tmdb_ids(stories, tmdb_by_film_id))
+                link_pairs(
+                    items, _predicted_tmdb_ids(stories, tmdb_by_film_id, unscoreable=unscoreable)
+                )
             )
             retrieval_nv = compute_news_value_metrics(
                 news_value_rows(

@@ -31,10 +31,21 @@ A bare-list fixture (the pre-NEU-1010 shape) still loads and falls back to wall 
 
 **What the pin is and isn't.** It rewinds the *active-film filter*, not ingestion history —
 74% of the films now in `catalog.film` were ingested after 2026-07-01, so the pinned catalog
-(1,407 films) is larger than the catalog that literally existed then. That is deliberate and
-conservative: both paths see the same films, so the gate's comparison stays like-for-like,
-and a larger catalog means more lexical collisions, which makes retrieval's job harder rather
-than easier. It is a fair comparison, not a historical replay.
+(1,407 films) is larger than the catalog that literally existed then. The index keeps them:
+both paths see the same films, so the gate's comparison stays like-for-like, and a larger
+catalog means more lexical collisions, which makes retrieval's job harder rather than easier.
+It is a fair comparison, not a historical replay.
+
+**But those films are not scoreable, and NEU-1011 found out the hard way.** A `none` label
+means "not about any film tracked **at labeling time**", so a pick naming a film the catalog
+gained later is outside the label space — the link may be perfectly correct and the fixture
+still has no way to credit it. Six of retrieval's thirteen false positives were exactly that.
+`films_ingested_after` therefore neutralizes such a pick to "no link" when scoring, for both
+paths; `validate_linking.py` reports the count and **aborts** if a film the fixture actually
+labels turns out to postdate the pin, since that would silently convert a correct link into a
+false negative. Keeping the films in the index but out of the scoring is what preserves
+production-like scale without inventing errors: excluding them from the index instead would
+drop the catalog to 367 films, a regime the growth curve says behaves nothing like production.
 
 **Except for 9 synthetic rows.** NEU-358 and NEU-367 added hand-written `about` examples to
 exercise the production-news axis where the real corpus was thin. They are identifiable by an

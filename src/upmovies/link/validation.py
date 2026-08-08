@@ -3,6 +3,7 @@ each item embeds the story text plus its label, keyed to films by TMDB id (stabl
 databases) rather than local uuids."""
 
 import json
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -57,6 +58,25 @@ class ValidationSet(BaseModel):
 
     as_of_date: date | None = None
     items: list[ValidationItem]
+
+
+def films_ingested_after(as_of: date | None, ingested_at: Mapping[int, date]) -> frozenset[int]:
+    """TMDB ids of films the catalog only learned about *after* the fixture was labeled.
+
+    `as_of_date` rewinds the active-film filter, but not ingestion history: a film added to
+    `catalog.film` last week is still in a catalog pinned to last month. That matters because
+    a `none` label means "not about any film tracked **at labeling time**" — so a prediction
+    naming one of these films is outside the label space entirely, and scoring it a false
+    positive asserts an opinion the fixture does not contain. Measured on the retrieval path,
+    six of thirteen false positives were exactly this (NEU-1011).
+
+    Callers neutralize such a prediction to "no link" — the counterfactual where the film was
+    not there to pick.
+
+    Empty for an unpinned fixture: with no date there is no "after"."""
+    if as_of is None:
+        return frozenset()
+    return frozenset(tmdb_id for tmdb_id, first_seen in ingested_at.items() if first_seen > as_of)
 
 
 def load_validation_set(path: str | Path) -> ValidationSet:
