@@ -72,6 +72,27 @@ async def test_select_pending_includes_new_event_and_maps_input(session):
     assert [s.source for s in pe.event_input.stories] == ["Deadline"]
 
 
+async def test_select_pending_skips_hidden_event_type(session):
+    """NEU-969: `other` never reaches the public surface, so summarizing it spends tokens on
+    output nobody sees. Safe to skip permanently — `event_type` is immutable once set."""
+    film = await _film(session, title="Hidden")
+    await _event_with_story(session, film, event_type="other", dek="Residual hype.")
+    await session.commit()
+
+    assert await _select_pending(session) == []
+
+
+async def test_select_pending_keeps_visible_types_alongside_hidden_ones(session):
+    film = await _film(session, title="Mixed")
+    visible = await _event_with_story(session, film, event_type="trailer", dek="Trailer dropped.")
+    await _event_with_story(session, film, event_type="other", dek="Residual hype.")
+    await session.commit()
+
+    pending = await _select_pending(session)
+
+    assert [pe.event_id for pe in pending] == [visible.id]
+
+
 async def test_select_pending_skips_up_to_date_event(session):
     film = await _film(session)
     event = await _event_with_story(session, film)

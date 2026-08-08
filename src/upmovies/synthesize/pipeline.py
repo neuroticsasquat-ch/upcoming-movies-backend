@@ -20,6 +20,7 @@ from upmovies.ingest.runs import finalize_run, record_llm_usage, record_progress
 from upmovies.llm.client import Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
+from upmovies.news.visibility import visible_events
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
@@ -57,8 +58,11 @@ async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[Async
 
 
 async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
-    """Events with no summary row yet — write-once: an event whose summary already exists is
-    never reselected, even if the event was later updated or the prompt version has moved on.
+    """User-facing events with no summary row yet — write-once: an event whose summary already
+    exists is never reselected, even if the event was later updated or the prompt version has
+    moved on. Hidden types are skipped outright (NEU-969): summarizing an event the public API
+    filters out spends tokens on text nobody reads, and `event_type` is immutable once set, so
+    a skipped event can never later become visible and need the summary it was denied.
     Returns each mapped to an EventInput (plain dataclasses — safe to use after the session
     closes), with is_new = no prior summary existed (always True here)."""
     rows = (
@@ -66,7 +70,7 @@ async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
             select(Event, Film.title, EventSummary.event_id)
             .join(Film, Film.id == Event.film_id)
             .outerjoin(EventSummary, EventSummary.event_id == Event.id)
-            .where(EventSummary.event_id.is_(None))
+            .where(EventSummary.event_id.is_(None), visible_events())
         )
     ).all()
     if not rows:

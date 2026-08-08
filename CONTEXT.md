@@ -5,6 +5,15 @@ films, clusters them into events, and summarizes those events for the tracker.
 
 ## Language
 
+### Pipeline shape
+
+**Stage**:
+One of the four named steps at which the pipeline consults a model: **link** (story → film),
+**cluster** (linked stories → event), **summarize** (event → published summary), and
+**source_judge** (unknown outlet domain → trust tier). Each has its own quality bar and is
+configured independently. The set is closed, and enforced as such in the schema.
+_Avoid_: step, phase, pass.
+
 ### News sources
 
 **Trade feed**:
@@ -52,6 +61,24 @@ _Avoid_: article, item, post.
 A cluster of stories about the same real-world development for a film. What the tracker
 summarizes and displays.
 _Avoid_: cluster (that's the act of forming an event), group.
+
+**Attach**:
+Adding a newly linked story to an event that *already exists*, rather than forming a new one
+— a beat already logged gaining another report of itself. The counterpart to forming an
+event. A story attaches to exactly one event.
+_Avoid_: merge (that's the defect below), append, link (that's the story→film step).
+
+**Split beat**:
+One real development recorded as two or more events, because stories that report it failed
+to reach the same event. Shows up as duplicate entries in a film's timeline: untidy, but no
+information is lost.
+_Avoid_: duplicate event, fragmentation.
+
+**Over-merge**:
+Two genuinely distinct developments recorded as a single event. The more serious failure of
+the pair — the swallowed beat disappears from the timeline entirely, so information is lost
+rather than merely repeated.
+_Avoid_: false merge, collision.
 
 ### Release-date events
 

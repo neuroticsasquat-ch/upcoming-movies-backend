@@ -3,10 +3,14 @@ events they belonged to. Used by both `blocked_cleanup` (admin-blocked domains) 
 `google_cleanup` (paused Google News sources) so the event-repair rules live in one place.
 
 Repair rules: an event whose sources were *all* rejected is deleted (its `event_story` and
-`event_summary` cascade); a mixed event keeps its surviving sources and has its `event_summary`
-deleted so synthesize regenerates a fresh summary next run (its `confidence` is left unchanged
-— a survivor still has a non-rejected source). Pure DB I/O — the caller owns the commit.
-Nothing is written when `apply=False`; the returned report reflects what *would* change.
+`event_summary` cascade); a mixed event keeps its surviving sources, has its `occurred_at`
+recomputed from those survivors (NEU-968), and has its `event_summary` deleted so synthesize
+regenerates a fresh summary next run (its `confidence` is left unchanged — a survivor still
+has a non-rejected source). Pure DB I/O — the caller owns the commit. Nothing is written when
+`apply=False`; the returned report reflects what *would* change.
+
+`repair_drifted_occurred_at` is the one-off counterpart: it repairs events that drifted
+before the recompute existed.
 """
 
 from dataclasses import dataclass
@@ -24,6 +28,50 @@ class EventRepairReport:
     stories_rejected: int
     events_deleted: int
     events_resummarized: int
+
+
+@dataclass
+class OccurredAtDriftReport:
+    events_repaired: int
+    max_drift_days: int
+
+
+async def repair_drifted_occurred_at(
+    session: AsyncSession, *, apply: bool
+) -> OccurredAtDriftReport:
+    """One-off repair for events whose `occurred_at` predates their own earliest surviving
+    story — drift left behind by repairs that ran before NEU-968 taught the repair path to
+    recompute. Idempotent: a second run finds nothing. Scoped deliberately to events that are
+    *too early*; an event that is later than its earliest story is a story having joined an
+    existing beat, which must not move the beat. Nothing is written when `apply=False`. The
+    caller owns the commit."""
+    rows = (
+        await session.execute(
+            select(
+                Event.id,
+                Event.occurred_at,
+                func.min(func.coalesce(Story.published_at, Story.fetched_at)).label("earliest"),
+            )
+            .join(EventStory, EventStory.event_id == Event.id)
+            .join(Story, Story.id == EventStory.story_id)
+            .group_by(Event.id, Event.occurred_at)
+            .having(
+                func.min(func.coalesce(Story.published_at, Story.fetched_at)) > Event.occurred_at
+            )
+        )
+    ).all()
+
+    max_drift = max(((earliest - occurred).days for _eid, occurred, earliest in rows), default=0)
+    report = OccurredAtDriftReport(events_repaired=len(rows), max_drift_days=max_drift)
+    if not apply:
+        return report
+
+    for eid, _occurred, earliest in rows:
+        event = await session.get(Event, eid)
+        if event is not None:
+            event.occurred_at = earliest
+    await session.flush()
+    return report
 
 
 async def reject_stories_and_repair_events(
@@ -95,6 +143,19 @@ async def reject_stories_and_repair_events(
         event = await session.get(Event, eid)
         if event is not None:
             event.updated_at = now
+            # NEU-968: occurred_at was stamped from the founding story group. If repair took
+            # that story away, re-derive it from the survivors so the event stops claiming a
+            # date none of its stories supports (it orders the public timeline). Only removal
+            # moves it — a story *joining* an existing beat must never push the beat forward.
+            earliest = (
+                await session.execute(
+                    select(func.min(func.coalesce(Story.published_at, Story.fetched_at)))
+                    .join(EventStory, EventStory.story_id == Story.id)
+                    .where(EventStory.event_id == eid)
+                )
+            ).scalar_one_or_none()
+            if earliest is not None:
+                event.occurred_at = earliest
         summary = await session.get(EventSummary, eid)
         if summary is not None:
             await session.delete(summary)
