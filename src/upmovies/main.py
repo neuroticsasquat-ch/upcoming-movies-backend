@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.runs import mark_stale_runs_cancelled
+from upmovies.llm import validate_stage_configuration
 from upmovies.routers import (
     admin_runs,
     auth,
@@ -52,6 +53,13 @@ async def run_startup_cleanup(session: AsyncSession, stale_after_minutes: int) -
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    # Before anything else, and before the app can serve: a stage routed at a
+    # `(provider, model)` with no rates entry or no credential is a container that must not
+    # start (NEU-981, spec §7). Left to the run, the same fault surfaces as a `KeyError`
+    # partway through a nightly publish, after the stages have already committed part of
+    # their work. `pipeline_run.main` runs the same check for its own sake — the scheduled
+    # tasks are a separate process, and this lifespan is not on their path.
+    validate_stage_configuration(settings)
     async with SessionLocal() as session:
         await run_startup_cleanup(session, stale_after_minutes=settings.ingest_stale_run_minutes)
         await session.commit()

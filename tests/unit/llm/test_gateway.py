@@ -14,7 +14,11 @@ from upmovies.llm.gateway import (
     STAGES,
     Gateway,
     MissingCredentialError,
+    StageConfigurationError,
     credential_for,
+    stage_models,
+    stage_providers,
+    validate_stage_configuration,
 )
 from upmovies.llm.openai_compat import OpenAICompatClient
 from upmovies.llm.retry import RetryPolicy
@@ -27,7 +31,9 @@ _REQUIRED_ENV = {
 }
 
 # Cleared unless a test sets them: the container passes empty strings for the two optional
-# credentials, and the dev compose file may pass provider names too.
+# credentials, and the dev compose file may pass provider names too. The model vars are
+# cleared for the same reason — a deployment that has retuned one of them must not change
+# what these tests are asserting about the defaults.
 _GATEWAY_ENV = (
     "DEEPINFRA_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -35,6 +41,10 @@ _GATEWAY_ENV = (
     "CLUSTER_PROVIDER",
     "SOURCE_JUDGE_PROVIDER",
     "SUMMARY_PROVIDER",
+    "LINK_MODEL",
+    "CLUSTER_MODEL",
+    "SOURCE_JUDGE_MODEL",
+    "SUMMARY_MODEL",
 )
 
 
@@ -242,3 +252,120 @@ def test_stages_are_the_four_the_schema_allows():
     """The set is closed and enforced in the schema (`ck_run_llm_usage_stage`, CONTEXT.md);
     a fifth stage here would resolve a provider for a stage no telemetry row can name."""
     assert STAGES == ("link", "cluster", "source_judge", "summarize")
+
+
+# --- boot-time validation (NEU-981, spec §7) ------------------------------------
+#
+# What this defends is the *timing* of a failure, not its existence. `rates_for` already
+# raises on an unknown `(provider, model)` — but it raises at the first call of a stage that
+# is well into a nightly publish, after earlier items have committed, because the pipelines
+# commit per item. These tests pin the same misconfigurations to boot instead.
+
+
+def test_the_stage_maps_cover_every_stage(monkeypatch):
+    """Both maps are written out by hand (`SUMMARY_PROVIDER` serves the `summarize` stage,
+    so there is no name to compute), which is exactly the shape a fifth stage gets missed
+    in — silently unvalidated rather than loudly absent."""
+    settings = _settings(monkeypatch)
+    assert set(stage_providers(settings)) == set(STAGES)
+    assert set(stage_models(settings)) == set(STAGES)
+
+
+def test_the_default_configuration_boots(monkeypatch):
+    """All four stages on Anthropic at their default models — today's production config, and
+    the one that must never be what this check rejects."""
+    validate_stage_configuration(_settings(monkeypatch))
+
+
+def test_a_model_with_no_rates_entry_fails_the_boot(monkeypatch):
+    """The bare `KeyError` this exists to pre-empt: a stage retuned to a model nobody priced
+    would otherwise fail at its first call, mid-publish."""
+    settings = _settings(monkeypatch, CLUSTER_MODEL="claude-opus-4-8")
+    with pytest.raises(StageConfigurationError) as excinfo:
+        validate_stage_configuration(settings)
+    message = str(excinfo.value)
+    assert "cluster" in message
+    assert "anthropic" in message
+    assert "claude-opus-4-8" in message
+
+
+def test_switching_a_stage_to_a_provider_that_does_not_serve_its_model_fails_the_boot(
+    monkeypatch,
+):
+    """The realistic misconfiguration: `CLUSTER_PROVIDER` is moved and `CLUSTER_MODEL` is
+    left behind. `_RATES` is keyed on the pair, so a valid provider and a valid model are
+    still not a valid route — and pricing it at whatever else serves those weights is the
+    outcome `rates_for` refuses (spec §7)."""
+    settings = _settings(
+        monkeypatch,
+        CLUSTER_PROVIDER="deepinfra",
+        DEEPINFRA_API_KEY="di-xxx",
+    )
+    with pytest.raises(StageConfigurationError, match="cluster"):
+        validate_stage_configuration(settings)
+
+
+def test_a_fully_configured_non_anthropic_stage_boots(monkeypatch):
+    """The other half of the pair check: provider, model *and* credential all lining up is
+    a configuration this must let through, or the gateway is unusable off Anthropic."""
+    settings = _settings(
+        monkeypatch,
+        CLUSTER_PROVIDER="deepinfra",
+        CLUSTER_MODEL="deepseek-ai/DeepSeek-V4-Flash",
+        DEEPINFRA_API_KEY="di-xxx",
+    )
+    validate_stage_configuration(settings)
+
+
+def test_a_configured_provider_without_a_credential_fails_the_boot(monkeypatch):
+    """What makes `DEEPSEEK_API_KEY` safe to default to None (design §8): a missing key is
+    an error only when a stage actually routes to that provider, and then it is one at
+    boot rather than at the stage's first call."""
+    settings = _settings(
+        monkeypatch,
+        SUMMARY_PROVIDER="deepseek",
+        SUMMARY_MODEL="deepseek-v4-flash",
+    )
+    with pytest.raises(StageConfigurationError) as excinfo:
+        validate_stage_configuration(settings)
+    message = str(excinfo.value)
+    assert "summarize" in message
+    assert "DEEPSEEK_API_KEY" in message
+
+
+def test_an_empty_credential_fails_the_boot_too(monkeypatch):
+    """`DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"` in the compose file means an unconfigured
+    credential reaches the container as `""`, which is the state this check actually meets."""
+    settings = _settings(
+        monkeypatch,
+        SUMMARY_PROVIDER="deepseek",
+        SUMMARY_MODEL="deepseek-v4-flash",
+        DEEPSEEK_API_KEY="",
+    )
+    with pytest.raises(StageConfigurationError, match="DEEPSEEK_API_KEY"):
+        validate_stage_configuration(settings)
+
+
+def test_an_unused_provider_needs_no_credential(monkeypatch):
+    """The default deploy has neither optional key set and must still boot — the whole
+    reason those two settings are optional."""
+    settings = _settings(monkeypatch, DEEPINFRA_API_KEY="", DEEPSEEK_API_KEY="")
+    validate_stage_configuration(settings)
+
+
+def test_every_misconfigured_stage_is_named_in_one_error(monkeypatch):
+    """A boot check that reports only the first problem turns a two-stage switch into two
+    failed deploys. All four stages are checked, and every fault is named once."""
+    settings = _settings(
+        monkeypatch,
+        CLUSTER_PROVIDER="deepinfra",
+        SUMMARY_PROVIDER="deepseek",
+        SUMMARY_MODEL="deepseek-v4-flash",
+    )
+    with pytest.raises(StageConfigurationError) as excinfo:
+        validate_stage_configuration(settings)
+    message = str(excinfo.value)
+    assert "cluster" in message  # deepinfra has no rates for claude-sonnet-4-6
+    assert "DEEPINFRA_API_KEY" in message  # ...and no credential either
+    assert "summarize" in message  # priced fine, but no credential
+    assert "DEEPSEEK_API_KEY" in message

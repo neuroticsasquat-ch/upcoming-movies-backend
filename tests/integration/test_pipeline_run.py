@@ -6,13 +6,14 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from tests.fixtures.gateway import StubGateway
+from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
 from upmovies import pipeline_run
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.link.pipeline import run_link_ingest
+from upmovies.llm import StageConfigurationError
 from upmovies.news.models import Story
 
 
@@ -427,3 +428,46 @@ async def test_ping_swallows_network_errors(monkeypatch):
     monkeypatch.setattr("upmovies.pipeline_run.httpx.AsyncClient", BoomClient)
     # Must not raise despite the POST failing.
     await pipeline_run._ping("https://hc.example/abc", "/fail")
+
+
+# --- the scheduled task refuses an unroutable stage before it starts ------------
+
+
+def _stub_daily(*, ok: bool):
+    async def _run(settings):
+        return ok
+
+    return _run
+
+
+def test_main_validates_the_llm_routing_before_running_anything(monkeypatch):
+    """A scheduled task is its own process, so the app's lifespan check does not cover it —
+    and this is the process the mid-publish `KeyError` was costing (NEU-981, spec §7). It
+    must refuse before the chain opens its first run, not partway through it."""
+    settings = get_settings().model_copy(
+        update={
+            **DEFAULT_ROUTING,
+            "summary_provider": "deepseek",
+            "summary_model": "deepseek-v4-flash",
+            "deepseek_api_key": None,
+        }
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the daily chain must not start on an unroutable stage")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", must_not_run)
+    with pytest.raises(StageConfigurationError, match="DEEPSEEK_API_KEY"):
+        pipeline_run.main(["daily"])
+
+
+def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
+    """The guard is a gate, not a wall: the default all-Anthropic routing still reaches the
+    chain, and `main` still reports its outcome as the exit code."""
+    settings = get_settings().model_copy(update=DEFAULT_ROUTING)
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", _stub_daily(ok=True))
+    assert pipeline_run.main(["daily"]) == 0
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", _stub_daily(ok=False))
+    assert pipeline_run.main(["daily"]) == 1
