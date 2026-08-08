@@ -67,12 +67,18 @@ outweighs a discount on a stage that costs ~$0.04/day.
 ### Cost is not the reason
 
 It is worth stating plainly, because the change looks like a cost decision and is not. backlotter
-runs ~$0.31/day in total, and `cluster` ~$0.04/day. A full swap saves under $10/year, and the
-saving is smaller still than the sticker ratio implies: both DeepInfra models are reasoning
-models, reasoning tokens bill at the output rate, and the capability probe measured ~440 output
-tokens per call against a handful of visible ones. The reasons are exercising the adapter,
-learning the real latency distribution, and having the provider axis be something the service
-actually does rather than something it could do.
+runs ~$0.31/day in total — ~$113/year, which is the ceiling on what any migration could save
+whatever the replacement charges — and `cluster` is ~$0.04/day of it, so the stage taking the
+*more* expensive tier here is one costing ~$15/year to begin with. (Spec §1 carries a correction
+worth repeating: an earlier draft put the total saving at "under $10/year", which was
+year-for-month.)
+
+The realized saving will also be smaller than the sticker ratio implies: both DeepInfra models
+are reasoning models, reasoning tokens bill at the output rate, and the capability probe measured
+~440 output tokens per call against a handful of visible ones. Output is the dominant term.
+
+The reasons are exercising the adapter, learning the real latency distribution, and having the
+provider axis be something the service actually does rather than something it could do.
 
 ## Consequences
 
