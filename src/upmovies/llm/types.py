@@ -37,9 +37,24 @@ class Prompt:
     `json_object` asks for JSON rather than prose. It is a *request*, not a guarantee — it
     becomes `response_format` on an OpenAI-compatible provider and is ignored by Anthropic,
     which has no equivalent — so the hand-rolled extractors at the call sites stay as
-    belt-and-braces either way. Whether a provider genuinely honours it, as against merely
-    accepting the field, is one of the things a provider has to be measured on rather than
-    trusted about.
+    belt-and-braces either way.
+
+    **Setting it is not free, and no builder sets it today.** Measured against live endpoints
+    (`scripts/verify_provider_capabilities.py`, 2026-08-08), it is honoured by both providers
+    but on incompatible terms:
+
+    * DeepSeek **rejects the request with a 400** unless the word "json" appears somewhere in
+      the prompt. That is a non-retryable failure, so switching this on for a prompt that
+      never says "json" turns every call at that stage into a dropped chunk.
+    * DeepInfra honours it unconditionally but forces a top-level **object**. Two of the four
+      stages want a top-level array (`link` and `source_judge` both parse with
+      `_extract_json_array`), and on the real `source_judge` prompt that took compliance from
+      10/10 down to 0-2/10 across three runs: the model answers for one domain instead of
+      five, or emits a JSON-Schema stub.
+
+    Both providers score 10/10 on that prompt with the field left alone. So this is a lever for
+    the object-shaped stages, and a footgun for the array-shaped ones — decide per stage,
+    measure, and do not switch it on globally.
     """
 
     stable_prefix: str

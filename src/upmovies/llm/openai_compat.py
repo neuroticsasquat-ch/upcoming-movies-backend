@@ -83,11 +83,16 @@ def _usage_from(usage: Mapping[str, Any]) -> Usage:
 
     `cache_creation_input_tokens` stays 0 by construction: automatic prefix caching has no
     explicit write, so there is nothing to charge a write premium for. That is exactly why
-    `cache_write_mult` stopped being an Anthropic constant (spec §7).
+    `cache_write_mult` stopped being an Anthropic constant (spec §7). DeepInfra does report a
+    `prompt_tokens_details.cache_write_tokens`, observed only as `null` — it stays unmapped,
+    because those tokens are already inside `prompt_tokens` and moving them across without also
+    subtracting them would break the disjointness `price` depends on. At `cache_write_mult=1.0`
+    it prices identically either way, so mapping it would buy risk and no accuracy.
 
     A provider reporting no cached counts at all fails the project's hard selection criterion
     (spec §10) — but that is a finding for the evaluation to report, not a reason to refuse the
-    response here, so it maps to "everything was uncached"."""
+    response here, so it maps to "everything was uncached". Both providers in scope pass it;
+    `scripts/verify_provider_capabilities.py` is what establishes that, against live endpoints."""
     prompt_tokens = int(usage.get("prompt_tokens") or 0)
     details = usage.get("prompt_tokens_details") or {}
     # Absent and zero are different answers, so this resolves on `is not None` rather than on

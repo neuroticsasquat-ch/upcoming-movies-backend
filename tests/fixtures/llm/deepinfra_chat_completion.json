@@ -1,25 +1,31 @@
 {
-  "id": "chatcmpl-6d0f1b2c9a7e4d38b5c1f0a2e7d94b60",
-  "object": "chat.completion",
-  "created": 1785283200,
-  "model": "deepseek-ai/DeepSeek-V4-Flash",
   "choices": [
     {
+      "finish_reason": "stop",
       "index": 0,
+      "logprobs": null,
       "message": {
+        "content": "OK.",
+        "name": null,
+        "reasoning_content": null,
         "role": "assistant",
-        "content": "{\"clusters\": [{\"kind\": \"trailer\", \"story_ids\": [7, 9]}]}"
-      },
-      "finish_reason": "stop"
+        "tool_calls": []
+      }
     }
   ],
+  "created": 1786210991,
+  "id": "chatcmpl-R5R1oU3GNaKFIoLtVAveuK4o",
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "object": "chat.completion",
+  "service_tier": "default",
   "usage": {
-    "prompt_tokens": 5000,
-    "completion_tokens": 64,
-    "total_tokens": 5064,
+    "completion_tokens": 3,
+    "estimated_cost": 0.00010551600000000001,
+    "prompt_tokens": 4648,
     "prompt_tokens_details": {
+      "cache_write_tokens": null,
       "cached_tokens": 4352
     },
-    "estimated_cost": 0.00048
+    "total_tokens": 4651
   }
 }

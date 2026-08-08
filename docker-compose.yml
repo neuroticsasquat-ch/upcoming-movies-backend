@@ -18,6 +18,11 @@ services:
       ADMIN_TOKEN: "${ADMIN_TOKEN:-dev-secret-change-me}"
       TMDB_API_KEY: "${TMDB_API_KEY:-dev-tmdb-key}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-test-anthropic-key}"
+      # Optional, and empty by default: the gateway's exit criterion is capability, and
+      # production stays on Anthropic for all four stages. Only the offline verification and
+      # eval scripts read these, so a deploy without them must keep working (spec §8).
+      DEEPINFRA_API_KEY: "${DEEPINFRA_API_KEY:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
       LOG_LEVEL: "INFO"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:-https://app.upmovies.localhost}"
       COOKIE_DOMAIN: "${COOKIE_DOMAIN:-.upmovies.localhost}"
