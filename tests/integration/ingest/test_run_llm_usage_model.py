@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
-from upmovies.llm.client import Usage
+from upmovies.llm import Usage
 from upmovies.llm.pricing import price, rates_for
 
 

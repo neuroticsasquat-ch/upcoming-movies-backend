@@ -24,12 +24,11 @@ from upmovies.ingest.runs import (
     record_progress,
     total_failure_error,
 )
-from upmovies.llm.client import CallLog, Usage
+from upmovies.llm.types import CallLog, Completer, Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
 from upmovies.news.visibility import visible_events
 from upmovies.synthesize.summarizer import (
-    Completer,
     EventInput,
     StoryInput,
     SummaryResult,

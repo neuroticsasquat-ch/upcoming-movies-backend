@@ -22,6 +22,17 @@ kept visible separately as `attempts` rather than hidden inside that figure. The
 `ingest.llm_call`, and the unit a `parse_ok` outcome hangs off.
 _Avoid_: request, attempt (that's the retry, not the call), round-trip.
 
+**Stable prefix**:
+The part of a stage's request that a builder promises does not vary between calls — in
+practice its instructions. Every adapter must serialize it first and unmodified, which is the
+one requirement that satisfies both explicit caching (Anthropic marks a `cache_control`
+breakpoint) and automatic caching (DeepInfra and DeepSeek match the longest byte-identical
+prefix). Named as a requirement, not a mechanism: `Prompt.stable_prefix` is what the four
+builders emit, and no builder names `cache_control`. Whether a prefix is actually cached is a
+fact about the provider's minimum cacheable length, not about the request — today all four
+sit below it, and the contract being inert is expected.
+_Avoid_: system block, cached block, `cache_control` (all vendor mechanism, adapter-internal).
+
 **Total stage failure**:
 A stage that produced **nothing at all** yet recorded failures — the case where per-item
 isolation degenerates into "discard everything and report success". It is the one condition a

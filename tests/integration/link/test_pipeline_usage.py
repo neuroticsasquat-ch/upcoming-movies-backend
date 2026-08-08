@@ -7,7 +7,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import CallResult, Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.news.models import Story
 
 
@@ -18,17 +18,17 @@ class UsageFakeClient:
     def __init__(self, usage: Usage):
         self._usage = usage
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        return calls.record(CallResult(text=self._decide(system, messages), usage=self._usage))
+    async def complete_call(self, *, model, prompt, calls):
+        return calls.record(CallResult(text=self._decide(prompt), usage=self._usage))
 
-    def _decide(self, system, messages) -> str:
-        if "entity-linking classifier" in system[0]["text"]:
-            payload = json.loads(messages[0]["content"])
+    def _decide(self, prompt) -> str:
+        if "entity-linking classifier" in prompt.stable_prefix:
+            payload = json.loads(prompt.user)
             stories = payload["stories"]
             return json.dumps(
                 [{"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"} for s in stories]
             )
-        new_ns = [s["n"] for s in json.loads(messages[0]["content"])["new_stories"]]
+        new_ns = [s["n"] for s in json.loads(prompt.user)["new_stories"]]
         return json.dumps(
             {
                 "events": [

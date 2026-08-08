@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from upmovies.ingest import runs
 from upmovies.ingest.models import RunLLMUsage
-from upmovies.llm.client import Usage
+from upmovies.llm import Usage
 from upmovies.llm.pricing import HAIKU_4_5, price
 
 

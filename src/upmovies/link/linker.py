@@ -5,20 +5,19 @@ session/commit. The LLM client is injected (Completer) so this is unit-testable 
 **One request shape.** `build_retrieval_link_request` sends each story its own retrieved
 candidate list and takes back an index into that story's list. The roster shape it replaced
 — the whole active catalog as one cached prefix, answered with a global index — was deleted
-at M4 (NEU-1004) once the cutover held; with it went the last prompt caching in production
-(spec §5.5)."""
+at M4 (NEU-1004) once the cutover held; with it went the last prefix in production large
+enough for any provider to cache (spec §5.5)."""
 
 import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any, Protocol
 from uuid import UUID
 
 from upmovies.link.retrieval.render import render_candidates
 from upmovies.link.retrieval.select import CandidateSet
-from upmovies.llm.client import CallLog, CallResult
+from upmovies.llm.types import CallLog, Completer, Prompt
 from upmovies.news.models import Story
 
 log = logging.getLogger(__name__)
@@ -175,23 +174,6 @@ _RETRIEVAL_INSTRUCTIONS = (
 )
 
 
-class Completer(Protocol):
-    """The LLM surface a stage needs: one logical call, recorded into the caller's `CallLog`.
-    Token usage rides along inside the recorded `CallResult` rather than being returned
-    separately, so the per-call telemetry rows and the per-stage `run_llm_usage` aggregate are
-    built from the same numbers (NEU-975)."""
-
-    async def complete_call(
-        self,
-        *,
-        model: str,
-        system: list[dict[str, Any]],
-        messages: list[dict[str, Any]],
-        max_tokens: int = ...,
-        calls: CallLog,
-    ) -> "CallResult": ...
-
-
 @dataclass
 class BatchLinkResult:
     linked: int
@@ -236,20 +218,18 @@ def _extract_json_array(text: str) -> str:
     return text[start : end + 1]
 
 
-def build_retrieval_link_request(
-    batch: Sequence[StoryCandidates], run_date: date
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The instructions-only system block + a story payload carrying per-story candidates.
+def build_retrieval_link_request(batch: Sequence[StoryCandidates], run_date: date) -> Prompt:
+    """The instructions-only stable prefix + a story payload carrying per-story candidates.
 
     Batches survive the rewrite — they still amortize the instruction block over 20 stories —
-    but the catalog leaves the system block entirely, which is the point of the whole
-    project: the prefix stopped scaling with catalog size, so it stops threatening the 200k
-    context ceiling when the undated-film expansion multiplies that catalog (spec §4.2).
+    but the catalog leaves the prefix entirely, which is the point of the whole project: the
+    prefix stopped scaling with catalog size, so it stops threatening the 200k context ceiling
+    when the undated-film expansion multiplies that catalog (spec §4.2).
 
-    **The system block is deliberately not cached.** What remains is ~1.5k tokens, below
-    Haiku 4.5's 4096-token cache floor, so `cache_control` would silently no-op — and `link`
-    was the only stage that cached at all. That is the anticipated consequence, not a
-    regression to engineer around.
+    Whether the prefix is *cached* is no longer decided here. What remains is ~1.5k tokens,
+    below Haiku 4.5's 4096-token floor, so no provider will cache it today — but that is a
+    fact about the provider, not about this request, and `Prompt` is where the distinction
+    now lives (spec §5.1).
     """
     for entry in batch:
         # A zero-candidate story is rejected without a model call (ADR-0009), so one
@@ -258,7 +238,6 @@ def build_retrieval_link_request(
         # with would be out of list.
         if entry.candidates.is_empty:
             raise ValueError(f"story {entry.story.id} has no candidates and must not be sent")
-    system = [{"type": "text", "text": _RETRIEVAL_INSTRUCTIONS}]
     payload = {
         "as_of_date": run_date.isoformat(),
         "stories": [
@@ -271,8 +250,11 @@ def build_retrieval_link_request(
     # rendered precisely when it *differs* from the title — i.e. exactly the non-Latin case.
     # That would blow the ~320 tok/story the rendering was costed at (spec §4.3) on the
     # stories that can least afford it, and hand the model `\uXXXX` runs to disambiguate on.
-    messages = [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
-    return system, messages
+    return Prompt(
+        stable_prefix=_RETRIEVAL_INSTRUCTIONS,
+        user=json.dumps(payload, ensure_ascii=False),
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 @dataclass(frozen=True)
@@ -414,10 +396,8 @@ async def link_retrieval_story_batch(
     means the whole chunk was zero-candidate and there is nothing to ask about."""
     if not batch:
         return BatchLinkResult(0, 0)
-    system, messages = build_retrieval_link_request(batch, run_date)
-    result = await client.complete_call(
-        model=model, system=system, messages=messages, max_tokens=_MAX_TOKENS, calls=calls
-    )
+    prompt = build_retrieval_link_request(batch, run_date)
+    result = await client.complete_call(model=model, prompt=prompt, calls=calls)
     try:
         decisions = apply_retrieval_link_decisions(raw=result.text, batch=batch, floor=floor)
     except Exception:

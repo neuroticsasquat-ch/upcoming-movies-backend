@@ -13,7 +13,7 @@ from upmovies.link.linker import (
 )
 from upmovies.link.retrieval.index import indexed_film
 from upmovies.link.retrieval.select import CandidateSet, ScoredCandidate
-from upmovies.llm.client import CallLog
+from upmovies.llm import CallLog
 from upmovies.news.models import Story
 
 
@@ -22,10 +22,10 @@ class FakeClient:
         self._response = response
         self.requests: list[dict] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        from upmovies.llm.client import CallResult
+    async def complete_call(self, *, model, prompt, calls):
+        from upmovies.llm import CallResult
 
-        self.requests.append({"model": model, "system": system, "messages": messages})
+        self.requests.append({"model": model, "prompt": prompt})
         return calls.record(CallResult(text=self._response))
 
 
@@ -112,25 +112,23 @@ def _batch(*pairs):
     return [StoryCandidates(story=story, candidates=candidates) for story, candidates in pairs]
 
 
-def test_retrieval_request_sends_no_roster_and_no_cached_block():
-    """The point of the rewrite: the prefix is instructions only. Below Haiku 4.5's
-    4096-token cache floor, so marking it cached would buy nothing and misreport why
-    `cache_creation_input_tokens` is zero (spec §4.2)."""
-    system, _ = build_retrieval_link_request(
+def test_retrieval_request_sends_no_roster_in_the_stable_prefix():
+    """The point of the rewrite: the prefix is instructions only (spec §4.2). Whether it is
+    worth caching is the adapter's call now — see `test_client.py` for the wire mapping."""
+    prompt = build_retrieval_link_request(
         _batch((_story(), _candidates("Runner"))), date(2026, 6, 25)
     )
-    assert len(system) == 1
-    assert "cache_control" not in system[0]
-    assert "ROSTER" not in system[0]["text"]
+    assert "ROSTER" not in prompt.stable_prefix
+    assert "entity-linking classifier" in prompt.stable_prefix
 
 
 def test_retrieval_request_carries_each_story_its_own_numbered_candidates():
     first, second = _story(title="Runner news"), _story(title="Sunup news")
-    _, messages = build_retrieval_link_request(
+    prompt = build_retrieval_link_request(
         _batch((first, _candidates("Runner", "Runner Up")), (second, _candidates("Sunup"))),
         date(2026, 6, 25),
     )
-    payload = json.loads(messages[0]["content"])
+    payload = json.loads(prompt.user)
     assert payload["as_of_date"] == "2026-06-25"
     one, two = payload["stories"]
     assert one["id"] == str(first.id) and one["title"] == "Runner news"
@@ -143,19 +141,17 @@ def test_retrieval_request_carries_each_story_its_own_numbered_candidates():
 
 def test_retrieval_request_shows_only_the_capped_candidates():
     story = _story()
-    _, messages = build_retrieval_link_request(
+    prompt = build_retrieval_link_request(
         _batch((story, _candidates("A", "B", "C", limit=2))), date(2026, 6, 25)
     )
-    candidates = json.loads(messages[0]["content"])["stories"][0]["candidates"]
+    candidates = json.loads(prompt.user)["stories"][0]["candidates"]
     assert [c["title"] for c in candidates] == ["A", "B"]
 
 
 def test_retrieval_request_carries_the_story_dek():
     story = _story(title="Runner news", summary="A dek about Runner.")
-    _, messages = build_retrieval_link_request(
-        _batch((story, _candidates("Runner"))), date(2026, 6, 25)
-    )
-    assert json.loads(messages[0]["content"])["stories"][0]["summary"] == "A dek about Runner."
+    prompt = build_retrieval_link_request(_batch((story, _candidates("Runner"))), date(2026, 6, 25))
+    assert json.loads(prompt.user)["stories"][0]["summary"] == "A dek about Runner."
 
 
 def test_retrieval_request_rejects_a_zero_candidate_story():
@@ -209,9 +205,9 @@ def test_retrieval_request_does_not_escape_non_latin_titles():
     story = _story()
     film = indexed_film(film_id=uuid4(), title="Godzilla Minus One", original_title="ゴジラ-1.0")
     candidates = CandidateSet(scored=(ScoredCandidate(film=film, score=1.0),), limit=10)
-    _, messages = build_retrieval_link_request(_batch((story, candidates)), date(2026, 6, 25))
-    assert "ゴジラ" in messages[0]["content"]
-    assert "\\u" not in messages[0]["content"]
+    prompt = build_retrieval_link_request(_batch((story, candidates)), date(2026, 6, 25))
+    assert "ゴジラ" in prompt.user
+    assert "\\u" not in prompt.user
 
 
 # --- applying retrieval decisions (NEU-999) -----------------------------------------
@@ -395,7 +391,7 @@ class TestLinkRetrievalStoryBatch:
 
         assert result.linked == 1
         assert len(client.requests) == 1
-        assert "cache_control" not in client.requests[0]["system"][0]
+        assert client.requests[0]["prompt"].max_tokens == 2048  # == linker._MAX_TOKENS
 
     async def test_an_empty_batch_makes_no_call(self):
         client = FakeClient("[]")

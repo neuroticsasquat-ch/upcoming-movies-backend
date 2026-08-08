@@ -23,7 +23,6 @@ from upmovies.ingest.runs import (
 )
 from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import (
-    Completer,
     StoryCandidates,
     link_retrieval_story_batch,
     reject_zero_candidate_stories,
@@ -44,7 +43,7 @@ from upmovies.link.retrieval.select import (
     select_candidates,
 )
 from upmovies.link.source_stage import run_source_quality_stage
-from upmovies.llm.client import CallLog, Usage
+from upmovies.llm.types import CallLog, Completer, Usage
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)

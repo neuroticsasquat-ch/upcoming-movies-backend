@@ -12,7 +12,7 @@ import asyncio
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.source_stage import backfill_source_domains
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient
 
 
 async def main() -> None:

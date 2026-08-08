@@ -8,31 +8,29 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import _cluster_stage_sequential, run_link_ingest
-from upmovies.llm.client import CallResult
+from upmovies.llm import CallResult
 from upmovies.news.models import Event, EventStory, Story
 
 
 class FakeClient:
     """Serves Stage 1 (link) and Stage 2 (cluster) off the same `_decide`, recording every
-    call's system blocks, messages, and max_tokens."""
+    call's model and `Prompt`."""
 
     def __init__(self):
         self.complete_calls: list[dict] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        self.complete_calls.append(
-            {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
-        )
-        return calls.record(CallResult(text=self._decide(system, messages)))
+    async def complete_call(self, *, model, prompt, calls):
+        self.complete_calls.append({"model": model, "prompt": prompt})
+        return calls.record(CallResult(text=self._decide(prompt)))
 
-    def _decide(self, system, messages) -> str:
-        if "entity-linking classifier" in system[0]["text"]:
-            payload = json.loads(messages[0]["content"])
+    def _decide(self, prompt) -> str:
+        if "entity-linking classifier" in prompt.stable_prefix:
+            payload = json.loads(prompt.user)
             stories = payload["stories"]
             return json.dumps(
                 [{"id": s["id"], "film": 1, "confidence": 0.95, "reason": "about"} for s in stories]
             )
-        new_ns = [s["n"] for s in json.loads(messages[0]["content"])["new_stories"]]
+        new_ns = [s["n"] for s in json.loads(prompt.user)["new_stories"]]
         return json.dumps(
             {
                 "events": [
@@ -49,7 +47,7 @@ class FakeClient:
 
 def _link_calls(client) -> list[dict]:
     return [
-        c for c in client.complete_calls if "entity-linking classifier" in c["system"][0]["text"]
+        c for c in client.complete_calls if "entity-linking classifier" in c["prompt"].stable_prefix
     ]
 
 
@@ -57,7 +55,7 @@ def _cluster_calls(client) -> list[dict]:
     return [
         c
         for c in client.complete_calls
-        if "entity-linking classifier" not in c["system"][0]["text"]
+        if "entity-linking classifier" not in c["prompt"].stable_prefix
     ]
 
 
@@ -186,24 +184,15 @@ class _TaggedFailClient(FakeClient):
         super().__init__()
         self._unparseable = unparseable
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        if "entity-linking classifier" in system[0]["text"]:
-            payload = json.loads(messages[0]["content"])
+    async def complete_call(self, *, model, prompt, calls):
+        if "entity-linking classifier" in prompt.stable_prefix:
+            payload = json.loads(prompt.user)
             if any(st["title"].startswith("FAIL") for st in payload["stories"]):
                 if self._unparseable:
-                    self.complete_calls.append(
-                        {
-                            "model": model,
-                            "system": system,
-                            "messages": messages,
-                            "max_tokens": max_tokens,
-                        }
-                    )
+                    self.complete_calls.append({"model": model, "prompt": prompt})
                     return calls.record(CallResult(text="not json"))
                 raise RuntimeError("boom")
-        return await super().complete_call(
-            model=model, system=system, messages=messages, max_tokens=max_tokens, calls=calls
-        )
+        return await super().complete_call(model=model, prompt=prompt, calls=calls)
 
 
 @pytest.mark.parametrize("unparseable", [False, True])
@@ -263,7 +252,7 @@ async def test_failed_chunk_stays_pending_others_commit(session, unparseable):
 class _TotalOutageClient(FakeClient):
     """Every call raises — a total LLM outage, so every chunk and every film fails."""
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+    async def complete_call(self, *, model, prompt, calls):
         raise RuntimeError("boom")
 
 
@@ -409,7 +398,7 @@ async def test_run_with_nothing_to_do_still_succeeds(session):
 
 
 # ---------------------------------------------------------------------------
-# Request mapping (cache_control, max_tokens, model)
+# Request mapping (max_tokens, model)
 # ---------------------------------------------------------------------------
 
 
@@ -434,11 +423,7 @@ async def test_link_request_mapping(session):
     assert len(calls) == 2  # one call per chunk
     for c in calls:
         assert c["model"] == "claude-haiku-4-5"
-        assert c["max_tokens"] == 2048  # == linker._MAX_TOKENS
-        # Not cached: the retrieval prefix is instructions only, ~1.5k tokens, below Haiku
-        # 4.5's 4096-token cache floor. Prompt caching left production with the roster
-        # (NEU-1004, spec §5.5).
-        assert "cache_control" not in c["system"][0]
+        assert c["prompt"].max_tokens == 2048  # == linker._MAX_TOKENS
 
 
 async def test_cluster_request_mapping(session):
@@ -456,9 +441,8 @@ async def test_cluster_request_mapping(session):
     calls = _cluster_calls(client)
     assert len(calls) == 1  # one cluster call per film
     assert calls[0]["model"] == "claude-sonnet-4-6"
-    assert calls[0]["max_tokens"] == 4096
-    assert "cache_control" not in calls[0]["system"][0]
-    assert "distinct EVENTS" in calls[0]["system"][0]["text"]
+    assert calls[0]["prompt"].max_tokens == 4096
+    assert "distinct EVENTS" in calls[0]["prompt"].stable_prefix
 
 
 async def test_run_link_ingest_threads_cluster_max_tokens(session):
@@ -483,7 +467,7 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
         cluster_max_tokens=7777,
     )
 
-    assert all(c["max_tokens"] == 7777 for c in _cluster_calls(client))
+    assert all(c["prompt"].max_tokens == 7777 for c in _cluster_calls(client))
 
 
 # ---------------------------------------------------------------------------
@@ -494,8 +478,8 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
 class _ClusterFailClient:
     """Stage-level fake: serves cluster calls, failing the film whose title starts 'FAIL'."""
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        payload = json.loads(messages[0]["content"])
+    async def complete_call(self, *, model, prompt, calls):
+        payload = json.loads(prompt.user)
         if payload["film"]["title"].startswith("FAIL"):
             raise RuntimeError("boom")
         new_ns = [s["n"] for s in payload["new_stories"]]
@@ -625,7 +609,7 @@ class _UnparseableClusterClient:
     """Returns an unparseable cluster response for every film, so apply_cluster_decisions
     raises ClusterParseError, which the pipeline catch-block records as failed_delta=1."""
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+    async def complete_call(self, *, model, prompt, calls):
         return calls.record(CallResult(text="not json {"))
 
 

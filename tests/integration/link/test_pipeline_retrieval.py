@@ -13,7 +13,7 @@ from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
 from upmovies.ingest.runs import create_run
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm.client import CallResult
+from upmovies.llm import CallResult, Prompt
 from upmovies.news.models import Story
 
 
@@ -22,12 +22,12 @@ class _FakeClient:
     each link request so a test can assert what the model was — and was not — shown."""
 
     def __init__(self):
-        self.link_requests: list[dict] = []
+        self.link_requests: list[Prompt] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        if "entity-linking classifier" in system[0]["text"]:
-            self.link_requests.append({"system": system, "messages": messages})
-            stories = json.loads(messages[0]["content"])["stories"]
+    async def complete_call(self, *, model, prompt, calls):
+        if "entity-linking classifier" in prompt.stable_prefix:
+            self.link_requests.append(prompt)
+            stories = json.loads(prompt.user)["stories"]
             return calls.record(
                 CallResult(
                     text=json.dumps(
@@ -38,7 +38,7 @@ class _FakeClient:
                     )
                 )
             )
-        new_ns = [s["n"] for s in json.loads(messages[0]["content"])["new_stories"]]
+        new_ns = [s["n"] for s in json.loads(prompt.user)["new_stories"]]
         return calls.record(
             CallResult(
                 text=json.dumps(
@@ -61,7 +61,7 @@ class _OutageClient(_FakeClient):
     """Every model call raises — a total Anthropic outage. Retrieval still runs: it is pure
     and needs no network, which is exactly what makes this failure mode reachable."""
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
+    async def complete_call(self, *, model, prompt, calls):
         raise RuntimeError("boom")
 
 
@@ -143,8 +143,8 @@ class TestRetrievalDecides:
         assert (story.link_status, story.film_id) == ("linked", films["Runner"].id)
 
     async def test_the_prompt_carries_candidates_instead_of_a_roster(self, session):
-        # The point of the whole project: the catalog leaves the system block, so the prefix
-        # stops scaling with catalog size (spec §4.2).
+        # The point of the whole project: the catalog leaves the stable prefix, so the
+        # prefix stops scaling with catalog size (spec §4.2).
         await _catalog(
             session, films={1: "Runner"}, stories={"https://e/hit": "Runner wraps filming"}
         )
@@ -152,10 +152,9 @@ class TestRetrievalDecides:
 
         await _run(session, client=client)
 
-        system = client.link_requests[0]["system"]
-        assert "ROSTER" not in system[0]["text"]
-        assert "cache_control" not in system[0]
-        story = json.loads(client.link_requests[0]["messages"][0]["content"])["stories"][0]
+        prompt = client.link_requests[0]
+        assert "ROSTER" not in prompt.stable_prefix
+        story = json.loads(prompt.user)["stories"][0]
         assert [c["title"] for c in story["candidates"]] == ["Runner"]
 
     async def test_only_the_storys_own_candidates_are_offered(self, session):
@@ -168,7 +167,7 @@ class TestRetrievalDecides:
 
         await _run(session, client=client)
 
-        story = json.loads(client.link_requests[0]["messages"][0]["content"])["stories"][0]
+        story = json.loads(client.link_requests[0].user)["stories"][0]
         assert [c["title"] for c in story["candidates"]] == ["Runner"]
 
 
@@ -203,7 +202,7 @@ class TestZeroCandidateRejection:
 
         await _run(session, client=client)
 
-        sent = json.loads(client.link_requests[0]["messages"][0]["content"])["stories"]
+        sent = json.loads(client.link_requests[0].user)["stories"]
         assert len(sent) == 1
         rows = await _stories(session)
         assert rows["https://e/hit"].link_status == "linked"

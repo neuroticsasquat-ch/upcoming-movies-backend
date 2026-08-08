@@ -14,7 +14,7 @@ from upmovies.link.cluster import (
     build_cluster_request,
     cluster_film_events,
 )
-from upmovies.llm.client import CallLog
+from upmovies.llm import CallLog
 from upmovies.news.models import Event, EventStory, Story
 
 
@@ -23,10 +23,10 @@ class FakeClient:
         self._response = response
         self.requests: list[dict] = []
 
-    async def complete_call(self, *, model, system, messages, max_tokens=4096, calls):
-        from upmovies.llm.client import CallResult
+    async def complete_call(self, *, model, prompt, calls):
+        from upmovies.llm import CallResult
 
-        self.requests.append({"system": system, "messages": messages})
+        self.requests.append({"model": model, "prompt": prompt})
         return calls.record(CallResult(text=json.dumps(self._response)))
 
 
@@ -185,14 +185,10 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
         session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    system, messages, plan = built
+    prompt, plan = built
 
-    # NEU-377: cluster instructions are below Sonnet's 2048-tok cache floor and the
-    # per-call payload is per-film (no shared prefix), so the block is intentionally
-    # un-cached — a plain {"type": "text", "text": ...} block with no cache_control.
-    assert "cache_control" not in system[0]
-    assert "distinct EVENTS" in system[0]["text"]
-    payload = json.loads(messages[0]["content"])
+    assert "distinct EVENTS" in prompt.stable_prefix
+    payload = json.loads(prompt.user)
     assert payload["film"]["title"] == "Runner"
     assert payload["existing_events"] == []
     assert {s["n"] for s in payload["new_stories"]} == {1, 2}
@@ -327,7 +323,7 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
         session, film_id=film.id, attach_limit=3650, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, _messages, plan = built
+    _prompt, plan = built
     assert plan.existing_event_ids == [e1.id, e2.id]  # ordered by occurred_at at build time
 
     # Flip occurred_at so a re-derived query would now order [e2, e1]; the plan must not change.
@@ -435,7 +431,7 @@ async def test_build_cluster_request_captures_film_status(session):
         session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, _messages, plan = built
+    _prompt, plan = built
     assert plan.film_status == "Post Production"
 
 
@@ -669,8 +665,8 @@ async def test_build_cluster_request_includes_event_older_than_recency_window(se
         session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, messages, plan = built
-    payload = json.loads(messages[0]["content"])
+    prompt, plan = built
+    payload = json.loads(prompt.user)
     assert [e["type"] for e in payload["existing_events"]] == ["casting"]
     assert plan.existing_event_ids == [event.id]
 
@@ -701,8 +697,8 @@ async def test_build_cluster_request_caps_existing_events_to_attach_limit(sessio
         session, film_id=film.id, attach_limit=2, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, messages, plan = built
-    payload = json.loads(messages[0]["content"])
+    prompt, plan = built
+    payload = json.loads(prompt.user)
     titles = [h for e in payload["existing_events"] for h in e["headlines"]]
     assert titles == ["beat day 2", "beat day 3"]  # 2 most recent, oldest->newest
     assert plan.existing_event_ids == [events[1].id, events[2].id]
@@ -741,8 +737,8 @@ async def test_build_cluster_request_caps_headlines_per_event(session):
         session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, messages, _plan = built
-    payload = json.loads(messages[0]["content"])
+    prompt, _plan = built
+    payload = json.loads(prompt.user)
     assert len(payload["existing_events"]) == 1
     assert payload["existing_events"][0]["headlines"] == ["headline 5", "headline 4", "headline 3"]
 

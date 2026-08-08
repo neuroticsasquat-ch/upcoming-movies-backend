@@ -29,9 +29,9 @@ margin into no margin needed at all.
 **The list comes from the retrieval index, not the deleted roster (NEU-1004).** Both read
 the same `active_film_clause` at the same `as_of`, so the labelable set is unchanged — what
 moved is only which module owns the read. Note this script still sends its whole film list as
-a **cached** prefix: it is the one remaining `cached_system_block` caller now that production
-has stopped caching, and here the prefix is large and reused across ~160 batches in one
-sitting, which is exactly the shape caching pays for."""
+its `Prompt.stable_prefix`: production's prefixes are all under the cache floor now, but here
+the prefix is large and reused byte-identically across ~160 batches in one sitting, which is
+exactly the shape prompt caching pays for — and the shape the stable-prefix contract names."""
 
 import argparse
 import asyncio
@@ -48,7 +48,7 @@ from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.link.linker import _extract_json_array
 from upmovies.link.retrieval.index import IndexedFilm, build_candidate_index, indexed_tmdb_ids
-from upmovies.llm.client import AnthropicClient, cached_system_block
+from upmovies.llm import AnthropicClient, Prompt
 
 # A strong model, deliberately distinct from settings.link_model (the Haiku linker under
 # test) so the human reviews independent proposals. Override with --model.
@@ -185,7 +185,7 @@ async def _propose_batch(
     client: AnthropicClient,
     *,
     model: str,
-    system: list[dict],
+    stable_prefix: str,
     draft: list[dict],
     start: int,
     semaphore: asyncio.Semaphore,
@@ -209,9 +209,11 @@ async def _propose_batch(
         try:
             raw = await client.complete(
                 model=model,
-                system=system,
-                messages=[{"role": "user", "content": json.dumps(payload)}],
-                max_tokens=MAX_TOKENS,
+                prompt=Prompt(
+                    stable_prefix=stable_prefix,
+                    user=json.dumps(payload),
+                    max_tokens=MAX_TOKENS,
+                ),
             )
             batch = {str(d.get("id")): d for d in json.loads(_extract_json_array(raw))}
         except Exception as exc:  # reported, and the rows stay undecided
@@ -235,11 +237,9 @@ async def main(args: argparse.Namespace) -> None:
             row.id: row.tmdb_id for row in (await s.execute(select(Film))).scalars().all()
         }
     labelable = indexed_tmdb_ids(index.films, tmdb_by_film_id)
-    system = [
-        cached_system_block(
-            f"{_INSTRUCTIONS}\n\nROSTER:\n{_film_list_text(index.films, tmdb_by_film_id)}"
-        )
-    ]
+    stable_prefix = (
+        f"{_INSTRUCTIONS}\n\nROSTER:\n{_film_list_text(index.films, tmdb_by_film_id)}"
+    )
     print(
         f"labelable: {len(labelable)} films as of {args.as_of or 'today'} "
         f"({len(tmdb_by_film_id)} in catalog) | proposer model: {args.model}",
@@ -255,7 +255,7 @@ async def main(args: argparse.Namespace) -> None:
                 _propose_batch(
                     client,
                     model=args.model,
-                    system=system,
+                    stable_prefix=stable_prefix,
                     draft=draft,
                     start=start,
                     semaphore=semaphore,
