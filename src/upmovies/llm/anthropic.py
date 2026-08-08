@@ -85,6 +85,12 @@ class AnthropicClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the underlying connection pool. Separate from `__aexit__` because `Gateway`
+        builds its clients lazily and so cannot enter them as context managers — it closes
+        them by name instead (`llm/gateway.py`)."""
         await self._client.close()
 
     async def complete_call(self, *, model: str, prompt: Prompt, calls: CallLog) -> CallResult:

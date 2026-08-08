@@ -43,7 +43,7 @@ from upmovies.link.retrieval.select import (
     select_candidates,
 )
 from upmovies.link.source_stage import run_source_quality_stage
-from upmovies.llm.types import CallLog, Completer, Usage
+from upmovies.llm.types import CallLog, StageGateway, Usage
 from upmovies.news.models import EventStory, Story
 
 log = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def _chunks(seq: Sequence[UUID], size: int) -> list[list[UUID]]:
 async def _link_stage_retrieval(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     index: CandidateIndex,
@@ -90,6 +90,11 @@ async def _link_stage_retrieval(
     model decided them, so no model failure may take them back — which is what makes an
     outage's tally `0 processed / N failed` rather than a partial success (ADR-0009), and
     what the outage test in `test_pipeline_retrieval.py` pins."""
+    # One resolution for the whole stage: the provider is a property of the stage, not of a
+    # batch, and resolving per batch would let a mid-run config change split one stage's rows
+    # across two providers.
+    client = gateway.for_stage("link")
+    provider = gateway.provider_for("link")
     linked = classified_rejected = zero_candidate_rejected = failed_stories = 0
     total_usage = Usage()
     for batch_ids in _chunks(pending_ids, batch_size):
@@ -153,7 +158,12 @@ async def _link_stage_retrieval(
             if calls.results:
                 async with _owned_session(session_factory) as s:
                     await record_llm_calls(
-                        s, run_id, stage="link", model=model, results=calls.results
+                        s,
+                        run_id,
+                        stage="link",
+                        provider=provider,
+                        model=model,
+                        results=calls.results,
                     )
                     await s.commit()
     return (
@@ -184,7 +194,7 @@ def _retrieve(index: CandidateIndex, story: Story, *, threshold: float, limit: i
 async def _cluster_stage_sequential(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     film_ids: Sequence[UUID],
@@ -195,6 +205,11 @@ async def _cluster_stage_sequential(
     release_change_window_days: int = 14,
     run_date: date,
 ) -> tuple[int, int, int, Usage, StageCounts]:
+    # `cluster`, not `link` — the same run_link_ingest call that resolved the link stage above
+    # resolves a second, independently configured provider here. That is the whole reason one
+    # `AnthropicClient` threaded down from `run_link_stage` had to go (spec §5.3).
+    client = gateway.for_stage("cluster")
+    provider = gateway.provider_for("cluster")
     events_created = stories_clustered = stories_rejected = 0
     films_ok = films_failed = 0
     total_usage = Usage()
@@ -237,7 +252,12 @@ async def _cluster_stage_sequential(
             if calls.results:
                 async with _owned_session(session_factory) as s:
                     await record_llm_calls(
-                        s, run_id, stage="cluster", model=model, results=calls.results
+                        s,
+                        run_id,
+                        stage="cluster",
+                        provider=provider,
+                        model=model,
+                        results=calls.results,
                     )
                     await s.commit()
     return (
@@ -255,7 +275,7 @@ async def _cluster_stage_sequential(
 async def run_link_ingest(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     cluster_model: str,
@@ -295,7 +315,7 @@ async def run_link_ingest(
     tally = RetrievalTally()
     linked, rejected, link_usage, link_counts = await _link_stage_retrieval(
         session_factory=session_factory,
-        client=client,
+        gateway=gateway,
         run_id=run_id,
         model=model,
         index=index,
@@ -320,21 +340,33 @@ async def run_link_ingest(
     if retrieval_breach:
         log.error("%s", retrieval_breach)
     async with _owned_session(session_factory) as s:
-        await record_llm_usage(s, run_id, stage="link", model=model, usage=link_usage)
+        await record_llm_usage(
+            s,
+            run_id,
+            stage="link",
+            provider=gateway.provider_for("link"),
+            model=model,
+            usage=link_usage,
+        )
         await s.commit()
 
     # --- Source-quality sub-stage: resolve domains, judge unknowns, drop admin-blocked ---
     if source_gate_enabled:
         source_result, source_usage = await run_source_quality_stage(
             session_factory=session_factory,
-            client=client,
+            gateway=gateway,
             run_id=run_id,
             judge_model=source_judge_model,
             unresolved_tier=unresolved_tier,
         )
         async with _owned_session(session_factory) as s:
             await record_llm_usage(
-                s, run_id, stage="source_judge", model=source_judge_model, usage=source_usage
+                s,
+                run_id,
+                stage="source_judge",
+                provider=gateway.provider_for("source_judge"),
+                model=source_judge_model,
+                usage=source_usage,
             )
             await s.commit()
         log.info(
@@ -373,7 +405,7 @@ async def run_link_ingest(
         cluster_counts,
     ) = await _cluster_stage_sequential(
         session_factory=session_factory,
-        client=client,
+        gateway=gateway,
         run_id=run_id,
         model=cluster_model,
         film_ids=film_ids,
@@ -385,7 +417,14 @@ async def run_link_ingest(
         run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
-        await record_llm_usage(s, run_id, stage="cluster", model=cluster_model, usage=cluster_usage)
+        await record_llm_usage(
+            s,
+            run_id,
+            stage="cluster",
+            provider=gateway.provider_for("cluster"),
+            model=cluster_model,
+            usage=cluster_usage,
+        )
         await s.commit()
 
     # Two independent guards, joined only here. `total_failure_error` watches model

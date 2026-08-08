@@ -19,10 +19,6 @@ from upmovies.llm.pricing import price, rates_for
 # Every new usage row is sequential — the Message Batches path is gone (ADR-0005).
 _BATCHED = False
 
-# Every call still goes to Anthropic; the gateway that makes this vary is M4 (NEU-980). Written
-# per row rather than assumed so the pre-gateway baseline is comparable to what follows it.
-_PROVIDER = "anthropic"
-
 
 class StageKind(StrEnum):
     """What a failed item costs a stage — the axis the total-failure rule turns on (NEU-987).
@@ -189,6 +185,7 @@ async def record_llm_usage(
     run_id: UUID,
     *,
     stage: str,
+    provider: str,
     model: str,
     usage: Usage,
 ) -> None:
@@ -197,10 +194,14 @@ async def record_llm_usage(
     and writes one row per (run_id, stage), overwriting on the uq_run_llm_usage_run_stage
     conflict so a stage re-run refreshes rather than duplicates. Caller owns the commit.
 
+    `provider` is required rather than defaulted, for the same reason `Rates`' cache
+    multipliers are: a default is how a second provider silently inherits the first one's
+    prices. The stage reads it off its gateway, which is the only thing that knows.
+
     `batched` is written as a constant `False`: the Message Batches path was removed
     (ADR-0005) so no new row can be batched, but the column stays because historical rows
     recorded under batch mode must keep pricing correctly."""
-    cost = Decimal(str(price(usage, rates_for(_PROVIDER, model), batch=_BATCHED)))
+    cost = Decimal(str(price(usage, rates_for(provider, model), batch=_BATCHED)))
     stmt = pg_insert(RunLLMUsage).values(
         run_id=run_id,
         stage=stage,
@@ -232,24 +233,29 @@ async def record_llm_calls(
     run_id: UUID,
     *,
     stage: str,
+    provider: str,
     model: str,
     results: Sequence[CallResult],
 ) -> None:
     """Insert one `ingest.llm_call` row per logical call in `results`, priced by the same
     shared pricing module `record_llm_usage` uses. Caller owns the commit.
 
-    `stage` and `run_id` are the two things the LLM adapter cannot know, which is exactly why
-    the write lives here and not in `llm/` — that package stays free of DB imports (spec §4).
-    A failed call is a row like any other: `ok=False` with an `error_type`, priced at whatever
-    tokens it managed to burn (zero, when the request never returned)."""
+    `stage`, `provider` and `run_id` are the three things the LLM adapter cannot know, which is
+    exactly why the write lives here and not in `llm/` — that package stays free of DB imports
+    (spec §4). A failed call is a row like any other: `ok=False` with an `error_type`, priced at
+    whatever tokens it managed to burn (zero, when the request never returned).
+
+    `provider` is what makes these rows comparable across an eval sweep: it is half of the
+    pricing key, and a row that names the wrong host reports one provider's cost and latency
+    under another's name — which no later analysis can detect, let alone correct."""
     if not results:
         return
-    rates = rates_for(_PROVIDER, model)
+    rates = rates_for(provider, model)
     session.add_all(
         LLMCall(
             run_id=run_id,
             stage=stage,
-            provider=_PROVIDER,
+            provider=provider,
             model=model,
             input_tokens=r.usage.input_tokens,
             output_tokens=r.usage.output_tokens,

@@ -2,9 +2,11 @@
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import LLMCall, RunLLMUsage
 from upmovies.ingest.runs import create_run
@@ -74,7 +76,7 @@ async def _run(session, client):
     await session.commit()
     await run_synthesize_ingest(
         session_factory=lambda: session,
-        client=client,
+        gateway=StubGateway(client),
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version="1",
@@ -118,6 +120,37 @@ async def test_each_summarized_event_writes_one_row(session):
     ).scalar_one()
     assert sum(r.input_tokens for r in rows) == aggregate.input_tokens
     assert sum(r.output_tokens for r in rows) == aggregate.output_tokens
+
+
+async def test_rows_are_attributed_to_the_stages_configured_provider(session):
+    """`summarize` resolves its own provider from the gateway, and both telemetry writes carry
+    it (NEU-980). Without that the rows would price DeepSeek tokens at Anthropic's rates and
+    label them `anthropic`, which is exactly the comparison an eval run is trying to make."""
+    await _event_for(session, tmdb_id=1, title="Runner")
+    await session.commit()
+    run_id = await create_run(session, kind="synthesize")
+    await session.commit()
+    gateway = StubGateway(_FakeClient(), provider="deepseek")
+
+    await run_synthesize_ingest(
+        session_factory=lambda: session,
+        gateway=gateway,
+        run_id=run_id,
+        model="deepseek-v4-flash",
+        prompt_version="1",
+    )
+
+    assert gateway.resolved == ["summarize"], "one lookup for the stage, not one per event"
+    (row,) = await _calls(session, run_id)
+    assert (row.provider, row.model) == ("deepseek", "deepseek-v4-flash")
+    aggregate = (
+        await session.execute(
+            select(RunLLMUsage).where(RunLLMUsage.run_id == run_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    # $0.14/Mtok in + $0.28/Mtok out over 80/12 tokens — DeepSeek's rates, not Anthropic's.
+    assert aggregate.cost_usd == Decimal("0.000015")
 
 
 async def test_an_unparseable_reply_records_parse_ok_false_and_still_costs(session):

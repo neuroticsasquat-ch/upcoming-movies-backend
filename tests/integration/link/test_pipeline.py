@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run
@@ -74,7 +75,7 @@ async def _story(url, *, published_offset_days, status="pending", title="Runner 
 async def _run(session, run_id, *, recency_days=45, batch_size=10, client=None):
     return await run_link_ingest(
         session_factory=lambda: session,
-        client=client or FakeClient(),
+        gateway=StubGateway(client or FakeClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         cluster_model="claude-sonnet-4-6",
@@ -457,7 +458,7 @@ async def test_run_link_ingest_threads_cluster_max_tokens(session):
     client = FakeClient()
     await run_link_ingest(
         session_factory=lambda: session,
-        client=client,
+        gateway=StubGateway(client),
         run_id=run_id,
         model="claude-haiku-4-5",
         cluster_model="claude-sonnet-4-6",
@@ -535,7 +536,7 @@ async def test_cluster_failure_is_isolated_per_film(session):
         _counts,
     ) = await _cluster_stage_sequential(
         session_factory=lambda: session,
-        client=_ClusterFailClient(),
+        gateway=StubGateway(_ClusterFailClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         film_ids=[ok_film.id, fail_film.id],
@@ -582,7 +583,7 @@ async def test_cluster_stage_persists_processed_films(session):
 
     await _cluster_stage_sequential(
         session_factory=lambda: session,
-        client=FakeClient(),  # every film clusters cleanly
+        gateway=StubGateway(FakeClient()),  # every film clusters cleanly
         run_id=run_id,
         model="claude-haiku-4-5",
         film_ids=[film.id],
@@ -631,7 +632,7 @@ async def test_cluster_parse_failure_surfaces_as_failed(session):
         _counts,
     ) = await _cluster_stage_sequential(
         session_factory=lambda: session,
-        client=_UnparseableClusterClient(),
+        gateway=StubGateway(_UnparseableClusterClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         film_ids=[film.id],

@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm import CallLog, CallResult, Prompt
@@ -56,7 +57,7 @@ async def test_pipeline_gate_downgrades_low_trust(session_factory, session):
         await session.commit()
         await run_link_ingest(
             session_factory=session_factory,
-            client=_StubClient(),
+            gateway=StubGateway(_StubClient()),
             run_id=run_id,
             model="claude-haiku-4-5",
             cluster_model="claude-haiku-4-5",

@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.runs import create_run
 from upmovies.link.source_stage import run_source_quality_stage
@@ -69,7 +70,7 @@ async def test_judges_unknown_domains_and_blocks(session_factory, session):
 
     result, usage = await run_source_quality_stage(
         session_factory=session_factory,
-        client=client,
+        gateway=StubGateway(client),
         run_id=await _run_id(session),
         judge_model="claude-haiku-4-5",
         resolver=_resolver,
@@ -109,7 +110,7 @@ async def test_resolves_google_urls_before_judging(session_factory, session):
 
     result, usage = await run_source_quality_stage(
         session_factory=session_factory,
-        client=client,
+        gateway=StubGateway(client),
         run_id=await _run_id(session),
         judge_model="claude-haiku-4-5",
         resolver=_resolver,
@@ -137,7 +138,7 @@ async def test_empty_when_nothing_linked(session_factory, session):
 
     result, usage = await run_source_quality_stage(
         session_factory=session_factory,
-        client=client,
+        gateway=StubGateway(client),
         run_id=await _run_id(session),
         judge_model="claude-haiku-4-5",
         resolver=_resolver,

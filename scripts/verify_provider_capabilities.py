@@ -28,13 +28,14 @@ the network (`CLAUDE.md`). Re-run it when a provider changes its API or a new on
 import argparse
 import asyncio
 import json
-import os
 import pathlib
 import sys
 from dataclasses import replace
 
 import httpx
 
+from upmovies.config import get_settings
+from upmovies.llm.gateway import credential_for
 from upmovies.llm.openai_compat import _text_from, _to_wire, _usage_from
 from upmovies.llm.pricing import price, rates_for
 from upmovies.llm.registry import DEEPINFRA, DEEPSEEK, base_url_for
@@ -250,12 +251,11 @@ async def probe_json_compliance(client: httpx.AsyncClient, provider: str, model:
 async def verify(provider: str, model: str, *, capture: bool = False) -> bool:
     """Run all three probes against one provider. False if it was skipped or mismapped.
 
-    The key is read straight from the environment rather than through `get_settings()`, unlike
-    every other script here. That is deliberate and temporary: the provider credentials become
-    `Settings` fields under NEU-980 (design §8), and adding them here would claim that ticket's
-    config surface for the sake of one offline script. Switch this to `get_settings()` once the
-    fields exist."""
-    key = os.environ.get(f"{provider.upper()}_API_KEY", "")
+    The credential comes from the same resolver the gateway uses, so a provider this script
+    reports on is one a stage could actually be pointed at. It differs only in what absence
+    means: a script skips a provider it has no key for, where `Gateway` refuses to run the
+    stage (`llm/gateway.py`)."""
+    key = credential_for(get_settings(), provider)
     if not key:
         print(f"\n!! {provider}: no {provider.upper()}_API_KEY in the environment — skipped")
         return False

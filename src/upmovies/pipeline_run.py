@@ -32,7 +32,7 @@ from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
-from upmovies.llm import AnthropicClient
+from upmovies.llm import Gateway
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -101,10 +101,13 @@ async def run_feeds_stage(
 
 async def run_link_stage(run_id: UUID, settings: Settings) -> None:
     try:
-        async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
+        # One gateway, three stages: `link`, `source_judge` and `cluster` all run inside
+        # `run_link_ingest` and each resolves its own provider from it. This used to be one
+        # `AnthropicClient` opened here and threaded down to all three (NEU-980, spec §5.3).
+        async with Gateway(settings) as gateway:
             await run_link_ingest(
                 session_factory=_session_factory,
-                client=client,
+                gateway=gateway,
                 run_id=run_id,
                 model=settings.link_model,
                 cluster_model=settings.cluster_model,
@@ -130,10 +133,10 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
 
 async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
     try:
-        async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
+        async with Gateway(settings) as gateway:
             await run_synthesize_ingest(
                 session_factory=_session_factory,
-                client=client,
+                gateway=gateway,
                 run_id=run_id,
                 model=settings.summary_model,
                 prompt_version=settings.summary_prompt_version,

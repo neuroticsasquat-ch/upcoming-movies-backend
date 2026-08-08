@@ -176,3 +176,21 @@ class Completer(Protocol):
     Protocol twice."""
 
     async def complete_call(self, *, model: str, prompt: Prompt, calls: CallLog) -> CallResult: ...
+
+
+class StageGateway(Protocol):
+    """What a pipeline needs from a gateway: which provider answers a stage, and something to
+    ask it with.
+
+    A Protocol for the same reason `Completer` is one — the pipelines are written against the
+    surface, not the implementation — and for one concrete reason besides: the implementation
+    (`llm.gateway.Gateway`) reads `Settings`, and a pipeline has no business importing the
+    application's configuration to state what it needs.
+
+    Both halves are here because a stage does two things with its provider: it calls it, and it
+    records that it did. `provider_for` is what keeps the second honest, `(provider, model)`
+    being the key pricing hangs off."""
+
+    def provider_for(self, stage: str) -> str: ...
+
+    def for_stage(self, stage: str) -> Completer: ...

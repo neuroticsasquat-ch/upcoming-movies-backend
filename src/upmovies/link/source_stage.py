@@ -16,7 +16,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import record_llm_calls
-from upmovies.llm.types import CallLog, Completer, Usage
+from upmovies.llm.types import CallLog, Completer, StageGateway, Usage
 from upmovies.news.models import EventStory, Story
 from upmovies.news.resolve import is_google_news_url, resolve_google_news_url
 from upmovies.news.source_quality import (
@@ -67,12 +67,15 @@ async def _linked_unclustered(session: AsyncSession) -> list[Story]:
 async def run_source_quality_stage(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     judge_model: str,
     resolver: Resolver = resolve_google_news_url,
     unresolved_tier: str = "acceptable",
 ) -> tuple[SourceQualityResult, Usage]:
+    """The `source_judge` stage. It runs inside `run_link_ingest` but resolves its own
+    provider: three stages sharing one client instance is precisely what the gateway
+    replaced (spec §5.3)."""
     # 1. Resolve Google-News URLs for the linked batch so we know the publisher domain.
     async with _owned_session(session_factory) as s:
         stories = await _linked_unclustered(s)
@@ -125,13 +128,21 @@ async def run_source_quality_stage(
         calls = CallLog()
         try:
             verdicts = await judge_domains(
-                client=client, model=judge_model, items=items, calls=calls
+                client=gateway.for_stage("source_judge"),
+                model=judge_model,
+                items=items,
+                calls=calls,
             )
         finally:
             if calls.results:
                 async with _owned_session(session_factory) as s:
                     await record_llm_calls(
-                        s, run_id, stage="source_judge", model=judge_model, results=calls.results
+                        s,
+                        run_id,
+                        stage="source_judge",
+                        provider=gateway.provider_for("source_judge"),
+                        model=judge_model,
+                        results=calls.results,
                     )
                     await s.commit()
         usage = calls.usage

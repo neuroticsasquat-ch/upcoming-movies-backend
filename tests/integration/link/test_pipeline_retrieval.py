@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
 from upmovies.ingest.runs import create_run
@@ -90,7 +91,7 @@ async def _run(session, *, client=None, batch_size=10, **kwargs):
     await session.commit()
     await run_link_ingest(
         session_factory=lambda: session,
-        client=client or _FakeClient(),
+        gateway=StubGateway(client or _FakeClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         cluster_model="claude-sonnet-4-6",

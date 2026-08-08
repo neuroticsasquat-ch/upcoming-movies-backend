@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies import pipeline_run
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
@@ -235,7 +236,7 @@ async def test_run_daily_aborts_when_link_stage_totally_fails(
         order.append("link")
         await run_link_ingest(
             session_factory=session_factory,
-            client=_OutageClient(),
+            gateway=StubGateway(_OutageClient()),
             run_id=run_id,
             model="claude-haiku-4-5",
             cluster_model="claude-sonnet-4-6",
@@ -305,7 +306,7 @@ async def test_run_daily_continues_past_a_lone_cluster_failure(
         order.append("link")
         await run_link_ingest(
             session_factory=session_factory,
-            client=_OutageClient(),
+            gateway=StubGateway(_OutageClient()),
             run_id=run_id,
             model="claude-haiku-4-5",
             cluster_model="claude-sonnet-4-6",

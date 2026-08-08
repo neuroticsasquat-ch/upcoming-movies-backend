@@ -1,13 +1,16 @@
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from upmovies.config import Settings
+from upmovies.config import Provider, Settings
 from upmovies.link.retrieval import (
     DEFAULT_CANDIDATE_LIMIT,
     DEFAULT_SCORE_THRESHOLD,
     MAX_ZERO_CANDIDATE_RATE,
     MIN_STORIES_FOR_BREACH,
 )
+from upmovies.llm.registry import PROVIDERS
 
 _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
@@ -111,6 +114,84 @@ def test_settings_summary_overrides_from_env(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.summary_model == "claude-sonnet-4-6"
     assert s.summary_prompt_version == "2"
+
+
+_PROVIDER_ENV = (
+    "LINK_PROVIDER",
+    "CLUSTER_PROVIDER",
+    "SOURCE_JUDGE_PROVIDER",
+    "SUMMARY_PROVIDER",
+    "DEEPINFRA_API_KEY",
+    "DEEPSEEK_API_KEY",
+)
+
+
+def _clear_providers(monkeypatch):
+    for key in _PROVIDER_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_defaults_every_stage_to_anthropic(monkeypatch):
+    """Default config must reproduce today's behaviour exactly — the gateway's exit criterion
+    is capability, and nothing migrates (design §1)."""
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_provider == "anthropic"
+    assert s.cluster_provider == "anthropic"
+    assert s.source_judge_provider == "anthropic"
+    assert s.summary_provider == "anthropic"
+
+
+def test_settings_reads_per_stage_providers_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    monkeypatch.setenv("CLUSTER_PROVIDER", "deepinfra")
+    monkeypatch.setenv("SUMMARY_PROVIDER", "deepseek")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.cluster_provider == "deepinfra"
+    assert s.summary_provider == "deepseek"
+    assert s.link_provider == "anthropic"  # untouched stages stay put
+
+
+@pytest.mark.parametrize(
+    "key", ["LINK_PROVIDER", "CLUSTER_PROVIDER", "SOURCE_JUDGE_PROVIDER", "SUMMARY_PROVIDER"]
+)
+def test_settings_rejects_an_unknown_provider(monkeypatch, key):
+    """What the `Literal` buys: a typo fails the container at boot rather than the stage at
+    its first call, halfway through a nightly publish."""
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    monkeypatch.setenv(key, "anthropik")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_provider_literal_matches_the_registry():
+    """`Provider` restates `llm.registry.PROVIDERS` because `config` cannot import the `llm`
+    package — `llm.gateway` reads `Settings`, so the import would be circular. Same bind as
+    the retrieval constants, same pinning test."""
+    assert set(get_args(Provider)) == set(PROVIDERS)
+
+
+def test_settings_provider_credentials_are_optional(monkeypatch):
+    """Adding these as required fields would break every deploy that does not use them
+    (design §8) — which today is all of them."""
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.deepinfra_api_key is None
+    assert s.deepseek_api_key is None
+
+
+def test_settings_reads_provider_credentials_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    _clear_providers(monkeypatch)
+    monkeypatch.setenv("DEEPINFRA_API_KEY", "di-xxx")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-xxx")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.deepinfra_api_key == "di-xxx"
+    assert s.deepseek_api_key == "ds-xxx"
 
 
 def test_settings_requires_tmdb_api_key(monkeypatch):

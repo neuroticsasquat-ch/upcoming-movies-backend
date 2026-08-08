@@ -31,6 +31,17 @@ off — `pricing._RATES`, the `ingest.llm_call.provider` column, and the per-sta
 settings. Rates are never shared across providers, and never defaulted from one.
 _Avoid_: host, vendor, reseller, backend.
 
+**Gateway**:
+The one object a pipeline holds instead of a client: it answers "which **provider** serves this
+**stage**, and what do I call it with". It exists because a pipeline is not a stage — one
+`run_link_ingest` spans link, source_judge and cluster — so a single client threaded down could
+never carry three independently configured providers. Its clients are pooled per provider, not
+per stage, and it **never falls back**: a stage whose provider has no credential fails, because
+answering it from another provider would attribute that provider's cost, latency and coverage
+to the one that never ran. It resolves the provider only; the model stays an argument, so the
+eval harnesses keep sweeping models without going through config.
+_Avoid_: router, proxy, factory, client (that's the thing it hands out).
+
 **Stable prefix**:
 The part of a stage's request that a builder promises does not vary between calls — in
 practice its instructions. Every adapter must serialize it first and unmodified, which is the
