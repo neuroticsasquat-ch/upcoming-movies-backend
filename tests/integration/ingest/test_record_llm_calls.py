@@ -32,7 +32,12 @@ async def test_writes_one_row_per_recorded_call(session):
     calls.record(CallResult(latency_ms=300))
 
     await runs.record_llm_calls(
-        session, run_id, stage="link", model="claude-haiku-4-5", results=calls.results
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=calls.results,
     )
     await session.commit()
 
@@ -52,7 +57,12 @@ async def test_records_usage_latency_attempts_and_parse_ok(session):
     calls.set_parse_ok(True)
 
     await runs.record_llm_calls(
-        session, run_id, stage="cluster", model="claude-haiku-4-5", results=calls.results
+        session,
+        run_id,
+        stage="cluster",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=calls.results,
     )
     await session.commit()
 
@@ -73,18 +83,28 @@ async def test_records_usage_latency_attempts_and_parse_ok(session):
     assert row.cost_usd == Decimal(str(price(usage, HAIKU_4_5, batch=False)))
 
 
-async def test_provider_is_anthropic_until_the_gateway_lands(session):
+async def test_the_row_names_the_provider_that_answered(session):
+    """Not a constant since NEU-980: the stage reads it off its gateway. A row that named the
+    wrong host would price the call at another provider's rates and report its latency under
+    another provider's name — the one error an eval sweep cannot detect afterwards."""
     run_id = await runs.create_run(session, kind="link")
     calls = CallLog()
-    calls.record(CallResult())
+    calls.record(CallResult(usage=Usage(input_tokens=1_000_000)))
 
     await runs.record_llm_calls(
-        session, run_id, stage="link", model="claude-haiku-4-5", results=calls.results
+        session,
+        run_id,
+        stage="link",
+        provider="deepinfra",
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        results=calls.results,
     )
     await session.commit()
 
     (row,) = await _rows(session, run_id)
-    assert row.provider == "anthropic"
+    assert row.provider == "deepinfra"
+    # Priced at DeepInfra's $0.09/Mtok, not at Anthropic's $1.00 for the same token count.
+    assert row.cost_usd == Decimal("0.090000")
 
 
 async def test_a_failed_call_still_writes_a_row_with_an_error_type(session):
@@ -93,7 +113,12 @@ async def test_a_failed_call_still_writes_a_row_with_an_error_type(session):
     calls.record(CallResult(latency_ms=42, attempts=3, ok=False, error_type="InternalServerError"))
 
     await runs.record_llm_calls(
-        session, run_id, stage="link", model="claude-haiku-4-5", results=calls.results
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=calls.results,
     )
     await session.commit()
 
@@ -109,7 +134,12 @@ async def test_no_calls_writes_nothing(session):
     run_id = await runs.create_run(session, kind="link")
 
     await runs.record_llm_calls(
-        session, run_id, stage="link", model="claude-haiku-4-5", results=CallLog().results
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=CallLog().results,
     )
     await session.commit()
 
@@ -125,10 +155,20 @@ async def test_per_call_tokens_sum_to_what_the_stage_aggregate_records(session):
     calls.record(CallResult(usage=Usage(input_tokens=20, output_tokens=2)))
 
     await runs.record_llm_calls(
-        session, run_id, stage="link", model="claude-haiku-4-5", results=calls.results
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        results=calls.results,
     )
     await runs.record_llm_usage(
-        session, run_id, stage="link", model="claude-haiku-4-5", usage=calls.usage
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        usage=calls.usage,
     )
     await session.commit()
 

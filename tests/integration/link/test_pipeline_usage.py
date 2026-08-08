@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
@@ -69,7 +70,7 @@ async def test_run_link_ingest_records_link_and_cluster_usage(session):
     usage = Usage(input_tokens=100, output_tokens=10, cache_read_input_tokens=900)
     await run_link_ingest(
         session_factory=lambda: session,
-        client=UsageFakeClient(usage),
+        gateway=StubGateway(UsageFakeClient(usage)),
         run_id=run_id,
         model="claude-haiku-4-5",
         cluster_model="claude-sonnet-4-6",

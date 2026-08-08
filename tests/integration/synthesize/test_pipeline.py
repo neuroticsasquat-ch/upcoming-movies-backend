@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 import upmovies.synthesize.pipeline as pipeline_mod
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run as _create_run
@@ -208,7 +209,7 @@ class FakeSummaryClient:
 async def _run(session, run_id, *, client=None, prompt_version="1"):
     return await run_synthesize_ingest(
         session_factory=lambda: session,
-        client=client or FakeSummaryClient(),
+        gateway=StubGateway(client or FakeSummaryClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version=prompt_version,
@@ -517,7 +518,7 @@ async def test_detail_reports_marked_google_news_story(session):
 
     await run_synthesize_ingest(
         session_factory=lambda: session,
-        client=FakeSummaryClient(),
+        gateway=StubGateway(FakeSummaryClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version="1",

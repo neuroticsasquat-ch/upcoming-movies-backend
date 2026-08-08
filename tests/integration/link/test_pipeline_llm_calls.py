@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import LLMCall, RunLLMUsage
 from upmovies.ingest.runs import create_run
@@ -114,7 +115,7 @@ async def _run(session, client, **kwargs):
     await session.commit()
     await run_link_ingest(
         session_factory=lambda: session,
-        client=client,
+        gateway=StubGateway(client),
         run_id=run_id,
         model="claude-haiku-4-5",
         cluster_model="claude-sonnet-4-6",
@@ -173,7 +174,7 @@ async def test_per_call_tokens_reconcile_with_the_stage_aggregate(session):
     await session.commit()
     await run_link_ingest(
         session_factory=lambda: session,
-        client=_FakeClient(),
+        gateway=StubGateway(_FakeClient()),
         run_id=run_id,
         model="claude-haiku-4-5",
         cluster_model="claude-sonnet-4-6",

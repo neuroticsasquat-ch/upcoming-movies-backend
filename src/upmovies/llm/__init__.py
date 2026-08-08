@@ -1,4 +1,8 @@
 from upmovies.llm.anthropic import AnthropicClient as AnthropicClient
+from upmovies.llm.gateway import STAGES as STAGES
+from upmovies.llm.gateway import Gateway as Gateway
+from upmovies.llm.gateway import MissingCredentialError as MissingCredentialError
+from upmovies.llm.gateway import credential_for as credential_for
 from upmovies.llm.openai_compat import OpenAICompatClient as OpenAICompatClient
 from upmovies.llm.pricing import HAIKU_4_5 as HAIKU_4_5
 from upmovies.llm.pricing import SONNET_4_6 as SONNET_4_6
@@ -11,5 +15,6 @@ from upmovies.llm.types import CallLog as CallLog
 from upmovies.llm.types import CallResult as CallResult
 from upmovies.llm.types import Completer as Completer
 from upmovies.llm.types import Prompt as Prompt
+from upmovies.llm.types import StageGateway as StageGateway
 from upmovies.llm.types import UnsupportedPromptError as UnsupportedPromptError
 from upmovies.llm.types import Usage as Usage

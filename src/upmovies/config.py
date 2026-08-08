@@ -1,7 +1,18 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The host a stage's model is served by — the gateway's second axis, alongside the per-stage
+# model settings that were already here (design §8). A `Literal` rather than a bare `str` so a
+# misspelled provider fails the container at boot rather than the stage at its first call: the
+# same discipline `rates_for` applies to an unknown `(provider, model)`.
+#
+# The names are duplicated from `llm.registry.PROVIDERS` rather than imported. `llm.gateway`
+# reads `Settings`, so importing the `llm` package here would be a cycle — the same bind the
+# retrieval constants below are in, and a test pins the two together the same way.
+Provider = Literal["anthropic", "deepinfra", "deepseek"]
 
 
 class Settings(BaseSettings):
@@ -29,8 +40,16 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
+    # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
+    # for all four stages, and requiring these would break every one of them for a capability
+    # none of them uses (design §8). Boot-time validation (NEU-981) is what makes optional
+    # safe — it asserts a credential exists for each *configured* provider, at startup.
+    deepinfra_api_key: str | None = Field(default=None, alias="DEEPINFRA_API_KEY")
+    deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
     link_model: str = Field(default="claude-haiku-4-5", alias="LINK_MODEL")
+    link_provider: Provider = Field(default="anthropic", alias="LINK_PROVIDER")
     cluster_model: str = Field(default="claude-sonnet-4-6", alias="CLUSTER_MODEL")
+    cluster_provider: Provider = Field(default="anthropic", alias="CLUSTER_PROVIDER")
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
     # Re-derived at NEU-1001. The old 15 was chosen when a ~46k-token roster prefix was
@@ -71,8 +90,12 @@ class Settings(BaseSettings):
     )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
+    source_judge_provider: Provider = Field(default="anthropic", alias="SOURCE_JUDGE_PROVIDER")
     source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
+    # Named for the setting beside it, not for the stage: the stage is `summarize`, and
+    # `Gateway` owns that one-line mapping rather than renaming a live env var.
+    summary_provider: Provider = Field(default="anthropic", alias="SUMMARY_PROVIDER")
     summary_prompt_version: str = Field(default="9", alias="SUMMARY_PROMPT_VERSION")
     url_resolve_per_run: int = Field(default=500, alias="URL_RESOLVE_PER_RUN")
     url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")

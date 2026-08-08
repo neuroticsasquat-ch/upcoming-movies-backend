@@ -24,7 +24,7 @@ from upmovies.ingest.runs import (
     record_progress,
     total_failure_error,
 )
-from upmovies.llm.types import CallLog, Completer, Usage
+from upmovies.llm.types import CallLog, StageGateway, Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
 from upmovies.news.visibility import visible_events
@@ -145,13 +145,17 @@ async def _upsert_summary(session: AsyncSession, event_id: UUID, result: Summary
 async def _summary_stage_sequential(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     prompt_version: str,
     pending: list[_PendingEvent],
     run_date: date,
 ) -> tuple[int, int, int, Usage]:
+    # One resolution for the stage, not one per event: the provider is a property of the
+    # stage, and this is the pipeline's only model-facing step.
+    client = gateway.for_stage("summarize")
+    provider = gateway.provider_for("summarize")
     new = refreshed = failed = 0
     total_usage = Usage()
     for pe in pending:
@@ -186,7 +190,12 @@ async def _summary_stage_sequential(
             if calls.results:
                 async with _owned_session(session_factory) as s:
                     await record_llm_calls(
-                        s, run_id, stage="summarize", model=model, results=calls.results
+                        s,
+                        run_id,
+                        stage="summarize",
+                        provider=provider,
+                        model=model,
+                        results=calls.results,
                     )
                     await s.commit()
     return new, refreshed, failed, total_usage
@@ -195,7 +204,7 @@ async def _summary_stage_sequential(
 async def run_synthesize_ingest(
     *,
     session_factory: SessionFactory,
-    client: Completer,
+    gateway: StageGateway,
     run_id: UUID,
     model: str,
     prompt_version: str,
@@ -210,7 +219,7 @@ async def run_synthesize_ingest(
     run_date = datetime.now(UTC).date()
     new, refreshed, failed, summary_usage = await _summary_stage_sequential(
         session_factory=session_factory,
-        client=client,
+        gateway=gateway,
         run_id=run_id,
         model=model,
         prompt_version=prompt_version,
@@ -218,7 +227,14 @@ async def run_synthesize_ingest(
         run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
-        await record_llm_usage(s, run_id, stage="summarize", model=model, usage=summary_usage)
+        await record_llm_usage(
+            s,
+            run_id,
+            stage="summarize",
+            provider=gateway.provider_for("summarize"),
+            model=model,
+            usage=summary_usage,
+        )
         await s.commit()
 
     try:

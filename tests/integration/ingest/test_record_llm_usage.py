@@ -17,7 +17,12 @@ async def test_record_llm_usage_inserts_priced_row(session):
         cache_creation_input_tokens=0,
     )
     await runs.record_llm_usage(
-        session, run_id, stage="link", model="claude-haiku-4-5", usage=usage
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        usage=usage,
     )
     await session.commit()
 
@@ -43,7 +48,12 @@ async def test_record_llm_usage_never_writes_batched_true(session):
     run_id = await runs.create_run(session, kind="link")
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
     await runs.record_llm_usage(
-        session, run_id, stage="link", model="claude-haiku-4-5", usage=usage
+        session,
+        run_id,
+        stage="link",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        usage=usage,
     )
     await session.commit()
     row = (
@@ -59,6 +69,7 @@ async def test_record_llm_usage_upserts_on_run_stage(session):
         session,
         run_id,
         stage="link",
+        provider="anthropic",
         model="claude-haiku-4-5",
         usage=Usage(input_tokens=10),
     )
@@ -68,6 +79,7 @@ async def test_record_llm_usage_upserts_on_run_stage(session):
         session,
         run_id,
         stage="link",
+        provider="anthropic",
         model="claude-haiku-4-5",
         usage=Usage(input_tokens=99),
     )
@@ -90,10 +102,15 @@ async def test_record_llm_usage_upserts_on_run_stage(session):
 async def test_record_llm_usage_two_stages_two_rows(session):
     run_id = await runs.create_run(session, kind="link")
     await runs.record_llm_usage(
-        session, run_id, stage="link", model="claude-haiku-4-5", usage=Usage()
+        session, run_id, stage="link", provider="anthropic", model="claude-haiku-4-5", usage=Usage()
     )
     await runs.record_llm_usage(
-        session, run_id, stage="cluster", model="claude-sonnet-4-6", usage=Usage()
+        session,
+        run_id,
+        stage="cluster",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        usage=Usage(),
     )
     await session.commit()
     rows = (

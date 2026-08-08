@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import RunLLMUsage
 from upmovies.ingest.runs import create_run
@@ -52,7 +53,7 @@ async def test_run_synthesize_records_summarize_usage(session):
 
     await run_synthesize_ingest(
         session_factory=lambda: session,
-        client=UsageSummaryClient(Usage(input_tokens=42, output_tokens=8)),
+        gateway=StubGateway(UsageSummaryClient(Usage(input_tokens=42, output_tokens=8))),
         run_id=run_id,
         model="claude-haiku-4-5",
         prompt_version="1",

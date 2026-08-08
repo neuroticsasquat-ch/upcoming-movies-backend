@@ -151,6 +151,12 @@ class OpenAICompatClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the underlying connection pool. Separate from `__aexit__` because `Gateway`
+        builds its clients lazily and so cannot enter them as context managers — it closes
+        them by name instead (`llm/gateway.py`)."""
         await self._client.aclose()
 
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
