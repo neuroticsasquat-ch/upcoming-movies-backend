@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import select
 
 from upmovies.catalog.models import Film, FilmFieldChange
-from upmovies.catalog.queries import active_film_clause
+from upmovies.catalog.queries import active_film_clause, dormant_film_clause
 from upmovies.news.models import Story
 
 TODAY = date(2026, 7, 2)
@@ -177,3 +177,28 @@ async def test_dormancy_still_defers_to_the_terminal_status_and_date_rules(sessi
     await session.commit()
 
     assert await _active_titles(session) == set()
+
+
+async def test_dormant_film_clause_never_catches_a_dated_film(session):
+    """The half of `active_film_clause` the sweep's refresh phase reads on its own. Dated
+    films age out by release date, so quiescence says nothing about them however quiet they
+    are — and the refresh cadence a film lands on depends on getting this right."""
+    session.add_all(
+        [
+            Film(tmdb_id=60, title="Quiet Undated", release_date=None, created_at=LONG_AGO),
+            Film(
+                tmdb_id=61,
+                title="Quiet But Dated",
+                release_date=date(2026, 12, 1),
+                created_at=LONG_AGO,
+            ),
+            Film(tmdb_id=62, title="Busy Undated", release_date=None, created_at=RECENT),
+        ]
+    )
+    await session.commit()
+
+    rows = await session.execute(
+        select(Film.title).where(dormant_film_clause(today=TODAY, dormancy_days=DORMANCY_DAYS))
+    )
+
+    assert set(rows.scalars().all()) == {"Quiet Undated"}
