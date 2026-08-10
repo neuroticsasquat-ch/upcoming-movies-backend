@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from upmovies.ingest import runs
 from upmovies.ingest.models import IngestRun
@@ -67,3 +69,18 @@ async def test_mark_stale_runs_cancelled_only_old_running_runs(session):
     assert stale_row.finished_at is not None
     assert stale_row.error is not None
     assert fresh_row.status == "running"
+
+
+async def test_sweep_is_an_accepted_run_kind(session):
+    """The sweep gets its own run row rather than hiding inside the tmdb stage's counters,
+    so `ck_ingest_run_kind` has to admit it (NEU-1074)."""
+    run_id = await runs.create_run(session, kind="sweep")
+    row = (await session.execute(select(IngestRun).where(IngestRun.id == run_id))).scalar_one()
+    assert row.kind == "sweep"
+
+
+async def test_unknown_run_kind_is_rejected(session):
+    """The constraint is widened, not dropped — a typo'd kind must still fail."""
+    session.add(IngestRun(kind="swep", status="running"))
+    with pytest.raises(IntegrityError):
+        await session.flush()
