@@ -40,6 +40,10 @@ services:
       LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-25}"
       LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE: "${LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE:-0.25}"
       LINK_RETRIEVAL_HEALTH_MIN_STORIES: "${LINK_RETRIEVAL_HEALTH_MIN_STORIES:-50}"
+      # The dormancy window (ADR-0015), passed through for the same reason as T and K: it is
+      # a placeholder until the M4 tuning ticket measures it, so it has to be sweepable from
+      # the repo-root .env without editing this file.
+      SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.upmovies-backend.rule=Host(`api.upmovies.localhost`)"

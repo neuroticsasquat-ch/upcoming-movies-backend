@@ -125,13 +125,22 @@ def drop_stale(entries: Sequence[StoryEntry], *, cutoff: datetime) -> list[Story
 async def _film_titles(session_factory: SessionFactory) -> list[str]:
     """Lightweight catalog read for per-film queries — the deliberate news→catalog
     coupling. Title column only (not link.retrieval.index's heavier per-film rows).
-    Released/canceled films are excluded so we stop searching news for them (NEU-286)."""
-    excluded = get_settings().tmdb_excluded_statuses
+    Released/canceled films are excluded so we stop searching news for them (NEU-286), and
+    so are dormant ones — an undated film nobody has reported on and TMDB has not touched
+    for `SWEEP_DORMANCY_DAYS` stops drawing a per-film query until something revives it
+    (ADR-0015)."""
+    settings = get_settings()
     today = datetime.now(UTC).date()
     async with _owned_session(session_factory) as s:
         rows = await s.execute(
             select(Film.title)
-            .where(active_film_clause(today=today, excluded_statuses=excluded))
+            .where(
+                active_film_clause(
+                    today=today,
+                    excluded_statuses=settings.tmdb_excluded_statuses,
+                    dormancy_days=settings.sweep_dormancy_days,
+                )
+            )
             .order_by(Film.title)
         )
         return list(rows.scalars().all())

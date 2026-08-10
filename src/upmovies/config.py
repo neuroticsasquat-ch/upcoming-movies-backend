@@ -39,6 +39,13 @@ class Settings(BaseSettings):
         default="Released,Canceled", alias="TMDB_EXCLUDED_STATUSES"
     )
 
+    # How long an undated film may stay quiescent — no `catalog.film_field_change` row and
+    # no linked story — before `active_film_clause` drops it from the working set (ADR-0015).
+    # Placeholder: deliberately long, so almost nothing goes dormant until the M4 tuning
+    # ticket sets it from the discovery probe. Erring long costs per-film queries; erring
+    # short silently stops following live films.
+    sweep_dormancy_days: int = Field(default=365, ge=1, alias="SWEEP_DORMANCY_DAYS")
+
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
     # for all four stages, and requiring these would break every one of them for a capability
