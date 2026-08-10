@@ -1,28 +1,27 @@
-"""The probe's two DB reads (the seed set, the already-known films) and one end-to-end
-pass over a mocked TMDB. The read-only guarantee is asserted, not assumed: the catalog is
-snapshotted before the run and compared after."""
+"""The probe end to end over a mocked TMDB. The read-only guarantee is asserted, not
+assumed: the catalog is snapshotted before the run and compared after. Its two catalog
+reads moved to `upmovies.ingest.sweep.seeds` (NEU-1077) and are tested there.
+"""
 
 import csv
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 
 import httpx
 import pytest
 import respx
 from sqlalchemy import func, select
 
-from scripts.probe_undated_candidates import (
-    load_known_film_tmdb_ids,
-    load_seed_person_ids,
-    run_probe,
-)
+from scripts.probe_undated_candidates import run_probe
+from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange, Person
+from upmovies.catalog.models import Film
 from upmovies.ingest.tmdb.client import TMDBClient
 
 BASE_URL = "https://api.themoviedb.org/3"
 EXCLUDED = frozenset({"Released", "Canceled"})
 TODAY = date(2026, 8, 10)
 DORMANCY_DAYS = 365
+DATED = TODAY + timedelta(days=90)
 
 
 @pytest.fixture
@@ -38,134 +37,13 @@ async def tmdb_client():
         yield client
 
 
-async def _add_film(session, tmdb_id: int, **overrides) -> Film:
-    defaults = {"release_date": TODAY + timedelta(days=90), "status": "In Production"}
-    film = Film(tmdb_id=tmdb_id, title=f"Film {tmdb_id}", **{**defaults, **overrides})
-    session.add(film)
-    await session.flush()
-    return film
-
-
-async def _add_credit(session, film: Film, person_id: int, **overrides) -> None:
-    if await session.get(Person, person_id) is None:
-        session.add(Person(id=person_id, name=f"Person {person_id}"))
-        await session.flush()
-    session.add(
-        FilmCredit(
-            credit_id=f"c-{film.tmdb_id}-{person_id}-{overrides.get('job') or 'cast'}",
-            film_id=film.id,
-            person_id=person_id,
-            **overrides,
-        )
-    )
-    await session.flush()
-
-
-async def test_load_seed_person_ids_takes_directors_writers_and_top_five_cast(session):
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
-    await _add_credit(session, film, 11, credit_type="crew", department="Writing", job="Writer")
-    await _add_credit(session, film, 12, credit_type="crew", department="Writing", job="Screenplay")
-    await _add_credit(session, film, 13, credit_type="cast", department="Acting", credit_order=4)
-
-    ids = await load_seed_person_ids(
-        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
-    )
-
-    assert ids == [10, 11, 12, 13]
-
-
-async def test_load_seed_person_ids_excludes_weaker_credits(session):
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 20, credit_type="cast", department="Acting", credit_order=5)
-    await _add_credit(
-        session, film, 21, credit_type="crew", department="Production", job="Producer"
-    )
-    await _add_credit(
-        session, film, 22, credit_type="crew", department="Sound", job="Original Music Composer"
-    )
-
-    assert (
-        await load_seed_person_ids(
-            session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
-        )
-        == []
-    )
-
-
-async def test_load_seed_person_ids_derives_only_from_active_films(session):
-    released = await _add_film(
-        session, 1, release_date=TODAY - timedelta(days=1), status="Released"
-    )
-    canceled = await _add_film(session, 2, status="Canceled")
-    undated = await _add_film(session, 3, release_date=None, status="Planned")
-    await _add_credit(session, released, 30, credit_type="crew", job="Director")
-    await _add_credit(session, canceled, 31, credit_type="crew", job="Director")
-    await _add_credit(session, undated, 32, credit_type="crew", job="Director")
-
-    assert await load_seed_person_ids(
-        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
-    ) == [32]
-
-
-async def test_load_seed_person_ids_drops_dormant_films(session):
-    """Dormancy governs the seed set too, and revives it the same way (ADR-0015)."""
-    dormant = await _add_film(
-        session,
-        1,
-        release_date=None,
-        status="Planned",
-        created_at=datetime(2024, 1, 1, tzinfo=UTC),
-    )
-    await _add_credit(session, dormant, 50, credit_type="crew", job="Director")
-    await session.commit()
-
-    assert (
-        await load_seed_person_ids(
-            session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
-        )
-        == []
-    )
-
-    session.add(
-        FilmFieldChange(
-            film_id=dormant.id,
-            field="overview",
-            new_value="x",
-            changed_at=datetime(2026, 8, 1, tzinfo=UTC),
-        )
-    )
-    await session.commit()
-
-    assert await load_seed_person_ids(
-        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
-    ) == [50]
-
-
-async def test_load_seed_person_ids_is_distinct_across_films(session):
-    for tmdb_id in (1, 2):
-        film = await _add_film(session, tmdb_id)
-        await _add_credit(session, film, 40, credit_type="crew", job="Director")
-
-    assert await load_seed_person_ids(
-        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
-    ) == [40]
-
-
-async def test_load_known_film_tmdb_ids_includes_inactive_films(session):
-    await _add_film(session, 1)
-    await _add_film(session, 2, release_date=TODAY - timedelta(days=400), status="Released")
-
-    assert await load_known_film_tmdb_ids(session) == {1, 2}
-
-
 @respx.mock
 async def test_run_probe_writes_the_report_and_touches_no_catalog_rows(
     session, session_factory, tmp_path, tmdb_client
 ):
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
-    await _add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
     await session.commit()
     before = (await session.execute(select(func.count()).select_from(Film))).scalar_one()
 
@@ -246,9 +124,9 @@ async def test_run_probe_writes_the_report_and_touches_no_catalog_rows(
 async def test_run_probe_skips_films_already_in_the_catalog(
     session, session_factory, tmp_path, tmdb_client
 ):
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
-    await _add_film(session, 500, release_date=None, status="Planned")
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
+    await add_film(session, 500, release_date=None, status="Planned")
     await session.commit()
 
     respx.get(f"{BASE_URL}/person/10/movie_credits").mock(
@@ -280,9 +158,9 @@ async def test_run_probe_skips_films_already_in_the_catalog(
 async def test_run_probe_survives_a_person_whose_credits_cannot_be_fetched(
     session, session_factory, tmp_path, tmdb_client
 ):
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
-    await _add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
     await session.commit()
 
     respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(404))
@@ -311,9 +189,9 @@ async def test_run_probe_survives_a_person_whose_credits_cannot_be_fetched(
 
 @respx.mock
 async def test_run_probe_limit_caps_the_seed_sweep(session, session_factory, tmp_path, tmdb_client):
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
-    await _add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
     await session.commit()
 
     respx.get(f"{BASE_URL}/person/10/movie_credits").mock(
@@ -341,8 +219,8 @@ async def test_run_probe_drops_a_candidate_the_details_reveal_to_be_dated(
 ):
     # TMDB's credits summaries lag: an entry can arrive with a blank release date that
     # `/movie/{id}` fills in. Reporting it would inflate the distribution M4 tunes on.
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
     await session.commit()
 
     respx.get(f"{BASE_URL}/person/10/movie_credits").mock(
@@ -379,9 +257,9 @@ async def test_run_probe_survives_a_malformed_credits_payload(
     session, session_factory, tmp_path, tmdb_client
 ):
     # A 30-minute sweep must not die on one entry TMDB sent without a title.
-    film = await _add_film(session, 1)
-    await _add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
-    await _add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 10, credit_type="crew", department="Directing", job="Director")
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
     await session.commit()
 
     respx.get(f"{BASE_URL}/person/10/movie_credits").mock(

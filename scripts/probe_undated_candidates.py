@@ -32,42 +32,38 @@ minutes, plus one request per distinct candidate. Run it in the container:
     python scripts/probe_undated_candidates.py --out /tmp/smoke.csv --limit 50  # smoke run
 
 Rows are flushed as they are judged, so an interrupted run still leaves usable output.
-The seed-set and role rules live here rather than in `src/` on purpose: the real sweep
-(M4) will own them, and this is the measurement that tells it what to be.
+The seed-set and role rules moved to `upmovies.ingest.sweep.seeds` when the sweep landed
+(NEU-1077) and are imported from there: a probe measuring a different definition of seed
+grade than the sweep applies would be a measurement of nothing.
 """
 
 import argparse
 import asyncio
 import csv
 import logging
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import httpx
-from sqlalchemy import and_, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film, FilmCredit
-from upmovies.catalog.queries import active_film_clause
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
+from upmovies.ingest.sweep.seeds import (
+    ROLE_ORDER,
+    CandidateTally,
+    SeedAttachment,
+    SessionFactory,
+    load_known_film_tmdb_ids,
+    load_seed_person_ids,
+    seed_attachments,
+    tally_attachments,
+)
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.filters import classify_skip
-from upmovies.ingest.tmdb.schemas import TMDBMovieDetails, TMDBPersonMovieCredits
+from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 
 log = logging.getLogger("probe_undated_candidates")
-
-SessionFactory = Callable[[], AsyncSession]
-
-DIRECTOR_JOB = "Director"
-WRITER_JOBS = frozenset({"Writer", "Screenplay"})
-# "Top-5 billed" is TMDB's `order`, which is 0-indexed.
-TOP_BILLED_ORDER = 5
-# Report order for `seed_roles_matched`: strongest attachment first, so the string reads
-# the way §3.2 lists the seed grades and groups stably.
-ROLE_ORDER = ("director", "writer", "cast")
 
 REPORT_COLUMNS: tuple[str, ...] = (
     "tmdb_id",
@@ -81,32 +77,6 @@ REPORT_COLUMNS: tuple[str, ...] = (
 )
 
 
-@dataclass(frozen=True)
-class SeedAttachment:
-    """One seed person reaching one undated film through one seed-grade credit."""
-
-    tmdb_id: int
-    title: str
-    person_id: int
-    role: str
-
-
-@dataclass
-class CandidateTally:
-    """Every seed person reaching one candidate film, folded together."""
-
-    tmdb_id: int
-    title: str = ""
-    seed_person_ids: set[int] = field(default_factory=set)
-    roles: set[str] = field(default_factory=set)
-
-    @property
-    def seed_attachment_count(self) -> int:
-        """Distinct *people*, not credits — one person who both wrote and directed a film
-        is a single attachment, and the corroboration threshold counts corroborators."""
-        return len(self.seed_person_ids)
-
-
 @dataclass
 class ProbeSummary:
     seed_people: int = 0
@@ -117,90 +87,6 @@ class ProbeSummary:
     skipped_excluded_status: int = 0
     details_fetch_failures: int = 0
     candidates_reported: int = 0
-
-
-async def load_seed_person_ids(
-    session: AsyncSession, *, today: date, excluded_statuses: frozenset[str], dormancy_days: int
-) -> list[int]:
-    """Distinct people holding a seed-grade credit on an active film (spec §3.2).
-
-    Producers and the wider crew are excluded deliberately: an EP credit travels far and
-    says little about whether a project is real.
-
-    Dormant films contribute no seed people (ADR-0015): the seed set is the third cost curve
-    dormancy governs, alongside the retrieval index and the per-film query list.
-    """
-    seed_grade = or_(
-        and_(FilmCredit.credit_type == "crew", FilmCredit.job == DIRECTOR_JOB),
-        and_(FilmCredit.credit_type == "crew", FilmCredit.job.in_(WRITER_JOBS)),
-        and_(
-            FilmCredit.credit_type == "cast",
-            FilmCredit.credit_order.is_not(None),
-            FilmCredit.credit_order < TOP_BILLED_ORDER,
-        ),
-    )
-    stmt = (
-        select(FilmCredit.person_id)
-        .join(Film, Film.id == FilmCredit.film_id)
-        .where(
-            seed_grade,
-            active_film_clause(
-                today=today,
-                excluded_statuses=excluded_statuses,
-                dormancy_days=dormancy_days,
-            ),
-        )
-        .distinct()
-        .order_by(FilmCredit.person_id)
-    )
-    return list((await session.execute(stmt)).scalars().all())
-
-
-async def load_known_film_tmdb_ids(session: AsyncSession) -> set[int]:
-    """Every `catalog.film` TMDB id, active or not — a candidate we already hold is not a
-    candidate, whatever state it is in."""
-    return set((await session.execute(select(Film.tmdb_id))).scalars().all())
-
-
-def seed_attachments(person_id: int, credits: TMDBPersonMovieCredits) -> list[SeedAttachment]:
-    """The undated films this person reaches *at seed grade*.
-
-    The role is the one held on the candidate film, not the one that made this person a
-    seed (§4.1 rule 2). Without that, a "Special Thanks" credit drags in someone's short.
-    """
-    attachments: list[SeedAttachment] = []
-    for entry in credits.cast:
-        if entry.release_date is not None:
-            continue
-        if entry.order is not None and entry.order < TOP_BILLED_ORDER:
-            attachments.append(SeedAttachment(entry.id, entry.title, person_id, "cast"))
-    for crew_entry in credits.crew:
-        if crew_entry.release_date is not None:
-            continue
-        role = _crew_role(crew_entry.job)
-        if role is not None:
-            attachments.append(SeedAttachment(crew_entry.id, crew_entry.title, person_id, role))
-    return attachments
-
-
-def _crew_role(job: str | None) -> str | None:
-    if job == DIRECTOR_JOB:
-        return "director"
-    if job in WRITER_JOBS:
-        return "writer"
-    return None
-
-
-def tally_attachments(attachments: Iterable[SeedAttachment]) -> dict[int, CandidateTally]:
-    """Fold attachments into one tally per candidate film."""
-    tallies: dict[int, CandidateTally] = {}
-    for attachment in attachments:
-        tally = tallies.setdefault(
-            attachment.tmdb_id, CandidateTally(tmdb_id=attachment.tmdb_id, title=attachment.title)
-        )
-        tally.seed_person_ids.add(attachment.person_id)
-        tally.roles.add(attachment.role)
-    return tallies
 
 
 def report_row(tally: CandidateTally, details: TMDBMovieDetails) -> dict[str, object]:

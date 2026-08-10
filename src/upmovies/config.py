@@ -46,6 +46,18 @@ class Settings(BaseSettings):
     # short silently stops following live films.
     sweep_dormancy_days: int = Field(default=365, ge=1, alias="SWEEP_DORMANCY_DAYS")
 
+    # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
+    # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the
+    # three tranche flags below so a rollback is one move and does not disturb the ramp.
+    sweep_enabled: bool = Field(default=False, alias="SWEEP_ENABLED")
+    # Admission ramps one seed grade at a time — directors, then writers, then top-5 cast
+    # (§7.4) — so the retrieval-health guard reacts to a 1,446-person expansion before a
+    # 7,519-person one, and a precision drop names the grade that caused it. All off until
+    # the M4 tranche tickets open them, which makes each one an env change, not a deploy.
+    sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
+    sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
+    sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
+
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
     # for all four stages, and requiring these would break every one of them for a capability

@@ -403,3 +403,28 @@ def test_settings_retrieval_health_min_stories_rejects_negative(monkeypatch):
     monkeypatch.setenv("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "-1")
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]
+
+
+def test_settings_sweep_admission_is_off_by_default(monkeypatch):
+    """A sweep that admits nothing is the shipped configuration (spec §7.4): the master
+    switch and all three tranches are off until a ramp ticket opens one."""
+    _set_required(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.sweep_enabled is False
+    assert (s.sweep_admit_directors, s.sweep_admit_writers, s.sweep_admit_cast) == (
+        False,
+        False,
+        False,
+    )
+
+
+def test_settings_reads_sweep_admission_flags_from_env(monkeypatch):
+    """Opening a tranche is an env change, not a deploy — which is what makes the ramp
+    reversible in one move."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SWEEP_ENABLED", "true")
+    monkeypatch.setenv("SWEEP_ADMIT_DIRECTORS", "true")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.sweep_enabled is True
+    assert s.sweep_admit_directors is True
+    assert (s.sweep_admit_writers, s.sweep_admit_cast) == (False, False)
