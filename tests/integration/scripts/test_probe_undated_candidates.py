@@ -3,7 +3,7 @@ pass over a mocked TMDB. The read-only guarantee is asserted, not assumed: the c
 snapshotted before the run and compared after."""
 
 import csv
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
@@ -16,12 +16,13 @@ from scripts.probe_undated_candidates import (
     run_probe,
 )
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.catalog.models import Film, FilmCredit, Person
+from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange, Person
 from upmovies.ingest.tmdb.client import TMDBClient
 
 BASE_URL = "https://api.themoviedb.org/3"
 EXCLUDED = frozenset({"Released", "Canceled"})
 TODAY = date(2026, 8, 10)
+DORMANCY_DAYS = 365
 
 
 @pytest.fixture
@@ -67,7 +68,9 @@ async def test_load_seed_person_ids_takes_directors_writers_and_top_five_cast(se
     await _add_credit(session, film, 12, credit_type="crew", department="Writing", job="Screenplay")
     await _add_credit(session, film, 13, credit_type="cast", department="Acting", credit_order=4)
 
-    ids = await load_seed_person_ids(session, today=TODAY, excluded_statuses=EXCLUDED)
+    ids = await load_seed_person_ids(
+        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
+    )
 
     assert ids == [10, 11, 12, 13]
 
@@ -82,7 +85,12 @@ async def test_load_seed_person_ids_excludes_weaker_credits(session):
         session, film, 22, credit_type="crew", department="Sound", job="Original Music Composer"
     )
 
-    assert await load_seed_person_ids(session, today=TODAY, excluded_statuses=EXCLUDED) == []
+    assert (
+        await load_seed_person_ids(
+            session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
+        )
+        == []
+    )
 
 
 async def test_load_seed_person_ids_derives_only_from_active_films(session):
@@ -95,7 +103,43 @@ async def test_load_seed_person_ids_derives_only_from_active_films(session):
     await _add_credit(session, canceled, 31, credit_type="crew", job="Director")
     await _add_credit(session, undated, 32, credit_type="crew", job="Director")
 
-    assert await load_seed_person_ids(session, today=TODAY, excluded_statuses=EXCLUDED) == [32]
+    assert await load_seed_person_ids(
+        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
+    ) == [32]
+
+
+async def test_load_seed_person_ids_drops_dormant_films(session):
+    """Dormancy governs the seed set too, and revives it the same way (ADR-0015)."""
+    dormant = await _add_film(
+        session,
+        1,
+        release_date=None,
+        status="Planned",
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    await _add_credit(session, dormant, 50, credit_type="crew", job="Director")
+    await session.commit()
+
+    assert (
+        await load_seed_person_ids(
+            session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
+        )
+        == []
+    )
+
+    session.add(
+        FilmFieldChange(
+            film_id=dormant.id,
+            field="overview",
+            new_value="x",
+            changed_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+    )
+    await session.commit()
+
+    assert await load_seed_person_ids(
+        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
+    ) == [50]
 
 
 async def test_load_seed_person_ids_is_distinct_across_films(session):
@@ -103,7 +147,9 @@ async def test_load_seed_person_ids_is_distinct_across_films(session):
         film = await _add_film(session, tmdb_id)
         await _add_credit(session, film, 40, credit_type="crew", job="Director")
 
-    assert await load_seed_person_ids(session, today=TODAY, excluded_statuses=EXCLUDED) == [40]
+    assert await load_seed_person_ids(
+        session, today=TODAY, excluded_statuses=EXCLUDED, dormancy_days=DORMANCY_DAYS
+    ) == [40]
 
 
 async def test_load_known_film_tmdb_ids_includes_inactive_films(session):
@@ -174,6 +220,7 @@ async def test_run_probe_writes_the_report_and_touches_no_catalog_rows(
         out_path=out,
         today=TODAY,
         excluded_statuses=EXCLUDED,
+        dormancy_days=DORMANCY_DAYS,
     )
 
     rows = list(csv.DictReader(out.open()))
@@ -221,6 +268,7 @@ async def test_run_probe_skips_films_already_in_the_catalog(
         out_path=out,
         today=TODAY,
         excluded_statuses=EXCLUDED,
+        dormancy_days=DORMANCY_DAYS,
     )
 
     assert not details.called, "a film already in catalog.film must not cost a details fetch"
@@ -254,6 +302,7 @@ async def test_run_probe_survives_a_person_whose_credits_cannot_be_fetched(
         out_path=out,
         today=TODAY,
         excluded_statuses=EXCLUDED,
+        dormancy_days=DORMANCY_DAYS,
     )
 
     assert summary.person_fetch_failures == 1
@@ -278,6 +327,7 @@ async def test_run_probe_limit_caps_the_seed_sweep(session, session_factory, tmp
         out_path=tmp_path / "probe.csv",
         today=TODAY,
         excluded_statuses=EXCLUDED,
+        dormancy_days=DORMANCY_DAYS,
         limit=1,
     )
 
@@ -316,6 +366,7 @@ async def test_run_probe_drops_a_candidate_the_details_reveal_to_be_dated(
         out_path=out,
         today=TODAY,
         excluded_statuses=EXCLUDED,
+        dormancy_days=DORMANCY_DAYS,
     )
 
     assert summary.skipped_dated_on_details == 1
@@ -351,6 +402,7 @@ async def test_run_probe_survives_a_malformed_credits_payload(
         out_path=tmp_path / "probe.csv",
         today=TODAY,
         excluded_statuses=EXCLUDED,
+        dormancy_days=DORMANCY_DAYS,
     )
 
     assert summary.person_fetch_failures == 1

@@ -1,25 +1,70 @@
 """Shared query predicates over `catalog.film`."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmFieldChange
 
+# The one place `catalog` reads `news`. Dormancy is defined partly by what news did (or did
+# not) link, so the predicate cannot be expressed without `Story`; `news.models` imports
+# nothing but `upmovies.db`, so the coupling `news.fetcher` already has in the other
+# direction stays acyclic.
+from upmovies.news.models import Story
 
-def active_film_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnElement[bool]:
-    """WHERE predicate selecting films still in play (not released/canceled).
+
+def active_film_clause(
+    *, today: date, excluded_statuses: frozenset[str], dormancy_days: int
+) -> ColumnElement[bool]:
+    """WHERE predicate selecting films still in play (not released/canceled/dormant).
 
     A film is INACTIVE when ``release_date < today`` OR ``status`` is in
     ``excluded_statuses``; this returns the negation. The NULL guards keep undated
     films and films with an unknown status in the active set — without them SQL's
     ``NULL NOT IN (...)`` evaluates to NULL and would wrongly drop those rows.
+
+    **Dormancy** (ADR-0015) closes the hole that leaves: a dated film ages out by
+    itself, but ``release_date IS NULL`` is permanently active and TMDB rarely marks
+    a dead project ``Canceled``, so without a rule the working set grows forever. An
+    undated film is dormant when, for ``dormancy_days``, TMDB recorded no semantic
+    change to it (no ``catalog.film_field_change`` row — the trigger's denylist already
+    strips popularity and vote churn) *and* no story linked to it. The window is
+    measured from ``film.created_at`` when neither signal exists, so a newly admitted
+    film is not born dormant.
+
+    Dormancy is **derived, never stored**: any later change or linked story revives the
+    film on the next read, with no intervention. It is also keyed on quiescence rather
+    than age — a film can be real and quiet for a year. And it only ever narrows the
+    active set; a busy film that is released or canceled stays out.
+
+    Callers pass ``today`` so a past date reconstructs the active set as it stood then.
+    That replay is approximate for dormancy, in both directions: the signal subqueries are
+    unbounded, so a change recorded *after* the replay date still counts, while a film
+    admitted long before it and quiet since drops out. Neither bites the dated fixtures the
+    replay serves — dormancy never applies to a dated film — and production passes no date.
     """
+    quiescent_before = today - timedelta(days=dormancy_days)
+    last_change = (
+        select(func.max(FilmFieldChange.changed_at))
+        .where(FilmFieldChange.film_id == Film.id)
+        .scalar_subquery()
+    )
+    # `linked_at` is set alongside `film_id` by every linking path; the coalesce is a
+    # belt-and-braces guard so a row that somehow lacks it still counts as a signal
+    # rather than silently reading as "never linked".
+    last_link = (
+        select(func.max(func.coalesce(Story.linked_at, Story.created_at)))
+        .where(Story.film_id == Film.id)
+        .scalar_subquery()
+    )
+    # GREATEST ignores NULL inputs, and `created_at` is NOT NULL, so this is never NULL.
+    last_signal = func.greatest(Film.created_at, last_change, last_link)
     return and_(
         or_(Film.release_date.is_(None), Film.release_date >= today),
         or_(Film.status.is_(None), Film.status.not_in(excluded_statuses)),
+        or_(Film.release_date.is_not(None), last_signal >= quiescent_before),
     )
 
 

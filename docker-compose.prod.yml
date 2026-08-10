@@ -65,6 +65,11 @@ services:
       # 1.0 disarms it; the minimum denominator is what keeps a quiet day from tripping it.
       LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE: "${LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE:-0.25}"
       LINK_RETRIEVAL_HEALTH_MIN_STORIES: "${LINK_RETRIEVAL_HEALTH_MIN_STORIES:-50}"
+      # How long an undated film may stay quiescent before it goes dormant (ADR-0015). Here
+      # for the same reason as T and K — the M4 tuning ticket sets it from the discovery
+      # probe, and that should be a Coolify env change rather than a redeploy. The fallback
+      # repeats the code default deliberately: unset would pass an empty string and fail to boot.
+      SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

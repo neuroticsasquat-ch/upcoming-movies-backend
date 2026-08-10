@@ -120,12 +120,15 @@ class ProbeSummary:
 
 
 async def load_seed_person_ids(
-    session: AsyncSession, *, today: date, excluded_statuses: frozenset[str]
+    session: AsyncSession, *, today: date, excluded_statuses: frozenset[str], dormancy_days: int
 ) -> list[int]:
     """Distinct people holding a seed-grade credit on an active film (spec §3.2).
 
     Producers and the wider crew are excluded deliberately: an EP credit travels far and
     says little about whether a project is real.
+
+    Dormant films contribute no seed people (ADR-0015): the seed set is the third cost curve
+    dormancy governs, alongside the retrieval index and the per-film query list.
     """
     seed_grade = or_(
         and_(FilmCredit.credit_type == "crew", FilmCredit.job == DIRECTOR_JOB),
@@ -141,7 +144,11 @@ async def load_seed_person_ids(
         .join(Film, Film.id == FilmCredit.film_id)
         .where(
             seed_grade,
-            active_film_clause(today=today, excluded_statuses=excluded_statuses),
+            active_film_clause(
+                today=today,
+                excluded_statuses=excluded_statuses,
+                dormancy_days=dormancy_days,
+            ),
         )
         .distinct()
         .order_by(FilmCredit.person_id)
@@ -217,6 +224,7 @@ async def run_probe(
     out_path: Path,
     today: date,
     excluded_statuses: frozenset[str],
+    dormancy_days: int,
     limit: int | None = None,
     log_every: int = 250,
 ) -> ProbeSummary:
@@ -225,7 +233,10 @@ async def run_probe(
 
     async with session_factory() as session:
         seed_ids = await load_seed_person_ids(
-            session, today=today, excluded_statuses=excluded_statuses
+            session,
+            today=today,
+            excluded_statuses=excluded_statuses,
+            dormancy_days=dormancy_days,
         )
         known_tmdb_ids = await load_known_film_tmdb_ids(session)
     if limit is not None:
@@ -319,6 +330,7 @@ async def main(argv: list[str] | None = None) -> None:
             out_path=args.out,
             today=date.today(),
             excluded_statuses=settings.tmdb_excluded_statuses,
+            dormancy_days=settings.sweep_dormancy_days,
             limit=args.limit,
         )
     log.info("wrote %s: %s", args.out, summary)

@@ -17,9 +17,16 @@ monotonically increasing, and the cap saturation the candidate-retrieval spec al
 The seed set for discovery (ADR-0013) has the same shape: admitted films contribute their own
 credits as seed people, which find more films, which contribute more credits.
 
-`active_film_clause` gates exactly two consumers — `link/retrieval/index.py` and
-`news/fetcher.py::_film_titles` — and no public surface. That makes "leave the working set" and
-"disappear from the site" separable.
+`active_film_clause` gates three consumers — `link/retrieval/index.py`,
+`news/fetcher.py::_film_titles`, and the seed-person query in
+`scripts/probe_undated_candidates.py` (the sweep inherits it at M4) — and no public surface.
+That makes "leave the working set" and "disappear from the site" separable.
+
+> **Amended 2026-08-10 (NEU-1076).** This paragraph said "exactly two consumers" when the ADR
+> was accepted; the probe added the third before the implementation landed. The count was
+> never load-bearing — the three cost curves named under *Consequences* always implied it —
+> but the implementing ticket asks for the call sites to be verified, so it is recorded here.
+> `dormancy_days` is a required argument precisely so a fourth consumer cannot quietly opt out.
 
 ## Decision
 
