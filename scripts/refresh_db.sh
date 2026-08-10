@@ -21,7 +21,9 @@
 #
 # Configuration lives in the repo-root .env (gitignored) — see .env.example:
 #   PROD_SSH             required, e.g. tom@ssh.neuroticsasquat.ch
-#   PROD_PG_CONTAINER    optional; auto-discovered by looking for the `catalog` schema
+#   PROD_PG_CONTAINER    optional; auto-discovered by looking for a `catalog.film` relation
+#                        alongside all four schemas (a bare `catalog` schema is not unique to
+#                        this app — the sibling TVBF stack has one)
 #   PROD_PG_USER         optional; defaults to the container's POSTGRES_USER
 #   PROD_PG_DB           optional; defaults to the container's POSTGRES_DB
 #   LOCAL_PG_CONTAINER   optional; defaults to tbc_postgresql_db
@@ -56,9 +58,14 @@ esac
 LOCAL_PG_CONTAINER="${LOCAL_PG_CONTAINER:-tbc_postgresql_db}"
 LOCAL_DB="${LOCAL_DB:-upmovies}"
 LOCAL_DB_USER="${LOCAL_DB_USER:-root}"
-# The marker schema container discovery looks for. `catalog` rather than `app`, because
-# `app` is a common enough schema name to collide on a host running several stacks.
-MARKER_SCHEMA="catalog"
+# How container discovery recognises *this* app's database among the several stacks on the
+# prod host. A bare schema name is not enough: `app` obviously collides, and `catalog` does
+# too — the sibling TVBF stack has a `catalog` schema and was silently matched first, which
+# would have dropped this app's local `news`/`ingest` with nothing in the dump to restore
+# them (see the ticket referenced in the header). The marker is therefore a *relation* only
+# this app has, plus the full four-schema set. Keep it free of double quotes: it is
+# interpolated into a double-quoted psql argument inside the discovery heredoc below.
+MARKER_SQL="SELECT 1 WHERE to_regclass('catalog.film') IS NOT NULL AND (SELECT count(*) FROM pg_namespace WHERE nspname IN ('app','catalog','news','ingest')) = 4"
 
 if [[ -z "${PROD_SSH:-}" ]]; then
   echo "ERROR: PROD_SSH is not set. Add it to $ENV_FILE (see .env.example)." >&2
@@ -108,26 +115,35 @@ fi
 # schema does, and it keeps working after a redeploy.
 if [[ -z "${PROD_PG_CONTAINER:-}" ]]; then
   echo "→ Locating the prod Postgres container on $PROD_SSH..."
-  PROD_PG_CONTAINER=$(ssh "$PROD_SSH" bash -s <<REMOTE
-set -euo pipefail
-for c in \$(docker ps --filter ancestor=postgres --format '{{.Names}}'; \
-            docker ps --format '{{.Names}}\t{{.Image}}' | awk '/postgres/ {print \$1}'); do
+  # Every match is collected rather than the first one returned. Taking the first is what
+  # made the TVBF mismatch silent: a wrong-but-plausible container looks identical to a
+  # right one at this point, and the next thing the script does is DROP SCHEMA locally.
+  MATCHES=$(ssh "$PROD_SSH" bash -s <<REMOTE || true
+set -uo pipefail
+for c in \$(docker ps --format '{{.Names}}\t{{.Image}}' | awk '/postgres/ {print \$1}' | sort -u); do
   u=\$(docker exec "\$c" printenv POSTGRES_USER 2>/dev/null || true)
   d=\$(docker exec "\$c" printenv POSTGRES_DB 2>/dev/null || true)
   [[ -n "\$u" ]] || continue
   if docker exec "\$c" psql -U "\$u" -d "\${d:-postgres}" -tAc \
-       "SELECT 1 FROM pg_namespace WHERE nspname = '$MARKER_SCHEMA'" 2>/dev/null | grep -q 1; then
+       "$MARKER_SQL" 2>/dev/null | grep -q 1; then
     echo "\$c"
-    exit 0
   fi
 done
-exit 1
 REMOTE
-  ) || {
-    echo "ERROR: no prod Postgres container has a '$MARKER_SCHEMA' schema." >&2
+  )
+  MATCH_COUNT=$(printf '%s' "$MATCHES" | grep -c . || true)
+  if (( MATCH_COUNT == 0 )); then
+    echo "ERROR: no prod Postgres container matched this app's marker." >&2
+    echo "  Looked for a catalog.film relation alongside all four schemas." >&2
     echo "  Set PROD_PG_CONTAINER in $ENV_FILE to pin it by hand." >&2
     exit 1
-  }
+  elif (( MATCH_COUNT > 1 )); then
+    echo "ERROR: $MATCH_COUNT prod containers matched the marker; refusing to guess:" >&2
+    printf '    %s\n' $MATCHES >&2
+    echo "  Set PROD_PG_CONTAINER in $ENV_FILE to pin the right one." >&2
+    exit 1
+  fi
+  PROD_PG_CONTAINER=$MATCHES
 fi
 
 PROD_PG_USER="${PROD_PG_USER:-$(ssh "$PROD_SSH" "docker exec $PROD_PG_CONTAINER printenv POSTGRES_USER")}"
@@ -148,7 +164,14 @@ LOCAL_MAJOR=$(docker exec "$LOCAL_PG_CONTAINER" pg_restore --version | grep -oE 
 if (( PROD_MAJOR > LOCAL_MAJOR )); then
   echo "ERROR: prod Postgres is $PROD_MAJOR, local is $LOCAL_MAJOR." >&2
   echo "  A newer pg_dump archive is not guaranteed readable by an older pg_restore." >&2
-  echo "  Bump the shared local container (tbc-localdev-infra) to $PROD_MAJOR and retry." >&2
+  echo "" >&2
+  echo "  Check the discovered container FIRST: container=$PROD_PG_CONTAINER db=$PROD_PG_DB." >&2
+  echo "  A version mismatch is more often the wrong container than a real upgrade — the" >&2
+  echo "  prod host runs several stacks and they are not all on the same major." >&2
+  echo "" >&2
+  echo "  If it really is the right container, note that $LOCAL_PG_CONTAINER is SHARED by" >&2
+  echo "  every local stack. A major bump makes its existing PGDATA unreadable, so it means" >&2
+  echo "  dumping and restoring every database on it, not editing an image tag." >&2
   exit 1
 fi
 
