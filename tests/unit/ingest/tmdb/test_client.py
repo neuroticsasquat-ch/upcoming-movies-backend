@@ -1,12 +1,18 @@
 import time
+from datetime import date
 
 import httpx
 import pytest
 import respx
 
-from tests.fixtures.tmdb import make_details
+from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
 from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient
-from upmovies.ingest.tmdb.schemas import TMDBCredits, TMDBDiscoverResponse, TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import (
+    TMDBCredits,
+    TMDBDiscoverResponse,
+    TMDBMovieDetails,
+    TMDBPersonMovieCredits,
+)
 
 BASE_URL = "https://api.themoviedb.org/3"
 
@@ -304,3 +310,42 @@ async def test_movie_details_parses_appended_release_dates_block_and_captures_in
     assert details.release_dates.results[0].release_dates[0].type == 3
     # Also present in raw payload
     assert details.tmdb_raw["release_dates"] == release_dates_block
+
+
+@respx.mock
+async def test_person_movie_credits_parses_cast_and_crew_roles():
+    route = respx.get(f"{BASE_URL}/person/42/movie_credits").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_person_movie_credits(
+                42,
+                cast=[make_credit_entry(1, order=0, character="Her")],
+                crew=[make_credit_entry(2, department="Directing", job="Director")],
+            ),
+        )
+    )
+    async with _client() as c:
+        credits = await c.person_movie_credits(42)
+
+    assert isinstance(credits, TMDBPersonMovieCredits)
+    assert credits.id == 42
+    assert [(e.id, e.order) for e in credits.cast] == [(1, 0)]
+    assert [(e.id, e.job) for e in credits.crew] == [(2, "Director")]
+    assert route.calls.last.request.url.params.get("api_key") == "test-key"
+
+
+@respx.mock
+async def test_person_movie_credits_reads_undated_entries_as_none():
+    respx.get(f"{BASE_URL}/person/42/movie_credits").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_person_movie_credits(
+                42,
+                cast=[make_credit_entry(1), make_credit_entry(2, release_date="2027-01-01")],
+            ),
+        )
+    )
+    async with _client() as c:
+        credits = await c.person_movie_credits(42)
+
+    assert [e.release_date for e in credits.cast] == [None, date(2027, 1, 1)]

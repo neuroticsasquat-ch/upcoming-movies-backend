@@ -176,6 +176,36 @@ class TMDBMovieDetails(TMDBMovieSummary):
     tmdb_raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class TMDBPersonMovieCastCredit(TMDBMovieSummary):
+    """A film in a person's `/person/{id}/movie_credits` cast list, carrying the billing
+    they held on *that* film."""
+
+    credit_id: str | None = None
+    character: str | None = None
+    order: int | None = None
+
+
+class TMDBPersonMovieCrewCredit(TMDBMovieSummary):
+    """A film in a person's `/person/{id}/movie_credits` crew list, carrying the job they
+    held on *that* film."""
+
+    credit_id: str | None = None
+    department: str | None = None
+    job: str | None = None
+
+
+class TMDBPersonMovieCredits(BaseModel):
+    """A whole filmography in one request. Unlike `/discover/movie` this enumerates
+    undated films, but the entries are summaries — no `status`, no `runtime` — so
+    judging one still costs a `/movie/{id}` fetch."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    cast: list[TMDBPersonMovieCastCredit] = Field(default_factory=list)
+    crew: list[TMDBPersonMovieCrewCredit] = Field(default_factory=list)
+
+
 class TMDBDiscoverResponse(BaseModel):
     """The paged envelope returned by `/discover/movie`."""
 

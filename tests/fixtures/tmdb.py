@@ -84,3 +84,31 @@ def make_summary(tmdb_id: int, popularity: float = 50.0, **overrides: Any) -> di
     }
     row.update(overrides)
     return row
+
+
+def make_person_movie_credits(
+    person_id: int,
+    *,
+    cast: list[dict[str, Any]] | None = None,
+    crew: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A `/person/{id}/movie_credits` envelope. Entries are movie summaries carrying the
+    role the person held on that film — `order`/`character` for cast, `department`/`job`
+    for crew — and no `status`, which is why the probe still needs a details fetch."""
+    return {"id": person_id, "cast": cast or [], "crew": crew or []}
+
+
+def make_credit_entry(tmdb_id: int, **overrides: Any) -> dict[str, Any]:
+    """One row inside a `/person/{id}/movie_credits` cast/crew list. Undated by default —
+    TMDB sends `""` rather than null for a film with no announced release date."""
+    row: dict[str, Any] = {
+        "id": tmdb_id,
+        "title": f"Movie {tmdb_id}",
+        "original_title": f"Movie {tmdb_id}",
+        "release_date": "",
+        "popularity": 0.4,
+        "original_language": "en",
+        "credit_id": f"credit-{tmdb_id}",
+    }
+    row.update(overrides)
+    return row
