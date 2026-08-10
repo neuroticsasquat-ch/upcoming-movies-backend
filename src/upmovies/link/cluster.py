@@ -425,6 +425,50 @@ async def _recorded_cast_names(session: AsyncSession, film_id: UUID) -> set[str]
     return names
 
 
+_LOG_FIELD_MAX = 40
+
+
+def _log_field(value: object) -> str:
+    """Render one decision-log value. `type` can be whatever the model put in the JSON, and
+    the fields are read back by splitting on spaces — so whitespace is squashed and the
+    result capped rather than allowed to break the line into unparseable pieces."""
+    text = "_".join(str(value).split())[:_LOG_FIELD_MAX]
+    return text or "-"
+
+
+def _log_decision(
+    film_id: UUID,
+    *,
+    llm: str,
+    outcome: str,
+    event_type: str | None,
+    event_id: UUID | None,
+    stories: int,
+    note: str | None = None,
+) -> None:
+    """One line per group the cluster LLM returned, so the effect of the undated-film
+    expansion on clustering quality can be measured rather than guessed (NEU-970).
+
+    `llm` is what the model asked for (attach vs create); `outcome` is what the code did,
+    so a deterministic dedup merge (`dedup_attach`) is never credited to the model. Rejected
+    stories have their `film_id` nulled, so for those the line is the only surviving record
+    of which film the drop was decided against.
+
+    Written as the decision is made, before the caller commits. A film whose clustering then
+    fails rolls back whole (`link/pipeline.py`), so a reader of these lines must discard any
+    `film=` that also appears in a `clustering failed for film` line."""
+    log.info(
+        "cluster decision: film=%s llm=%s outcome=%s type=%s event=%s stories=%d note=%s",
+        film_id,
+        llm,
+        outcome,
+        _log_field(event_type) if event_type else "-",
+        event_id or "-",
+        stories,
+        _log_field(note) if note else "-",
+    )
+
+
 async def apply_cluster_decisions(
     session: AsyncSession,
     *,
@@ -479,6 +523,27 @@ async def apply_cluster_decisions(
     assigned: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
+    def _reject_group(sids: list[UUID], *, llm: str, event_type: str | None, note: str) -> int:
+        """Drop a whole group: unlink its stories with `note` and log the decision.
+        Returns the number rejected. Shared by every drop path so they cannot drift."""
+        _log_decision(
+            plan.film_id,
+            llm=llm,
+            outcome="reject",
+            event_type=event_type,
+            event_id=None,
+            stories=len(sids),
+            note=note,
+        )
+        for sid in sids:
+            story = by_id[sid]
+            story.link_status = "rejected"
+            story.film_id = None
+            story.link_confidence = None
+            story.link_note = note
+            assigned.add(sid)
+        return len(sids)
+
     for group in groups:
         group_sids: list[UUID] = []
         for n in group.story_indices:
@@ -486,11 +551,25 @@ async def apply_cluster_decisions(
             if sid not in by_id or sid in assigned:
                 continue
             group_sids.append(sid)
+        # What the model asked for, recorded separately from what the code did below.
+        llm_intent = "attach" if group.existing is not None else "create"
         if not group_sids:
+            # An earlier group already claimed every story this one names — the model
+            # over-grouped. Still one line, so the decision counts reconcile against the
+            # group count instead of silently under-reporting exactly where it went wrong.
+            _log_decision(
+                plan.film_id,
+                llm=llm_intent,
+                outcome="superseded",
+                event_type=group.event_type,
+                event_id=None,
+                stories=len(group.story_indices),
+            )
             continue
         if group.existing is not None and 1 <= group.existing <= len(existing_events):
             event = existing_events[group.existing - 1]
             event.updated_at = now
+            outcome = "attach"
         else:
             etype = group.event_type
             conf = group.confidence
@@ -498,14 +577,9 @@ async def apply_cluster_decisions(
                 # Backstop for cross-film mis-attribution (NEU-453): a story whose real
                 # subject is a different film reaches clustering only if LINK mis-linked it.
                 # Drop it rather than record it as this film's event (mirrors is_stale_stage).
-                for sid in group_sids:
-                    story = by_id[sid]
-                    story.link_status = "rejected"
-                    story.film_id = None
-                    story.link_confidence = None
-                    story.link_note = "off-topic"
-                    assigned.add(sid)
-                    stories_rejected += 1
+                stories_rejected += _reject_group(
+                    group_sids, llm=llm_intent, event_type=etype, note="off-topic"
+                )
                 continue
             if etype not in _VALID_TYPES or conf not in ("confirmed", "rumored"):
                 log.warning(
@@ -514,16 +588,19 @@ async def apply_cluster_decisions(
                     etype,
                     conf,
                 )
+                _log_decision(
+                    plan.film_id,
+                    llm=llm_intent,
+                    outcome="invalid",
+                    event_type=etype,
+                    event_id=None,
+                    stories=len(group_sids),
+                )
                 continue
             if is_stale_stage(etype, plan.film_status, plan.film_release_date, as_of_date):
-                for sid in group_sids:
-                    story = by_id[sid]
-                    story.link_status = "rejected"
-                    story.film_id = None
-                    story.link_confidence = None
-                    story.link_note = f"stale-stage:{etype}"
-                    assigned.add(sid)
-                    stories_rejected += 1
+                stories_rejected += _reject_group(
+                    group_sids, llm=llm_intent, event_type=etype, note=f"stale-stage:{etype}"
+                )
                 continue
             new_cast: list[str] | None = None
             if etype == "casting":
@@ -536,14 +613,9 @@ async def apply_cluster_decisions(
                 )
                 new_cast = [n for n in names if n not in recorded_cast]
                 if not new_cast:
-                    for sid in group_sids:
-                        story = by_id[sid]
-                        story.link_status = "rejected"
-                        story.film_id = None
-                        story.link_confidence = None
-                        story.link_note = "casting-recorded"
-                        assigned.add(sid)
-                        stories_rejected += 1
+                    stories_rejected += _reject_group(
+                        group_sids, llm=llm_intent, event_type=etype, note="casting-recorded"
+                    )
                     continue
             if etype == "release_date":
                 # NEU-718: a release_date event may form only when TMDB's own primary
@@ -569,25 +641,30 @@ async def apply_cluster_decisions(
                             (by_id[sid].published_at or by_id[sid].fetched_at) for sid in group_sids
                         )
                         if (as_of_date - oldest.date()).days <= release_change_window_days:
-                            continue  # hold: re-evaluated on a later run
+                            # hold: re-evaluated on a later run
+                            _log_decision(
+                                plan.film_id,
+                                llm=llm_intent,
+                                outcome="hold",
+                                event_type=etype,
+                                event_id=None,
+                                stories=len(group_sids),
+                            )
+                            continue
                         note = "release-date-uncorroborated"
                     elif group.claimed_date is not None:
                         note = "release-date-restated"
                     else:
                         note = "release-date-unchanged"
-                    for sid in group_sids:
-                        story = by_id[sid]
-                        story.link_status = "rejected"
-                        story.film_id = None
-                        story.link_confidence = None
-                        story.link_note = note
-                        assigned.add(sid)
-                        stories_rejected += 1
+                    stories_rejected += _reject_group(
+                        group_sids, llm=llm_intent, event_type=etype, note=note
+                    )
                     continue
             target = dedup_targets.get(etype) if etype in _SINGULAR_BEAT_TYPES else None
             if target is not None:
                 event = target
                 event.updated_at = now
+                outcome = "dedup_attach"
             else:
                 conf = downgrade_confidence(
                     conf, best_tier((_tier_for(sid) for sid in group_sids), default=unresolved_tier)
@@ -606,10 +683,19 @@ async def apply_cluster_decisions(
                 session.add(event)
                 await session.flush()
                 events_created += 1
+                outcome = "create"
                 if etype in _SINGULAR_BEAT_TYPES:
                     dedup_targets[etype] = event
                 if etype == "casting" and new_cast:
                     recorded_cast.update(new_cast)
+        _log_decision(
+            plan.film_id,
+            llm=llm_intent,
+            outcome=outcome,
+            event_type=event.event_type,
+            event_id=event.id,
+            stories=len(group_sids),
+        )
         for sid in group_sids:
             session.add(EventStory(event_id=event.id, story_id=sid))
             assigned.add(sid)
