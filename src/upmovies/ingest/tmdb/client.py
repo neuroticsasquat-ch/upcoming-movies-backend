@@ -8,7 +8,11 @@ from typing import Any
 
 import httpx
 
-from upmovies.ingest.tmdb.schemas import TMDBDiscoverResponse, TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import (
+    TMDBDiscoverResponse,
+    TMDBMovieDetails,
+    TMDBPersonMovieCredits,
+)
 
 
 class RateLimiter:
@@ -112,3 +116,10 @@ class TMDBClient:
         details = TMDBMovieDetails.model_validate(data)
         details.tmdb_raw = data
         return details
+
+    async def person_movie_credits(self, person_id: int) -> TMDBPersonMovieCredits:
+        """Fetch a person's whole movie filmography from `/person/{id}/movie_credits` —
+        one request, undated entries included."""
+        url = f"{self._base_url}/person/{person_id}/movie_credits"
+        resp = await self._request("GET", url)
+        return TMDBPersonMovieCredits.model_validate(resp.json())
