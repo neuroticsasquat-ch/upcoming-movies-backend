@@ -240,15 +240,49 @@ async def test_aborts_after_consecutive_failures_and_leaves_the_run_open(
 
 
 @respx.mock
-async def test_without_a_successful_tmdb_run_every_in_play_film_is_stale(
+async def test_with_no_finished_tmdb_run_every_in_play_film_is_stale(
     session, session_factory, tmdb_client, run_id
 ):
-    """No successful discover pass on record means nothing can be assumed refreshed —
-    including a film written moments ago by a run that then failed."""
-    session.add(IngestRun(kind="tmdb", status="failed", started_at=LAST_TMDB_RUN))
+    """No discover pass on record at all means nothing can be assumed refreshed."""
+    session.add(IngestRun(kind="tmdb", status="running", started_at=LAST_TMDB_RUN))
     await _add_undated(session, 800, updated_at=FRESH)
     await session.commit()
     _mock_details(800)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.selected, result.refreshed) == (1, 1)
+
+
+@respx.mock
+async def test_a_failed_tmdb_run_still_moves_the_watermark(
+    session, session_factory, tmdb_client, run_id
+):
+    """The refresh writes, so its own upserts lift a film past whatever watermark selected
+    it. If a failed `tmdb` run left the watermark behind, one pass would carry the catalog
+    over it and every later pass would select nothing — silently, for the whole outage,
+    which is precisely the failure this phase exists to prevent (§6.2)."""
+    session.add_all(
+        [
+            IngestRun(
+                kind="tmdb",
+                status="succeeded",
+                started_at=LAST_TMDB_RUN - timedelta(days=1),
+                finished_at=LAST_TMDB_RUN - timedelta(days=1) + timedelta(minutes=20),
+            ),
+            IngestRun(
+                kind="tmdb",
+                status="failed",
+                started_at=LAST_TMDB_RUN,
+                finished_at=LAST_TMDB_RUN + timedelta(minutes=2),
+            ),
+        ]
+    )
+    # Refreshed by yesterday's sweep, so it sits above the last *successful* run's start
+    # and below the failed run's.
+    await _add_undated(session, 900, updated_at=STALE)
+    await session.commit()
+    _mock_details(900)
 
     result = await _run(session_factory, tmdb_client, run_id)
 

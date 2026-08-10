@@ -163,22 +163,29 @@ async def finalize_run(
     await session.execute(update(IngestRun).where(IngestRun.id == run_id).values(**values))
 
 
-async def last_successful_run_started_at(session: AsyncSession, kind: str) -> datetime | None:
-    """When the most recent **succeeded** run of `kind` began, or None if none ever has.
+async def last_finished_run_started_at(session: AsyncSession, kind: str) -> datetime | None:
+    """When the most recent **finished** run of `kind` began, or None if none has.
 
     The sweep's refresh phase uses this as a watermark: `_upsert_film_row` bumps
     `film.updated_at` on every upsert, so a film whose `updated_at` predates the last
-    successful `tmdb` run is one discover did not reach (spec §4.5).
+    `tmdb` run is one discover did not reach (spec §4.5).
 
-    Succeeded, not merely finished, and deliberately so on both counts. A run still
-    `running` started moments ago and would mark the whole catalog stale. A run that
-    *failed* cannot be assumed to have covered anything, so falling back to the last
-    known-good pass is what keeps the films it missed in the refresh set — and it costs
-    nothing extra for the ones it did reach, whose `updated_at` is later still.
+    Finished — any terminal status — rather than `succeeded`, and the difference is not
+    cosmetic. The refresh *writes*, so its own upserts lift a film's `updated_at` above
+    whatever watermark selected it. Pin the watermark to the last success and a `tmdb`
+    stage that stays broken freezes it: one sweep pass lifts the whole catalog past it and
+    every later pass selects nothing, silently, for as long as the outage lasts — which is
+    exactly the failure §6.2 is about, and `run_daily` being fail-fast makes a stretch of
+    failed `tmdb` runs the likely case rather than the exotic one. Reading any finished run
+    keeps the watermark moving with the schedule. The cost of trusting a run that failed
+    early is one day of not refreshing what it never reached; the next pass takes them.
+
+    A run still `running` is excluded: it started moments ago and would mark the whole
+    catalog stale.
     """
     stmt = (
         select(IngestRun.started_at)
-        .where(IngestRun.kind == kind, IngestRun.status == "succeeded")
+        .where(IngestRun.kind == kind, IngestRun.status != "running")
         .order_by(IngestRun.started_at.desc())
         .limit(1)
     )

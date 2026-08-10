@@ -9,7 +9,7 @@ nothing looks healthy and delivers the feature's whole point to no one, which is
 counts here are reported distinctly on `/admin/runs` (`summary.sweep_detail`).
 
 **Scoped by reachability, not by datedness.** The refresh set is every film whose
-`updated_at` predates the last successful `tmdb` run — no popularity branch, no
+`updated_at` predates the last `tmdb` run — no popularity branch, no
 undated/dated branch. That is what closes the *promotion gap*: an admitted undated film
 that finally gets a date is no longer undated, but is still below the popularity floor
 where `_discover_candidate_ids` stops paging, so discover never reaches it either. A
@@ -19,6 +19,13 @@ way also self-corrects if the discover floor ever moves.
 **Dormant films are not exempt**, they run on a reduced cadence. Detecting the change that
 revives a dormant film requires re-fetching it, so exempting them would make dormancy a
 one-way door with no handle on the other side (ADR-0015).
+
+**Not gated by `SWEEP_ENABLED`.** The master switch governs *admission* — whether the sweep
+may write films it did not previously hold (§7.3). Refreshing a film the catalog already
+carries admits nothing, and gating it would mean the shipped default configuration, with
+every flag off, never refreshes anything and the catalog-sourced-event feature never works
+at all. The rollback story is unaffected: turning the sweep off stops new admissions, and
+dormancy still drains what is already in, on the reduced cadence §4.5 prices in.
 
 Contract with the pipeline conventions, matching the enumerate phase: commit per item so one
 failure never rolls back the others, `record_progress` against the run id, abort after N
@@ -37,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import dormant_film_clause, in_play_clause
-from upmovies.ingest.runs import last_successful_run_started_at, record_progress
+from upmovies.ingest.runs import last_finished_run_started_at, record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.client import TMDBClient
@@ -82,7 +89,7 @@ def refresh_set_clause(
     can still reach is due when its `updated_at` predates `discover_watermark`; a dormant one
     is due when it predates `dormant_refresh_days` ago.
 
-    A `discover_watermark` of None means no `tmdb` run has ever succeeded, so nothing can be
+    A `discover_watermark` of None means no `tmdb` run has ever finished, so nothing can be
     assumed refreshed and every non-dormant film in play is due. Dormant films keep their own
     cadence either way — they are undated by definition, so discover never touched them and
     the watermark says nothing about them.
@@ -141,12 +148,12 @@ async def run_sweep_refresh(
     failure_threshold: int = 10,
     log_every: int = 250,
 ) -> RefreshResult:
-    """Re-fetch every in-play film the last successful discover pass did not reach."""
+    """Re-fetch every in-play film the last discover pass did not reach."""
     result = RefreshResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
 
     async with owned_session(session_factory) as s:
-        watermark = await last_successful_run_started_at(s, "tmdb")
+        watermark = await last_finished_run_started_at(s, "tmdb")
         targets = await load_refresh_set(
             s,
             today=today,

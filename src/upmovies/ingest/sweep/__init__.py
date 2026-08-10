@@ -5,9 +5,6 @@ from upmovies.ingest.sweep.admission import AdmissionTranches as AdmissionTranch
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult as EnumerateResult
 from upmovies.ingest.sweep.enumerate_phase import run_sweep_enumerate as run_sweep_enumerate
 from upmovies.ingest.sweep.refresh_phase import RefreshResult as RefreshResult
-from upmovies.ingest.sweep.refresh_phase import RefreshTarget as RefreshTarget
-from upmovies.ingest.sweep.refresh_phase import load_refresh_set as load_refresh_set
-from upmovies.ingest.sweep.refresh_phase import refresh_set_clause as refresh_set_clause
 from upmovies.ingest.sweep.refresh_phase import run_sweep_refresh as run_sweep_refresh
 from upmovies.ingest.sweep.seeds import CandidateTally as CandidateTally
 from upmovies.ingest.sweep.seeds import SeedAttachment as SeedAttachment

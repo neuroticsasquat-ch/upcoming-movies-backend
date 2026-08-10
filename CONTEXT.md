@@ -365,3 +365,20 @@ refresh on reachability rather than on datedness is what closes the **promotion 
 that finally gets a date but stays under the floor would otherwise fall out of the sweep without
 ever falling into discover, and freeze permanently.
 _Avoid_: in-window, discoverable, indexed.
+
+**In play**:
+A film that has neither released nor been called off — `active_film_clause` without its
+dormancy term (`in_play_clause`). It exists for exactly one caller: the sweep's refresh phase,
+which spans **both** sides of dormancy and so cannot ask the composed question. Everywhere the
+working set is being *spent* — the retrieval index, the per-film query list, the seed-person
+query — the word is **active**, and dormancy is part of what it means.
+_Avoid_: active (that's the composed predicate), live, current, open.
+
+**Discover watermark**:
+The start of the last **finished** `tmdb` run, the timestamp the refresh set is cut against: a
+film whose `updated_at` predates it is one discover did not reach. Finished, not succeeded, and
+the difference is load-bearing — the refresh writes, so its own upserts lift a film past the
+watermark that selected it. Pinned to the last *success*, a `tmdb` stage that stays broken
+freezes the watermark, one sweep pass carries the whole catalog over it, and every later pass
+selects nothing at all.
+_Avoid_: cutoff, high-water mark, last sync, refresh cursor.

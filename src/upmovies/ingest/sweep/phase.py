@@ -6,7 +6,6 @@ others; stop on an outage rather than burning a request per catalog film). Keepi
 is what stops the two phases drifting into two different definitions of "gave up".
 """
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,8 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.seeds import SessionFactory
-
-log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
