@@ -1,6 +1,17 @@
 # Ground release-date events in TMDB change history, not the story's claim
 
 **Status:** accepted
+**Amended by:** [ADR-0014](0014-catalog-sourced-events.md) — 2026-08-10
+
+> **Amendment.** The Context section below rests on the premise that *"every tracked film already
+> has a release date"* and that *"no date yet" is a near-empty set*. The **backlotter: Undated
+> Film Discovery** project deletes that premise: undated films become the majority of the catalog.
+>
+> **The decision below survives unchanged.** A first date being assigned (`null → date`) was
+> always recorded as a change, so the unified rule already subsumed the null branch and needs no
+> revision. What no longer follows from the Context is the *requirement that a story trigger the
+> event at all* — ADR-0014 adds an independent, story-less path to event creation for catalog
+> changes. Story-triggered release-date events continue to obey this ADR exactly as written.
 
 ## Context
 
