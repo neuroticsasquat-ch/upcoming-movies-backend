@@ -308,6 +308,16 @@ film contributes its own credits back as seeds — and **dormancy** is what boun
 project that goes nowhere stops paying for its own people.
 _Avoid_: tracked person, watched person, followed talent.
 
+**Tranche**:
+One seed grade's admission flag — `SWEEP_ADMIT_DIRECTORS`, `SWEEP_ADMIT_WRITERS`,
+`SWEEP_ADMIT_CAST` — opened one at a time so a precision drop names the grade that caused it
+rather than arriving as one undifferentiated jump. They sit under the master `SWEEP_ENABLED`,
+which is kept separate on purpose: the master is the rollback, the tranches are the ramp, and a
+sweep that enumerates and reports while admitting nothing is the state where all four are off.
+Admission is per **film**, not per credit — one open tranche among the grades that reached a
+candidate is enough.
+_Avoid_: phase (that's enumerate/refresh), stage, wave, cohort.
+
 **Seed grade**:
 The role classes that both qualify a person as a seed *and* qualify a candidate film for
 admission. It is checked twice, on purpose: once on the person (do we follow them at all) and
