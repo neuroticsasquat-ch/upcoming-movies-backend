@@ -285,3 +285,73 @@ TMDB's single scalar `release_date` for a film — the only date this model gate
 / per-type dates (the `film_release_date` table) are explicitly out of scope: a regional-only
 move that leaves the primary date untouched does not form a release-date event.
 _Avoid_: regional date, theatrical date (those are the out-of-scope per-country values).
+
+### Undated film discovery
+
+**Sweep**:
+The scheduled pass that discovers and maintains films TMDB's dated `/discover/movie` roster
+cannot reach. It runs as its own `ingest_run.kind` on its own schedule slot, roughly two hours
+ahead of the daily pipeline — deliberately *not* a stage in it, because the daily chain is
+fail-fast and a ~45-minute TMDB pass would take feeds, link and synthesize down with it. It has
+**two** phases and needs both: **enumerate** (walk seed people's credits for undated candidates)
+and **refresh** (re-fetch every active film discover did not touch). Dropping the refresh phase
+is the project's quietest failure mode — undated films sit outside the discover window, so
+without it they are never re-read, never upserted, and no catalog-sourced event ever fires.
+_Avoid_: crawl, scan, discovery run (that's the enumerate phase alone), Path B job.
+
+**Seed person**:
+Someone whose credits the sweep enumerates: anyone holding a **seed-grade** credit — director,
+writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film. 7,519
+of them at a 1,435-film catalog. Producers are deliberately not seed-grade: an EP credit travels
+far and says little about whether a project is real. The set is *self-expanding* — admitting a
+film contributes its own credits back as seeds — and **dormancy** is what bounds it, so a
+project that goes nowhere stops paying for its own people.
+_Avoid_: tracked person, watched person, followed talent.
+
+**Seed grade**:
+The role classes that both qualify a person as a seed *and* qualify a candidate film for
+admission. It is checked twice, on purpose: once on the person (do we follow them at all) and
+once on their role **on the candidate film** — without the second check a "Special Thanks"
+credit would drag in someone's short film.
+_Avoid_: role tier, credit weight, billing.
+
+**Catalog-sourced event**:
+An event created by a change in TMDB's own data — a release date assigned or moved, a status
+transition, a credit attached — with **no story behind it**. It carries a deterministic
+`EventSummary` (a template, never a model call: `model` is the sentinel `"deterministic"`) and
+attributes to **"via TMDB"** where a story-sourced event lists outlets. Confidence sits below a
+trade-sourced beat because TMDB is community-edited. When a trade story later clusters onto it,
+the LLM summary supersedes the deterministic one and real sources appear — the card upgrades in
+place. It exists because story supply is fixed at 8 trade feeds while the catalog is about to
+multiply: without it, most admitted films would be permanently blank pages.
+_Avoid_: synthetic event, system event, auto event, TMDB event (that's the source, not the kind).
+
+**First observation**:
+The first time the sweep reads a newly admitted film's credits. It is recorded as a **baseline
+and emits no events** — a hard rule of the credit-history contract rather than something left to
+fall out of the implementation. `catalog.film_field_change` gets the same protection by accident
+(it is a `BEFORE UPDATE` trigger, so inserts write no history), and the credit history is being
+built from scratch, where the accident does not repeat. Without the rule, admitting 3,000 films
+would emit tens of thousands of false "attached to direct" events on day one.
+_Avoid_: initial sync, backfill, seeding (that's the person set).
+
+**Dormant**:
+An undated film that has been quiet for N days — no `film_field_change` row *and* no linked
+story. Dormant films leave `active_film_clause`, and with it the candidate retrieval index, the
+per-film query list, and the seed-person query; they keep their page, their events, and a
+**reduced-cadence refresh**. That last part is not a concession: detecting the change that
+revives a film requires re-fetching it, so a dormancy that stopped the refresh would be a
+one-way door. Keyed on **quiescence**, never on age — a film can be real and quiet for a year.
+Dormancy is load-bearing for three separate cost curves at once, which is why N is measured
+rather than picked.
+_Avoid_: inactive (that's `active_film_clause`'s whole predicate), stale, archived, retired,
+abandoned.
+
+**Reachable**:
+Whether the dated `/discover/movie` roster can see a film at all. Unreachable films — undated
+ones, and dated ones sitting below the popularity floor where discover stops paging — are the
+sweep's refresh set, identified by `film.updated_at` predating the last `tmdb` run. Scoping the
+refresh on reachability rather than on datedness is what closes the **promotion gap**: a film
+that finally gets a date but stays under the floor would otherwise fall out of the sweep without
+ever falling into discover, and freeze permanently.
+_Avoid_: in-window, discoverable, indexed.
