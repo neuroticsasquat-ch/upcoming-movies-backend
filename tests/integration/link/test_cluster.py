@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import UTC, date, datetime
 
@@ -1649,3 +1650,300 @@ async def test_casting_in_pass_dedup(session):
 
     assert result.events_created == 1  # second John group is a same-pass duplicate → dropped
     assert result.stories_rejected == 1
+
+
+# ---------------------------------------------------------------------------
+# NEU-970 — cluster-decision logging (post-expansion clustering baseline)
+# ---------------------------------------------------------------------------
+
+
+def _decisions(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("cluster decision:")
+    ]
+
+
+def _fields(line: str) -> dict[str, str]:
+    """Parse one decision line back into its key=value pairs. The re-measurement (NEU-1091)
+    reads these logs, so the field set is asserted exactly, not by substring."""
+    return dict(part.split("=", 1) for part in line.split(": ", 1)[1].split(" "))
+
+
+async def test_decision_log_records_a_created_event(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    s2 = await _linked_story(session, film, "https://e/2")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id, s2.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "trailer",
+                    "confidence": "confirmed",
+                    "stories": [1, 2],
+                }
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "create",
+        "type": "trailer",
+        "event": str(event.id),
+        "stories": "2",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_an_attach(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    first = await _linked_story(session, film, "https://e/1")
+    event = Event(
+        film_id=film.id, event_type="casting", confidence="confirmed", occurred_at=datetime.now(UTC)
+    )
+    session.add(event)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=first.id))
+    second = await _linked_story(session, film, "https://e/2")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id, existing_event_ids=[event.id], unclustered_story_ids=[second.id]
+    )
+    raw = json.dumps({"events": [{"existing": 1, "stories": [1]}]})
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "attach",
+        "outcome": "attach",
+        "type": "casting",
+        "event": str(event.id),
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_separates_deterministic_dedup_from_an_llm_attach(session, caplog):
+    """The singular-beat dedup turns a model 'create' into an attach. Left as plain
+    'attach' the logs would credit the model with a merge the code made."""
+    film = Film(tmdb_id=201, title="FF")
+    session.add(film)
+    await session.flush()
+    ev = await _existing_event(
+        session,
+        film,
+        event_type="trailer",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed",
+    )
+    story = await _linked_story(session, film, "https://e/new", title="trailer released")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[ev.id],
+        unclustered_story_ids=[story.id],
+        run_date=date(2026, 1, 1),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw, dedup_days=14)
+    await session.commit()
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "dedup_attach",
+        "type": "trailer",
+        "event": str(ev.id),
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_a_reject_with_its_note(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {"events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}]}
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    # A rejected story has its film_id nulled, so the log line is the only record of which
+    # film the drop was decided against.
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "reject",
+        "type": "off_topic",
+        "event": "-",
+        "stories": "1",
+        "note": "off-topic",
+    }
+
+
+async def test_decision_log_records_a_held_release_date(session, caplog):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await _apply_release_date(
+            session, film=film, claimed="2026-11-20", run_date=date(2026, 7, 4)
+        )
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "hold",
+        "type": "release_date",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_an_invalid_group(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "not-a-type",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    # Every group the model returned produces exactly one line, so the decision counts
+    # reconcile against the group count rather than silently under-reporting.
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "invalid",
+        "type": "not-a-type",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_a_superseded_group(session, caplog):
+    """A group whose stories an earlier group already claimed still gets a line: the
+    counts must reconcile against the group count, and over-grouping is itself the
+    behaviour the baseline exists to watch."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]},
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]},
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1
+    first, second = _decisions(caplog)
+    assert _fields(first)["outcome"] == "create"
+    assert _fields(second) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "superseded",
+        "type": "casting",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_keeps_a_model_supplied_type_parseable(session, caplog):
+    """`type` on the invalid path is whatever the model put in the JSON. Since the fields
+    are read back by splitting on spaces, an embedded space must not split the line."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release date changed",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "invalid",
+        "type": "release_date_changed",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
