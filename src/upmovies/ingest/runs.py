@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,6 +161,28 @@ async def finalize_run(
     if detail is not None:
         values["detail"] = detail
     await session.execute(update(IngestRun).where(IngestRun.id == run_id).values(**values))
+
+
+async def last_successful_run_started_at(session: AsyncSession, kind: str) -> datetime | None:
+    """When the most recent **succeeded** run of `kind` began, or None if none ever has.
+
+    The sweep's refresh phase uses this as a watermark: `_upsert_film_row` bumps
+    `film.updated_at` on every upsert, so a film whose `updated_at` predates the last
+    successful `tmdb` run is one discover did not reach (spec §4.5).
+
+    Succeeded, not merely finished, and deliberately so on both counts. A run still
+    `running` started moments ago and would mark the whole catalog stale. A run that
+    *failed* cannot be assumed to have covered anything, so falling back to the last
+    known-good pass is what keeps the films it missed in the refresh set — and it costs
+    nothing extra for the ones it did reach, whose `updated_at` is later still.
+    """
+    stmt = (
+        select(IngestRun.started_at)
+        .where(IngestRun.kind == kind, IngestRun.status == "succeeded")
+        .order_by(IngestRun.started_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def mark_stale_runs_cancelled(session: AsyncSession, *, stale_after_minutes: int) -> int:

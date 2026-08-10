@@ -18,17 +18,15 @@ Two deliberate departures from that pipeline:
 
 import logging
 from collections import Counter
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from uuid import UUID
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.admission import AdmissionTranches
+from upmovies.ingest.sweep.phase import AbortGuard, owned_session
 from upmovies.ingest.sweep.seeds import (
     ROLE_ORDER,
     CandidateTally,
@@ -76,34 +74,6 @@ class EnumerateResult:
     abort_error: str | None = None
 
 
-@asynccontextmanager
-async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[AsyncSession]:
-    async with session_factory() as s:
-        yield s
-
-
-@dataclass
-class _AbortGuard:
-    """Consecutive-failure abort, shared by the phase's two loops so an outage that starts
-    in one is still counted in the other. Records each failure against the run as it goes."""
-
-    session_factory: SessionFactory
-    run_id: UUID
-    threshold: int
-    consecutive: int = 0
-
-    async def failed(self) -> bool:
-        """Record one failure; True when the run has hit the consecutive threshold."""
-        self.consecutive += 1
-        async with _owned_session(self.session_factory) as s:
-            await record_progress(s, self.run_id, failed_delta=1)
-            await s.commit()
-        return self.consecutive >= self.threshold
-
-    def succeeded(self) -> None:
-        self.consecutive = 0
-
-
 async def run_sweep_enumerate(
     *,
     session_factory: SessionFactory,
@@ -118,9 +88,9 @@ async def run_sweep_enumerate(
 ) -> EnumerateResult:
     """Enumerate the seed set's undated candidates and admit those a tranche allows."""
     result = EnumerateResult()
-    guard = _AbortGuard(session_factory, run_id, failure_threshold)
+    guard = AbortGuard(session_factory, run_id, failure_threshold)
 
-    async with _owned_session(session_factory) as s:
+    async with owned_session(session_factory) as s:
         seed_ids = await load_seed_person_ids(
             s, today=today, excluded_statuses=excluded_statuses, dormancy_days=dormancy_days
         )
@@ -162,7 +132,7 @@ async def _collect_attachments(
     client: TMDBClient,
     seed_ids: list[int],
     result: EnumerateResult,
-    guard: _AbortGuard,
+    guard: AbortGuard,
     log_every: int,
 ) -> list[SeedAttachment]:
     """One `/person/{id}/movie_credits` per seed person — a whole filmography per request,
@@ -197,7 +167,7 @@ async def _judge_candidates(
     excluded_statuses: frozenset[str],
     tranches: AdmissionTranches,
     result: EnumerateResult,
-    guard: _AbortGuard,
+    guard: AbortGuard,
     log_every: int,
 ) -> None:
     """One `/movie/{id}` per candidate — the credits list carries no `status` — then the
@@ -216,7 +186,7 @@ async def _judge_candidates(
             else:
                 result.attachment_histogram[tally.seed_attachment_count] += 1
                 if tranches.admits(tally.roles):
-                    async with _owned_session(session_factory) as s:
+                    async with owned_session(session_factory) as s:
                         await upsert_film(s, details)
                         await record_progress(s, run_id, processed_delta=1)
                         await s.commit()

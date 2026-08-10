@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # ticket sets it from the discovery probe. Erring long costs per-film queries; erring
     # short silently stops following live films.
     sweep_dormancy_days: int = Field(default=365, ge=1, alias="SWEEP_DORMANCY_DAYS")
+    # How often the sweep's refresh phase still re-fetches a dormant film. Dormancy is not
+    # an exemption from refreshing — detecting the change that revives a film requires
+    # reading it, so a dormancy that stopped the refresh would be a one-way door (§4.5) —
+    # it is a *reduced cadence*. Placeholder until the M4 tuning ticket sets it: erring
+    # short only costs requests, erring long delays every revival by that much.
+    sweep_dormant_refresh_days: int = Field(default=30, ge=1, alias="SWEEP_DORMANT_REFRESH_DAYS")
 
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the
