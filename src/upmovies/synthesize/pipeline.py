@@ -25,6 +25,7 @@ from upmovies.ingest.runs import (
     total_failure_error,
 )
 from upmovies.llm.types import CallLog, StageGateway, Usage
+from upmovies.news.catalog_events import CREDIT_EVENT_TYPES
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
 from upmovies.news.visibility import visible_events
@@ -144,7 +145,13 @@ async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
                     film_title=film_title,
                     source_updated_at=event.updated_at,
                     stories=story_inputs,
-                    subjects=event.subject_key,
+                    # Only the credit half's `subject_key` is a list of *people*, which is
+                    # what the prompt's "subjects" clause means. Release-date events carry
+                    # `US:wide`-style market tokens (NEU-1121), and handing those over would
+                    # tell the model the beat concerns a performer called "US:wide".
+                    subjects=(
+                        event.subject_key if event.event_type in CREDIT_EVENT_TYPES else None
+                    ),
                 ),
             )
         )

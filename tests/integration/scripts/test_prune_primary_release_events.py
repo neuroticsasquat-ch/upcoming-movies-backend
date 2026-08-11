@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
-from scripts.prune_primary_release_events import prune
+from scripts.prune_primary_release_events import DEFAULT_CUTOFF, prune
 from tests.fixtures.catalog import add_film
 from upmovies.news.models import Event, EventSummary
 
@@ -16,6 +16,7 @@ NOW = datetime(2026, 8, 11, 5, 11, tzinfo=UTC)
 
 
 async def _event(session, film, *, event_type="release_date", provenance="catalog"):
+    assert NOW < DEFAULT_CUTOFF  # the fixtures below must land inside the pruned window
     event = Event(
         film_id=film.id,
         event_type=event_type,
@@ -92,4 +93,16 @@ async def test_it_takes_every_catalog_release_event_across_films(session):
     await session.commit()
 
     assert await prune(session, apply=True) == 2
+    assert await _count(session, Event) == 1
+
+
+async def test_events_created_after_the_cutoff_are_left_alone(session):
+    """The bound is the whole safety of running this twice: events carded after the fix
+    ships come from `film_release_date_change` and are correct."""
+    film = await add_film(session, 1)
+    event = await _event(session, film)
+    event.created_at = datetime(2026, 9, 1, tzinfo=UTC)
+    await session.commit()
+
+    assert await prune(session, apply=True) == 0
     assert await _count(session, Event) == 1

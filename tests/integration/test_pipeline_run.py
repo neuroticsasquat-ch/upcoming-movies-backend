@@ -481,7 +481,7 @@ def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
     assert pipeline_run.main(["daily"]) == 1
 
 
-# --- the sweep: four phases, one run row ---------------------------------------
+# --- the sweep: five phases, one run row ---------------------------------------
 
 
 def _stub_phases(

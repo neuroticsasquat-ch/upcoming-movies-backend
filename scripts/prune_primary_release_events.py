@@ -41,6 +41,7 @@ Run it in the container, dry by default:
 import argparse
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,16 +52,29 @@ from upmovies.news.models import Event, EventStory, EventSummary
 
 log = logging.getLogger("prune_primary_release_events")
 
-TARGET = (Event.event_type == "release_date", Event.provenance == "catalog")
+# The cutoff is the deploy boundary, and it is not optional. Everything carded from the
+# primary date was written before this change shipped; everything after it is carded from
+# `film_release_date_change` and is correct. Without the bound, running this a second time —
+# after a corrected sweep — would delete the good events too.
+DEFAULT_CUTOFF = datetime(2026, 8, 12, tzinfo=UTC)
 
 
-async def _report(session: AsyncSession) -> list[tuple[str, str, int]]:
+def _catalog_release_events(*, before: datetime):
+    """WHERE terms selecting the events the old primary-date path produced."""
+    return (
+        Event.event_type == "release_date",
+        Event.provenance == "catalog",
+        Event.created_at < before,
+    )
+
+
+async def _report(session: AsyncSession, *, before: datetime) -> list[tuple[str, str, int]]:
     """Affected films, most cards first — the before picture, printed either way."""
     rows = (
         await session.execute(
             select(Film.title, Film.slug, func.count(Event.id))
             .join(Event, Event.film_id == Film.id)
-            .where(*TARGET)
+            .where(*_catalog_release_events(before=before))
             .group_by(Film.title, Film.slug)
             .order_by(func.count(Event.id).desc(), Film.title)
         )
@@ -68,14 +82,22 @@ async def _report(session: AsyncSession) -> list[tuple[str, str, int]]:
     return [(title, slug, n) for title, slug, n in rows]
 
 
-async def prune(session: AsyncSession, *, apply: bool) -> int:
+async def prune(session: AsyncSession, *, apply: bool, before: datetime = DEFAULT_CUTOFF) -> int:
     """Delete the targeted events and their dependants. Returns the event count.
 
     `event_summary` and `event_story` are cleared explicitly rather than trusted to cascade:
     a summary orphaned by a deleted event is invisible to every read path (they inner-join)
     but would still be there, and `event_story` holds the link rows a later re-cluster reads.
     """
-    ids = list((await session.execute(select(Event.id).where(*TARGET))).scalars().all())
+    ids = list(
+        (
+            await session.execute(
+                select(Event.id).where(*_catalog_release_events(before=before))
+            )
+        )
+        .scalars()
+        .all()
+    )
     if not ids:
         return 0
     if apply:
@@ -92,10 +114,16 @@ async def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--apply", action="store_true", help="actually delete (default is report only)"
     )
+    parser.add_argument(
+        "--before",
+        type=datetime.fromisoformat,
+        default=DEFAULT_CUTOFF,
+        help=f"only events created before this ISO timestamp (default {DEFAULT_CUTOFF.date()})",
+    )
     args = parser.parse_args(argv)
 
     async with SessionLocal() as session:
-        affected = await _report(session)
+        affected = await _report(session, before=args.before)
         total = sum(n for _, _, n in affected)
         log.info("%d catalog release-date events across %d films", total, len(affected))
         for title, slug, n in affected[:25]:
@@ -103,7 +131,7 @@ async def main(argv: list[str] | None = None) -> None:
         if len(affected) > 25:
             log.info("  ... and %d more films", len(affected) - 25)
 
-        deleted = await prune(session, apply=args.apply)
+        deleted = await prune(session, apply=args.apply, before=args.before)
         if args.apply:
             log.info("deleted %d events", deleted)
         else:

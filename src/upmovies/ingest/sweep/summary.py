@@ -1,6 +1,6 @@
 """The sweep's `ingest_run.detail` line.
 
-All four phases share one run row, so the four sets of counters have to be legible side by
+All five phases share one run row, so the four sets of counters have to be legible side by
 side: the failure this exists to make visible is a run that enumerated fine and refreshed
 nothing, which is otherwise indistinguishable from a healthy pass on `/admin/runs` — and costs
 the whole catalog-sourced-event feature (spec §6.2). The two event phases are on the same line
@@ -30,7 +30,7 @@ def sweep_detail(
     attached: CreditEventResult,
     released: ReleaseEventResult,
 ) -> str:
-    """One line reporting all four phases distinctly, for `finalize_run(detail=...)`."""
+    """One line reporting all five phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
         f"enumerate: {enumerated.seed_people} seeds, "
         f"{enumerated.candidates_found} candidates, "

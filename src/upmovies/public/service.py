@@ -31,7 +31,11 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
-from upmovies.catalog.release_grade import RELEASE_TYPE_BUCKETS
+from upmovies.catalog.release_grade import (
+    PRIMARY_REGION,
+    RELEASE_TYPE_BUCKETS,
+    displayable_regions,
+)
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import visible_events
 from upmovies.public.arc import derive_arc_stage, most_significant_event_type
@@ -97,7 +101,7 @@ def _region_visible() -> ColumnElement[bool]:
     return or_(
         Event.event_type != "release_date",
         Event.region.is_(None),
-        Event.region == "US",
+        Event.region == PRIMARY_REGION,
         Event.region == any_(Film.origin_country),
     )
 
@@ -295,9 +299,11 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         for event, summary, edited_at in summarized
     ]
 
-    regions: set[str] = {"US"}
-    if film.origin_country:
-        regions.add(film.origin_country[0])
+    # The one definition, shared with the event writer and with `_region_visible` above
+    # (`catalog.release_grade`). This used to take `origin_country[0]` while the visibility
+    # predicate took all of them, so a co-production could surface an event about a date the
+    # page declined to list — the drift NEU-1121 closes.
+    regions = displayable_regions(film.origin_country)
 
     release_date_rows = (
         (
@@ -664,7 +670,7 @@ async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[U
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
-    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (1, 2, 3) — derived, never drifts
+    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (2, 3) — derived, never drifts
 
     # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
     # film rows — so the UI shows "N dates at a time" with a deterministic "view more".

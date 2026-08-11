@@ -341,6 +341,32 @@ async def test_detail_includes_origin_country_dates(
     assert len(rds) == 2
 
 
+async def test_detail_includes_every_origin_country_not_just_the_first(
+    client, make_film, add_event, add_release_date, session
+):
+    """A co-production carries several origins and a date in any of them is as much the
+    film's own market as one in the first-listed. The page used to read `origin_country[0]`
+    while `_region_visible` read all of them, so it could hide a date whose event it
+    surfaced; both now read `catalog.release_grade.displayable_regions` (NEU-1121)."""
+    film = await make_film(slug="rd-coprod-2026", title="Co-production")
+    film.origin_country = ["GB", "FR"]
+    session.add(film)
+    await session.commit()
+    await session.refresh(film)
+
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="FR",
+        release_type=3,
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+    r = await client.get("/films/rd-coprod-2026")
+    assert r.status_code == 200
+    assert [rd["country"] for rd in r.json()["release_dates"]] == ["FR"]
+
+
 # ── film metadata (genres, companies, collection, scalars) ────────────────────
 
 

@@ -441,7 +441,7 @@ async def _catalog_dedup_target(
 
     Scoped to `provenance='catalog'`: two *story*-triggered events of one type on one film is
     pre-existing behaviour, governed by the LLM's own attach decision, and not this rule's to
-    change. The mirror is `ingest.sweep.field_events._already_carded`, which decides whether a
+    change. The mirror is `ingest.sweep.release_events._already_carded`, which decides whether a
     change cards at all; the two are one rule read from opposite ends and must move together.
     """
     if event_type not in CATALOG_EVENT_TYPES:
