@@ -1,5 +1,6 @@
-"""Run-tracking for the ingestion pipelines: the DB helpers (pure I/O — callers own commits)
-plus `StageCounts`, the pure rule a pipeline consults to decide a run's terminal status."""
+"""Run-tracking for the ingestion pipelines: the DB helpers (pure I/O — callers own commits),
+`StageCounts` (the pure rule a pipeline consults to decide a run's terminal status), and the
+shared shape of the `detail` line those runs report themselves through."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -117,6 +118,20 @@ def _kind_of(stage: str) -> StageKind:
             f"unclassified stage {stage!r}: add it to STAGE_KINDS as LOSSY (a failed item is "
             f"never retried) or SELF_HEALING (it is re-selected next run)"
         ) from None
+
+
+def format_skip_detail(skip_counts: Mapping[str, int]) -> str:
+    """The `skipped N (reason=n, ...)` clause of a run's `detail` line.
+
+    Shared rather than restated per stage: `/admin/runs` puts a sweep row next to a `tmdb`
+    row, and an operator comparing what each one let through should not have to read two
+    dialects of the same sentence. Reasons are sorted so the clause is diffable across runs.
+    """
+    total = sum(skip_counts.values())
+    if not skip_counts:
+        return f"skipped {total}"
+    breakdown = ", ".join(f"{reason}={n}" for reason, n in sorted(skip_counts.items()))
+    return f"skipped {total} ({breakdown})"
 
 
 async def create_run(session: AsyncSession, kind: str) -> UUID:

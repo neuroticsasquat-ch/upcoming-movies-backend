@@ -75,7 +75,13 @@ async def test_admin_lists_the_sweep_with_every_phase_counter(admin_authed_clien
     four phases are told apart, and a run that enumerated fine and refreshed nothing — or
     refreshed fine and carded nothing — is the failure it exists to make visible (§6.2)."""
     detail = sweep_detail(
-        EnumerateResult(seed_people=7519, candidates_found=42, admitted=0, withheld=42),
+        EnumerateResult(
+            seed_people=7519,
+            candidates_found=42,
+            admitted=0,
+            withheld=30,
+            skipped_below_corroboration=12,
+        ),
         RefreshResult(selected=300, refreshed=299, dormant_selected=12, failures=1),
         FieldEventResult(changes_read=58, events_created=6, skipped=52),
         CreditEventResult(attachments_read=19, events_created=5, skipped=14),
@@ -90,7 +96,10 @@ async def test_admin_lists_the_sweep_with_every_phase_counter(admin_authed_clien
 
     assert r.status_code == 200
     row = next(row for row in r.json() if row["kind"] == "sweep")
-    assert "enumerate: 7519 seeds, 42 candidates, 0 admitted, 42 withheld" in row["detail"]
+    assert (
+        "enumerate: 7519 seeds, 42 candidates, 0 admitted, "
+        "skipped 42 (corroboration=12, no_tranche=30)" in row["detail"]
+    )
     assert "refresh: 299/300 refreshed (12 dormant)" in row["detail"]
     assert "events: 6 carded from 58 changes, 52 already carded" in row["detail"]
     assert "credits: 5 carded from 19 attachments, 14 already carded" in row["detail"]

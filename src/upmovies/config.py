@@ -69,6 +69,23 @@ class Settings(BaseSettings):
     sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
     sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
+    # How many distinct seed people must reach an undated film before it may be admitted
+    # (§4.1). One director attachment is the earliest and most valuable signal the product
+    # sells; it is also exactly what a speculative TMDB entry looks like, and §4.2 leaves
+    # that tension open on purpose, for the M4 tuning ticket to settle against the probe's
+    # distribution.
+    #
+    # So the placeholder is 1 — the identity value, which leaves the bar at the two clauses
+    # §4.1 states unconditionally (status, and a seed-grade role on the candidate film).
+    # Deliberately not 2: the flags ship closed and the directors tranche opens *before*
+    # tuning (§7.4), so whatever stands here is the value that first flip actually runs at.
+    # At 2 that flip would admit only films a second tracked person also reaches — a
+    # different, better-connected population than "a director we follow just attached" —
+    # and it would move the ramp and the bar together, which is precisely what §7.4 splits
+    # them up to avoid. Guessing strict is still guessing.
+    sweep_corroboration_threshold: int = Field(
+        default=1, ge=1, alias="SWEEP_CORROBORATION_THRESHOLD"
+    )
 
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
