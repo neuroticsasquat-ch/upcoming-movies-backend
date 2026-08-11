@@ -5,6 +5,13 @@ always finalizes its run (→ `failed` on an unexpected crash) — the same cont
 `/admin/ingest/*` trigger endpoints rely on, so `routers.ingest_admin` imports these
 rather than duplicating the wiring.
 
+`run_sweep` is deliberately **not** one of `run_daily`'s stages (spec §6.1, ADR-0013): the
+daily chain is fail-fast, so a TMDB hiccup partway through a ~45-minute sweep would abort
+feeds, link *and* synthesize for the day. It runs on its own Coolify slot roughly two hours
+ahead of the daily one, so films it admits are in the retrieval index for that day's link
+pass, and carries its own deadman URL — a sweep that stops running would otherwise be
+invisible in the daily check's ping.
+
 `run_daily` / `run_hourly` run the stages **sequentially in one process**: because each
 stage is awaited to completion before the next begins, `synthesize` cannot start until
 `link` has fully finished — there is no HTTP poll window to time out. The daily chain is
@@ -12,7 +19,7 @@ fail-fast: the first stage that does not reach `succeeded` aborts the rest. A be
 healthchecks.io deadman ping (`/start` at the top, base URL on success, `/fail` on any
 failure) drives alerting.
 
-Entry point: `python -m upmovies.pipeline_run {daily|hourly}`.
+Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep}`.
 """
 
 import asyncio
@@ -29,6 +36,14 @@ from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
+from upmovies.ingest.sweep import (
+    AdmissionTranches,
+    EnumerateResult,
+    RefreshResult,
+    run_sweep_enumerate,
+    run_sweep_refresh,
+    sweep_detail,
+)
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
@@ -149,6 +164,79 @@ async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
         await _finalize_failed(run_id, str(e))
 
 
+async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
+    """Both sweep phases against one run row: enumerate, then refresh, then the run's
+    terminal status.
+
+    The odd one out among the stage runners: the phases it calls do **not** finalize. They
+    share a single `ingest_run` row — one sweep, one row on `/admin/runs` — so the status,
+    the error, and the detail line carrying both phases' counters are written here (§6.2).
+    """
+    try:
+        today = date.today()
+        async with TMDBClient(
+            base_url=settings.tmdb_base_url,
+            api_key=settings.tmdb_api_key,
+            rate_calls=settings.tmdb_rate_limit_requests,
+            rate_window=settings.tmdb_rate_limit_window_seconds,
+            retry_max_attempts=settings.tmdb_retry_max_attempts,
+        ) as client:
+            enumerated = await run_sweep_enumerate(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                today=today,
+                excluded_statuses=settings.tmdb_excluded_statuses,
+                dormancy_days=settings.sweep_dormancy_days,
+                tranches=AdmissionTranches.from_settings(settings),
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
+            # Unconditional, even when enumerate gave up. Refresh is the phase the whole
+            # catalog-sourced-event feature rests on (§6.2), and skipping it on an enumerate
+            # abort would mean a TMDB flake in the last few of ~7,500 people silently costs
+            # the catalog a day of movement. Its own consecutive-failure guard bounds what a
+            # real outage costs to find out: `INGEST_CONSECUTIVE_FAILURE_THRESHOLD` requests.
+            refreshed = await run_sweep_refresh(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                today=today,
+                excluded_statuses=settings.tmdb_excluded_statuses,
+                dormancy_days=settings.sweep_dormancy_days,
+                dormant_refresh_days=settings.sweep_dormant_refresh_days,
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
+        # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
+        # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
+        # to be covered by the same net as the work it reports on.
+        await _finalize_sweep(run_id, enumerated, refreshed)
+    except Exception as e:
+        log.exception("sweep crashed")
+        await _finalize_failed(run_id, str(e))
+
+
+async def _finalize_sweep(
+    run_id: UUID, enumerated: EnumerateResult, refreshed: RefreshResult
+) -> None:
+    """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
+    failures, and the both-phase detail line either way — a run that aborted still reports
+    what it managed to do before it did."""
+    aborts = [
+        f"{phase} phase {result.abort_error}"
+        for phase, result in (("enumerate", enumerated), ("refresh", refreshed))
+        if result.aborted
+    ]
+    async with SessionLocal() as s:
+        await finalize_run(
+            s,
+            run_id,
+            status="failed" if aborts else "succeeded",
+            error="; ".join(aborts) or None,
+            detail=sweep_detail(enumerated, refreshed),
+        )
+        await s.commit()
+
+
 async def _run_tracked_stage(kind: str, runner: StageRunner, settings: Settings) -> str:
     """Open a run of `kind`, execute `runner` to completion (it finalizes its own run), and
     return the run's terminal status (`succeeded` / `failed` / `cancelled`)."""
@@ -220,6 +308,20 @@ async def run_hourly(settings: Settings) -> bool:
     return True
 
 
+async def run_sweep(settings: Settings) -> bool:
+    """Run the undated-film sweep on its own run kind. Returns True iff it succeeded.
+    Pings the sweep deadman check at start / success / failure."""
+    await _ping(settings.healthcheck_sweep_url, "/start")
+    status = await _run_tracked_stage("sweep", lambda rid, s: run_sweep_stage(rid, s), settings)
+    if status != "succeeded":
+        log.error("sweep pipeline failed: ended %s", status)
+        await _ping(settings.healthcheck_sweep_url, "/fail")
+        return False
+    log.info("sweep pipeline succeeded")
+    await _ping(settings.healthcheck_sweep_url)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "daily"
@@ -235,13 +337,19 @@ def main(argv: list[str] | None = None) -> int:
     # so the app having booted proves nothing about the env this one was handed (CLAUDE.md's
     # "a long-running container holds the env it was created with"). Checked before the first
     # run row exists, so an unroutable stage costs no half-published run (NEU-981).
-    validate_stage_configuration(settings)
+    # Except for the sweep, which makes no model calls: failing it on an unrelated LLM
+    # routing typo would re-introduce exactly the shared failure mode §6.1 keeps it out of
+    # the daily chain to avoid, and it would surface only as deadman silence.
+    if mode != "sweep":
+        validate_stage_configuration(settings)
     if mode == "daily":
         ok = asyncio.run(run_daily(settings))
     elif mode == "hourly":
         ok = asyncio.run(run_hourly(settings))
+    elif mode == "sweep":
+        ok = asyncio.run(run_sweep(settings))
     else:
-        print(f"unknown mode {mode!r}: expected 'daily' or 'hourly'", file=sys.stderr)
+        print(f"unknown mode {mode!r}: expected 'daily', 'hourly' or 'sweep'", file=sys.stderr)
         return 2
     return 0 if ok else 1
 

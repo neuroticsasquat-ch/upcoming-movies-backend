@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
+from upmovies.ingest.sweep import EnumerateResult, RefreshResult, sweep_detail
 from upmovies.main import app
 from upmovies.news.models import Story
 
@@ -60,6 +61,29 @@ async def test_admin_lists_recent_runs(admin_authed_client, session):
     body = r.json()
     assert len(body) == 2
     assert {row["kind"] for row in body} == {"tmdb", "feeds"}
+
+
+async def test_admin_lists_the_sweep_with_both_phase_counters(admin_authed_client, session):
+    """The sweep's whole reason for having its own run kind (spec §6.1): a legible row of its
+    own rather than counters hidden inside the tmdb stage's. `detail` is the only place the
+    two phases are told apart, and a run that enumerated fine and refreshed nothing is the
+    failure it exists to make visible (§6.2)."""
+    detail = sweep_detail(
+        EnumerateResult(seed_people=7519, candidates_found=42, admitted=0, withheld=42),
+        RefreshResult(selected=300, refreshed=299, dormant_selected=12, failures=1),
+    )
+    run = IngestRun(
+        kind="sweep", status="succeeded", items_processed=341, items_failed=1, detail=detail
+    )
+    session.add(run)
+    await session.commit()
+
+    r = await admin_authed_client.get("/admin/runs")
+
+    assert r.status_code == 200
+    row = next(row for row in r.json() if row["kind"] == "sweep")
+    assert "enumerate: 7519 seeds, 42 candidates, 0 admitted, 42 withheld" in row["detail"]
+    assert "refresh: 299/300 refreshed (12 dormant)" in row["detail"]
 
 
 async def test_admin_run_list_respects_limit(admin_authed_client, session):

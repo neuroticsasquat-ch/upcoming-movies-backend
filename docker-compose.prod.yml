@@ -48,10 +48,14 @@ services:
       ENVIRONMENT: "production"
       SENTRY_DSN: "${SENTRY_DSN:-}"
       # healthchecks.io deadman ping URLs for the Coolify scheduled tasks that run
-      # `python -m upmovies.pipeline_run daily|hourly` in this container. Optional — unset
-      # makes the ping a no-op (the pipeline still runs).
+      # `python -m upmovies.pipeline_run daily|hourly|sweep` in this container. Optional —
+      # unset makes the ping a no-op (the pipeline still runs). The sweep gets its own check
+      # rather than riding the daily one: it runs on its own slot ~2h ahead of daily and is
+      # not a stage in that chain, so a sweep that stopped running would leave the daily
+      # deadman perfectly green while the catalog quietly stopped moving (ADR-0013, spec §6.1).
       HEALTHCHECK_DAILY_URL: "${HEALTHCHECK_DAILY_URL:-}"
       HEALTHCHECK_HOURLY_URL: "${HEALTHCHECK_HOURLY_URL:-}"
+      HEALTHCHECK_SWEEP_URL: "${HEALTHCHECK_SWEEP_URL:-}"
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
@@ -70,6 +74,11 @@ services:
       # probe, and that should be a Coolify env change rather than a redeploy. The fallback
       # repeats the code default deliberately: unset would pass an empty string and fail to boot.
       SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
+      # How often the sweep still re-fetches a dormant film. Dormancy is not a one-way door —
+      # the change that revives a project can only be seen by reading it — so this is the
+      # cadence, not an exemption (ADR-0015, §4.5). Same reasoning as above for being here:
+      # M4 tunes it from the probe, and that should be an env change rather than a redeploy.
+      SWEEP_DORMANT_REFRESH_DAYS: "${SWEEP_DORMANT_REFRESH_DAYS:-30}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

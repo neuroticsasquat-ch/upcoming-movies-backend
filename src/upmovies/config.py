@@ -146,9 +146,12 @@ class Settings(BaseSettings):
     # healthchecks.io deadman ping URLs for the Coolify scheduled tasks (see
     # upmovies.pipeline_run). Optional: unset → the ping is a no-op, so local/dev runs of
     # `python -m upmovies.pipeline_run` don't need them. `daily` runs the full chain
-    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass.
+    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass; `sweep`
+    # runs the undated-film pass on its own slot ~2h ahead of daily, with its own deadman
+    # because a sweep that stops running is invisible in the daily chain's ping (§6.1).
     healthcheck_daily_url: str | None = Field(default=None, alias="HEALTHCHECK_DAILY_URL")
     healthcheck_hourly_url: str | None = Field(default=None, alias="HEALTHCHECK_HOURLY_URL")
+    healthcheck_sweep_url: str | None = Field(default=None, alias="HEALTHCHECK_SWEEP_URL")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
