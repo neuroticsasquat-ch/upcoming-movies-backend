@@ -24,11 +24,11 @@ from uuid import UUID
 
 import httpx
 
+from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.admission import AdmissionTranches
 from upmovies.ingest.sweep.phase import AbortGuard, owned_session
 from upmovies.ingest.sweep.seeds import (
-    ROLE_ORDER,
     CandidateTally,
     SeedAttachment,
     SessionFactory,

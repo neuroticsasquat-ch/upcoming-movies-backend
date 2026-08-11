@@ -47,10 +47,10 @@ from pathlib import Path
 
 import httpx
 
+from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.sweep.seeds import (
-    ROLE_ORDER,
     CandidateTally,
     SeedAttachment,
     SessionFactory,

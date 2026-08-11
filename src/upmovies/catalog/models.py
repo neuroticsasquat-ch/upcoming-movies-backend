@@ -61,6 +61,18 @@ class Film(Base):
         Integer, ForeignKey("catalog.collection.id"), nullable=True
     )
     tmdb_raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    credits_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When the catalog first held an observation of this film's credits — NULL until it has.
+
+    The durable form of "first observation is a baseline, never a change" (ADR-0014, spec
+    §5.3). It cannot be inferred from `film_credit` being empty: a speculative TMDB entry can
+    be admitted with an empty credits payload, and a film that *was* observed holding nothing
+    must be told apart from one that was never looked at, or the director who attaches next
+    run is silently swallowed as a baseline. Ingest bookkeeping, not a fact about the film —
+    hence its place in `FILM_FIELD_CHANGE_DENYLIST`.
+    """
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -280,9 +292,57 @@ class FilmCredit(Base):
     credit_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class FilmCreditChange(Base):
+    """Append-only history of seed-grade credit attachments and detachments, written by the
+    credit rebuild in `ingest.tmdb.credit_history` (ADR-0014, spec §5.2).
+
+    `catalog.film_credit` is delete-and-rebuilt on every ingest, so it holds no memory of a
+    director having been attached — only that one is attached now. This table is that memory,
+    and it is the whole reason a credit can card as an event (NEU-1083).
+
+    Two properties it does *not* get for free, unlike `film_field_change`, which is a
+    `BEFORE UPDATE` trigger and so writes no history on insert:
+
+    - **First observation is a baseline, never a change** (spec §5.3). The rebuild has both
+      sides in hand and diffs them explicitly; a film whose credits the catalog has never
+      held records them with no rows here. Without it, admitting 3,000 films would write tens
+      of thousands of false attachments on day one.
+    - **Only seed-grade credits** (director, writer, top-5 billed cast) are recorded. A
+      40th-billed extra churning between ingests is noise, and recording it would make this
+      table churn with TMDB's cast-ordering edits.
+    """
+
+    __tablename__ = "film_credit_change"
+    __table_args__ = (
+        Index("ix_catalog_film_credit_change_lookup", "film_id", "changed_at"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    person_id: Mapped[int] = mapped_column(Integer, ForeignKey("catalog.person.id"), nullable=False)
+    credit_type: Mapped[str] = mapped_column(Text, nullable=False)
+    """`cast` or `crew`, mirroring `film_credit.credit_type`."""
+    job: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The crew job (`Director`, `Writer`, `Screenplay`); NULL for a cast credit, which has
+    no job — the seed grade it carries is its top-5 billing, not a title."""
+    change: Mapped[str] = mapped_column(Text, nullable=False)
+    """`added` or `removed`."""
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 # --- Film column-change history trigger -------------------------------------
 # Volatile columns TMDB churns on nearly every ingest — excluded so the history
 # table records only semantic changes (release_date, status, title, runtime, ...).
+# `credits_observed_at` is excluded for the other reason: it is ingest bookkeeping
+# rather than a property of the film, and a history row for it would make a film
+# look active to `dormant_film_clause` on the day it was admitted.
 FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "popularity",
     "vote_average",
@@ -290,6 +350,7 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "revenue",
     "tmdb_raw",
     "updated_at",
+    "credits_observed_at",
 )
 
 

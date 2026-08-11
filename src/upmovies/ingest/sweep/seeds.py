@@ -1,14 +1,12 @@
 """The seed set: who the sweep enumerates, and what their credits are worth.
 
-Seed grade — director, writer (`Writer`/`Screenplay`), top-5 billed cast — is checked
-twice on purpose (spec §3.2, §4.1): once on the *person*, to decide whose filmography is
-worth a request, and once on their role on the *candidate film*, so a "Special Thanks"
-credit cannot drag in someone's short on the strength of the directing credit that made
-them a seed.
-
-Producers are deliberately not seed grade. An EP credit travels far and says little about
-whether a project is real, and the 2,191 extra people it would add are the weakest of the
-four attachments.
+Seed grade itself — director, writer (`Writer`/`Screenplay`), top-5 billed cast — is defined
+in `upmovies.catalog.seed_grade`, because the credit history (`ingest.tmdb.credit_history`)
+applies the same cut and the two must not drift. This module is about how the sweep *uses*
+it: the grade is checked twice on purpose (spec §3.2, §4.1),
+once on the *person*, to decide whose filmography is worth a request, and once on their role
+on the *candidate film*, so a "Special Thanks" credit cannot drag in someone's short on the
+strength of the directing credit that made them a seed.
 
 These rules were written for the read-only probe (`scripts/probe_undated_candidates.py`,
 NEU-1073) and moved here when the sweep landed. The probe imports them rather than keeping
@@ -25,17 +23,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmCredit
 from upmovies.catalog.queries import active_film_clause
+from upmovies.catalog.seed_grade import (
+    DIRECTOR_JOB,
+    TOP_BILLED_ORDER,
+    WRITER_JOBS,
+    crew_role,
+    is_top_billed,
+)
 from upmovies.ingest.tmdb.schemas import TMDBPersonMovieCredits
 
 SessionFactory = Callable[[], AsyncSession]
-
-DIRECTOR_JOB = "Director"
-WRITER_JOBS = frozenset({"Writer", "Screenplay"})
-# "Top-5 billed" is TMDB's `order`, which is 0-indexed.
-TOP_BILLED_ORDER = 5
-# Strongest attachment first, so a rendered role list reads the way §3.2 lists the seed
-# grades and groups stably.
-ROLE_ORDER = ("director", "writer", "cast")
 
 
 @dataclass(frozen=True)
@@ -116,7 +113,7 @@ def seed_attachments(person_id: int, credits: TMDBPersonMovieCredits) -> list[Se
     for entry in credits.cast:
         if entry.release_date is not None:
             continue
-        if entry.order is not None and entry.order < TOP_BILLED_ORDER:
+        if is_top_billed(entry.order):
             attachments.append(SeedAttachment(entry.id, entry.title, person_id, "cast"))
     for crew_entry in credits.crew:
         if crew_entry.release_date is not None:
@@ -125,15 +122,6 @@ def seed_attachments(person_id: int, credits: TMDBPersonMovieCredits) -> list[Se
         if role is not None:
             attachments.append(SeedAttachment(crew_entry.id, crew_entry.title, person_id, role))
     return attachments
-
-
-def crew_role(job: str | None) -> str | None:
-    """The seed grade a crew job carries, or None when it carries none."""
-    if job == DIRECTOR_JOB:
-        return "director"
-    if job in WRITER_JOBS:
-        return "writer"
-    return None
 
 
 def tally_attachments(attachments: Iterable[SeedAttachment]) -> dict[int, CandidateTally]:
