@@ -40,19 +40,40 @@ TEMPLATE_VERSION = "deterministic-2"
 
 
 @dataclass(frozen=True)
-class ReleaseDateSet:
-    """A film that had no release date now has one — the majority case after the undated-film
-    expansion, and the one ADR-0002's story-trigger rule was never written for."""
+class ReleaseDateChanged:
+    """One **displayable** release date set or moved, qualified by the market it belongs to.
 
+    Qualified because unqualified was wrong (NEU-1121). "Release date moved to 15 September"
+    was carded off `film.release_date`, TMDB's earliest release in any country of any type,
+    while the page listed US-or-origin theatrical dates — so the card named a date the page
+    never showed. A body that says *which* market moved cannot make that mistake, and the film
+    page lists limited and wide separately, so the label is part of the subject too.
+    """
+
+    region: str
+    """ISO 3166-1 alpha-2, e.g. `US`."""
+    label: str
+    """`limited` or `wide` — `public.release.RELEASE_BUCKET_LABELS` renders the display form."""
     new_date: date
+    previous_date: date | None = None
+    """None when the date is newly *set* for this market; a date when it *moved*."""
 
 
 @dataclass(frozen=True)
-class ReleaseDateMoved:
-    """A film's release date moved from one date to another."""
+class ReleaseDatesChanged:
+    """Every displayable release date one observation changed, rendered as one body (NEU-1121).
 
-    previous_date: date
-    new_date: date
+    Grouped for the reason `CreditsAttached` is: `uq_event_catalog_change` allows one catalog
+    event per film, type and timestamp, and the rebuild detects every change in a single
+    observation — so US limited and US wide moving in one distributor announcement have to
+    share a card. They usually do move together, and two cards would be two beats where the
+    world had one.
+
+    A one-change group renders exactly what a single change renders; one template, not a pair
+    to drift apart.
+    """
+
+    changes: tuple[ReleaseDateChanged, ...]
 
 
 @dataclass(frozen=True)
@@ -89,7 +110,9 @@ class CreditsAttached:
     credits: tuple[CreditAttached, ...]
 
 
-CatalogChange = ReleaseDateSet | ReleaseDateMoved | StatusChanged | CreditAttached | CreditsAttached
+CatalogChange = (
+    ReleaseDateChanged | ReleaseDatesChanged | StatusChanged | CreditAttached | CreditsAttached
+)
 
 # Keyed on TMDB's `status` values. An unknown status still gets a body (see `_render_status`) —
 # TMDB may add one, and a stage that raised here would leave the event with no summary row,
@@ -107,6 +130,24 @@ _STATUS_BODIES = {
 def _format_date(value: date) -> str:
     """`14 August 2026` — no zero padding on the day (`%-d` is not portable)."""
     return f"{value.day} {value:%B %Y}"
+
+
+def _render_release_date(change: ReleaseDateChanged) -> str:
+    """One market's clause. `previous_date is None` is a first date for that market, which has
+    no "moved from" to render — the same distinction the old unqualified pair encoded as two
+    types."""
+    market = f"{change.region} {change.label}"
+    if change.previous_date is None:
+        return f"{market} release date set to {_format_date(change.new_date)}."
+    return (
+        f"{market} release date moved from {_format_date(change.previous_date)} "
+        f"to {_format_date(change.new_date)}."
+    )
+
+
+def _render_release_dates(change: ReleaseDatesChanged) -> str:
+    """The group as one body, one sentence per market, in the order the diff produced."""
+    return " ".join(_render_release_date(c) for c in change.changes)
 
 
 def _render_status(change: StatusChanged) -> str:
@@ -158,10 +199,10 @@ def _render_credits(change: CreditsAttached) -> str:
 def render_summary(change: CatalogChange) -> str:
     """The user-facing body for one catalog change. Pure — no DB, no clock."""
     match change:
-        case ReleaseDateSet(new_date=new_date):
-            return f"Release date set to {_format_date(new_date)}."
-        case ReleaseDateMoved(previous_date=previous, new_date=new_date):
-            return f"Release date moved from {_format_date(previous)} to {_format_date(new_date)}."
+        case ReleaseDateChanged():
+            return _render_release_dates(ReleaseDatesChanged(changes=(change,)))
+        case ReleaseDatesChanged():
+            return _render_release_dates(change)
         case StatusChanged():
             return _render_status(change)
         case CreditAttached():

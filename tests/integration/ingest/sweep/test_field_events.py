@@ -3,9 +3,10 @@ events, and what stops the same change becoming two.
 
 The rules that carry the weight here are the ones a re-run exercises. The phase reads a fixed
 rolling window rather than a watermark, so every change is offered to it several days running;
-if the skip check were wrong the feed would fill with duplicate cards within a week. The other
-is the ADR-0002 interaction: a story-triggered release-date event and a catalog-triggered one
-read the same change row, and must never both card it.
+if the skip check were wrong the feed would fill with duplicate cards within a week.
+
+Release dates left this phase in NEU-1121 — see `test_release_events.py`, which carries the
+ADR-0002 anti-double-card rule that moved with them.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -23,7 +24,6 @@ from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL, TEMPLATE_VERS
 NOW = datetime(2026, 8, 10, 2, 0, tzinfo=UTC)
 YESTERDAY = NOW - timedelta(days=1)
 LOOKBACK_DAYS = 7
-WINDOW_DAYS = 14
 
 
 async def _change(session, film, *, field, old, new, changed_at=YESTERDAY):
@@ -41,7 +41,6 @@ async def _run(session_factory, run_id, **overrides):
         "run_id": run_id,
         "now": NOW,
         "lookback_days": LOOKBACK_DAYS,
-        "corroboration_window_days": WINDOW_DAYS,
     }
     return await run_field_change_events(**{**kwargs, **overrides})
 
@@ -59,44 +58,42 @@ async def _events(session, film):
     )
 
 
-async def test_a_first_release_date_cards_a_summarized_catalog_event(
-    session, session_factory, run_id
-):
-    film = await add_film(session, 1, release_date=date(2026, 12, 4), title="Runner")
-    await _change(session, film, field="release_date", old=None, new="2026-12-04")
+async def test_a_status_change_cards_a_summarized_catalog_event(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, title="Runner")
+    await _change(session, film, field="status", old="Planned", new="In Production")
     await session.commit()
 
     result = await _run(session_factory, run_id)
 
     assert (result.changes_read, result.events_created, result.skipped) == (1, 1, 0)
     (event,) = await _events(session, film)
-    assert event.event_type == "release_date"
+    assert event.event_type == "production_start"
     assert event.provenance == "catalog"
     assert event.confidence == "confirmed"
     # The change's own timestamp, so a backlog worked off after an outage is not all dated today.
     assert event.occurred_at == YESTERDAY
-    # Per-country dates have no change history to read, so there is never a region (ADR-0002).
+    # Status is not a regional fact, so it is never region-tagged (NEU-446).
     assert event.region is None
     summary = (
         await session.execute(select(EventSummary).where(EventSummary.event_id == event.id))
     ).scalar_one()
-    assert summary.summary == "Release date set to 4 December 2026."
+    assert summary.summary == "The film has entered production."
     assert summary.model == DETERMINISTIC_MODEL
     assert summary.prompt_version == TEMPLATE_VERSION
 
 
-async def test_a_moved_release_date_cards_both_dates(session, session_factory, run_id):
+async def test_a_primary_release_date_change_is_read_and_ignored(session, session_factory, run_id):
+    """NEU-1121: `film.release_date` is TMDB's earliest release in any country of any type,
+    which is not what the page lists — so this phase no longer cards it at all. Displayable
+    dates come from `film_release_date_change` via `sweep.release_events`."""
     film = await add_film(session, 1, release_date=date(2026, 12, 4))
-    await _change(session, film, field="release_date", old="2026-08-14", new="2026-12-04")
+    await _change(session, film, field="release_date", old=None, new="2026-12-04")
     await session.commit()
 
-    await _run(session_factory, run_id)
+    result = await _run(session_factory, run_id)
 
-    (event,) = await _events(session, film)
-    summary = (
-        await session.execute(select(EventSummary).where(EventSummary.event_id == event.id))
-    ).scalar_one()
-    assert summary.summary == "Release date moved from 14 August 2026 to 4 December 2026."
+    assert (result.changes_read, result.events_created) == (0, 0)
+    assert await _events(session, film) == []
 
 
 async def test_status_transitions_card_the_production_milestones(session, session_factory, run_id):
@@ -124,12 +121,11 @@ async def test_status_transitions_card_the_production_milestones(session, sessio
 async def test_changes_that_are_not_beats_are_read_and_ignored(session, session_factory, run_id):
     film = await add_film(session, 1)
     await _change(session, film, field="status", old="Post Production", new="Released")
-    await _change(session, film, field="release_date", old="2026-12-04", new=None)
     await session.commit()
 
     result = await _run(session_factory, run_id)
 
-    assert (result.changes_read, result.events_created, result.skipped) == (2, 0, 0)
+    assert (result.changes_read, result.events_created, result.skipped) == (1, 0, 0)
     assert await _events(session, film) == []
 
 
@@ -138,8 +134,7 @@ async def test_a_second_pass_over_the_same_window_cards_nothing_new(
 ):
     """The window is a fixed rolling one, so every change is re-read for days. This is the
     property that keeps that free."""
-    film = await add_film(session, 1, release_date=date(2026, 12, 4))
-    await _change(session, film, field="release_date", old=None, new="2026-12-04")
+    film = await add_film(session, 1, release_date=None)
     await _change(
         session,
         film,
@@ -148,6 +143,7 @@ async def test_a_second_pass_over_the_same_window_cards_nothing_new(
         new="In Production",
         changed_at=NOW - timedelta(days=2),
     )
+    await _change(session, film, field="status", old="In Production", new="Post Production")
     await session.commit()
 
     first = await _run(session_factory, run_id)
@@ -160,14 +156,14 @@ async def test_a_second_pass_over_the_same_window_cards_nothing_new(
 
 async def test_changes_older_than_the_lookback_are_never_read(session, session_factory, run_id):
     """`film_field_change` holds months of history. Without the floor, the first pass after
-    deploy would card every date move ever recorded."""
-    film = await add_film(session, 1, release_date=date(2026, 12, 4))
+    deploy would card every status transition ever recorded."""
+    film = await add_film(session, 1, release_date=None)
     await _change(
         session,
         film,
-        field="release_date",
-        old=None,
-        new="2026-12-04",
+        field="status",
+        old="Planned",
+        new="In Production",
         changed_at=NOW - timedelta(days=LOOKBACK_DAYS + 1),
     )
     await session.commit()
@@ -178,86 +174,17 @@ async def test_changes_older_than_the_lookback_are_never_read(session, session_f
     assert await _events(session, film) == []
 
 
-async def test_a_story_event_for_the_same_move_is_not_carded_twice(
-    session, session_factory, run_id
-):
-    """ADR-0002's path ran first — `link` corroborated a held story against this very change
-    and carded it, dating the event to the story rather than to the change. Carding it again
-    here would put two release-date cards on the film for one move."""
-    film = await add_film(session, 1, release_date=date(2026, 12, 4))
-    await _change(session, film, field="release_date", old=None, new="2026-12-04")
-    session.add(
-        Event(
-            film_id=film.id,
-            event_type="release_date",
-            confidence="confirmed",
-            occurred_at=YESTERDAY - timedelta(days=2),
-        )
-    )
-    await session.commit()
-
-    result = await _run(session_factory, run_id)
-
-    assert (result.events_created, result.skipped) == (0, 1)
-    assert len(await _events(session, film)) == 1
-
-
-async def test_a_second_genuine_move_inside_the_window_still_cards(
-    session, session_factory, run_id
-):
-    """The skip check reads the two provenances differently on purpose. A catalog card is
-    matched at exactly its change's timestamp, so a date that moves twice in one week gets
-    two cards — matching those on a window instead would swallow the second move silently."""
-    film = await add_film(session, 1, release_date=date(2026, 12, 4))
-    await _change(
-        session,
-        film,
-        field="release_date",
-        old=None,
-        new="2026-11-20",
-        changed_at=NOW - timedelta(days=4),
-    )
-    await _change(session, film, field="release_date", old="2026-11-20", new="2026-12-04")
-    await session.commit()
-
-    result = await _run(session_factory, run_id)
-
-    assert result.events_created == 2
-    assert len(await _events(session, film)) == 2
-
-
-async def test_a_release_date_event_outside_the_window_does_not_suppress_the_card(
-    session, session_factory, run_id
-):
-    film = await add_film(session, 1, release_date=date(2026, 12, 4))
-    await _change(session, film, field="release_date", old="2026-08-14", new="2026-12-04")
-    session.add(
-        Event(
-            film_id=film.id,
-            event_type="release_date",
-            confidence="confirmed",
-            occurred_at=YESTERDAY - timedelta(days=WINDOW_DAYS + 1),
-        )
-    )
-    await session.commit()
-
-    result = await _run(session_factory, run_id)
-
-    assert result.events_created == 1
-    assert len(await _events(session, film)) == 2
-
-
 async def test_each_film_commits_on_its_own(session, session_factory, run_id, monkeypatch):
     """Commit per item: one film whose write blows up must not cost the others."""
-    first = await add_film(session, 1, release_date=date(2026, 12, 4))
-    second = await add_film(session, 2, release_date=date(2026, 12, 5))
-    await _change(session, first, field="release_date", old=None, new="2026-12-04")
+    first = await add_film(session, 1, release_date=None)
+    second = await add_film(session, 2, release_date=None)
+    await _change(session, first, field="status", old="Planned", new="In Production")
     await _change(
         session,
         second,
-        field="release_date",
-        old=None,
-        new="2026-12-05",
+        field="status",
+        old="In Production",
+        new="Post Production",
         changed_at=NOW - timedelta(hours=1),
     )
     await session.commit()
@@ -265,7 +192,7 @@ async def test_each_film_commits_on_its_own(session, session_factory, run_id, mo
     real = field_events.write_deterministic_summary
 
     async def explode(session_, *, event_id, change, source_updated_at):
-        if isinstance(change, field_events.ReleaseDateSet) and change.new_date == date(2026, 12, 4):
+        if change == field_events.StatusChanged(new_status="In Production"):
             raise RuntimeError("summary write failed")
         return await real(
             session_, event_id=event_id, change=change, source_updated_at=source_updated_at
@@ -282,13 +209,13 @@ async def test_each_film_commits_on_its_own(session, session_factory, run_id, mo
 
 async def test_consecutive_failures_abort_the_phase(session, session_factory, run_id, monkeypatch):
     for i in range(1, 4):
-        film = await add_film(session, i, release_date=date(2026, 12, 4))
+        film = await add_film(session, i, release_date=None)
         await _change(
             session,
             film,
-            field="release_date",
-            old=None,
-            new="2026-12-04",
+            field="status",
+            old="Planned",
+            new="In Production",
             changed_at=NOW - timedelta(hours=i),
         )
     await session.commit()
@@ -306,8 +233,8 @@ async def test_consecutive_failures_abort_the_phase(session, session_factory, ru
 
 
 async def test_the_run_counts_what_it_carded(session, session_factory, run_id):
-    film = await add_film(session, 1, release_date=date(2026, 12, 4))
-    await _change(session, film, field="release_date", old=None, new="2026-12-04")
+    film = await add_film(session, 1, release_date=None)
+    await _change(session, film, field="status", old="Planned", new="In Production")
     await session.commit()
 
     await _run(session_factory, run_id)

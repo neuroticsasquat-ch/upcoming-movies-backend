@@ -30,7 +30,14 @@ async def _film(session, *, tmdb_id=1, title="Runner"):
 
 
 async def _event_with_story(
-    session, film, *, event_type="casting", dek="A dek.", source="Deadline", url=None
+    session,
+    film,
+    *,
+    event_type="casting",
+    dek="A dek.",
+    source="Deadline",
+    url=None,
+    subject_key=None,
 ):
     story = Story(
         source=source,
@@ -46,6 +53,7 @@ async def _event_with_story(
         event_type=event_type,
         confidence="confirmed",
         occurred_at=datetime.now(UTC),
+        subject_key=subject_key,
     )
     session.add(event)
     await session.flush()
@@ -535,3 +543,32 @@ async def test_detail_reports_marked_google_news_story(session):
         )
     ).scalar_one()
     assert "urls marked 1, resolved 1" in run.detail
+
+
+async def test_credit_subject_keys_reach_the_summarizer(session):
+    """`subjects` narrows the prompt to named performers, and a credit event's `subject_key`
+    is exactly that."""
+    film = await _film(session, title="Runner")
+    await _event_with_story(
+        session, film, event_type="casting", dek="Cast.", subject_key=["john doe"]
+    )
+    await session.commit()
+
+    (pe,) = await _select_pending(session)
+
+    assert pe.event_input.subjects == ["john doe"]
+
+
+async def test_release_date_subject_keys_do_not_reach_the_summarizer(session):
+    """Release-date events carry `US:wide`-style market tokens in `subject_key` (NEU-1121),
+    not people. The prompt reads `subjects` as "this beat concerns ONLY those named
+    performers", so passing them would invent a performer called "US:wide"."""
+    film = await _film(session, title="Runner")
+    await _event_with_story(
+        session, film, event_type="release_date", dek="Moved.", subject_key=["US:wide"]
+    )
+    await session.commit()
+
+    (pe,) = await _select_pending(session)
+
+    assert pe.event_input.subjects is None

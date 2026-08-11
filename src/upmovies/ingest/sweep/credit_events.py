@@ -20,9 +20,9 @@ ingests. The grouping below is the difference between one `casting` card naming 
 and three cards about one beat, and `uq_event_catalog_change` enforces the same thing
 structurally: one catalog event per film, type and timestamp.
 
-Contract with the pipeline conventions, matching the other three phases: one session per item
+Contract with the pipeline conventions, matching the other phases: one session per item
 so a failure never rolls back the others, `record_progress` against the run id, abort after N
-consecutive failures, and **no `finalize_run`** — all four phases share one `ingest_run` row.
+consecutive failures, and **no `finalize_run`** — all five phases share one `ingest_run` row.
 """
 
 import logging

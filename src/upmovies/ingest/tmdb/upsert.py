@@ -32,6 +32,13 @@ from upmovies.ingest.tmdb.credit_history import (
     record_credit_changes,
     seed_credits_from_details,
 )
+from upmovies.ingest.tmdb.release_date_history import (
+    diff_release_dates,
+    displayable_from_details,
+    load_displayable_releases,
+    mark_release_dates_observed,
+    record_release_date_changes,
+)
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 
 
@@ -218,6 +225,26 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
 async def _rebuild_release_dates(
     session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
 ) -> None:
+    """Rebuild `catalog.film_release_date`, capturing the displayable diff on the way through.
+
+    The rebuild is the only place both sides of that diff exist: the stored rows are about to
+    be deleted and the incoming ones are in the payload. `catalog.film_release_date_change` is
+    written from them first, so a US wide date moving survives as history rather than being
+    overwritten into silence. First observation is a baseline, never a change — see
+    `ingest.tmdb.release_date_history`.
+    """
+    origin_country = (
+        await session.execute(select(Film.origin_country).where(Film.id == film_id))
+    ).scalar_one_or_none()
+    # Read the stored side before the delete below wipes it.
+    previous = await load_displayable_releases(session, film_id, origin_country=origin_country)
+    changes = diff_release_dates(
+        previous=previous,
+        current=displayable_from_details(details, origin_country=origin_country),
+    )
+    await record_release_date_changes(session, film_id, changes)
+    await mark_release_dates_observed(session, film_id)
+
     # Delete-then-reinsert, mirroring `_rebuild_joins`: a film that drops its release_dates
     # between runs (empty or absent payload) must have its stale rows cleared, so the delete
     # is unconditional and only the insert is guarded.

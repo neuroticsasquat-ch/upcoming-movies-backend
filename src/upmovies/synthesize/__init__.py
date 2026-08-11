@@ -2,8 +2,8 @@ from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL as DETERMINIST
 from upmovies.synthesize.deterministic import TEMPLATE_VERSION as TEMPLATE_VERSION
 from upmovies.synthesize.deterministic import CatalogChange as CatalogChange
 from upmovies.synthesize.deterministic import CreditAttached as CreditAttached
-from upmovies.synthesize.deterministic import ReleaseDateMoved as ReleaseDateMoved
-from upmovies.synthesize.deterministic import ReleaseDateSet as ReleaseDateSet
+from upmovies.synthesize.deterministic import ReleaseDateChanged as ReleaseDateChanged
+from upmovies.synthesize.deterministic import ReleaseDatesChanged as ReleaseDatesChanged
 from upmovies.synthesize.deterministic import StatusChanged as StatusChanged
 from upmovies.synthesize.deterministic import render_summary as render_summary
 from upmovies.synthesize.deterministic import (
