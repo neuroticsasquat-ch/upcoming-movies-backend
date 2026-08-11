@@ -293,13 +293,15 @@ The scheduled pass that discovers and maintains films TMDB's dated `/discover/mo
 cannot reach. It runs as its own `ingest_run.kind` on its own schedule slot, roughly two hours
 ahead of the daily pipeline — deliberately *not* a stage in it, because the daily chain is
 fail-fast and a ~45-minute TMDB pass would take feeds, link and synthesize down with it. It has
-**three** phases and needs all of them: **enumerate** (walk seed people's credits for undated
-candidates), **refresh** (re-fetch every active film discover did not touch), and **events**
-(card the changes refreshing produced). Dropping the refresh phase is the project's quietest
-failure mode — undated films sit outside the discover window, so without it they are never
-re-read, never upserted, and no catalog-sourced event ever fires. Running the events phase last,
-in the same pass, is what makes a change TMDB published today a card today; running the whole
-sweep ahead of the daily chain is what puts that card in front of `link` rather than behind it.
+**four** phases and needs all of them: **enumerate** (walk seed people's credits for undated
+candidates), **refresh** (re-fetch every active film discover did not touch), **events** (card
+the field changes refreshing produced), and **credits** (card the attachments it produced).
+Dropping the refresh phase is the project's quietest failure mode — undated films sit outside
+the discover window, so without it they are never re-read, never upserted, and no
+catalog-sourced event ever fires. Running the two carding phases last, in the same pass, is what
+makes a change TMDB published today a card today; running the whole sweep ahead of the daily
+chain is what puts that card in front of `link` rather than behind it. The two card from
+different tables and fail independently, so they count separately on `/admin/runs`.
 _Avoid_: crawl, scan, discovery run (that's the enumerate phase alone), Path B job.
 
 **Seed person**:
@@ -319,7 +321,7 @@ which is kept separate on purpose: the master is the rollback, the tranches are 
 sweep that enumerates and reports while admitting nothing is the state where all four are off.
 Admission is per **film**, not per credit — one open tranche among the grades that reached a
 candidate is enough.
-_Avoid_: phase (that's enumerate/refresh/events), stage, wave, cohort.
+_Avoid_: phase (that's enumerate/refresh/events/credits), stage, wave, cohort.
 
 **Seed grade**:
 The role classes that both qualify a person as a seed *and* qualify a candidate film for
@@ -341,6 +343,20 @@ because story supply is fixed at 8 trade feeds while the catalog is about to mul
 it, most admitted films would be permanently blank pages.
 _Avoid_: synthetic event, system event, auto event, TMDB event (that's the source, not the kind).
 
+**Credit attachment event**:
+The catalog-sourced card raised when a seed-grade credit crosses into a film's credit set —
+`crew_attached` for a director or writer, the existing `casting` for top-5 billed cast, both at
+`rumored`. Keyed on the **observation**, not the person: every attachment sharing one
+`changed_at` cards once, so a whole top-billed cast arriving between two ingests is one card
+naming all of them rather than five. Detachments are recorded as history but never carded —
+"no longer attached" is mostly TMDB reverting its own vandalism. `crew_attached` is a new type
+and has to be registered wherever the vocabulary is enumerated (`ck_event_type`, the arc's
+`_EVENT_STAGE`, the cluster's `_STALE_EVENT_TYPES`) or it silently ranks below everything; it is
+deliberately *not* hidden, because a director attaching to a film no trade has written about is
+the beat the whole expansion exists for.
+_Avoid_: casting event (that is one of the two types, not the pair), crew change, credit diff
+(that is the history row it reads).
+
 **Double-carding**:
 The failure mode where the story path and the catalog path both raise an event for one TMDB
 change. They are independent by design — a story-triggered release-date event still needs
@@ -352,7 +368,11 @@ release-date event inside it, and the story path attaches to the most recent *ca
 inside it. A catalog card is matched at exactly its own change's timestamp, so a date that moves
 twice in a week still gets two cards. Production milestones are matched on type alone: a film
 enters production once, so a story running a month behind TMDB's status flip still belongs on
-the existing card.
+the existing card. Credits are matched on neither: the question is always **who**, answered by
+`Event.subject_key` on both sides — the catalog path suppresses a person a card already names,
+and a story naming someone a credit event carded joins that card rather than being dropped as a
+restatement of it. A story about a director attaching comes back classified `casting`, because
+the LLM has no `crew_attached` in its vocabulary, so the story side searches both credit types.
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **First observation**:

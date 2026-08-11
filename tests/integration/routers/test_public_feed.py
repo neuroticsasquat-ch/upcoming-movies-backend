@@ -245,3 +245,25 @@ async def test_feed_marks_story_triggered_events_as_story_provenance(client, mak
 
     r = await client.get("/feed")
     assert r.json()["items"][0]["provenance"] == "story"
+
+
+async def test_feed_cards_a_crew_attachment(client, make_film, add_event):
+    """`crew_attached` is deliberately not in `HIDDEN_EVENT_TYPES` (ADR-0014): the director
+    attaching to an undated nobody has written about is the beat the expansion exists for, so
+    it has to reach the feed the day it is carded."""
+    film = await make_film(slug="undated-film", title="An Undated Film")
+    await add_event(
+        film=film,
+        event_type="crew_attached",
+        confidence="rumored",
+        summary="Denis Villeneuve attached to direct.",
+        provenance="catalog",
+        summary_model="deterministic",
+    )
+
+    r = await client.get("/feed")
+    assert r.status_code == 200
+    (item,) = r.json()["items"]
+    assert item["event_type"] == "crew_attached"
+    assert item["summary"] == "Denis Villeneuve attached to direct."
+    assert item["sources"] == []

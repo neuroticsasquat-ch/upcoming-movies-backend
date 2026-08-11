@@ -38,9 +38,11 @@ from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.sweep import (
     AdmissionTranches,
+    CreditEventResult,
     EnumerateResult,
     FieldEventResult,
     RefreshResult,
+    run_credit_attachment_events,
     run_field_change_events,
     run_sweep_enumerate,
     run_sweep_refresh,
@@ -167,8 +169,8 @@ async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
 
 
 async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
-    """All three sweep phases against one run row: enumerate, refresh, card the changes
-    refreshing produced, then the run's terminal status.
+    """All four sweep phases against one run row: enumerate, refresh, card the field changes
+    and the credit attachments refreshing produced, then the run's terminal status.
 
     The odd one out among the stage runners: the phases it calls do **not** finalize. They
     share a single `ingest_run` row — one sweep, one row on `/admin/runs` — so the status,
@@ -221,10 +223,21 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             corroboration_window_days=settings.link_release_change_window_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
+        # The credit half, on the same terms and the same window as the field half — and
+        # separately, because the two read different tables and a failure in one says nothing
+        # about the other. Last, for the same reason: `_rebuild_joins` writes
+        # `film_credit_change` during refresh, so this pass's own attachments are in hand.
+        attached = await run_credit_attachment_events(
+            session_factory=_session_factory,
+            run_id=run_id,
+            now=now,
+            lookback_days=settings.sweep_event_lookback_days,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
         # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
         # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
         # to be covered by the same net as the work it reports on.
-        await _finalize_sweep(run_id, enumerated, refreshed, carded)
+        await _finalize_sweep(run_id, enumerated, refreshed, carded, attached)
     except Exception as e:
         log.exception("sweep crashed")
         await _finalize_failed(run_id, str(e))
@@ -235,6 +248,7 @@ async def _finalize_sweep(
     enumerated: EnumerateResult,
     refreshed: RefreshResult,
     carded: FieldEventResult,
+    attached: CreditEventResult,
 ) -> None:
     """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
     failures, and the every-phase detail line either way — a run that aborted still reports
@@ -245,6 +259,7 @@ async def _finalize_sweep(
             ("enumerate", enumerated),
             ("refresh", refreshed),
             ("events", carded),
+            ("credits", attached),
         )
         if result.aborted
     ]
@@ -254,7 +269,7 @@ async def _finalize_sweep(
             run_id,
             status="failed" if aborts else "succeeded",
             error="; ".join(aborts) or None,
-            detail=sweep_detail(enumerated, refreshed, carded),
+            detail=sweep_detail(enumerated, refreshed, carded, attached),
         )
         await s.commit()
 

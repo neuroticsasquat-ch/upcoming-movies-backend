@@ -2142,3 +2142,160 @@ async def test_story_provenance_event_is_not_a_catalog_dedup_target(session):
     await session.commit()
 
     assert result.events_created == 1
+
+
+# ADR-0014, the credit half — a story about an attachment TMDB recorded first joins that card.
+#
+# The sweep runs ~2h ahead of the daily chain, so a credit event is normally already on the
+# film when the trade story lands. Without this the story either opens a second card for the
+# same attachment or, worse, is dropped as `casting-recorded` — the beat would read as
+# already-covered while the card carrying it still had no sources and a templated body.
+
+
+async def _catalog_credit_event(session, film, *, event_type, names, occurred_at=None):
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=occurred_at or datetime(2026, 6, 29, tzinfo=UTC),
+        subject_key=names,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def _apply_casting(session, *, film, cast, url="https://e/cast-news"):
+    story = await _linked_story(session, film, url, title="casting news")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=date(2026, 7, 4),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": cast,
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    return await apply_cluster_decisions(session, plan=plan, raw=raw), story
+
+
+async def test_story_about_a_carded_casting_joins_the_catalog_event(session):
+    """Left to the `casting-recorded` rule alone this story would be *dropped*: the performer
+    is already named by a card. But that card is the deterministic one TMDB's credit change
+    raised, and the story is what upgrades it — real sources, and a real summary."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_credit_event(session, film, event_type="casting", names=["zendaya"])
+
+    result, story = await _apply_casting(session, film=film, cast=["Zendaya"])
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_story_about_a_carded_crew_attachment_joins_that_card(session):
+    """The LLM has no `crew_attached` in its vocabulary, so a story about a director
+    attaching comes back classified `casting`. The card it belongs on is still the one the
+    credit change raised — otherwise the film shows "attached to direct" twice."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_credit_event(
+        session, film, event_type="crew_attached", names=["denis villeneuve"]
+    )
+
+    result, story = await _apply_casting(session, film=film, cast=["Denis Villeneuve"])
+    await session.commit()
+
+    assert result.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_story_about_someone_else_still_opens_its_own_card(session):
+    """The match is on *who*. A catalog casting card for one performer must not swallow the
+    trade breaking a different one."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    await _catalog_credit_event(session, film, event_type="casting", names=["zendaya"])
+
+    result, _ = await _apply_casting(session, film=film, cast=["Josh Brolin"])
+    await session.commit()
+
+    assert result.events_created == 1
+
+
+async def test_a_story_casting_event_is_not_a_credit_dedup_target(session):
+    """Scoped to `provenance='catalog'`, like the field half: two story-triggered casting
+    events on one film is governed by the `casting-recorded` rule, unchanged here."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    await _casting_event(session, film, ["zendaya"], url="https://e/prior")
+    await session.commit()
+
+    result, story = await _apply_casting(session, film=film, cast=["Zendaya"])
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert story.link_note == "casting-recorded"
+
+
+async def test_attaching_records_the_performers_the_card_now_names(session):
+    """The story brought a performer the catalog card did not name. Unless the attach records
+    them, the *next* story about that performer finds no overlap and opens a second card for
+    a beat this one already covers."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_credit_event(session, film, event_type="casting", names=["zendaya"])
+
+    first, _ = await _apply_casting(
+        session, film=film, cast=["Zendaya", "Josh Brolin"], url="https://e/cast-1"
+    )
+    await session.commit()
+    await session.refresh(carded)
+
+    assert first.events_created == 0
+    assert carded.subject_key == ["zendaya", "josh brolin"]
+
+    second, story = await _apply_casting(
+        session, film=film, cast=["Josh Brolin"], url="https://e/cast-2"
+    )
+    await session.commit()
+
+    assert second.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id

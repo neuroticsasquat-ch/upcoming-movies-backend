@@ -6,7 +6,6 @@ backstop. The caller owns the session/commit."""
 import json
 import logging
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -18,7 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import field_changed_at
 from upmovies.llm.types import CallLog, Completer, Prompt
-from upmovies.news.catalog_events import CATALOG_EVENT_TYPES, ONCE_PER_FILM_EVENT_TYPES
+from upmovies.news.catalog_events import (
+    CATALOG_EVENT_TYPES,
+    CREDIT_EVENT_TYPES,
+    ONCE_PER_FILM_EVENT_TYPES,
+)
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.news.source_quality import (
     best_tier,
@@ -27,6 +30,7 @@ from upmovies.news.source_quality import (
     effective_tier,
     get_source_domains,
 )
+from upmovies.news.subject_key import normalize_name, recorded_subject_names
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +49,13 @@ _VALID_TYPES = {
     "first_look",
     "other",
 }
-_STALE_EVENT_TYPES = {"announced", "casting", "production_start", "production_wrap"}
+_STALE_EVENT_TYPES = {
+    "announced",
+    "casting",
+    "crew_attached",
+    "production_start",
+    "production_wrap",
+}
 _SINGULAR_BEAT_TYPES = {"trailer", "first_look"}
 _WRAPPED_STATUSES = {"Post Production", "Released"}
 
@@ -69,14 +79,6 @@ def is_stale_stage(
     if film_status in _WRAPPED_STATUSES:
         return True
     return release_date is not None and release_date < as_of_date
-
-
-def _normalize_name(name: str) -> str:
-    """Deterministic casting-identity key: NFKC-fold, casefold, collapse whitespace.
-    String-based (not TMDB-person-id) — imperfect on aliases/typos, but stable and
-    dependency-free, which fits breaking-cast news where TMDB credits lag."""
-    folded = unicodedata.normalize("NFKC", name).casefold().strip()
-    return " ".join(folded.split())
 
 
 _SUMMARY_MAX = 500
@@ -404,34 +406,13 @@ async def _load_events_in_order(session: AsyncSession, event_ids: list[UUID]) ->
     return [by_id[eid] for eid in event_ids if eid in by_id]
 
 
-async def _recorded_cast_names(session: AsyncSession, film_id: UUID) -> set[str]:
-    """All normalized performer names already represented by this film's casting events
-    (dedicated query — not limited to the attach-window candidate set)."""
-    rows = (
-        (
-            await session.execute(
-                select(Event.subject_key).where(
-                    Event.film_id == film_id,
-                    Event.event_type == "casting",
-                    Event.subject_key.isnot(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    names: set[str] = set()
-    for key in rows:
-        names.update(key or [])
-    return names
-
-
 async def _catalog_dedup_target(
     session: AsyncSession,
     *,
     film_id: UUID,
     event_type: str,
     changed_at: datetime | None,
+    names: list[str],
     release_change_window_days: int,
 ) -> Event | None:
     """The catalog-sourced event this group would duplicate, if there is one (ADR-0014).
@@ -452,6 +433,11 @@ async def _catalog_dedup_target(
       catalog event of that type is the target however old it is. Bounding this by a window
       would mean a trade story running a month behind TMDB's status flip opens a second card
       for the same milestone.
+    - `casting` — matched on *who* rather than on when: the catalog credit event naming any
+      of the performers this group names. `crew_attached` events are searched too, because
+      the LLM has no such type in its vocabulary — a story about a director attaching comes
+      back classified `casting`, and the card it belongs on is the one TMDB's own credit
+      change raised.
 
     Scoped to `provenance='catalog'`: two *story*-triggered events of one type on one film is
     pre-existing behaviour, governed by the LLM's own attach decision, and not this rule's to
@@ -460,16 +446,20 @@ async def _catalog_dedup_target(
     """
     if event_type not in CATALOG_EVENT_TYPES:
         return None
-    stmt = select(Event).where(
-        Event.film_id == film_id,
-        Event.event_type == event_type,
-        Event.provenance == "catalog",
-    )
-    if event_type not in ONCE_PER_FILM_EVENT_TYPES:
-        if changed_at is None:
+    stmt = select(Event).where(Event.film_id == film_id, Event.provenance == "catalog")
+    if event_type in CREDIT_EVENT_TYPES:
+        if not names:
             return None
-        window = timedelta(days=release_change_window_days)
-        stmt = stmt.where(Event.occurred_at.between(changed_at - window, changed_at + window))
+        stmt = stmt.where(
+            Event.event_type.in_(CREDIT_EVENT_TYPES), Event.subject_key.overlap(names)
+        )
+    else:
+        stmt = stmt.where(Event.event_type == event_type)
+        if event_type not in ONCE_PER_FILM_EVENT_TYPES:
+            if changed_at is None:
+                return None
+            window = timedelta(days=release_change_window_days)
+            stmt = stmt.where(Event.occurred_at.between(changed_at - window, changed_at + window))
     stmt = stmt.order_by(Event.occurred_at.desc(), Event.id.desc()).limit(1)
     return (await session.execute(stmt)).scalars().first()
 
@@ -568,7 +558,12 @@ async def apply_cluster_decisions(
             prev = dedup_targets.get(ev.event_type)
             if prev is None or ev.occurred_at > prev.occurred_at:
                 dedup_targets[ev.event_type] = ev
-    recorded_cast = await _recorded_cast_names(session, plan.film_id)
+    # Casting events only: the "already carded" reject below is about a beat the trades
+    # already ran, and a `crew_attached` card is a different beat. A story that *does* name
+    # someone a catalog credit event carded joins that card instead — see the target lookup.
+    recorded_cast = await recorded_subject_names(
+        session, film_id=plan.film_id, event_types=("casting",)
+    )
     assigned: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
@@ -652,20 +647,16 @@ async def apply_cluster_decisions(
                 )
                 continue
             new_cast: list[str] | None = None
+            cast_names: list[str] = []
             if etype == "casting":
-                names = list(
+                cast_names = list(
                     dict.fromkeys(
-                        _normalize_name(c)
+                        normalize_name(c)
                         for c in (group.cast or [])
-                        if isinstance(c, str) and _normalize_name(c)
+                        if isinstance(c, str) and normalize_name(c)
                     )
                 )
-                new_cast = [n for n in names if n not in recorded_cast]
-                if not new_cast:
-                    stories_rejected += _reject_group(
-                        group_sids, llm=llm_intent, event_type=etype, note="casting-recorded"
-                    )
-                    continue
+                new_cast = [n for n in cast_names if n not in recorded_cast]
             changed_at: datetime | None = None
             if etype == "release_date":
                 # NEU-718: a release_date event may form only when TMDB's own primary
@@ -711,22 +702,43 @@ async def apply_cluster_decisions(
                     )
                     continue
             target = dedup_targets.get(etype) if etype in _SINGULAR_BEAT_TYPES else None
-            if target is not None:
-                event = target
-                event.updated_at = now
-                outcome = "dedup_attach"
-            elif (
-                catalog_target := await _catalog_dedup_target(
+            catalog_target = (
+                None
+                if target is not None
+                else await _catalog_dedup_target(
                     session,
                     film_id=plan.film_id,
                     event_type=etype,
                     changed_at=changed_at,
+                    names=cast_names,
                     release_change_window_days=release_change_window_days,
                 )
-            ) is not None:
+            )
+            if etype == "casting" and not new_cast and catalog_target is None:
+                # Every performer named is already on one of this film's casting cards, and no
+                # catalog credit event covers them — the trades have run this beat, so the
+                # story is a restatement. Checked *after* the catalog lookup so that a story
+                # naming someone TMDB's credits carded first upgrades that card (ADR-0014,
+                # §5.4) instead of being dropped as a repeat of it.
+                stories_rejected += _reject_group(
+                    group_sids, llm=llm_intent, event_type=etype, note="casting-recorded"
+                )
+                continue
+            if target is not None:
+                event = target
+                event.updated_at = now
+                outcome = "dedup_attach"
+            elif catalog_target is not None:
                 event = catalog_target
                 event.updated_at = now
                 outcome = "catalog_attach"
+                if new_cast:
+                    # The card now covers performers it did not name before. Recording them
+                    # is what keeps the *next* story about one of them on this card rather
+                    # than opening a second one — the create path already does it, and an
+                    # attach that skipped it would leave the guarantee good for one story only.
+                    event.subject_key = [*(event.subject_key or []), *new_cast]
+                    recorded_cast.update(new_cast)
             else:
                 conf = downgrade_confidence(
                     conf, best_tier((_tier_for(sid) for sid in group_sids), default=unresolved_tier)

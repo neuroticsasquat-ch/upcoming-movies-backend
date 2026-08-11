@@ -25,6 +25,7 @@ from uuid import UUID
 from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.news.models import EventSummary
 from upmovies.synthesize.store import upsert_summary
 
@@ -35,7 +36,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-1"
+TEMPLATE_VERSION = "deterministic-2"
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,24 @@ class CreditAttached:
     character: str | None = None
 
 
-CatalogChange = ReleaseDateSet | ReleaseDateMoved | StatusChanged | CreditAttached
+@dataclass(frozen=True)
+class CreditsAttached:
+    """Every credit one observation of a film attached, rendered as one body (NEU-1083).
+
+    The credit history is diffed per *observation*, not per person: TMDB routinely gains a
+    whole top-billed cast between two ingests, and three cards each reading "X joins the
+    cast." is three cards about one beat. `uq_event_catalog_change` says the same thing
+    structurally — one catalog event per film, type and timestamp — so a director and a
+    writer arriving in one edit have to share a body too.
+
+    A one-credit group renders exactly what the singular change renders; there is one
+    template, not a singular and a plural pair to drift apart.
+    """
+
+    credits: tuple[CreditAttached, ...]
+
+
+CatalogChange = ReleaseDateSet | ReleaseDateMoved | StatusChanged | CreditAttached | CreditsAttached
 
 # Keyed on TMDB's `status` values. An unknown status still gets a body (see `_render_status`) —
 # TMDB may add one, and a stage that raised here would leave the event with no summary row,
@@ -97,20 +115,44 @@ def _render_status(change: StatusChanged) -> str:
     )
 
 
-def _render_credit(change: CreditAttached) -> str:
+def _join_names(names: list[str]) -> str:
+    """`A`, `A and B`, `A, B and C` — the list as a clause reads it."""
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _render_role(role: str, people: list[CreditAttached]) -> str:
     # Unlike a TMDB status, `role` is set by our own trigger sites from a fixed vocabulary — an
     # unknown one is a bug in the caller, not new data from upstream, so it raises rather than
     # falling back to a body nobody wrote.
-    match change.role:
+    names = _join_names([p.name for p in people])
+    match role:
         case "director":
-            return f"{change.name} attached to direct."
+            return f"{names} attached to direct."
         case "writer":
-            return f"{change.name} attached to write."
+            return f"{names} attached to write."
         case "cast":
-            if change.character:
-                return f"{change.name} joins the cast as {change.character}."
-            return f"{change.name} joins the cast."
-    raise ValueError(f"unknown credit role: {change.role!r}")
+            # The character is only legible when one performer is named — `film_credit_change`
+            # does not record it, so in practice only a caller that has it supplies it.
+            if len(people) == 1 and people[0].character:
+                return f"{names} joins the cast as {people[0].character}."
+            verb = "joins" if len(people) == 1 else "join"
+            return f"{names} {verb} the cast."
+    raise ValueError(f"unknown credit role: {role!r}")
+
+
+def _render_credits(change: CreditsAttached) -> str:
+    """One clause per role, strongest attachment first (`ROLE_ORDER`, spec §3.2), so a
+    director and a writer attached in the same edit read in a fixed order rather than in
+    whichever order the diff happened to emit them."""
+    by_role: dict[str, list[CreditAttached]] = {}
+    for credit in change.credits:
+        by_role.setdefault(credit.role, []).append(credit)
+    unknown = [role for role in by_role if role not in ROLE_ORDER]
+    if unknown:
+        raise ValueError(f"unknown credit role: {unknown[0]!r}")
+    return " ".join(_render_role(role, by_role[role]) for role in ROLE_ORDER if role in by_role)
 
 
 def render_summary(change: CatalogChange) -> str:
@@ -123,7 +165,9 @@ def render_summary(change: CatalogChange) -> str:
         case StatusChanged():
             return _render_status(change)
         case CreditAttached():
-            return _render_credit(change)
+            return _render_credits(CreditsAttached(credits=(change,)))
+        case CreditsAttached():
+            return _render_credits(change)
 
 
 async def write_deterministic_summary(

@@ -6,6 +6,7 @@ from upmovies.synthesize.deterministic import (
     DETERMINISTIC_MODEL,
     TEMPLATE_VERSION,
     CreditAttached,
+    CreditsAttached,
     ReleaseDateMoved,
     ReleaseDateSet,
     StatusChanged,
@@ -91,3 +92,53 @@ def test_sentinel_model_is_not_a_real_model_id():
     ledger must not carry rows for a call that was never made (ADR-0014)."""
     assert DETERMINISTIC_MODEL == "deterministic"
     assert TEMPLATE_VERSION.startswith("deterministic-")
+
+
+def test_several_cast_attached_in_one_observation_read_as_one_beat():
+    """Three performers added between two ingests is one beat, not three cards — so the
+    body has to name all of them (NEU-1083)."""
+    assert render_summary(
+        CreditsAttached(
+            credits=(
+                CreditAttached(role="cast", name="Timothée Chalamet"),
+                CreditAttached(role="cast", name="Zendaya"),
+                CreditAttached(role="cast", name="Rebecca Ferguson"),
+            )
+        )
+    ) == ("Timothée Chalamet, Zendaya and Rebecca Ferguson join the cast.")
+
+
+def test_two_people_in_one_role_share_a_clause():
+    assert render_summary(
+        CreditsAttached(
+            credits=(
+                CreditAttached(role="writer", name="Jon Spaihts"),
+                CreditAttached(role="writer", name="Eric Roth"),
+            )
+        )
+    ) == ("Jon Spaihts and Eric Roth attached to write.")
+
+
+def test_roles_render_one_clause_each_in_seed_grade_order():
+    """A director and a writer arriving in one edit is a single `crew_attached` event —
+    `uq_event_catalog_change` allows only one catalog event per film per timestamp — so both
+    have to fit in one body, strongest attachment first."""
+    assert render_summary(
+        CreditsAttached(
+            credits=(
+                CreditAttached(role="writer", name="Jon Spaihts"),
+                CreditAttached(role="director", name="Denis Villeneuve"),
+            )
+        )
+    ) == ("Denis Villeneuve attached to direct. Jon Spaihts attached to write.")
+
+
+def test_one_credit_renders_exactly_as_the_singular_change():
+    change = CreditAttached(role="cast", name="Zendaya", character="Chani")
+
+    assert render_summary(CreditsAttached(credits=(change,))) == render_summary(change)
+
+
+def test_unknown_role_is_rejected_in_a_group_too():
+    with pytest.raises(ValueError, match="producer"):
+        render_summary(CreditsAttached(credits=(CreditAttached(role="producer", name="M P"),)))

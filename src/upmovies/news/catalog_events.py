@@ -24,6 +24,24 @@ STATUS_EVENT_TYPES: dict[str, str] = {
 # this film already have one" — no window, no timestamp comparison, on either side.
 ONCE_PER_FILM_EVENT_TYPES = frozenset(STATUS_EVENT_TYPES.values())
 
-# Every event type a catalog change can raise. `release_date` is the odd one out: a film's date
-# may move repeatedly, so it is the only type matched on *when* rather than on existence.
-CATALOG_EVENT_TYPES = ONCE_PER_FILM_EVENT_TYPES | {"release_date"}
+# The event type each seed-grade credit role cards as (spec §5.2). Director and writer share
+# one type: they are one beat, and TMDB commonly gains both in a single edit — which
+# `uq_event_catalog_change` would refuse as two catalog events at one timestamp anyway.
+# `casting` is an existing type; `crew_attached` is new with the credit half, and has to be
+# registered wherever the vocabulary is enumerated (`public.arc._EVENT_STAGE`,
+# `link.cluster._STALE_EVENT_TYPES`, `ck_event_type`) or it ranks below everything.
+CREDIT_ROLE_EVENT_TYPES: dict[str, str] = {
+    "director": "crew_attached",
+    "writer": "crew_attached",
+    "cast": "casting",
+}
+
+# The event types a credit attachment can raise. Matched neither on existence nor on a window
+# but on *who* — `Event.subject_key` — because a film gains cast repeatedly and the question
+# is always "is this person already carded", never "is this film already carded".
+CREDIT_EVENT_TYPES = frozenset(CREDIT_ROLE_EVENT_TYPES.values())
+
+# Every event type a catalog change can raise. `release_date` is the odd one out among the
+# field-change types: a film's date may move repeatedly, so it is the only one of those
+# matched on *when* rather than on existence.
+CATALOG_EVENT_TYPES = ONCE_PER_FILM_EVENT_TYPES | {"release_date"} | CREDIT_EVENT_TYPES
