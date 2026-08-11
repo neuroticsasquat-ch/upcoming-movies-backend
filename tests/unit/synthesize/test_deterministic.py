@@ -66,8 +66,8 @@ def test_a_one_market_group_renders_as_the_single_change_does():
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
-        ("In Production", "Shooting has begun on the film."),
-        ("Post Production", "Shooting has wrapped on the film."),
+        ("In Production", "Shooting has started."),
+        ("Post Production", "Shooting has wrapped."),
         ("Released", "The film has been released."),
         ("Canceled", "The film has been canceled."),
         ("Planned", "The film is now listed as planned."),
