@@ -71,18 +71,23 @@ class Settings(BaseSettings):
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
     # How many distinct seed people must reach an undated film before it may be admitted
     # (§4.1). One director attachment is the earliest and most valuable signal the product
-    # sells; it is also exactly what a speculative TMDB entry looks like, and §4.2 leaves
-    # that tension open on purpose, for the M4 tuning ticket to settle against the probe's
-    # distribution.
+    # sells; it is also exactly what a speculative TMDB entry looks like, and §4.2 left that
+    # tension open for measurement rather than taste.
     #
-    # So the placeholder is 1 — the identity value, which leaves the bar at the two clauses
-    # §4.1 states unconditionally (status, and a seed-grade role on the candidate film).
-    # Deliberately not 2: the flags ship closed and the directors tranche opens *before*
-    # tuning (§7.4), so whatever stands here is the value that first flip actually runs at.
-    # At 2 that flip would admit only films a second tracked person also reaches — a
-    # different, better-connected population than "a director we follow just attached" —
-    # and it would move the ramp and the bar together, which is precisely what §7.4 splits
-    # them up to avoid. Guessing strict is still guessing.
+    # **Measured 2026-08-11 (NEU-1087); 1 is no longer a placeholder.** The probe ran against
+    # a snapshot taken minutes before the directors tranche opened — the pre-expansion
+    # distribution, which cannot be retaken — and found 639 director-reached candidates of
+    # 3,250. Raising the bar to 2 cuts that by 60% while the `Rumored` share, the only
+    # available signature of a speculative entry, does not move: 19.4% -> 19.6%. Of the 384
+    # films it would drop, 19.3% are `Rumored`, indistinguishable from the base rate — so 2
+    # does not select against vaporware, it selects against being early, which is the signal
+    # the product sells. It would also discard 113 films already `In Production` or `Post
+    # Production` to remove 74 `Rumored` ones. Only at 3 does the `Rumored` share fall, on a
+    # tranche of 87. Full table in spec §4.3.
+    #
+    # Ground truth is still owed: "was it real" properly means what fraction later went
+    # dormant, and nothing can go dormant until 2027 at the current N (NEU-1118). Status is
+    # a proxy. If that figure ever contradicts this, it wins.
     sweep_corroboration_threshold: int = Field(
         default=1, ge=1, alias="SWEEP_CORROBORATION_THRESHOLD"
     )
