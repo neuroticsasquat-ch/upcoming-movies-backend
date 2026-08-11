@@ -644,7 +644,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
     assert row.status == "succeeded"
     assert row.error is None
     assert row.detail is not None
-    assert "enumerate: 7 seeds, 4 candidates" in row.detail
+    assert "enumerate: 7 seeds (0 missing), 4 candidates" in row.detail
     assert "refresh: 5/5 refreshed" in row.detail
     assert "events: 3 carded from 9 changes" in row.detail
     assert "credits: 2 carded from 4 attachments" in row.detail

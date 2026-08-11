@@ -21,7 +21,7 @@ from datetime import date
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film, FilmCredit
+from upmovies.catalog.models import Film, FilmCredit, Person
 from upmovies.catalog.queries import active_film_clause
 from upmovies.catalog.seed_grade import (
     DIRECTOR_JOB,
@@ -70,6 +70,12 @@ async def load_seed_person_ids(
     compounding without bound as admitted films contribute their own credits back: a film
     that goes nowhere goes quiet, its credits drop out of this query, and the sweep
     contracts (§3.3).
+
+    People TMDB has deleted are excluded too (`person.tmdb_missing_at`). Their credit rows are
+    ours and outlive the person record upstream, so without this the sweep re-requests a dead
+    filmography every run forever — about fifty of them today. The join is an outer one because
+    the seed set is defined by `film_credit`: a credit whose person row we never wrote is still
+    a seed, and must not be silently dropped by the exclusion (NEU-1124).
     """
     seed_grade = or_(
         and_(FilmCredit.credit_type == "crew", FilmCredit.job == DIRECTOR_JOB),
@@ -83,8 +89,10 @@ async def load_seed_person_ids(
     stmt = (
         select(FilmCredit.person_id)
         .join(Film, Film.id == FilmCredit.film_id)
+        .outerjoin(Person, Person.id == FilmCredit.person_id)
         .where(
             seed_grade,
+            Person.tmdb_missing_at.is_(None),
             active_film_clause(
                 today=today,
                 excluded_statuses=excluded_statuses,

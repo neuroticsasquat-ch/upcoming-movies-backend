@@ -319,6 +319,26 @@ chain is what puts that card in front of `link` rather than behind it. The two c
 different tables and fail independently, so they count separately on `/admin/runs`.
 _Avoid_: crawl, scan, discovery run (that's the enumerate phase alone), Path B job.
 
+**Missing** (of a film or a person):
+TMDB answers 404 for its id — the entry has been deleted or merged upstream. Deliberately not a
+*failure*: a failure is a reason to worry about TMDB and counts toward the sweep's
+consecutive-failure abort, whereas missing is terminal and counts toward nothing, because no
+retry brings a deleted record back. Conflating the two is what aborted the 2026-08-11 sweep —
+eleven missing films, sorted to the head of a stalest-first queue, read as an outage. The two
+are counted separately on `/admin/runs` for the same reason: a climbing *missing* count is
+catalog hygiene, a climbing *failed* count is an incident.
+_Avoid_: deleted, dead, gone, orphaned (that's an `ingest_run` left `running`).
+
+**Tombstone**:
+The `tmdb_missing_at` stamp that records a film or person as **missing**, and takes it off the
+work the sweep does every pass. Not a deletion and not a retirement: a tombstoned film keeps its
+page, its events and its linked stories — films are never deleted (spec §4.4) — and a tombstone
+is only ever a statement about *TMDB's* record, never about the production. Never a one-way
+door, on the same argument §4.5 makes about dormancy: a film's tombstone expires onto the
+reduced `SWEEP_DORMANT_REFRESH_DAYS` cadence so a restored entry can be found again, and a
+person's is cleared by the ordinary person upsert the next time any film names them.
+_Avoid_: soft delete, archive, blacklist, dead flag.
+
 **Seed person**:
 Someone whose credits the sweep enumerates: anyone holding a **seed-grade** credit — director,
 writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film. 7,519

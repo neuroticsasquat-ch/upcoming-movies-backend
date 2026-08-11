@@ -47,8 +47,8 @@ from upmovies.catalog.queries import dormant_film_clause, in_play_clause
 from upmovies.ingest.runs import last_finished_run_started_at, record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
-from upmovies.ingest.tmdb.client import TMDBClient
-from upmovies.ingest.tmdb.upsert import upsert_film
+from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
+from upmovies.ingest.tmdb.upsert import mark_film_missing, upsert_film
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,10 @@ class RefreshResult:
     """How many of `selected` came in on the reduced cadence rather than the discover
     watermark — the number that says the dormant carve-out is actually running."""
     refreshed: int = 0
+    missing: int = 0
+    """Films TMDB answered 404 for, and this pass tombstoned. Reported apart from `failures`
+    because they are the opposite kind of event: a failure is a reason to worry about TMDB, a
+    missing film is a reason to stop asking about it."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -85,9 +89,22 @@ def refresh_set_clause(
 ) -> ColumnElement[bool]:
     """WHERE predicate selecting the films this pass owes a re-fetch.
 
-    In play (neither released nor called off), and then one of two cadences: a film discover
-    can still reach is due when its `updated_at` predates `discover_watermark`; a dormant one
-    is due when it predates `dormant_refresh_days` ago.
+    In play (neither released nor called off), and then one of *three* cadences. A live film
+    discover can still reach is due when its `updated_at` predates `discover_watermark`; a live
+    dormant one is due when it predates `dormant_refresh_days` ago; and a film tombstoned as
+    missing from TMDB is due when its **tombstone** predates `dormant_refresh_days` ago.
+
+    The third cadence is what makes a 404 cost one request per `dormant_refresh_days` rather
+    than one per pass forever. Without a tombstone at all, a deleted id is not merely retried,
+    it is retried *first* — the order below is stalest-first, and a film that cannot be fetched
+    never has its `updated_at` bumped, so it holds the head of the queue permanently (NEU-1124).
+
+    Note the tombstoned branch is keyed on `tmdb_missing_at` alone, ignoring `updated_at`
+    entirely: a missing film's `updated_at` is frozen at its last successful read and would put
+    it at the head of the queue on every pass, which is the behaviour being fixed. And it is a
+    reduced cadence rather than a permanent exclusion for the reason §4.5 gives about dormancy —
+    detecting that TMDB restored an entry requires asking TMDB about it, so suppressing the only
+    reader would make the tombstone a one-way door.
 
     A `discover_watermark` of None means no `tmdb` run has ever finished, so nothing can be
     assumed refreshed and every non-dormant film in play is due. Dormant films keep their own
@@ -102,8 +119,14 @@ def refresh_set_clause(
     return and_(
         in_play_clause(today=today, excluded_statuses=excluded_statuses),
         or_(
-            and_(not_(dormant), discover_due),
-            and_(dormant, Film.updated_at < dormant_due_before),
+            and_(
+                Film.tmdb_missing_at.is_(None),
+                or_(
+                    and_(not_(dormant), discover_due),
+                    and_(dormant, Film.updated_at < dormant_due_before),
+                ),
+            ),
+            Film.tmdb_missing_at < dormant_due_before,
         ),
     )
 
@@ -182,7 +205,12 @@ async def run_sweep_refresh(
         heartbeat=heartbeat,
         log_every=log_every,
     )
-    log.info("refresh: %d refreshed, %d failed", result.refreshed, result.failures)
+    log.info(
+        "refresh: %d refreshed, %d missing, %d failed",
+        result.refreshed,
+        result.missing,
+        result.failures,
+    )
     return result
 
 
@@ -215,6 +243,23 @@ async def _refresh_films(
             guard.succeeded()
             if i % log_every == 0:
                 log.info("refresh: %d/%d films", i, len(targets))
+            continue
+        except TMDBNotFound:
+            # Terminal, not an outage — so it is tombstoned rather than retried, and it does
+            # not touch `guard` in *either* direction. Not `failed()`, because a permanent
+            # deletion is not evidence TMDB is down: eleven of them at the head of this queue
+            # is what aborted the 2026-08-11 sweep. Not `succeeded()` either, because a 404
+            # interleaved with real failures is no evidence TMDB has recovered, and resetting
+            # the streak on one would blunt the outage abort this guard exists for.
+            async with owned_session(session_factory) as s:
+                await mark_film_missing(s, target.tmdb_id)
+                # Counted as processed, like any other item the pass disposed of for good —
+                # the same call the zero-candidate rejection makes for a story it rejects
+                # without a model call (CONTEXT.md, ADR-0009).
+                await record_progress(s, run_id, processed_delta=1)
+                await s.commit()
+            result.missing += 1
+            log.info("refresh: film %d is gone from TMDB (404); tombstoned", target.tmdb_id)
             continue
         except httpx.HTTPError as e:
             log.warning("refreshing film %d failed: %s", target.tmdb_id, e)

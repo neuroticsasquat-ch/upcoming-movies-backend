@@ -8,6 +8,11 @@ for the same reason: they are where that cost finally shows up as a number, and 
 independently — a reader that stopped carding credits is invisible next to a healthy
 field-change count.
 
+Both phases report **missing** (TMDB 404) apart from **failed**, because conflating them is
+what hid the 2026-08-11 wedge: fifty dead person ids reported as "50 failed" read as a flaky
+TMDB, and eleven dead film ids were what actually aborted the run (NEU-1124). A missing count
+that climbs is a catalog-hygiene signal; a failed count that climbs is an outage.
+
 The enumerate clause reports admissions against skips *by reason*, in the `tmdb` stage's
 shared `format_skip_detail` form: while the ramp is in progress the operating question is
 what the open tranche let in and what stopped the rest, and a bare total leaves "the tranche
@@ -32,13 +37,15 @@ def sweep_detail(
 ) -> str:
     """One line reporting all five phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
-        f"enumerate: {enumerated.seed_people} seeds, "
+        f"enumerate: {enumerated.seed_people} seeds "
+        f"({enumerated.person_missing} missing), "
         f"{enumerated.candidates_found} candidates, "
         f"{enumerated.admitted} admitted, "
         f"{format_skip_detail(enumerated.skip_counts)}, "
         f"{enumerated.person_failures + enumerated.candidate_failures} failed",
         f"refresh: {refreshed.refreshed}/{refreshed.selected} refreshed "
-        f"({refreshed.dormant_selected} dormant), {refreshed.failures} failed",
+        f"({refreshed.dormant_selected} dormant), {refreshed.missing} missing, "
+        f"{refreshed.failures} failed",
         f"events: {carded.events_created} carded from {carded.changes_read} changes, "
         f"{carded.skipped} already carded, {carded.failures} failed",
         f"credits: {attached.events_created} carded from "

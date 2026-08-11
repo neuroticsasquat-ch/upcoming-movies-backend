@@ -54,6 +54,7 @@ from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm import Gateway, validate_stage_configuration
+from upmovies.logging_config import configure_logging
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -408,12 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "daily"
     settings = get_settings()
-    logging.basicConfig(
-        level=settings.log_level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-        force=True,
-    )
+    configure_logging(settings.log_level)
     # The same guard the app's lifespan runs, for the process that actually pays for the
     # failure: a scheduled task is a separate `python -m upmovies.pipeline_run` invocation,
     # so the app having booted proves nothing about the env this one was handed (CLAUDE.md's

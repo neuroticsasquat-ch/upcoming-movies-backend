@@ -1,4 +1,3 @@
-import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,6 +13,7 @@ from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.runs import mark_stale_runs_cancelled
 from upmovies.llm import validate_stage_configuration
+from upmovies.logging_config import configure_logging
 from upmovies.routers import (
     admin_runs,
     auth,
@@ -33,15 +33,6 @@ if dsn := os.environ.get("SENTRY_DSN"):
         traces_sample_rate=0.1,
         environment=os.environ.get("ENVIRONMENT", "development"),
         release=os.environ.get("GIT_SHA", "unknown"),
-    )
-
-
-def _configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-        force=True,
     )
 
 
@@ -68,7 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    _configure_logging(settings.log_level)
+    configure_logging(settings.log_level)
     app = FastAPI(title="upmovies-backend", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,

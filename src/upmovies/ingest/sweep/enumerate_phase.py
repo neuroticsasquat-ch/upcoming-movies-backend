@@ -37,9 +37,9 @@ from upmovies.ingest.sweep.seeds import (
     seed_attachments,
     tally_attachments,
 )
-from upmovies.ingest.tmdb.client import TMDBClient
+from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
 from upmovies.ingest.tmdb.filters import classify_skip
-from upmovies.ingest.tmdb.upsert import upsert_film
+from upmovies.ingest.tmdb.upsert import mark_person_missing, upsert_film
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ class EnumerateResult:
 
     seed_people: int = 0
     person_failures: int = 0
+    person_missing: int = 0
+    """Seed people TMDB answered 404 for, and this pass tombstoned. Not a failure — the person
+    record is simply gone — and tombstoning is what stops the ~50 of them per run being
+    re-requested on every later run for as long as their credit rows survive them (NEU-1124)."""
     candidates_found: int = 0
     """Distinct undated films the seed set reached, before any of the filters below."""
     skipped_already_known: int = 0
@@ -64,6 +68,9 @@ class EnumerateResult:
     skipped_below_corroboration: int = 0
     """Reached by fewer than `corroboration_threshold` distinct seed people — the vaporware
     filter (§4.2), and the one skip reason a config change alone can undo."""
+    skipped_missing: int = 0
+    """Candidates TMDB answered 404 for between the credits read and the details fetch. No
+    tombstone is written: the film was never admitted, so there is no catalog row to mark."""
     candidate_failures: int = 0
     admitted: int = 0
     withheld: int = 0
@@ -91,6 +98,7 @@ class EnumerateResult:
                 "dated": self.skipped_dated_on_details,
                 "status": self.skipped_excluded_status,
                 "corroboration": self.skipped_below_corroboration,
+                "missing": self.skipped_missing,
                 "no_tranche": self.withheld,
             }
         )
@@ -127,6 +135,7 @@ async def run_sweep_enumerate(
     log.info("enumerate: %d seed people, %d known films", len(seed_ids), len(known_tmdb_ids))
 
     attachments = await _collect_attachments(
+        session_factory=session_factory,
         client=client,
         seed_ids=seed_ids,
         result=result,
@@ -164,6 +173,7 @@ async def run_sweep_enumerate(
 
 async def _collect_attachments(
     *,
+    session_factory: SessionFactory,
     client: TMDBClient,
     seed_ids: list[int],
     result: EnumerateResult,
@@ -182,6 +192,16 @@ async def _collect_attachments(
             guard.succeeded()
             if i % log_every == 0:
                 log.info("enumerate: %d/%d seed people", i, len(seed_ids))
+            continue
+        except TMDBNotFound:
+            # Terminal, so it neither counts against the guard nor resets it — see the same
+            # branch in `refresh_phase._refresh_films` for why both halves matter. Scattered
+            # across ~7,700 people these have never yet tripped the abort, but that is luck
+            # about their ordering, not a property of the code (NEU-1124).
+            async with owned_session(session_factory) as s:
+                await mark_person_missing(s, person_id)
+                await s.commit()
+            result.person_missing += 1
             continue
         except httpx.HTTPError as e:
             log.warning("credits for person %d failed: %s", person_id, e)
@@ -257,6 +277,11 @@ async def _judge_candidates(
             if i % log_every == 0:
                 log.info("enumerate: %d/%d candidates judged", i, len(candidates))
             continue
+        except TMDBNotFound:
+            # Deleted between the credits read and this fetch. A skip, not a failure, and it
+            # leaves the guard untouched for the same reasons as the other two 404 branches.
+            result.skipped_missing += 1
+            continue
         except httpx.HTTPError as e:
             log.warning("judging film %d failed: %s", tally.tmdb_id, e)
         except Exception:
@@ -279,12 +304,13 @@ def _abort(result: EnumerateResult, error: str) -> None:
 
 def _log_outcome(result: EnumerateResult, tranches: AdmissionTranches) -> None:
     log.info(
-        "enumerate: %d admitted, %s (%s), %d person failures, %d candidate failures, "
-        "attachments %s",
+        "enumerate: %d admitted, %s (%s), %d person failures, %d people missing, "
+        "%d candidate failures, attachments %s",
         result.admitted,
         format_skip_detail(result.skip_counts),
         tranches,
         result.person_failures,
+        result.person_missing,
         result.candidate_failures,
         dict(sorted(result.attachment_histogram.items())),
     )
