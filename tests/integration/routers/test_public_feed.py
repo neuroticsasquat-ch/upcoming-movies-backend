@@ -214,3 +214,34 @@ async def test_feed_quiets_non_primary_country_release_date(client, make_film, a
     summaries = {i["summary"] for i in r.json()["items"]}
     assert "US date set." in summaries
     assert "Dated in India." not in summaries
+
+
+async def test_feed_renders_a_catalog_sourced_event_with_no_outlets(client, make_film, add_event):
+    """ADR-0014: a catalog event has a deterministic summary and no stories. It must still card
+    on the feed — an empty `sources` array is a designed state the frontend attributes to TMDB,
+    not a degenerate one, and `provenance` is what tells it apart from a story-triggered event."""
+    film = await make_film(slug="undated-film", title="An Undated Film")
+    await add_event(
+        film=film,
+        event_type="release_date",
+        confidence="rumored",
+        summary="Release date set to 14 August 2026.",
+        provenance="catalog",
+        summary_model="deterministic",
+    )
+
+    r = await client.get("/feed")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert items[0]["summary"] == "Release date set to 14 August 2026."
+    assert items[0]["provenance"] == "catalog"
+    assert items[0]["sources"] == []
+
+
+async def test_feed_marks_story_triggered_events_as_story_provenance(client, make_film, add_event):
+    film = await make_film(slug="reported-film", title="A Reported Film")
+    await add_event(film=film, event_type="casting", summary="Someone joined the cast.")
+
+    r = await client.get("/feed")
+    assert r.json()["items"][0]["provenance"] == "story"

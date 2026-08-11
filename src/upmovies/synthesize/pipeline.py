@@ -1,7 +1,8 @@
-"""The `synthesize` pipeline: select events with no summary yet (write-once — an existing summary
-is never reselected); summarize each via the Messages API; and upsert news.event_summary.
-Idempotent — a re-run with nothing pending is a no-op. One event's failure never rolls back
-others. Mirrors link/pipeline.py structurally."""
+"""The `synthesize` pipeline: select events needing a summary (write-once — an existing LLM
+summary is never reselected; the one exception is a superseded deterministic body, see
+`_superseded_deterministic`); summarize each via the Messages API; and upsert
+news.event_summary. Idempotent — a re-run with nothing pending is a no-op. One event's failure
+never rolls back others. Mirrors link/pipeline.py structurally."""
 
 import logging
 from collections import defaultdict
@@ -11,8 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from sqlalchemy import func, nulls_last, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import ColumnElement, and_, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
@@ -28,10 +28,11 @@ from upmovies.llm.types import CallLog, StageGateway, Usage
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.resolve import resolve_google_news_url
 from upmovies.news.visibility import visible_events
+from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL
+from upmovies.synthesize.store import upsert_summary
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
-    SummaryResult,
     summarize_event,
 )
 from upmovies.synthesize.url_resolution import Resolver, ResolveResult, run_url_resolution
@@ -61,20 +62,51 @@ async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[Async
         yield s
 
 
+def _has_a_story() -> ColumnElement[bool]:
+    """The summarizer paraphrases stories; with none attached it would be inventing prose from
+    an event type and a film title, which is exactly the fabrication risk ADR-0014 rejected an
+    LLM body over for catalog-sourced events. Story-triggered events always satisfy this — it
+    exists for the story-less ones catalog events introduced."""
+    return select(1).where(EventStory.event_id == Event.id).exists()
+
+
+def _superseded_deterministic() -> ColumnElement[bool]:
+    """The one exception to write-once: a catalog-sourced event whose deterministic body has
+    since acquired stories (ADR-0014 §Presentation). Selecting it lets the real summarizer
+    replace the template in place — `EventSummary` is keyed on the event, so the card upgrades
+    with no special path.
+
+    Both guards are load-bearing: `model` is the sentinel, so an LLM summary is still
+    write-once; `edited_at` is NULL, so an admin's wording is not silently overwritten and the
+    reset action remains the only way back to a machine summary. (The story that does the
+    superseding is required of every selected event by `_has_a_story`.)"""
+    return and_(
+        EventSummary.model == DETERMINISTIC_MODEL,
+        EventSummary.edited_at.is_(None),
+    )
+
+
 async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
-    """User-facing events with no summary row yet — write-once: an event whose summary already
-    exists is never reselected, even if the event was later updated or the prompt version has
-    moved on. Hidden types are skipped outright (NEU-969): summarizing an event the public API
+    """User-facing events with at least one story to summarize (`_has_a_story`) that need one:
+    those with no summary row yet, plus catalog-sourced events whose deterministic body is now
+    superseded by attached stories (`_superseded_deterministic`). Otherwise write-once — an
+    event whose LLM summary already exists is never reselected, even if the event was later
+    updated or the prompt version has moved on. Hidden types are skipped outright (NEU-969):
+    summarizing an event the public API
     filters out spends tokens on text nobody reads, and `event_type` is immutable once set, so
     a skipped event can never later become visible and need the summary it was denied.
     Returns each mapped to an EventInput (plain dataclasses — safe to use after the session
-    closes), with is_new = no prior summary existed (always True here)."""
+    closes), with is_new = no prior summary existed."""
     rows = (
         await session.execute(
             select(Event, Film.title, EventSummary.event_id)
             .join(Film, Film.id == Event.film_id)
             .outerjoin(EventSummary, EventSummary.event_id == Event.id)
-            .where(EventSummary.event_id.is_(None), visible_events())
+            .where(
+                or_(EventSummary.event_id.is_(None), _superseded_deterministic()),
+                _has_a_story(),
+                visible_events(),
+            )
         )
     ).all()
     if not rows:
@@ -119,29 +151,6 @@ async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
     return pending
 
 
-async def _upsert_summary(session: AsyncSession, event_id: UUID, result: SummaryResult) -> None:
-    """Insert or update the one summary row for an event (PK event_id). Refreshes generated_at
-    on update. Caller owns the commit."""
-    stmt = pg_insert(EventSummary).values(
-        event_id=event_id,
-        summary=result.summary,
-        model=result.model,
-        prompt_version=result.prompt_version,
-        source_updated_at=result.source_updated_at,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["event_id"],
-        set_={
-            "summary": result.summary,
-            "model": result.model,
-            "prompt_version": result.prompt_version,
-            "source_updated_at": result.source_updated_at,
-            "generated_at": func.now(),
-        },
-    )
-    await session.execute(stmt)
-
-
 async def _summary_stage_sequential(
     *,
     session_factory: SessionFactory,
@@ -172,7 +181,14 @@ async def _summary_stage_sequential(
                 calls=calls,
             )
             async with _owned_session(session_factory) as s:
-                await _upsert_summary(s, pe.event_id, result)
+                await upsert_summary(
+                    s,
+                    event_id=pe.event_id,
+                    summary=result.summary,
+                    model=result.model,
+                    prompt_version=result.prompt_version,
+                    source_updated_at=result.source_updated_at,
+                )
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
             if pe.is_new:
