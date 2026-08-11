@@ -280,6 +280,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             created_at=event.created_at,
             summary=summary,
             summary_edited=edited_at is not None,
+            provenance=event.provenance,
             sources=[
                 SourceOut(
                     url=source_url(story),
@@ -511,6 +512,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
                 occurred_at=event.occurred_at,
                 created_at=event.created_at,
                 summary=summary,
+                provenance=event.provenance,
                 sources=[
                     SourceOut(
                         url=source_url(story),
