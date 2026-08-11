@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.3.0] - 2026-08-11
+
+### Features
+
+- Add the read-only undated-candidate probe ([#225](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/225))
+- **ingest:** Add the sweep ingest run kind ([#226](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/226))
+- **catalog:** Make quiescent undated films go dormant ([#228](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/228))
+- **sweep:** Add the enumerate phase behind closed admission tranches ([#229](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/229))
+- **sweep:** Add the reachability-scoped refresh phase (NEU-1078) ([#230](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/230))
+- **sweep:** Add the sweep entrypoint and its own schedule slot ([#231](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/231))
+- Add Event.provenance and the deterministic EventSummary writer (NEU-1080) ([#232](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/232))
+- **sweep:** Catalog events from film_field_change — release date and status (NEU-1081) ([#233](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/233))
+- **catalog:** Record seed-grade credit history, baselining first observation ([#234](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/234))
+- **sweep:** Catalog events from credit changes (casting, crew_attached) ([#235](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/235))
+- **public:** Carry arc_stage on the grouped feed row ([#236](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/236))
+- **sweep:** Wire the admission bar to config with a corroboration threshold ([#237](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/237))
+
+### Bug Fixes
+
+- Identify the prod database by content unique to this app ([#223](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/223))
+
+### Documentation
+
+- Record the undated-film discovery design of record (NEU-285) ([#222](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/222))
+
+### Testing
+
+- **tmdb:** Cover the remaining person_movie_credits cases ([#227](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/227))
+
+### Miscellaneous
+
+- Log cluster-stage attach decisions ([#224](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/224))
+
 ## [0.2.0] - 2026-08-08
 
 ### Features
