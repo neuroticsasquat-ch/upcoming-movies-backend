@@ -1,5 +1,7 @@
 """The one-line detail the entrypoint writes to `ingest_run.detail`."""
 
+from collections import Counter
+
 from upmovies.ingest.sweep import (
     CreditEventResult,
     EnumerateResult,
@@ -181,3 +183,35 @@ def test_names_the_release_date_phase_when_it_aborts():
     )
 
     assert "release dates aborted: aborted after 10 consecutive failures" in detail
+
+
+def test_reports_the_attachment_histogram():
+    """The distribution is only built during the sweep and only logged, and `docker exec`
+    output never reaches `docker logs` — so the one artifact the M4 tuning ticket reads the
+    threshold off (§4.3) has to land in `detail` or it is gone with the container."""
+    detail = sweep_detail(
+        EnumerateResult(
+            admitted=12, attachment_histogram=Counter({1: 8421, 2: 932, 3: 100, 5: 40})
+        ),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        ReleaseEventResult(),
+    )
+
+    assert "seed attachments: 1×8421, 2×932, 3+×140" in detail
+
+
+def test_a_pass_that_reached_no_candidates_says_nothing_about_attachments():
+    """Dropped rather than rendered as an empty group, matching how `skip_counts` drops
+    zero-valued reasons: the line is read at a glance."""
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        ReleaseEventResult(),
+    )
+
+    # The label, not the bare word: the credits clause legitimately says "from 0 attachments".
+    assert "seed attachments:" not in detail
