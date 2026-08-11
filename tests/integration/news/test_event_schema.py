@@ -116,3 +116,20 @@ async def test_event_rejects_bad_provenance(session):
     )
     with pytest.raises(IntegrityError):
         await session.commit()
+
+
+async def test_event_accepts_crew_attached(session):
+    """`ck_event_type` enumerates the vocabulary, so the new type has to be registered there
+    too or the credit phase cannot write a row at all (NEU-1083)."""
+    film, _ = await _film_and_story(session)
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="crew_attached",
+            confidence="rumored",
+            provenance="catalog",
+            occurred_at=datetime.now(UTC),
+            subject_key=["denis villeneuve"],
+        )
+    )
+    await session.commit()

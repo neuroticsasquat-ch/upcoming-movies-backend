@@ -202,12 +202,14 @@ def test_parse_bad_claimed_date_is_none():
 
 
 def test_normalize_name_folds_case_and_whitespace():
-    from upmovies.link.cluster import _normalize_name
+    # Shared with the credit phase (`news.subject_key`): both sides of the "have we already
+    # carded this person" question must fold a name the same way (ADR-0014).
+    from upmovies.news.subject_key import normalize_name
 
-    assert _normalize_name("Alain  Chabat") == "alain chabat"
-    assert _normalize_name("  Monica Barbaro ") == "monica barbaro"
-    assert _normalize_name("JOHN DOE") == "john doe"
-    assert _normalize_name("") == ""
+    assert normalize_name("Alain  Chabat") == "alain chabat"
+    assert normalize_name("  Monica Barbaro ") == "monica barbaro"
+    assert normalize_name("JOHN DOE") == "john doe"
+    assert normalize_name("") == ""
 
 
 def test_parse_reads_cast_for_casting_events():

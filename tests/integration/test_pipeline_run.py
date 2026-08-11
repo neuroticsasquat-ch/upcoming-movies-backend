@@ -14,6 +14,7 @@ from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.sweep import (
     AdmissionTranches,
+    CreditEventResult,
     EnumerateResult,
     FieldEventResult,
     RefreshResult,
@@ -479,11 +480,11 @@ def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
     assert pipeline_run.main(["daily"]) == 1
 
 
-# --- the sweep: three phases, one run row --------------------------------------
+# --- the sweep: four phases, one run row ---------------------------------------
 
 
-def _stub_phases(monkeypatch, *, enumerated=None, refreshed=None, carded=None):
-    """Replace all three sweep phases with fakes that record their kwargs and return the
+def _stub_phases(monkeypatch, *, enumerated=None, refreshed=None, carded=None, attached=None):
+    """Replace all four sweep phases with fakes that record their kwargs and return the
     given results. Returns (calls, captured) — call order and each phase's kwargs."""
     calls: list[str] = []
     captured: dict[str, dict] = {}
@@ -503,9 +504,15 @@ def _stub_phases(monkeypatch, *, enumerated=None, refreshed=None, carded=None):
         captured["events"] = kwargs
         return carded if carded is not None else FieldEventResult(changes_read=1)
 
+    async def fake_credits(**kwargs):
+        calls.append("credits")
+        captured["credits"] = kwargs
+        return attached if attached is not None else CreditEventResult(attachments_read=1)
+
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_enumerate", fake_enumerate)
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_refresh", fake_refresh)
     monkeypatch.setattr("upmovies.pipeline_run.run_field_change_events", fake_events)
+    monkeypatch.setattr("upmovies.pipeline_run.run_credit_attachment_events", fake_credits)
     return calls, captured
 
 
@@ -534,13 +541,14 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
         enumerated=EnumerateResult(seed_people=7, candidates_found=4),
         refreshed=RefreshResult(selected=5, refreshed=5),
         carded=FieldEventResult(changes_read=9, events_created=3, skipped=6),
+        attached=CreditEventResult(attachments_read=4, events_created=2, skipped=2),
     )
     run_id = await create_run(session, kind="sweep")
     await session.commit()
 
     await pipeline_run.run_sweep_stage(run_id, get_settings())
 
-    assert calls == ["enumerate", "refresh", "events"]
+    assert calls == ["enumerate", "refresh", "events", "credits"]
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
     assert row.error is None
@@ -548,6 +556,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
     assert "enumerate: 7 seeds, 4 candidates" in row.detail
     assert "refresh: 5/5 refreshed" in row.detail
     assert "events: 3 carded from 9 changes" in row.detail
+    assert "credits: 2 carded from 4 attachments" in row.detail
 
 
 async def test_sweep_stage_passes_the_sweep_settings_to_every_phase(session, monkeypatch):
@@ -576,6 +585,11 @@ async def test_sweep_stage_passes_the_sweep_settings_to_every_phase(session, mon
     assert events_kwargs["lookback_days"] == settings.sweep_event_lookback_days
     # The two paths that can card one date move share one definition of "the same move".
     assert events_kwargs["corroboration_window_days"] == settings.link_release_change_window_days
+    # The credit half reads the same rolling window, for the same reason: re-reading a carded
+    # attachment is free, and a watermark would lose what a failed sweep never got to.
+    credits_kwargs = captured["credits"]
+    assert credits_kwargs["lookback_days"] == settings.sweep_event_lookback_days
+    assert credits_kwargs["run_id"] == run_id
     # Every phase shares the run row, and all must guard against the same outage.
     assert enumerate_kwargs["run_id"] == run_id == refresh_kwargs["run_id"]
     assert events_kwargs["run_id"] == run_id
@@ -595,7 +609,7 @@ async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkey
 
     await pipeline_run.run_sweep_stage(run_id, get_settings())
 
-    assert calls == ["enumerate", "refresh", "events"]
+    assert calls == ["enumerate", "refresh", "events", "credits"]
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "aborted after 10 failures" in row.error
@@ -735,3 +749,18 @@ def test_main_runs_the_sweep_on_an_unroutable_llm_configuration(monkeypatch):
 def test_main_rejects_an_unknown_mode(capsys):
     assert pipeline_run.main(["weekly"]) == 2
     assert "sweep" in capsys.readouterr().err
+
+
+async def test_sweep_stage_fails_the_run_when_the_credit_phase_aborted(session, monkeypatch):
+    _stub_phases(
+        monkeypatch,
+        attached=CreditEventResult(aborted=True, abort_error="aborted after 10 failures"),
+    )
+    run_id = await create_run(session, kind="sweep")
+    await session.commit()
+
+    await pipeline_run.run_sweep_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "credits phase" in row.error

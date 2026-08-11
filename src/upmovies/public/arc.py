@@ -23,6 +23,10 @@ _STATUS_BASELINE: dict[str, str] = {
 _EVENT_STAGE: dict[str, str] = {
     "announced": "announced",
     "casting": "cast",
+    # A director or writer attaching is the "this is real now" beat, which is what `announced`
+    # means here. Unmapped it would fall to `most_significant_event_type`'s -1 and rank beneath
+    # every other type — a director attachment would lose to anything it shared a day with.
+    "crew_attached": "announced",
     "production_start": "shooting",
     "production_wrap": "wrapped",
     "release_date": "dated",

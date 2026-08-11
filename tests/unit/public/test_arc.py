@@ -42,3 +42,18 @@ def test_most_significant_first_look_ranks_below_arc_types():
     # first_look ranks like other (-1): loses to any arc-stage type, wins when alone.
     assert most_significant_event_type(["casting", "first_look"]) == "casting"
     assert most_significant_event_type(["first_look"]) == "first_look"
+
+
+def test_crew_attached_ranks_with_announced():
+    """Unregistered it would fall to the -1 fallback and rank beneath every arc type — a
+    director attaching would lose to anything it shared a day with (NEU-1083)."""
+    assert most_significant_event_type(["crew_attached", "other"]) == "crew_attached"
+    assert most_significant_event_type(["crew_attached", "casting"]) == "casting"
+    assert most_significant_event_type(["crew_attached"]) == "crew_attached"
+
+
+def test_crew_attached_does_not_move_the_arc_stage():
+    """`derive_arc_stage` stays status-only (NEU-452): a catalog event is not a status, any
+    more than a news event is."""
+    assert derive_arc_stage("Planned") == "announced"
+    assert derive_arc_stage("In Production") == "shooting"
