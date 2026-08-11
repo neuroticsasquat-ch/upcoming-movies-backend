@@ -8,7 +8,7 @@ from upmovies.ingest.sweep import (
 )
 
 
-def test_reports_both_phases_distinctly():
+def test_reports_every_phase_distinctly():
     """A run that enumerated fine but refreshed nothing must be visible as such on
     `/admin/runs` — the phase that silently produces nothing is the one that costs the
     whole catalog-sourced-event feature (§6.2)."""

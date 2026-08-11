@@ -202,6 +202,30 @@ async def test_a_story_event_for_the_same_move_is_not_carded_twice(
     assert len(await _events(session, film)) == 1
 
 
+async def test_a_second_genuine_move_inside_the_window_still_cards(
+    session, session_factory, run_id
+):
+    """The skip check reads the two provenances differently on purpose. A catalog card is
+    matched at exactly its change's timestamp, so a date that moves twice in one week gets
+    two cards — matching those on a window instead would swallow the second move silently."""
+    film = await add_film(session, 1, release_date=date(2026, 12, 4))
+    await _change(
+        session,
+        film,
+        field="release_date",
+        old=None,
+        new="2026-11-20",
+        changed_at=NOW - timedelta(days=4),
+    )
+    await _change(session, film, field="release_date", old="2026-11-20", new="2026-12-04")
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert result.events_created == 2
+    assert len(await _events(session, film)) == 2
+
+
 async def test_a_release_date_event_outside_the_window_does_not_suppress_the_card(
     session, session_factory, run_id
 ):

@@ -54,6 +54,13 @@ id, so cost tables are not polluted with rows that made no call. The card attrib
 **"via TMDB"** in place of outlets, and confidence is marked below a trade-sourced beat because
 TMDB is community-edited.
 
+> **Refinement — 2026-08-11 (NEU-1081).** "Below a trade-sourced beat" holds for **credits**,
+> which any editor can add. It does not hold for the primary scalar `release_date` and `status`:
+> ADR-0002 already makes TMDB the system of record for its own fields, so a change to one of
+> them is not a claim awaiting corroboration — it *is* the corroboration. Events raised from
+> `film_field_change` are therefore `confirmed`. The community-editing caveat below stands for
+> the credit half.
+
 When a trade story later clusters onto the event, the LLM summary **supersedes** the deterministic
 one and real sources appear. The card upgrades in place; `EventSummary` is keyed on the event, so
 this needs no special path.
@@ -79,6 +86,11 @@ this needs no special path.
   always recorded as a change and the unified rule already subsumed the null branch.
 - Catalog-sourced events import TMDB's editorial noise into the product. Mitigated by lower
   confidence and explicit attribution, not eliminated — a vandalised credit can card.
+- The two paths read the same `catalog.film_field_change` row, so each has to check for the
+  other's card or one date move raises two events. The catalog reader skips a change already
+  covered by a story-borne release-date event inside the corroboration window; the story path
+  attaches to the catalog event raised from the change that corroborated it. The rules are one
+  rule read from opposite ends and have to move together.
 - The credit-change history is new infrastructure, and its baseline-vs-change contract is the
   single most safety-critical part of this project.
 - The feed gains a class of card with no outlets. The frontend must handle an empty sources array

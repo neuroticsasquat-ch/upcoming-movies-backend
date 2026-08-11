@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import field_changed_at
 from upmovies.llm.types import CallLog, Completer, Prompt
+from upmovies.news.catalog_events import CATALOG_EVENT_TYPES, ONCE_PER_FILM_EVENT_TYPES
 from upmovies.news.models import Event, EventStory, Story
 from upmovies.news.source_quality import (
     best_tier,
@@ -425,17 +426,13 @@ async def _recorded_cast_names(session: AsyncSession, film_id: UUID) -> set[str]
     return names
 
 
-# The event types the sweep's field-change phase cards on its own (ADR-0014). Only these can
-# have a catalog-sourced event standing where the story path is about to create one.
-_CATALOG_CARDED_TYPES = frozenset({"release_date", "production_start", "production_wrap"})
-
-
 async def _catalog_dedup_target(
     session: AsyncSession,
     *,
     film_id: UUID,
     event_type: str,
     changed_at: datetime | None,
+    release_change_window_days: int,
 ) -> Event | None:
     """The catalog-sourced event this group would duplicate, if there is one (ADR-0014).
 
@@ -445,11 +442,12 @@ async def _catalog_dedup_target(
     the normal ordering: without this, a held story finally corroborated by change *C* would
     card *C* a second time, next to the card the sweep wrote from *C* hours earlier.
 
-    Matching is by trigger, not by recency window:
-
-    - `release_date` — the catalog event whose `occurred_at` **is** the corroborating change's
-      `changed_at`, because that is exactly what the field-change phase writes. Same row on
-      both sides of the join, so an earlier date move on the same film cannot be swallowed.
+    - `release_date` — the most recent catalog event within the corroboration window either
+      side of the corroborating change. The window, rather than an exact `occurred_at ==
+      changed_at` match, because `field_changed_at` only ever returns the film's *latest*
+      change: a date that moved twice inside `W` leaves the story corroborated by the second
+      move and the card raised from the first, and an exact match would miss it and open a
+      second card — the very outcome this exists to prevent.
     - `production_start` / `production_wrap` — a film enters production once, so the film's
       catalog event of that type is the target however old it is. Bounding this by a window
       would mean a trade story running a month behind TMDB's status flip opens a second card
@@ -457,19 +455,21 @@ async def _catalog_dedup_target(
 
     Scoped to `provenance='catalog'`: two *story*-triggered events of one type on one film is
     pre-existing behaviour, governed by the LLM's own attach decision, and not this rule's to
-    change.
+    change. The mirror is `ingest.sweep.field_events._already_carded`, which decides whether a
+    change cards at all; the two are one rule read from opposite ends and must move together.
     """
-    if event_type not in _CATALOG_CARDED_TYPES:
+    if event_type not in CATALOG_EVENT_TYPES:
         return None
     stmt = select(Event).where(
         Event.film_id == film_id,
         Event.event_type == event_type,
         Event.provenance == "catalog",
     )
-    if event_type == "release_date":
+    if event_type not in ONCE_PER_FILM_EVENT_TYPES:
         if changed_at is None:
             return None
-        stmt = stmt.where(Event.occurred_at == changed_at)
+        window = timedelta(days=release_change_window_days)
+        stmt = stmt.where(Event.occurred_at.between(changed_at - window, changed_at + window))
     stmt = stmt.order_by(Event.occurred_at.desc(), Event.id.desc()).limit(1)
     return (await session.execute(stmt)).scalars().first()
 
@@ -717,7 +717,11 @@ async def apply_cluster_decisions(
                 outcome = "dedup_attach"
             elif (
                 catalog_target := await _catalog_dedup_target(
-                    session, film_id=plan.film_id, event_type=etype, changed_at=changed_at
+                    session,
+                    film_id=plan.film_id,
+                    event_type=etype,
+                    changed_at=changed_at,
+                    release_change_window_days=release_change_window_days,
                 )
             ) is not None:
                 event = catalog_target

@@ -1999,6 +1999,41 @@ async def test_corroborated_story_attaches_to_the_catalog_event_for_that_change(
     assert link.event_id == carded.id
 
 
+async def test_story_corroborated_by_a_later_move_joins_the_card_the_earlier_one_raised(
+    session,
+):
+    """The date moved twice inside the corroboration window. `field_changed_at` returns only
+    the *latest* change, so an exact `occurred_at == changed_at` match would find nothing and
+    open a second release-date card beside the one the sweep already wrote for this film."""
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    first_move = datetime(2026, 6, 25, tzinfo=UTC)
+    _seed_release_date_change(session, film, old=None, new="2026-08-12", changed_at=first_move)
+    _seed_release_date_change(
+        session,
+        film,
+        old="2026-08-12",
+        new="2026-09-01",
+        changed_at=datetime(2026, 6, 29, tzinfo=UTC),
+    )
+    carded = await _catalog_event(session, film, event_type="release_date", occurred_at=first_move)
+    await session.flush()
+
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
 async def test_catalog_event_for_a_different_move_does_not_swallow_the_story(session):
     film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
     session.add(film)

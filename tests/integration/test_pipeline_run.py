@@ -550,7 +550,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
     assert "events: 3 carded from 9 changes" in row.detail
 
 
-async def test_sweep_stage_passes_the_sweep_settings_to_both_phases(session, monkeypatch):
+async def test_sweep_stage_passes_the_sweep_settings_to_every_phase(session, monkeypatch):
     _, captured = _stub_phases(monkeypatch)
     settings = get_settings().model_copy(
         update={

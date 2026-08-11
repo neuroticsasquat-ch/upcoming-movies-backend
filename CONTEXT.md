@@ -319,7 +319,7 @@ which is kept separate on purpose: the master is the rollback, the tranches are 
 sweep that enumerates and reports while admitting nothing is the state where all four are off.
 Admission is per **film**, not per credit — one open tranche among the grades that reached a
 candidate is enough.
-_Avoid_: phase (that's enumerate/refresh), stage, wave, cohort.
+_Avoid_: phase (that's enumerate/refresh/events), stage, wave, cohort.
 
 **Seed grade**:
 The role classes that both qualify a person as a seed *and* qualify a candidate film for
@@ -345,12 +345,14 @@ _Avoid_: synthetic event, system event, auto event, TMDB event (that's the sourc
 The failure mode where the story path and the catalog path both raise an event for one TMDB
 change. They are independent by design — a story-triggered release-date event still needs
 corroboration, a catalog-triggered one fires from the change alone — but they read the *same*
-`film_field_change` row, so each has to check for the other's card. The catalog path skips a
-change already covered by a release-date event inside the corroboration window; the story path
-attaches to the catalog event born from the very change that corroborated it, rather than
-opening a second one beside it. Production milestones are matched on type alone: a film enters
-production once, so a story running a month behind TMDB's status flip still belongs on the
-existing card.
+`film_field_change` row, so each has to check for the other's card — one rule read from opposite
+ends, which is why the two checks have to move together. For a date move both sides work off the
+**corroboration window**: the catalog path skips a change already covered by a *story*-borne
+release-date event inside it, and the story path attaches to the most recent *catalog* event
+inside it. A catalog card is matched at exactly its own change's timestamp, so a date that moves
+twice in a week still gets two cards. Production milestones are matched on type alone: a film
+enters production once, so a story running a month behind TMDB's status flip still belongs on
+the existing card.
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **First observation**:

@@ -32,13 +32,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import FilmFieldChange
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
+from upmovies.news.catalog_events import ONCE_PER_FILM_EVENT_TYPES, STATUS_EVENT_TYPES
 from upmovies.news.models import Event
 from upmovies.synthesize.deterministic import (
     CatalogChange,
@@ -53,19 +55,6 @@ log = logging.getLogger(__name__)
 # The two `catalog.film` columns in scope. Everything else the trigger records (title, runtime,
 # overview, …) is metadata drift, not a beat.
 TRACKED_FIELDS: tuple[str, ...] = ("release_date", "status")
-
-# The TMDB statuses that are a production milestone, and the event type each becomes. `Released`
-# and `Canceled` are real transitions with no event type in scope; an unrecognised status is new
-# data from upstream. Both are dropped rather than guessed at — a status this map does not name
-# is not a beat.
-STATUS_EVENT_TYPES: dict[str, str] = {
-    "In Production": "production_start",
-    "Post Production": "production_wrap",
-}
-
-# Production milestones happen once per film, so "this film already has one" is the whole
-# idempotency rule for them — no window, no timestamp comparison.
-_ONCE_PER_FILM = frozenset(STATUS_EVENT_TYPES.values())
 
 
 @dataclass(frozen=True)
@@ -173,7 +162,17 @@ async def load_change_backlog(session: AsyncSession, *, since: datetime) -> list
         .where(FilmFieldChange.field.in_(TRACKED_FIELDS), FilmFieldChange.changed_at >= since)
         .order_by(FilmFieldChange.changed_at, FilmFieldChange.id)
     )
-    return [TrackedChange(*row) for row in await session.execute(stmt)]
+    return [
+        TrackedChange(
+            id=row.id,
+            film_id=row.film_id,
+            field=row.field,
+            old_value=row.old_value,
+            new_value=row.new_value,
+            changed_at=row.changed_at,
+        )
+        for row in await session.execute(stmt)
+    ]
 
 
 async def _already_carded(
@@ -186,25 +185,42 @@ async def _already_carded(
 ) -> bool:
     """Whether this film already carries the event this change would card.
 
-    Two jobs in one query, because they are the same question. It is the **idempotency**
+    Two jobs, because a change can already be carded by either path. It is the **idempotency**
     guard — the rolling window re-reads every change for days, and the same change must never
     card twice — and it is the **anti-double-card** rule ADR-0014 owes ADR-0002: the
-    story-triggered path and this one must not both card one date move.
+    story-triggered path and this one must not both raise an event for one date move.
 
-    A `release_date` change matches any release-date event within the corroboration window
-    either side of it. That covers this phase's own event on a re-read (`occurred_at` is
-    exactly `changed_at`) *and* a story-triggered one, whose `occurred_at` is the story's
-    publication rather than the change's — which is the whole point of the window: `link` may
-    only form that event when a change lands within `W` of it, so an event inside `W` is
-    reporting this same move. The cost is that a second genuine move inside `W` does not card
-    twice; carding one move once is the behaviour worth having.
+    A production milestone matches on type alone, whatever raised it: a film enters production
+    once, so any existing `production_start` is the card this change would duplicate.
 
-    A production milestone matches on type alone — a film enters production once.
+    A `release_date` change is matched on *when*, and the two provenances are asked different
+    questions on purpose:
+
+    - **catalog**, exactly at `changed_at` — that is the timestamp this phase writes, so it is
+      this very change's own card and nothing else's. Matching those on a window instead would
+      silently swallow a second genuine date move inside `W`.
+    - **story**, anywhere within `W` either side — `link` dates that event to the story's
+      publication rather than to the change, and may only form it when a change lands within
+      `W`, so a story-borne release-date event inside the window is reporting this same move.
+
+    The mirror of this lives in `link.cluster._catalog_dedup_target`, which decides where a
+    corroborated story lands. Both must move together or one direction reopens.
     """
-    carded = exists().where(Event.film_id == film_id, Event.event_type == event_type)
-    if event_type not in _ONCE_PER_FILM:
+    if event_type in ONCE_PER_FILM_EVENT_TYPES:
+        carded = exists().where(Event.film_id == film_id, Event.event_type == event_type)
+    else:
         window = timedelta(days=corroboration_window_days)
-        carded = carded.where(Event.occurred_at.between(changed_at - window, changed_at + window))
+        carded = exists().where(
+            Event.film_id == film_id,
+            Event.event_type == event_type,
+            or_(
+                and_(Event.provenance == "catalog", Event.occurred_at == changed_at),
+                and_(
+                    Event.provenance == "story",
+                    Event.occurred_at.between(changed_at - window, changed_at + window),
+                ),
+            ),
+        )
     return bool((await session.execute(select(carded))).scalar())
 
 
@@ -283,6 +299,15 @@ async def run_field_change_events(
                 if created:
                     await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
+        except IntegrityError:
+            # `uq_event_catalog_change` is the structural backstop under the skip check above,
+            # so reaching it means a concurrent writer got there first — the change *is*
+            # carded. Counting that as a failure would fail the run over the guarantee
+            # working, and feed the abort guard on a healthy catalog.
+            log.info("film_field_change %d was carded concurrently", change.id)
+            result.skipped += 1
+            guard.succeeded()
+            continue
         except Exception:
             # One unwritable event must not cost the rest of the backlog.
             log.exception("carding film_field_change %d failed", change.id)
