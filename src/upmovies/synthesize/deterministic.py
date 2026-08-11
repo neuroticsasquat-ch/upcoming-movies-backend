@@ -118,8 +118,12 @@ CatalogChange = (
 # TMDB may add one, and a stage that raised here would leave the event with no summary row,
 # which is the one failure mode this module exists to prevent.
 _STATUS_BODIES = {
-    "In Production": "The film has entered production.",
-    "Post Production": "The film has entered post-production.",
+    # Phrased around *shooting* rather than around TMDB's stage names, and deliberately
+    # matching the arc vocabulary the film page already renders beside them
+    # (`public.arc`: In Production → "shooting", Post Production → "wrapped"). "Entered
+    # post-production" also buries the thing a reader cares about: the shoot is over.
+    "In Production": "Shooting has begun on the film.",
+    "Post Production": "Shooting has wrapped on the film.",
     "Released": "The film has been released.",
     "Canceled": "The film has been canceled.",
     "Planned": "The film is now listed as planned.",
