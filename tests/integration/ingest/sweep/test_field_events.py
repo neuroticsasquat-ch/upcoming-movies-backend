@@ -77,7 +77,7 @@ async def test_a_status_change_cards_a_summarized_catalog_event(session, session
     summary = (
         await session.execute(select(EventSummary).where(EventSummary.event_id == event.id))
     ).scalar_one()
-    assert summary.summary == "The film has entered production."
+    assert summary.summary == "Shooting has begun on the film."
     assert summary.model == DETERMINISTIC_MODEL
     assert summary.prompt_version == TEMPLATE_VERSION
 
