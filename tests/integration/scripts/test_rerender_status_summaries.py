@@ -67,7 +67,7 @@ async def test_apply_rewrites_the_stale_body(session):
     await session.commit()
 
     assert len(await rerender(session, apply=True)) == 1
-    assert await _body(session, event) == "Shooting has begun on the film."
+    assert await _body(session, event) == "Shooting has started."
 
 
 async def test_a_wrap_event_reconstructs_its_own_status(session):
@@ -77,7 +77,7 @@ async def test_a_wrap_event_reconstructs_its_own_status(session):
     await session.commit()
 
     await rerender(session, apply=True)
-    assert await _body(session, event) == "Shooting has wrapped on the film."
+    assert await _body(session, event) == "Shooting has wrapped."
 
 
 async def test_a_hand_edited_summary_is_never_touched(session):
@@ -103,7 +103,7 @@ async def test_an_llm_written_summary_is_never_touched(session):
 async def test_an_already_current_body_is_not_reported_as_work(session):
     film = await add_film(session, 1)
     event = await _event(session, film)
-    await _summary(session, event, body="Shooting has begun on the film.")
+    await _summary(session, event, body="Shooting has started.")
     await session.commit()
 
     assert await rerender(session, apply=True) == []

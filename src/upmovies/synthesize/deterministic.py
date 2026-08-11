@@ -122,8 +122,10 @@ _STATUS_BODIES = {
     # matching the arc vocabulary the film page already renders beside them
     # (`public.arc`: In Production → "shooting", Post Production → "wrapped"). "Entered
     # post-production" also buries the thing a reader cares about: the shoot is over.
-    "In Production": "Shooting has begun on the film.",
-    "Post Production": "Shooting has wrapped on the film.",
+    # No "on the film" — the card sits under the film's own title, so naming it again is the
+    # redundancy the summarizer prompt already tells the model to avoid.
+    "In Production": "Shooting has started.",
+    "Post Production": "Shooting has wrapped.",
     "Released": "The film has been released.",
     "Canceled": "The film has been canceled.",
     "Planned": "The film is now listed as planned.",
