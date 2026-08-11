@@ -169,7 +169,12 @@ class Settings(BaseSettings):
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
     )
-    ingest_stale_run_minutes: int = Field(default=15, alias="INGEST_STALE_RUN_MINUTES")
+    # How long a `running` run may go without a heartbeat before startup/scheduled-task
+    # cleanup cancels it. Read against `last_progress_at`, not `started_at` (NEU-1117), so
+    # this bounds *silence*, not total runtime: ~5x the longest legitimate gap anywhere
+    # (one retrying LLM batch) and 30x the sweep's heartbeat interval. It was 15 when it
+    # meant runtime, which cancelled live multi-hour sweeps on any restart.
+    ingest_stale_run_minutes: int = Field(default=30, alias="INGEST_STALE_RUN_MINUTES")
 
     # healthchecks.io deadman ping URLs for the Coolify scheduled tasks (see
     # upmovies.pipeline_run). Optional: unset → the ping is a no-op, so local/dev runs of

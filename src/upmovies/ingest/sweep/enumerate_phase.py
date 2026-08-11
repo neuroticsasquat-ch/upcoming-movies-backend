@@ -27,7 +27,7 @@ import httpx
 from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import format_skip_detail, record_progress
 from upmovies.ingest.sweep.admission import AdmissionTranches
-from upmovies.ingest.sweep.phase import AbortGuard, owned_session
+from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import (
     CandidateTally,
     SeedAttachment,
@@ -114,6 +114,9 @@ async def run_sweep_enumerate(
     seed grade has an open tranche."""
     result = EnumerateResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
+    # Both loops below share one heartbeat: the throttle is about how often the run says
+    # "alive", which is a property of the run, not of whichever loop it happens to be in.
+    heartbeat = Heartbeat(session_factory, run_id)
 
     async with owned_session(session_factory) as s:
         seed_ids = await load_seed_person_ids(
@@ -124,7 +127,12 @@ async def run_sweep_enumerate(
     log.info("enumerate: %d seed people, %d known films", len(seed_ids), len(known_tmdb_ids))
 
     attachments = await _collect_attachments(
-        client=client, seed_ids=seed_ids, result=result, guard=guard, log_every=log_every
+        client=client,
+        seed_ids=seed_ids,
+        result=result,
+        guard=guard,
+        heartbeat=heartbeat,
+        log_every=log_every,
     )
     if result.aborted:
         return result
@@ -147,6 +155,7 @@ async def run_sweep_enumerate(
         tranches=tranches,
         result=result,
         guard=guard,
+        heartbeat=heartbeat,
         log_every=log_every,
     )
     _log_outcome(result, tranches)
@@ -159,12 +168,14 @@ async def _collect_attachments(
     seed_ids: list[int],
     result: EnumerateResult,
     guard: AbortGuard,
+    heartbeat: Heartbeat,
     log_every: int,
 ) -> list[SeedAttachment]:
     """One `/person/{id}/movie_credits` per seed person — a whole filmography per request,
     undated entries included."""
     attachments: list[SeedAttachment] = []
     for i, person_id in enumerate(seed_ids, start=1):
+        await heartbeat.tick()
         try:
             credits = await client.person_movie_credits(person_id)
             attachments.extend(seed_attachments(person_id, credits))
@@ -195,6 +206,7 @@ async def _judge_candidates(
     tranches: AdmissionTranches,
     result: EnumerateResult,
     guard: AbortGuard,
+    heartbeat: Heartbeat,
     log_every: int,
 ) -> None:
     """One `/movie/{id}` per candidate — the credits list carries no `status` — then the
@@ -204,6 +216,7 @@ async def _judge_candidates(
     credits that make the film contribute its own seed people back on the next sweep (§3.3)
     and the alternative titles the link stage's candidate retrieval matches on."""
     for i, tally in enumerate(candidates, start=1):
+        await heartbeat.tick()
         try:
             details = await client.movie_details(tally.tmdb_id)
             # A credits entry can omit a release date that `/movie/{id}` does carry, and a

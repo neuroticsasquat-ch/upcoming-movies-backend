@@ -1,7 +1,7 @@
 """In-process ingestion orchestration (upmovies.pipeline_run): the shared stage runners and
 the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -175,6 +175,87 @@ def spy_stages(monkeypatch):
 
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
     return order, pings, status_by_kind
+
+
+async def test_run_daily_clears_an_orphaned_run_before_opening_its_own(session, spy_stages):
+    """The stale-run canceller used to run only in the app's lifespan — i.e. on deploy — so
+    a run orphaned by a killed scheduled task sat `running` until the next release. Every
+    scheduled task now sweeps first (NEU-1117)."""
+    orphan = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+    )
+    session.add(orphan)
+    await session.commit()
+
+    await pipeline_run.run_daily(get_settings())
+
+    row = await _run_row(session, orphan.id)
+    assert row.status == "cancelled"
+
+
+async def test_run_daily_leaves_a_heartbeating_run_alone(session, spy_stages):
+    """The cleanup is safe to run from a task that may overlap a live sweep precisely
+    because expiry is heartbeat-based."""
+    alive = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+        last_progress_at=datetime.now(UTC),
+    )
+    session.add(alive)
+    await session.commit()
+
+    await pipeline_run.run_daily(get_settings())
+
+    assert (await _run_row(session, alive.id)).status == "running"
+
+
+async def test_run_hourly_clears_an_orphaned_run_before_opening_its_own(session, monkeypatch):
+    """The mode that makes the cleanup worth having: hourly is the most frequent slot, so it
+    is what bounds an orphan's life to an hour rather than to the next deploy (NEU-1117)."""
+    orphan = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+    )
+    session.add(orphan)
+    await session.commit()
+
+    async def fake_feeds(run_id, settings, *args, **kwargs):
+        async with pipeline_run.SessionLocal() as s:
+            await finalize_run(s, run_id, status="succeeded")
+            await s.commit()
+
+    monkeypatch.setattr(pipeline_run, "run_feeds_stage", fake_feeds)
+    monkeypatch.setattr(pipeline_run, "_ping", lambda *a, **k: _noop())
+
+    await pipeline_run.run_hourly(get_settings())
+
+    assert (await _run_row(session, orphan.id)).status == "cancelled"
+
+
+async def test_run_sweep_clears_an_orphaned_run_before_opening_its_own(session, monkeypatch):
+    orphan = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+    )
+    session.add(orphan)
+    await session.commit()
+
+    async def fake_sweep(run_id, settings):
+        async with pipeline_run.SessionLocal() as s:
+            await finalize_run(s, run_id, status="succeeded")
+            await s.commit()
+
+    monkeypatch.setattr(pipeline_run, "run_sweep_stage", fake_sweep)
+    monkeypatch.setattr(pipeline_run, "_ping", lambda *a, **k: _noop())
+
+    await pipeline_run.run_sweep(get_settings())
+
+    assert (await _run_row(session, orphan.id)).status == "cancelled"
 
 
 async def test_run_daily_runs_all_stages_in_order(session, spy_stages):
