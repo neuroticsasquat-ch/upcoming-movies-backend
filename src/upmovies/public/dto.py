@@ -115,6 +115,9 @@ class FeedDayItem(BaseModel):
     film_title: str
     release_year: int | None
     poster_path: str | None
+    # Rendered in the release year's slot for an undated film (NEU-1085), so it has to
+    # ride along on the row — it is not derivable client-side from release_year.
+    arc_stage: str
     day: date
     top_event_type: str
     event_count: int
