@@ -18,7 +18,15 @@ shared `format_skip_detail` form: while the ramp is in progress the operating qu
 what the open tranche let in and what stopped the rest, and a bare total leaves "the tranche
 is still closed" and "they were all below the corroboration threshold" — one an env change
 away from each other — indistinguishable (NEU-1086).
+
+The attachment clause is here because nowhere else keeps it: the histogram is built on every
+sweep and was only ever logged, and Coolify runs the sweep through `docker exec`, whose output
+never reaches `docker logs` and dies with the container. `detail` is the only durable outlet
+for the distribution the M4 tuning ticket reads the threshold off (§4.3) — and, after the
+directors flip, for what opening the writers tranche would admit (NEU-1089, NEU-1116).
 """
+
+from collections import Counter
 
 from upmovies.ingest.runs import format_skip_detail
 from upmovies.ingest.sweep.credit_events import CreditEventResult
@@ -26,6 +34,38 @@ from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
 from upmovies.ingest.sweep.field_events import FieldEventResult
 from upmovies.ingest.sweep.refresh_phase import RefreshResult
 from upmovies.ingest.sweep.release_events import ReleaseEventResult
+
+_HISTOGRAM_TAIL = 3
+"""Seed-attachment counts at or above this are reported as one `3+` group, keeping the whole
+of §4.3's table readable off one line: it reads cumulatively at ≥1, ≥2 and ≥3, and all three
+survive the grouping (≥1 is the total, ≥2 the total less the first bucket, ≥3 the last one).
+What it does cost is the region above 3 — §4.3 stopped there because the tranche got small,
+not because ≥4 is uninteresting, so a retune that wants to look higher needs this raised
+rather than the log it replaces."""
+
+
+def _format_attachment_detail(histogram: Counter[int]) -> str:
+    """The `seed attachments: 1×N, 2×N, 3+×N` clause, or `""` when nothing was counted.
+
+    Labelled *seed* attachments because the same line already says "carded from N
+    attachments" about credit attachment events, which are a different thing: these are the
+    distinct seed people that reached a candidate, the quantity the corroboration threshold
+    is set against.
+
+    An empty histogram is dropped rather than rendered as an empty group, matching how
+    `skip_counts` drops zero-valued reasons: a sweep that reached no candidates has nothing
+    to say about their distribution.
+    """
+    if not histogram:
+        return ""
+    grouped: Counter[int] = Counter()
+    for attachments, films in histogram.items():
+        grouped[min(attachments, _HISTOGRAM_TAIL)] += films
+    buckets = ", ".join(
+        f"{attachments}{'+' if attachments == _HISTOGRAM_TAIL else ''}×{films}"
+        for attachments, films in sorted(grouped.items())
+    )
+    return f"seed attachments: {buckets}"
 
 
 def sweep_detail(
@@ -55,6 +95,10 @@ def sweep_detail(
         f"{released.changes_read} changes, "
         f"{released.skipped} already carded, {released.failures} failed",
     ]
+    attachments = _format_attachment_detail(enumerated.attachment_histogram)
+    if attachments:
+        # Beside the enumerate clause it belongs to, ahead of the phases that follow it.
+        parts.insert(1, attachments)
     if enumerated.aborted:
         parts.append(f"enumerate aborted: {enumerated.abort_error}")
     if refreshed.aborted:

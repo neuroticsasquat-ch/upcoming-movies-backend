@@ -16,7 +16,15 @@ from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
 from upmovies.catalog.models import Film, FilmAlternativeTitle, FilmCredit, Person
 from upmovies.ingest.models import IngestRun
-from upmovies.ingest.sweep import AdmissionTranches, run_sweep_enumerate
+from upmovies.ingest.sweep import (
+    AdmissionTranches,
+    CreditEventResult,
+    FieldEventResult,
+    RefreshResult,
+    ReleaseEventResult,
+    run_sweep_enumerate,
+    sweep_detail,
+)
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
 
@@ -425,6 +433,11 @@ async def test_the_attachment_histogram_still_counts_what_the_threshold_excluded
     )
 
     assert result.attachment_histogram == {1: 1}
+    # Asserted through the detail line too: the histogram is durable only if it survives
+    # into `ingest_run.detail`, and that is the surface the tuning pass actually reads.
+    assert "seed attachments: 1×1" in sweep_detail(
+        result, RefreshResult(), FieldEventResult(), CreditEventResult(), ReleaseEventResult()
+    )
 
 
 @respx.mock
@@ -443,6 +456,11 @@ async def test_a_candidate_reached_only_through_a_writer_waits_for_its_tranche(
 
     assert (result.admitted, result.withheld) == (0, 1)
     assert await _film_count(session) == 1
+    # A closed tranche withholds the film but must not hide it from the distribution: this
+    # line is the answer to what opening the writers tranche would admit (NEU-1089).
+    assert "seed attachments: 1×1" in sweep_detail(
+        result, RefreshResult(), FieldEventResult(), CreditEventResult(), ReleaseEventResult()
+    )
 
 
 @respx.mock
