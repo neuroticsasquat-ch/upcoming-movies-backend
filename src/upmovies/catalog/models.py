@@ -73,6 +73,16 @@ class Film(Base):
     run is silently swallowed as a baseline. Ingest bookkeeping, not a fact about the film —
     hence its place in `FILM_FIELD_CHANGE_DENYLIST`.
     """
+    release_dates_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When the catalog first held an observation of this film's release slate — NULL until it
+    has. `credits_observed_at` for release dates (NEU-1121), and load-bearing for exactly the
+    same reason, only more so: an undated film is admitted with *no* release rows at all, so
+    inferring "never observed" from "holds nothing" would re-baseline it on every ingest and
+    swallow the first date it is ever given — the single most valuable beat this project's
+    undated population can produce. Ingest bookkeeping, so it joins the denylist too.
+    """
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -337,6 +347,57 @@ class FilmCreditChange(Base):
     )
 
 
+class FilmReleaseDateChange(Base):
+    """Append-only history of **displayable** release dates being set or moved, written by the
+    release-date rebuild in `ingest.tmdb.release_date_history` (NEU-1121).
+
+    `catalog.film_release_date` is delete-and-rebuilt on every ingest, so it holds no memory of
+    a date having moved — only where it stands now. This table is that memory, and it is what
+    lets a release date card as an event.
+
+    It exists because the *primary* date could not do the job. `film.release_date` gets change
+    history free from the `film_field_change` trigger, and that is what release-date events used
+    to card from — but the primary is the earliest release in any country of any type, while the
+    film page shows US-or-origin theatrical dates only. The two are different quantities, so the
+    card routinely cited a date the page never displayed. Only rows passing
+    `catalog.release_grade.is_displayable_release` are recorded here; anything else is noise the
+    site would never show.
+
+    Like `film_credit_change`, and unlike the trigger, it has to earn two properties explicitly:
+
+    - **First observation is a baseline, never a change** (spec §5.3), keyed on the durable
+      `film.release_dates_observed_at` rather than on the rows being absent.
+    - **Withdrawals are not recorded.** A date disappearing leaves the page with one fewer line
+      and nothing to render a card about.
+    """
+
+    __tablename__ = "film_release_date_change"
+    __table_args__ = (
+        Index("ix_catalog_film_release_date_change_lookup", "film_id", "changed_at"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    iso_3166_1: Mapped[str] = mapped_column(Text, nullable=False)
+    release_type: Mapped[int] = mapped_column(Integer, nullable=False)
+    """TMDB release `type`; always 2 (limited) or 3 (wide) — `THEATRICAL_RELEASE_TYPES`.
+    Together with `iso_3166_1` this is the *subject*: US limited and US wide are two subjects
+    on one film, and a distributor can move one without the other."""
+    previous_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    """NULL when the change is `set` — there was no prior date for this subject."""
+    new_date: Mapped[date] = mapped_column(Date, nullable=False)
+    change: Mapped[str] = mapped_column(Text, nullable=False)
+    """`set` or `moved`."""
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 # --- Film column-change history trigger -------------------------------------
 # Volatile columns TMDB churns on nearly every ingest — excluded so the history
 # table records only semantic changes (release_date, status, title, runtime, ...).
@@ -351,6 +412,7 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "tmdb_raw",
     "updated_at",
     "credits_observed_at",
+    "release_dates_observed_at",
 )
 
 

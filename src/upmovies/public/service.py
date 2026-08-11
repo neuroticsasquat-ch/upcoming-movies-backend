@@ -31,6 +31,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
+from upmovies.catalog.release_grade import RELEASE_TYPE_BUCKETS
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import visible_events
 from upmovies.public.arc import derive_arc_stage, most_significant_event_type
@@ -51,7 +52,7 @@ from upmovies.public.dto import (
     ReleaseDateOut,
     SourceOut,
 )
-from upmovies.public.release import _TMDB_TYPE_TO_BUCKET, release_label_for_tmdb_type
+from upmovies.public.release import release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 MIN_QUERY_LEN = 2
@@ -663,7 +664,7 @@ async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[U
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
-    surfaced_types = tuple(_TMDB_TYPE_TO_BUCKET)  # (1, 2, 3) — derived, never drifts
+    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (1, 2, 3) — derived, never drifts
 
     # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
     # film rows — so the UI shows "N dates at a time" with a deterministic "view more".
@@ -734,7 +735,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
             release_year=_release_year(row.film_release_date),
             poster_path=row.poster_path,
             release_date=row.release_date,
-            release_type=_TMDB_TYPE_TO_BUCKET[row.release_type],
+            release_type=RELEASE_TYPE_BUCKETS[row.release_type],
             director=directors_by_film.get(row.film_id),
             stars=stars_by_film.get(row.film_id, []),
             genres=genres_by_film.get(row.film_id, []),

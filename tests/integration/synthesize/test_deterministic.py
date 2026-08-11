@@ -11,7 +11,7 @@ from upmovies.synthesize.deterministic import (
     DETERMINISTIC_MODEL,
     TEMPLATE_VERSION,
     CreditAttached,
-    ReleaseDateSet,
+    ReleaseDateChanged,
     write_deterministic_summary,
 )
 from upmovies.synthesize.pipeline import _select_pending
@@ -68,14 +68,14 @@ async def test_writer_persists_the_templated_body_with_the_sentinel_model(sessio
     body = await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await session.commit()
 
-    assert body == "Release date set to 14 August 2026."
+    assert body == "US wide release date set to 14 August 2026."
     row = await _summary(session, event.id)
-    assert row.summary == "Release date set to 14 August 2026."
+    assert row.summary == "US wide release date set to 14 August 2026."
     assert row.model == DETERMINISTIC_MODEL
     assert row.prompt_version == TEMPLATE_VERSION
     assert row.source_updated_at == event.updated_at
@@ -88,7 +88,7 @@ async def test_writer_is_idempotent_on_the_one_row_per_event(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await session.commit()
@@ -123,7 +123,7 @@ async def test_the_sentinel_never_reaches_the_cost_ledger(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await session.commit()
@@ -142,7 +142,7 @@ async def test_a_deterministic_summary_alone_is_not_reselected(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await session.commit()
@@ -158,7 +158,7 @@ async def test_an_attached_story_supersedes_the_deterministic_summary(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await _attach_story(session, event)
@@ -201,7 +201,7 @@ async def test_an_edited_deterministic_summary_is_left_alone(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await session.commit()
@@ -251,7 +251,7 @@ async def test_the_writer_never_overwrites_an_admin_edit(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14)),
         source_updated_at=event.updated_at,
     )
     await session.commit()
@@ -263,7 +263,7 @@ async def test_the_writer_never_overwrites_an_admin_edit(session):
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=ReleaseDateSet(new_date=date(2026, 10, 2)),
+        change=ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 10, 2)),
         source_updated_at=event.updated_at,
     )
     await session.commit()

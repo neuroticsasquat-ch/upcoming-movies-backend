@@ -1,53 +1,21 @@
 """Classifying one `catalog.film_field_change` row into an event, with no DB in sight.
 
 The rules this pins are the ones a reader of the ticket would check first: which fields card
-at all, that a date *removal* is not a date move, and that a status TMDB may add tomorrow is
-ignored rather than carded under a body nobody wrote.
+at all, and that a status TMDB may add tomorrow is ignored rather than carded under a body
+nobody wrote.
 """
 
-from datetime import date
-
-from upmovies.ingest.sweep.field_events import classify_field_change
-from upmovies.synthesize.deterministic import (
-    ReleaseDateMoved,
-    ReleaseDateSet,
-    StatusChanged,
-)
+from upmovies.ingest.sweep.field_events import TRACKED_FIELDS, classify_field_change
+from upmovies.synthesize.deterministic import StatusChanged
 
 
-def test_first_release_date_is_a_release_date_event():
-    carded = classify_field_change("release_date", None, "2026-08-14")
-
-    assert carded is not None
-    assert carded.event_type == "release_date"
-    assert carded.change == ReleaseDateSet(new_date=date(2026, 8, 14))
-
-
-def test_moved_release_date_carries_both_dates():
-    carded = classify_field_change("release_date", "2026-08-14", "2026-11-20")
-
-    assert carded is not None
-    assert carded.change == ReleaseDateMoved(
-        previous_date=date(2026, 8, 14), new_date=date(2026, 11, 20)
-    )
-
-
-def test_removed_release_date_is_not_an_event():
-    # "assigned or moved" — a date TMDB withdrew is neither, and there is no date to render.
-    assert classify_field_change("release_date", "2026-08-14", None) is None
-
-
-def test_unparseable_release_date_is_not_an_event():
-    assert classify_field_change("release_date", None, "soon") is None
-
-
-def test_unparseable_previous_date_still_cards_as_a_first_date():
-    # The new date is what the body renders; a previous value we cannot read costs the
-    # "moved from" clause, not the event.
-    carded = classify_field_change("release_date", "TBA", "2026-11-20")
-
-    assert carded is not None
-    assert carded.change == ReleaseDateSet(new_date=date(2026, 11, 20))
+def test_the_primary_release_date_no_longer_cards_here():
+    # NEU-1121: `film.release_date` is TMDB's earliest release in any country of any type,
+    # while the page lists US-or-origin theatrical dates — so carding it named dates the page
+    # never showed. Displayable dates card from `film_release_date_change` instead.
+    assert classify_field_change("release_date", None, "2026-08-14") is None
+    assert classify_field_change("release_date", "2026-08-14", "2026-11-20") is None
+    assert "release_date" not in TRACKED_FIELDS
 
 
 def test_status_into_production_is_a_production_start():

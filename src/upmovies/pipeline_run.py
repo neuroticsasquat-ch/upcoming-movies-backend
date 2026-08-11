@@ -42,8 +42,10 @@ from upmovies.ingest.sweep import (
     EnumerateResult,
     FieldEventResult,
     RefreshResult,
+    ReleaseEventResult,
     run_credit_attachment_events,
     run_field_change_events,
+    run_release_date_events,
     run_sweep_enumerate,
     run_sweep_refresh,
     sweep_detail,
@@ -221,7 +223,6 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             run_id=run_id,
             now=now,
             lookback_days=settings.sweep_event_lookback_days,
-            corroboration_window_days=settings.link_release_change_window_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
         # The credit half, on the same terms and the same window as the field half — and
@@ -235,10 +236,22 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             lookback_days=settings.sweep_event_lookback_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
+        # The release-date half (NEU-1121), reading `film_release_date_change` — which the
+        # refresh above has just written, same as the credit half. Its own phase because its
+        # source table is its own: the field half reads the `catalog.film` trigger and no
+        # longer touches release dates at all.
+        released = await run_release_date_events(
+            session_factory=_session_factory,
+            run_id=run_id,
+            now=now,
+            lookback_days=settings.sweep_event_lookback_days,
+            corroboration_window_days=settings.link_release_change_window_days,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
         # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
         # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
         # to be covered by the same net as the work it reports on.
-        await _finalize_sweep(run_id, enumerated, refreshed, carded, attached)
+        await _finalize_sweep(run_id, enumerated, refreshed, carded, attached, released)
     except Exception as e:
         log.exception("sweep crashed")
         await _finalize_failed(run_id, str(e))
@@ -250,6 +263,7 @@ async def _finalize_sweep(
     refreshed: RefreshResult,
     carded: FieldEventResult,
     attached: CreditEventResult,
+    released: ReleaseEventResult,
 ) -> None:
     """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
     failures, and the every-phase detail line either way — a run that aborted still reports
@@ -261,6 +275,7 @@ async def _finalize_sweep(
             ("refresh", refreshed),
             ("events", carded),
             ("credits", attached),
+            ("release dates", released),
         )
         if result.aborted
     ]
@@ -270,7 +285,7 @@ async def _finalize_sweep(
             run_id,
             status="failed" if aborts else "succeeded",
             error="; ".join(aborts) or None,
-            detail=sweep_detail(enumerated, refreshed, carded, attached),
+            detail=sweep_detail(enumerated, refreshed, carded, attached, released),
         )
         await s.commit()
 

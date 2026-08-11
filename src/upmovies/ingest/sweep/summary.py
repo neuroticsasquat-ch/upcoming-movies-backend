@@ -20,6 +20,7 @@ from upmovies.ingest.sweep.credit_events import CreditEventResult
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
 from upmovies.ingest.sweep.field_events import FieldEventResult
 from upmovies.ingest.sweep.refresh_phase import RefreshResult
+from upmovies.ingest.sweep.release_events import ReleaseEventResult
 
 
 def sweep_detail(
@@ -27,6 +28,7 @@ def sweep_detail(
     refreshed: RefreshResult,
     carded: FieldEventResult,
     attached: CreditEventResult,
+    released: ReleaseEventResult,
 ) -> str:
     """One line reporting all four phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
@@ -42,6 +44,9 @@ def sweep_detail(
         f"credits: {attached.events_created} carded from "
         f"{attached.attachments_read} attachments, "
         f"{attached.skipped} already carded, {attached.failures} failed",
+        f"release dates: {released.events_created} carded from "
+        f"{released.changes_read} changes, "
+        f"{released.skipped} already carded, {released.failures} failed",
     ]
     if enumerated.aborted:
         parts.append(f"enumerate aborted: {enumerated.abort_error}")
@@ -51,4 +56,6 @@ def sweep_detail(
         parts.append(f"events aborted: {carded.abort_error}")
     if attached.aborted:
         parts.append(f"credits aborted: {attached.abort_error}")
+    if released.aborted:
+        parts.append(f"release dates aborted: {released.abort_error}")
     return "; ".join(parts)
