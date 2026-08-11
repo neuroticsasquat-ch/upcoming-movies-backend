@@ -99,10 +99,10 @@ async def test_admin_lists_the_sweep_with_every_phase_counter(admin_authed_clien
     assert r.status_code == 200
     row = next(row for row in r.json() if row["kind"] == "sweep")
     assert (
-        "enumerate: 7519 seeds, 42 candidates, 0 admitted, "
+        "enumerate: 7519 seeds (0 missing), 42 candidates, 0 admitted, "
         "skipped 42 (corroboration=12, no_tranche=30)" in row["detail"]
     )
-    assert "refresh: 299/300 refreshed (12 dormant)" in row["detail"]
+    assert "refresh: 299/300 refreshed (12 dormant), 0 missing" in row["detail"]
     assert "events: 6 carded from 58 changes, 52 already carded" in row["detail"]
     assert "credits: 5 carded from 19 attachments, 14 already carded" in row["detail"]
     assert "release dates: 3 carded from 11 changes, 8 already carded" in row["detail"]

@@ -6,7 +6,7 @@ import pytest
 import respx
 
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient
+from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient, TMDBNotFound
 from upmovies.ingest.tmdb.schemas import (
     TMDBCredits,
     TMDBDiscoverResponse,
@@ -382,3 +382,69 @@ async def test_person_movie_credits_does_not_retry_on_404():
             await c.person_movie_credits(9999)
 
     assert route.call_count == 1
+
+
+# --- 404 is its own outcome, and no error message carries the API key (NEU-1124) ---
+
+
+@respx.mock
+async def test_movie_details_raises_tmdb_not_found_on_404():
+    """A deleted TMDB entry is a *terminal* outcome, distinguishable from an outage.
+
+    The sweep's consecutive-failure guard aborts a pass on what it reads as a TMDB outage;
+    without a distinct type, eleven permanently deleted ids at the head of the refresh queue
+    look exactly like TMDB falling over, which is what killed the 2026-08-11 run.
+    """
+    respx.get(f"{BASE_URL}/movie/9999").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.movie_details(9999)
+
+
+@respx.mock
+async def test_person_movie_credits_raises_tmdb_not_found_on_404():
+    respx.get(f"{BASE_URL}/person/9999/movie_credits").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.person_movie_credits(9999)
+
+
+@respx.mock
+async def test_server_error_is_not_a_tmdb_not_found():
+    """The distinction has to cut both ways, or the guard stops catching real outages."""
+    respx.get(f"{BASE_URL}/movie/500").mock(return_value=httpx.Response(503))
+    async with _client(retry_max_attempts=2) as c:
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await c.movie_details(500)
+    assert not isinstance(excinfo.value, TMDBNotFound)
+
+
+@respx.mock
+async def test_tmdb_not_found_is_still_caught_as_an_httpx_error():
+    """Existing `except httpx.HTTPError` handlers must keep working unchanged."""
+    respx.get(f"{BASE_URL}/movie/9999").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(httpx.HTTPError):
+            await c.movie_details(9999)
+
+
+@respx.mock
+async def test_404_message_does_not_leak_the_api_key():
+    """v3 auth puts the key in the query string, so httpx's stock message quotes a live
+    credential into every log line and Sentry event that formats the exception."""
+    respx.get(f"{BASE_URL}/movie/9999").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound) as excinfo:
+            await c.movie_details(9999)
+    assert "test-key" not in str(excinfo.value)
+    assert "api_key=REDACTED" in str(excinfo.value)
+
+
+@respx.mock
+async def test_5xx_message_does_not_leak_the_api_key():
+    respx.get(f"{BASE_URL}/movie/500").mock(return_value=httpx.Response(503))
+    async with _client(retry_max_attempts=2) as c:
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await c.movie_details(500)
+    assert "test-key" not in str(excinfo.value)
+    assert "api_key=REDACTED" in str(excinfo.value)

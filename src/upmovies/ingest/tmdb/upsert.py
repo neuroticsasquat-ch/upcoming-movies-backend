@@ -2,9 +2,10 @@
 spine (keyed by `tmdb_id`) plus its normalized genre/company/country/language/collection
 relations. Pure DB I/O — the caller owns the transaction (commit/rollback)."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +41,34 @@ from upmovies.ingest.tmdb.release_date_history import (
     record_release_date_changes,
 )
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
+
+
+async def mark_film_missing(session: AsyncSession, tmdb_id: int) -> None:
+    """Record that TMDB has no entry at this film's id, as of now. Caller commits.
+
+    Re-stamps a film that is already tombstoned, deliberately: the column drives the re-check
+    cadence in `refresh_set_clause`, so a confirmed-still-missing film has to move forward or
+    it comes back due on every subsequent pass (NEU-1124).
+
+    Writes nothing else. The film keeps its page, its events and its stories; the spec is
+    explicit that films are never deleted (§4.4).
+    """
+    await session.execute(
+        update(Film).where(Film.tmdb_id == tmdb_id).values(tmdb_missing_at=datetime.now(UTC))
+    )
+
+
+async def mark_person_missing(session: AsyncSession, person_id: int) -> None:
+    """Record that TMDB has no entry at this person's id, as of now. Caller commits.
+
+    Takes them out of the seed set until a film ingest names them again — which is what clears
+    the tombstone, so no cadence is needed on this side (NEU-1124). A person we hold no row for
+    is a no-op: the seed set is built from `film_credit`, and a credit can outlive the person
+    record we never wrote.
+    """
+    await session.execute(
+        update(Person).where(Person.id == person_id).values(tmdb_missing_at=datetime.now(UTC))
+    )
 
 
 async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
@@ -107,6 +136,10 @@ async def _upsert_film_row(
     }
     update_set = {k: v for k, v in values.items() if k not in ("tmdb_id", "slug")}
     update_set["updated_at"] = func.now()
+    # A successful read is proof the id is live, so it clears any tombstone
+    # `mark_film_missing` left. TMDB restores and re-merges deleted entries, and without this
+    # the refresh set's exclusion would be permanent on our side alone (NEU-1124).
+    update_set["tmdb_missing_at"] = None
     stmt = (
         insert(Film)
         .values(**values)
@@ -352,6 +385,9 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
                 "known_for_department": stmt.excluded.known_for_department,
                 "gender": stmt.excluded.gender,
                 "popularity": stmt.excluded.popularity,
+                # TMDB naming this person in a film's credits is proof the id is live again,
+                # which is the whole revival path for a tombstoned seed person (NEU-1124).
+                "tmdb_missing_at": None,
             },
         )
         await session.execute(stmt)

@@ -83,6 +83,35 @@ class Film(Base):
     swallow the first date it is ever given — the single most valuable beat this project's
     undated population can produce. Ingest bookkeeping, so it joins the denylist too.
     """
+    tmdb_missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When TMDB was last confirmed to have no entry at this film's id — NULL while it is live.
+
+    A tombstone for the *TMDB entry*, not for the film. Films are never deleted (spec §4.4:
+    "if we announced it, we do not un-announce it"), so a missing film keeps its page, its
+    events and its linked stories. All this column does is take the id off the sweep's normal
+    refresh cadence, which is the one place a permanently dead id costs a request every single
+    day (NEU-1124).
+
+    Load-bearing because a 404 is self-perpetuating without it: the refresh set is ordered
+    stalest-first on `updated_at`, and a film that cannot be fetched never has its `updated_at`
+    bumped, so it holds the head of the queue forever and every pass pays for it again.
+
+    *Last confirmed*, not first observed, because the column also drives the re-check cadence
+    below — a first-observation stamp would go stale immediately and make every later pass due.
+    The cost is that "how long has this been gone" is no longer readable off the row; the
+    alternative was a second column to carry it, for a question nothing asks yet.
+
+    **Tombstoned is not deleted, and not a one-way door.** A missing film returns to the refresh
+    set once its tombstone is older than `dormant_refresh_days`, on exactly the reduced cadence
+    §4.5 gives dormant films and for the same reason: detecting that TMDB has restored an entry
+    requires asking TMDB about it, so a tombstone that suppressed the only reader would be a
+    door with no handle on the other side. A confirmed-still-missing film re-stamps and drops
+    back out, so the standing cost is one request per dead id per cadence, not per pass.
+
+    Ingest bookkeeping rather than a fact about the film, so it joins
+    `FILM_FIELD_CHANGE_DENYLIST` — a catalog-sourced event announcing that TMDB deleted a
+    record would be news about our source, not about the production.
+    """
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -251,6 +280,19 @@ class Person(Base):
     known_for_department: Mapped[str | None] = mapped_column(Text, nullable=True)
     gender: Mapped[int | None] = mapped_column(Integer, nullable=True)
     popularity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tmdb_missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When TMDB was last confirmed to have no entry at this person's id — NULL while live.
+
+    `Film.tmdb_missing_at` for seed people (NEU-1124). Around fifty of the ~7,700 filmographies
+    the enumerate phase requests each run are for people TMDB has deleted, and without this they
+    are re-requested every run forever; the credit rows that make them seeds are ours and
+    outlive the person record upstream.
+
+    Revival needs no cadence here, unlike the film case: this is cleared by the person upsert
+    that runs on every film ingest, so a restored person reappears in the seed set as soon as
+    any film they are credited on is next read. The handle on the other side is a door someone
+    else opens.
+    """
 
 
 class FilmFieldChange(Base):
@@ -413,6 +455,7 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "updated_at",
     "credits_observed_at",
     "release_dates_observed_at",
+    "tmdb_missing_at",
 )
 
 

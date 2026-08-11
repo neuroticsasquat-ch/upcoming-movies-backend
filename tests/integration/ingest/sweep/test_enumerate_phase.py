@@ -14,9 +14,11 @@ from sqlalchemy import func, select
 
 from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.catalog.models import Film, FilmAlternativeTitle, FilmCredit
+from upmovies.catalog.models import Film, FilmAlternativeTitle, FilmCredit, Person
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.sweep import AdmissionTranches, run_sweep_enumerate
+from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
+from upmovies.ingest.tmdb.upsert import upsert_film
 
 BASE_URL = "https://api.themoviedb.org/3"
 EXCLUDED = frozenset({"Released", "Canceled"})
@@ -247,10 +249,12 @@ async def test_a_short_undated_film_is_not_dropped_for_its_runtime(
 async def test_one_unreachable_person_does_not_cost_the_rest(
     session, session_factory, tmdb_client, run_id
 ):
+    """A 503 — TMDB is up but this request is not getting through. Contrast
+    `test_a_404_person_is_missing_not_failed`: a deleted person is not a failure at all."""
     film = await _seed_director(session)
     await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
     await session.commit()
-    respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(404))
+    respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(503))
     _mock_credits(11, cast=[make_credit_entry(100, order=0)])
     _mock_details(100)
 
@@ -546,3 +550,124 @@ async def test_a_closed_tranche_is_reported_ahead_of_a_low_attachment_count(
 
     assert (result.withheld, result.skipped_below_corroboration) == (1, 0)
     assert result.skip_counts == {"no_tranche": 1}
+
+
+# --- A person or candidate TMDB has deleted is terminal, not an outage (NEU-1124) ---
+
+
+@respx.mock
+async def test_a_404_person_is_missing_not_failed(session, session_factory, tmdb_client, run_id):
+    """~50 of these fire on every production run. Reported as failures they read as a flaky
+    TMDB, and they sit one unlucky ordering away from aborting the phase outright."""
+    film = await _seed_director(session)
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    await session.commit()
+    respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(404))
+    _mock_credits(11, cast=[make_credit_entry(100, order=0)])
+    _mock_details(100)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.person_missing, result.person_failures) == (1, 0)
+    assert result.candidates_found == 1, "the other person's filmography is still read"
+    assert (await _run_row(session, run_id)).items_failed == 0
+    person = await session.get(Person, 10, populate_existing=True)
+    assert person.tmdb_missing_at is not None, "the dead seed person is tombstoned"
+
+
+@respx.mock
+async def test_a_tombstoned_person_leaves_the_seed_set(
+    session, session_factory, tmdb_client, run_id
+):
+    """The half that stops the daily cost. Their credit rows are ours and outlive the person
+    record upstream, so without the tombstone the dead filmography is requested every run."""
+    await _seed_director(session)
+    await session.commit()
+    route = respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(404))
+
+    first = await _run(session_factory, tmdb_client, run_id)
+    assert first.seed_people == 1
+
+    second = await _run(session_factory, tmdb_client, run_id)
+
+    assert second.seed_people == 0, "a tombstoned person is no longer a seed"
+    assert route.call_count == 1, "a dead person id costs one request, not one per run"
+
+
+@respx.mock
+async def test_a_person_tmdb_names_again_returns_to_the_seed_set(
+    session, session_factory, tmdb_client, run_id
+):
+    """No cadence needed on this side: the person upsert that runs on every film ingest is
+    what clears the tombstone, so a restored person comes back on their own."""
+    film = await _seed_director(session)
+    await session.commit()
+    respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(404))
+    await _run(session_factory, tmdb_client, run_id)
+    assert (await _run(session_factory, tmdb_client, run_id)).seed_people == 0
+
+    # TMDB names them in a film's credits again — the ordinary ingest path.
+    async with session_factory() as s:
+        await upsert_film(
+            s,
+            TMDBMovieDetails.model_validate(
+                make_details(
+                    film.tmdb_id,
+                    credits={
+                        "cast": [],
+                        "crew": [
+                            {
+                                "id": 10,
+                                "name": "Person 10",
+                                "job": "Director",
+                                "department": "Directing",
+                                "credit_id": "c-restored",
+                            }
+                        ],
+                    },
+                )
+            ),
+        )
+        await s.commit()
+
+    person = await session.get(Person, 10, populate_existing=True)
+    assert person.tmdb_missing_at is None, "the upsert cleared the tombstone"
+
+
+@respx.mock
+async def test_a_whole_seed_set_of_404s_does_not_abort_the_phase(
+    session, session_factory, tmdb_client, run_id
+):
+    film = await _seed_director(session)
+    for person_id in range(20, 35):
+        await add_credit(
+            session, film, person_id, credit_type="cast", department="Acting", credit_order=0
+        )
+        respx.get(f"{BASE_URL}/person/{person_id}/movie_credits").mock(
+            return_value=httpx.Response(404)
+        )
+    respx.get(f"{BASE_URL}/person/10/movie_credits").mock(return_value=httpx.Response(404))
+    await session.commit()
+
+    result = await _run(session_factory, tmdb_client, run_id, failure_threshold=10)
+
+    assert not result.aborted
+    assert result.person_missing == 16
+    assert result.person_failures == 0
+
+
+@respx.mock
+async def test_a_404_candidate_is_skipped_as_missing(session, session_factory, tmdb_client, run_id):
+    """Deleted between the credits read and the details fetch. Nothing is tombstoned — the
+    film was never admitted, so there is no catalog row to mark."""
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, job="Director")])
+    respx.get(f"{BASE_URL}/movie/100").mock(return_value=httpx.Response(404))
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=DIRECTORS_ONLY)
+
+    assert result.skipped_missing == 1
+    assert result.candidate_failures == 0
+    assert not result.aborted
+    assert result.skip_counts["missing"] == 1

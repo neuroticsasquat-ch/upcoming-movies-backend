@@ -13,6 +13,24 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBMovieDetails,
     TMDBPersonMovieCredits,
 )
+from upmovies.logging_config import redact_api_key
+
+
+class TMDBNotFound(httpx.HTTPStatusError):
+    """TMDB has no entry at this id — a 404, not a transport or server failure.
+
+    Its own type because the two mean opposite things to a pipeline. A 5xx or a timeout is an
+    *outage*: retrying later is right, and a run of them should abort the pass before it burns
+    thousands of requests. A 404 is *terminal* — the entry is gone from TMDB and no retry
+    brings it back — so counting one toward a consecutive-failure guard reads a permanent
+    condition as a temporary one. That is the 2026-08-11 sweep incident (NEU-1124): eleven
+    deleted ids sorted to the head of a stalest-first queue tripped an abort built for an
+    outage.
+
+    Subclasses `httpx.HTTPStatusError` so every existing `except httpx.HTTPError` still
+    catches it unchanged; a caller that wants to tell the two apart puts a narrower clause
+    ahead of its own.
+    """
 
 
 class RateLimiter:
@@ -90,13 +108,28 @@ class TMDBClient:
 
             if 500 <= resp.status_code < 600:
                 if attempt + 1 >= self._retry_max:
-                    resp.raise_for_status()
+                    self._raise_for_status(resp)
                 await asyncio.sleep(self._retry_base * (2**attempt))
                 attempt += 1
                 continue
 
-            resp.raise_for_status()
+            self._raise_for_status(resp)
             return resp
+
+    def _raise_for_status(self, resp: httpx.Response) -> None:
+        """`resp.raise_for_status()`, but with the API key scrubbed and 404 given its own type.
+
+        httpx builds its message from the full request URL, which carries `api_key=` — so the
+        stock call leaks a live credential into every log line that formats the exception. The
+        message is composed here instead, at the one point where a key-bearing URL can enter an
+        exception at all (NEU-1124).
+        """
+        if not resp.is_error:
+            return
+        url = redact_api_key(str(resp.request.url))
+        message = f"{resp.status_code} {resp.reason_phrase} for url '{url}'"
+        error = TMDBNotFound if resp.status_code == httpx.codes.NOT_FOUND else httpx.HTTPStatusError
+        raise error(message, request=resp.request, response=resp)
 
     async def discover_movies(self, *, page: int = 1, **params: str | int) -> TMDBDiscoverResponse:
         """Page through `/discover/movie`. Extra keyword args are passed through as
