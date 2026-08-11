@@ -538,6 +538,10 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
     # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
     # number of distinct days, so the client knows when no more days remain.
+    #
+    # The day is `created_at`, NOT `occurred_at`, on purpose: the feed is a publication log
+    # (ADR-0016). A backfill or a new catalog tranche therefore lands as one tall day — that is
+    # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
     visible = (Film.slug.is_not(None), visible_events(), _region_visible())
 
