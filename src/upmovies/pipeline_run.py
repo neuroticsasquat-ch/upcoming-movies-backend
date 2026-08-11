@@ -193,6 +193,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
                 today=today,
                 excluded_statuses=settings.tmdb_excluded_statuses,
                 dormancy_days=settings.sweep_dormancy_days,
+                corroboration_threshold=settings.sweep_corroboration_threshold,
                 tranches=AdmissionTranches.from_settings(settings),
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )

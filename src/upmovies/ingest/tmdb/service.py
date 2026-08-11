@@ -17,7 +17,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.ingest.runs import finalize_run, record_progress
+from upmovies.ingest.runs import finalize_run, format_skip_detail, record_progress
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.filters import classify_skip
 from upmovies.ingest.tmdb.upsert import upsert_film
@@ -36,14 +36,6 @@ class IngestResult:
     films_failed: int
     films_skipped: int = 0
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
-
-
-def _format_skip_detail(skip_counts: Counter[str]) -> str:
-    total = sum(skip_counts.values())
-    if not skip_counts:
-        return f"skipped {total}"
-    breakdown = ", ".join(f"{reason}={n}" for reason, n in sorted(skip_counts.items()))
-    return f"skipped {total} ({breakdown})"
 
 
 @asynccontextmanager
@@ -151,7 +143,7 @@ async def run_tmdb_ingest(
             s,
             run_id,
             status="succeeded",
-            detail=f"upserted {processed}, {_format_skip_detail(skip_counts)}",
+            detail=f"upserted {processed}, {format_skip_detail(skip_counts)}",
         )
         await s.commit()
     return IngestResult(processed, failed, sum(skip_counts.values()), dict(skip_counts))

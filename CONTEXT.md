@@ -323,6 +323,16 @@ Admission is per **film**, not per credit — one open tranche among the grades 
 candidate is enough.
 _Avoid_: phase (that's enumerate/refresh/events/credits), stage, wave, cohort.
 
+**Corroboration threshold**:
+How many **distinct seed people** must reach an undated film before it may be admitted
+(`SWEEP_CORROBORATION_THRESHOLD`). Distinct *people*, not credits — someone who both wrote and
+directed a film corroborates it once. It is the third clause of the admission bar, alongside
+status and seed-grade role, and it is the dial between the two things one director attachment
+can be: the earliest signal the product sells, and a speculative TMDB entry. Not to be confused
+with the **corroboration window**, which is about release-date stories agreeing with TMDB's
+change history — same word, unrelated mechanism.
+_Avoid_: confidence threshold, minimum seeds, corroboration window (that's the other one).
+
 **Seed grade**:
 The role classes that both qualify a person as a seed *and* qualify a candidate film for
 admission. It is checked twice, on purpose: once on the person (do we follow them at all) and

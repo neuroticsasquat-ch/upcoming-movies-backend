@@ -25,7 +25,7 @@ from uuid import UUID
 import httpx
 
 from upmovies.catalog.seed_grade import ROLE_ORDER
-from upmovies.ingest.runs import record_progress
+from upmovies.ingest.runs import format_skip_detail, record_progress
 from upmovies.ingest.sweep.admission import AdmissionTranches
 from upmovies.ingest.sweep.phase import AbortGuard, owned_session
 from upmovies.ingest.sweep.seeds import (
@@ -43,10 +43,10 @@ from upmovies.ingest.tmdb.upsert import upsert_film
 
 log = logging.getLogger(__name__)
 
-# The admission bar is status alone (§4.1). `classify_skip`'s short-film rule is disabled
-# rather than tuned: an undated film rarely carries a real runtime, and rejecting one for
-# the zero TMDB reports would drop precisely the just-announced projects the sweep exists
-# to find.
+# Runtime is not one of the admission bar's clauses (§4.1), so `classify_skip` is asked
+# about status alone — its short-film rule is disabled rather than tuned. An undated film
+# rarely carries a real runtime, and rejecting one for the zero TMDB reports would drop
+# precisely the just-announced projects the sweep exists to find.
 _MIN_RUNTIME = 0
 
 
@@ -61,17 +61,40 @@ class EnumerateResult:
     skipped_already_known: int = 0
     skipped_dated_on_details: int = 0
     skipped_excluded_status: int = 0
+    skipped_below_corroboration: int = 0
+    """Reached by fewer than `corroboration_threshold` distinct seed people — the vaporware
+    filter (§4.2), and the one skip reason a config change alone can undo."""
     candidate_failures: int = 0
     admitted: int = 0
     withheld: int = 0
-    """Cleared the admission bar but its seed grade has no open tranche — the count that
-    says what the sweep would admit if a tranche were opened today."""
+    """Reached only at seed grades whose tranche is closed. A statement about the rollout,
+    not about the film — which is why it is counted before the corroboration threshold."""
     attachment_histogram: Counter[int] = field(default_factory=Counter)
-    """Candidates that cleared the bar, by `seed_attachment_count`. The corroboration
-    threshold is read off this distribution in M4 (§4.2), so it is collected from the
-    first run rather than added when the threshold lands."""
+    """Candidates that cleared *status*, by `seed_attachment_count` — deliberately not
+    narrowed by the corroboration threshold or the tranches. This is the distribution the
+    M4 tuning ticket reads the threshold off (§4.3), so it has to show what today's
+    settings excluded, and it is also the honest answer to "what would opening a tranche
+    admit"."""
     aborted: bool = False
     abort_error: str | None = None
+
+    @property
+    def skip_counts(self) -> Counter[str]:
+        """Everything reached but not admitted, by reason, for the run's `detail` line.
+
+        Zero-valued reasons are dropped rather than reported as `reason=0`: the line is read
+        at a glance on `/admin/runs`, and the reasons that fired are the information.
+        """
+        counts = Counter(
+            {
+                "already_known": self.skipped_already_known,
+                "dated": self.skipped_dated_on_details,
+                "status": self.skipped_excluded_status,
+                "corroboration": self.skipped_below_corroboration,
+                "no_tranche": self.withheld,
+            }
+        )
+        return Counter({reason: n for reason, n in counts.items() if n})
 
 
 async def run_sweep_enumerate(
@@ -82,11 +105,13 @@ async def run_sweep_enumerate(
     today: date,
     excluded_statuses: frozenset[str],
     dormancy_days: int,
+    corroboration_threshold: int,
     tranches: AdmissionTranches,
     failure_threshold: int = 10,
     log_every: int = 250,
 ) -> EnumerateResult:
-    """Enumerate the seed set's undated candidates and admit those a tranche allows."""
+    """Enumerate the seed set's undated candidates and admit those clearing the bar whose
+    seed grade has an open tranche."""
     result = EnumerateResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
 
@@ -118,6 +143,7 @@ async def run_sweep_enumerate(
         run_id=run_id,
         candidates=unknown,
         excluded_statuses=excluded_statuses,
+        corroboration_threshold=corroboration_threshold,
         tranches=tranches,
         result=result,
         guard=guard,
@@ -165,13 +191,18 @@ async def _judge_candidates(
     run_id: UUID,
     candidates: list[CandidateTally],
     excluded_statuses: frozenset[str],
+    corroboration_threshold: int,
     tranches: AdmissionTranches,
     result: EnumerateResult,
     guard: AbortGuard,
     log_every: int,
 ) -> None:
     """One `/movie/{id}` per candidate — the credits list carries no `status` — then the
-    admission bar and the tranche gate."""
+    admission bar (§4.1: status, seed-grade role, corroboration) and the tranche gate.
+
+    The full details fetch is what admission writes, not a stub row: `upsert_film` lands the
+    credits that make the film contribute its own seed people back on the next sweep (§3.3)
+    and the alternative titles the link stage's candidate retrieval matches on."""
     for i, tally in enumerate(candidates, start=1):
         try:
             details = await client.movie_details(tally.tmdb_id)
@@ -184,14 +215,16 @@ async def _judge_candidates(
             ):
                 result.skipped_excluded_status += 1
             else:
+                # Counted before the threshold rather than after it: this histogram is what
+                # the M4 tuning ticket reads the threshold *off* (§4.3), so letting today's
+                # value truncate it would hide the evidence that it should be lowered.
                 result.attachment_histogram[tally.seed_attachment_count] += 1
-                if tranches.admits(tally.roles):
-                    async with owned_session(session_factory) as s:
-                        await upsert_film(s, details)
-                        await record_progress(s, run_id, processed_delta=1)
-                        await s.commit()
-                    result.admitted += 1
-                else:
+                # The tranche gate is asked first, and the order is the reported reason.
+                # It is the rollout posture — an operator's deliberate setting — whereas the
+                # threshold is a judgement about the film. While a grade is closed nothing
+                # is being judged at all, so reporting a threshold that was never consulted
+                # would read as a verdict the sweep did not reach.
+                if not tranches.admits(tally.roles):
                     result.withheld += 1
                     log.debug(
                         "enumerate: withheld %d (%s, %d seed attachments)",
@@ -199,6 +232,14 @@ async def _judge_candidates(
                         _roles(tally),
                         tally.seed_attachment_count,
                     )
+                elif tally.seed_attachment_count < corroboration_threshold:
+                    result.skipped_below_corroboration += 1
+                else:
+                    async with owned_session(session_factory) as s:
+                        await upsert_film(s, details)
+                        await record_progress(s, run_id, processed_delta=1)
+                        await s.commit()
+                    result.admitted += 1
             guard.succeeded()
             if i % log_every == 0:
                 log.info("enumerate: %d/%d candidates judged", i, len(candidates))
@@ -225,14 +266,11 @@ def _abort(result: EnumerateResult, error: str) -> None:
 
 def _log_outcome(result: EnumerateResult, tranches: AdmissionTranches) -> None:
     log.info(
-        "enumerate: %d admitted, %d withheld (%s), skipped %d known / %d dated / %d status, "
-        "%d person failures, %d candidate failures, attachments %s",
+        "enumerate: %d admitted, %s (%s), %d person failures, %d candidate failures, "
+        "attachments %s",
         result.admitted,
-        result.withheld,
+        format_skip_detail(result.skip_counts),
         tranches,
-        result.skipped_already_known,
-        result.skipped_dated_on_details,
-        result.skipped_excluded_status,
         result.person_failures,
         result.candidate_failures,
         dict(sorted(result.attachment_histogram.items())),

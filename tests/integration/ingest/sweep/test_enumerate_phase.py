@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 
 from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.catalog.models import Film
+from upmovies.catalog.models import Film, FilmAlternativeTitle, FilmCredit
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.sweep import AdmissionTranches, run_sweep_enumerate
 
@@ -57,7 +57,7 @@ async def _run(session_factory, tmdb_client, run_id, **overrides):
         today=TODAY,
         excluded_statuses=EXCLUDED,
         dormancy_days=DORMANCY_DAYS,
-        **{"tranches": AdmissionTranches(), **overrides},
+        **{"tranches": AdmissionTranches(), "corroboration_threshold": 1, **overrides},
     )
 
 
@@ -329,3 +329,199 @@ async def test_survives_a_malformed_credits_payload(session, session_factory, tm
 
     assert result.person_failures == 1
     assert result.candidates_found == 1
+
+
+@respx.mock
+async def test_a_candidate_below_the_corroboration_threshold_is_not_admitted(
+    session, session_factory, tmdb_client, run_id
+):
+    """One attachment is the earliest signal the product sells and also what a speculative
+    TMDB entry looks like (§4.2), so the bar is a configured constant rather than a
+    judgement made in code."""
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_details(100)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=DIRECTORS_ONLY,
+        corroboration_threshold=2,
+    )
+
+    assert (result.admitted, result.skipped_below_corroboration) == (0, 1)
+    assert result.withheld == 0, "withheld means an open tranche was missing, not a low count"
+    assert await _film_count(session) == 1
+
+
+@respx.mock
+async def test_a_candidate_meeting_the_threshold_is_admitted(
+    session, session_factory, tmdb_client, run_id
+):
+    """Two distinct seed people reach the film, one of them at an open grade."""
+    film = await _seed_director(session)
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_credits(11, cast=[make_credit_entry(100, order=0)])
+    _mock_details(100)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=DIRECTORS_ONLY,
+        corroboration_threshold=2,
+    )
+
+    assert (result.admitted, result.skipped_below_corroboration) == (1, 0)
+
+
+@respx.mock
+async def test_the_attachment_histogram_still_counts_what_the_threshold_excluded(
+    session, session_factory, tmdb_client, run_id
+):
+    """The histogram is what the M4 tuning ticket reads the threshold *off* (§4.3). Letting
+    the current threshold truncate it would leave the next tuning pass unable to see that it
+    should be lowered."""
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_details(100)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=DIRECTORS_ONLY,
+        corroboration_threshold=2,
+    )
+
+    assert result.attachment_histogram == {1: 1}
+
+
+@respx.mock
+async def test_a_candidate_reached_only_through_a_writer_waits_for_its_tranche(
+    session, session_factory, tmdb_client, run_id
+):
+    """Directors open, writers still closed: the ramp is per seed grade, and the role that
+    matters is the one held *on the candidate film* (§4.1, §7.4)."""
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 11, credit_type="crew", department="Writing", job="Writer")
+    await session.commit()
+    _mock_credits(11, crew=[make_credit_entry(100, department="Writing", job="Writer")])
+    _mock_details(100)
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=DIRECTORS_ONLY)
+
+    assert (result.admitted, result.withheld) == (0, 1)
+    assert await _film_count(session) == 1
+
+
+@respx.mock
+async def test_the_master_flag_off_admits_nothing_however_the_tranches_are_set(
+    session, session_factory, tmdb_client, run_id
+):
+    """`SWEEP_ENABLED` is the rollback, kept separate from the ramp on purpose (§7.3): one
+    move has to stop admission without anyone having to remember which tranches were open."""
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_details(100)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=AdmissionTranches(enabled=False, directors=True, writers=True, cast=True),
+    )
+
+    assert (result.admitted, result.withheld) == (0, 1)
+    assert await _film_count(session) == 1
+
+
+@respx.mock
+async def test_admission_lands_the_alternative_titles_the_retrieval_index_needs(
+    session, session_factory, tmdb_client, run_id
+):
+    """Admission is a full `movie_details` fetch, not a stub row: the link stage's candidate
+    retrieval matches on alternative titles, and credits are what make the admitted film
+    contribute its own seed people back on the next sweep (§3.3)."""
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    respx.get(f"{BASE_URL}/movie/100").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_details(
+                100,
+                release_date="",
+                status="Planned",
+                alternative_titles={
+                    "titles": [{"iso_3166_1": "FR", "title": "Projet Sans Titre", "type": ""}]
+                },
+                credits={
+                    "cast": [],
+                    "crew": [
+                        {
+                            "id": 10,
+                            "name": "Person 10",
+                            "credit_id": "c-100-10",
+                            "department": "Directing",
+                            "job": "Director",
+                        }
+                    ],
+                },
+            ),
+        )
+    )
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=DIRECTORS_ONLY)
+
+    assert result.admitted == 1
+    admitted = (await session.execute(select(Film).where(Film.tmdb_id == 100))).scalar_one()
+    titles = (
+        (
+            await session.execute(
+                select(FilmAlternativeTitle.title).where(
+                    FilmAlternativeTitle.film_id == admitted.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert titles == ["Projet Sans Titre"]
+    jobs = (
+        (await session.execute(select(FilmCredit.job).where(FilmCredit.film_id == admitted.id)))
+        .scalars()
+        .all()
+    )
+    assert jobs == ["Director"]
+
+
+@respx.mock
+async def test_a_closed_tranche_is_reported_ahead_of_a_low_attachment_count(
+    session, session_factory, tmdb_client, run_id
+):
+    """A candidate can fail both gates, and the run's `detail` line reports one reason per
+    candidate — so which one it names matters. The closed tranche is the operator's own
+    setting and the threshold was never consulted, so reporting `corroboration` here would
+    read as a verdict on the film that the sweep never actually reached."""
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_details(100)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=AdmissionTranches(),
+        corroboration_threshold=2,
+    )
+
+    assert (result.withheld, result.skipped_below_corroboration) == (1, 0)
+    assert result.skip_counts == {"no_tranche": 1}

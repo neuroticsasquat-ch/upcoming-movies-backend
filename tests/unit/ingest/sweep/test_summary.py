@@ -104,3 +104,39 @@ def test_names_the_credit_phase_when_it_aborts():
     )
 
     assert "credits aborted: aborted after 10 consecutive failures" in detail
+
+
+def test_reports_admissions_against_skips_by_reason():
+    """The ramp's operating question is "what did the open tranche let in, and what stopped
+    the rest" — so the enumerate clause reads like the tmdb stage's, one reason at a time
+    (NEU-1086). A run reporting only a total would leave "the tranche is closed" and "TMDB
+    says they are all released" indistinguishable."""
+    detail = sweep_detail(
+        EnumerateResult(
+            seed_people=1446,
+            candidates_found=310,
+            admitted=12,
+            withheld=40,
+            skipped_already_known=200,
+            skipped_below_corroboration=50,
+            skipped_dated_on_details=6,
+            skipped_excluded_status=2,
+        ),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+    )
+
+    assert "12 admitted" in detail
+    assert (
+        "skipped 298 (already_known=200, corroboration=50, dated=6, no_tranche=40, status=2)"
+        in detail
+    )
+
+
+def test_a_pass_that_skipped_nothing_still_reports_a_skip_total():
+    detail = sweep_detail(
+        EnumerateResult(admitted=3), RefreshResult(), FieldEventResult(), CreditEventResult()
+    )
+
+    assert "3 admitted, skipped 0," in detail
