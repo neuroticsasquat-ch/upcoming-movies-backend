@@ -7,8 +7,11 @@ the database; everything below it (`build_index`, `indexed_film`, and every look
 against a hand-built index with no session at all.
 
 **Search scope is unchanged from the roster's.** The same `active_film_clause` gates the
-index: released and canceled films stay out. That is a product decision about what the
-site tracks, not a prefix-size workaround, so shrinking the prompt does not get to widen it.
+index: released, canceled and dormant films stay out. That is a product decision about what
+the site tracks, not a prefix-size workaround, so shrinking the prompt does not get to widen
+it. Dormancy (ADR-0015) is the one thing that moves the boundary over time, and it moves it
+for every other consumer of the clause in the same breath — `news.fetcher`'s per-film query
+list and the sweep's seed-person query — so they cannot drift apart on what "active" means.
 
 **Only titles are indexed** — `film.title`, `film.original_title`, and
 `catalog.film_alternative_title`. Collection name and talent are deliberately absent from
@@ -262,11 +265,15 @@ async def build_candidate_index(
     fixture against the catalog its stories were news in. Production passes nothing and
     reads the catalog as of today."""
     started = time.perf_counter()
-    excluded = get_settings().tmdb_excluded_statuses
+    settings = get_settings()
     today = as_of or datetime.now(UTC).date()
     # Built once and shared by every query below, so the child reads can never disagree
     # with the film read about what "active" means.
-    is_active = active_film_clause(today=today, excluded_statuses=excluded)
+    is_active = active_film_clause(
+        today=today,
+        excluded_statuses=settings.tmdb_excluded_statuses,
+        dormancy_days=settings.sweep_dormancy_days,
+    )
     active_ids = select(Film.id).where(is_active).scalar_subquery()
 
     film_rows = (

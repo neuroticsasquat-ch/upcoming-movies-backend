@@ -39,6 +39,54 @@ class Settings(BaseSettings):
         default="Released,Canceled", alias="TMDB_EXCLUDED_STATUSES"
     )
 
+    # How long an undated film may stay quiescent — no `catalog.film_field_change` row and
+    # no linked story — before `active_film_clause` drops it from the working set (ADR-0015).
+    # Placeholder: deliberately long, so almost nothing goes dormant until the M4 tuning
+    # ticket sets it from the discovery probe. Erring long costs per-film queries; erring
+    # short silently stops following live films.
+    sweep_dormancy_days: int = Field(default=365, ge=1, alias="SWEEP_DORMANCY_DAYS")
+    # How often the sweep's refresh phase still re-fetches a dormant film. Dormancy is not
+    # an exemption from refreshing — detecting the change that revives a film requires
+    # reading it, so a dormancy that stopped the refresh would be a one-way door (§4.5) —
+    # it is a *reduced cadence*. Placeholder until the M4 tuning ticket sets it: erring
+    # short only costs requests, erring long delays every revival by that much.
+    sweep_dormant_refresh_days: int = Field(default=30, ge=1, alias="SWEEP_DORMANT_REFRESH_DAYS")
+    # How far back the sweep's field-change phase reads `catalog.film_field_change` for events
+    # to card (ADR-0014). A fixed rolling window, not a watermark: re-reading a carded change
+    # is a no-op, so the overlap costs a couple of indexed queries and means a failed sweep
+    # loses nothing. It is also the day-one guard — the table holds months of history, and
+    # without a floor the first pass after deploy would card every date move ever recorded.
+    sweep_event_lookback_days: int = Field(default=7, ge=1, alias="SWEEP_EVENT_LOOKBACK_DAYS")
+
+    # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
+    # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the
+    # three tranche flags below so a rollback is one move and does not disturb the ramp.
+    sweep_enabled: bool = Field(default=False, alias="SWEEP_ENABLED")
+    # Admission ramps one seed grade at a time — directors, then writers, then top-5 cast
+    # (§7.4) — so the retrieval-health guard reacts to a 1,446-person expansion before a
+    # 7,519-person one, and a precision drop names the grade that caused it. All off until
+    # the M4 tranche tickets open them, which makes each one an env change, not a deploy.
+    sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
+    sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
+    sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
+    # How many distinct seed people must reach an undated film before it may be admitted
+    # (§4.1). One director attachment is the earliest and most valuable signal the product
+    # sells; it is also exactly what a speculative TMDB entry looks like, and §4.2 leaves
+    # that tension open on purpose, for the M4 tuning ticket to settle against the probe's
+    # distribution.
+    #
+    # So the placeholder is 1 — the identity value, which leaves the bar at the two clauses
+    # §4.1 states unconditionally (status, and a seed-grade role on the candidate film).
+    # Deliberately not 2: the flags ship closed and the directors tranche opens *before*
+    # tuning (§7.4), so whatever stands here is the value that first flip actually runs at.
+    # At 2 that flip would admit only films a second tracked person also reaches — a
+    # different, better-connected population than "a director we follow just attached" —
+    # and it would move the ramp and the bar together, which is precisely what §7.4 splits
+    # them up to avoid. Guessing strict is still guessing.
+    sweep_corroboration_threshold: int = Field(
+        default=1, ge=1, alias="SWEEP_CORROBORATION_THRESHOLD"
+    )
+
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
     # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
     # for all four stages, and requiring these would break every one of them for a capability
@@ -121,9 +169,12 @@ class Settings(BaseSettings):
     # healthchecks.io deadman ping URLs for the Coolify scheduled tasks (see
     # upmovies.pipeline_run). Optional: unset → the ping is a no-op, so local/dev runs of
     # `python -m upmovies.pipeline_run` don't need them. `daily` runs the full chain
-    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass.
+    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass; `sweep`
+    # runs the undated-film pass on its own slot ~2h ahead of daily, with its own deadman
+    # because a sweep that stops running is invisible in the daily chain's ping (§6.1).
     healthcheck_daily_url: str | None = Field(default=None, alias="HEALTHCHECK_DAILY_URL")
     healthcheck_hourly_url: str | None = Field(default=None, alias="HEALTHCHECK_HOURLY_URL")
+    healthcheck_sweep_url: str | None = Field(default=None, alias="HEALTHCHECK_SWEEP_URL")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

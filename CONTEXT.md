@@ -285,3 +285,149 @@ TMDB's single scalar `release_date` for a film — the only date this model gate
 / per-type dates (the `film_release_date` table) are explicitly out of scope: a regional-only
 move that leaves the primary date untouched does not form a release-date event.
 _Avoid_: regional date, theatrical date (those are the out-of-scope per-country values).
+
+### Undated film discovery
+
+**Sweep**:
+The scheduled pass that discovers and maintains films TMDB's dated `/discover/movie` roster
+cannot reach. It runs as its own `ingest_run.kind` on its own schedule slot, roughly two hours
+ahead of the daily pipeline — deliberately *not* a stage in it, because the daily chain is
+fail-fast and a ~45-minute TMDB pass would take feeds, link and synthesize down with it. It has
+**four** phases and needs all of them: **enumerate** (walk seed people's credits for undated
+candidates), **refresh** (re-fetch every active film discover did not touch), **events** (card
+the field changes refreshing produced), and **credits** (card the attachments it produced).
+Dropping the refresh phase is the project's quietest failure mode — undated films sit outside
+the discover window, so without it they are never re-read, never upserted, and no
+catalog-sourced event ever fires. Running the two carding phases last, in the same pass, is what
+makes a change TMDB published today a card today; running the whole sweep ahead of the daily
+chain is what puts that card in front of `link` rather than behind it. The two card from
+different tables and fail independently, so they count separately on `/admin/runs`.
+_Avoid_: crawl, scan, discovery run (that's the enumerate phase alone), Path B job.
+
+**Seed person**:
+Someone whose credits the sweep enumerates: anyone holding a **seed-grade** credit — director,
+writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film. 7,519
+of them at a 1,435-film catalog. Producers are deliberately not seed-grade: an EP credit travels
+far and says little about whether a project is real. The set is *self-expanding* — admitting a
+film contributes its own credits back as seeds — and **dormancy** is what bounds it, so a
+project that goes nowhere stops paying for its own people.
+_Avoid_: tracked person, watched person, followed talent.
+
+**Tranche**:
+One seed grade's admission flag — `SWEEP_ADMIT_DIRECTORS`, `SWEEP_ADMIT_WRITERS`,
+`SWEEP_ADMIT_CAST` — opened one at a time so a precision drop names the grade that caused it
+rather than arriving as one undifferentiated jump. They sit under the master `SWEEP_ENABLED`,
+which is kept separate on purpose: the master is the rollback, the tranches are the ramp, and a
+sweep that enumerates and reports while admitting nothing is the state where all four are off.
+Admission is per **film**, not per credit — one open tranche among the grades that reached a
+candidate is enough.
+_Avoid_: phase (that's enumerate/refresh/events/credits), stage, wave, cohort.
+
+**Corroboration threshold**:
+How many **distinct seed people** must reach an undated film before it may be admitted
+(`SWEEP_CORROBORATION_THRESHOLD`). Distinct *people*, not credits — someone who both wrote and
+directed a film corroborates it once. It is the third clause of the admission bar, alongside
+status and seed-grade role, and it is the dial between the two things one director attachment
+can be: the earliest signal the product sells, and a speculative TMDB entry. Not to be confused
+with the **corroboration window**, which is about release-date stories agreeing with TMDB's
+change history — same word, unrelated mechanism.
+_Avoid_: confidence threshold, minimum seeds, corroboration window (that's the other one).
+
+**Seed grade**:
+The role classes that both qualify a person as a seed *and* qualify a candidate film for
+admission. It is checked twice, on purpose: once on the person (do we follow them at all) and
+once on their role **on the candidate film** — without the second check a "Special Thanks"
+credit would drag in someone's short film.
+_Avoid_: role tier, credit weight, billing.
+
+**Catalog-sourced event**:
+An event created by a change in TMDB's own data — a release date assigned or moved, a status
+transition, a credit attached — with **no story behind it**. It carries a deterministic
+`EventSummary` (a template, never a model call: `model` is the sentinel `"deterministic"`) and
+attributes to **"via TMDB"** where a story-sourced event lists outlets. Confidence follows the
+field: a release-date or status change is `confirmed`, because ADR-0002 already makes TMDB the
+system of record for its own scalar fields, while a credit — which any editor can add — sits
+below a trade-sourced beat. When a trade story later clusters onto it, the LLM summary
+supersedes the deterministic one and real sources appear — the card upgrades in place. It exists
+because story supply is fixed at 8 trade feeds while the catalog is about to multiply: without
+it, most admitted films would be permanently blank pages.
+_Avoid_: synthetic event, system event, auto event, TMDB event (that's the source, not the kind).
+
+**Credit attachment event**:
+The catalog-sourced card raised when a seed-grade credit crosses into a film's credit set —
+`crew_attached` for a director or writer, the existing `casting` for top-5 billed cast, both at
+`rumored`. Keyed on the **observation**, not the person: every attachment sharing one
+`changed_at` cards once, so a whole top-billed cast arriving between two ingests is one card
+naming all of them rather than five. Detachments are recorded as history but never carded —
+"no longer attached" is mostly TMDB reverting its own vandalism. `crew_attached` is a new type
+and has to be registered wherever the vocabulary is enumerated (`ck_event_type`, the arc's
+`_EVENT_STAGE`, the cluster's `_STALE_EVENT_TYPES`) or it silently ranks below everything; it is
+deliberately *not* hidden, because a director attaching to a film no trade has written about is
+the beat the whole expansion exists for.
+_Avoid_: casting event (that is one of the two types, not the pair), crew change, credit diff
+(that is the history row it reads).
+
+**Double-carding**:
+The failure mode where the story path and the catalog path both raise an event for one TMDB
+change. They are independent by design — a story-triggered release-date event still needs
+corroboration, a catalog-triggered one fires from the change alone — but they read the *same*
+`film_field_change` row, so each has to check for the other's card — one rule read from opposite
+ends, which is why the two checks have to move together. For a date move both sides work off the
+**corroboration window**: the catalog path skips a change already covered by a *story*-borne
+release-date event inside it, and the story path attaches to the most recent *catalog* event
+inside it. A catalog card is matched at exactly its own change's timestamp, so a date that moves
+twice in a week still gets two cards. Production milestones are matched on type alone: a film
+enters production once, so a story running a month behind TMDB's status flip still belongs on
+the existing card. Credits are matched on neither: the question is always **who**, answered by
+`Event.subject_key` on both sides — the catalog path suppresses a person a card already names,
+and a story naming someone a credit event carded joins that card rather than being dropped as a
+restatement of it. A story about a director attaching comes back classified `casting`, because
+the LLM has no `crew_attached` in its vocabulary, so the story side searches both credit types.
+_Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
+
+**First observation**:
+The first time the sweep reads a newly admitted film's credits. It is recorded as a **baseline
+and emits no events** — a hard rule of the credit-history contract rather than something left to
+fall out of the implementation. `catalog.film_field_change` gets the same protection by accident
+(it is a `BEFORE UPDATE` trigger, so inserts write no history), and the credit history is being
+built from scratch, where the accident does not repeat. Without the rule, admitting 3,000 films
+would emit tens of thousands of false "attached to direct" events on day one.
+_Avoid_: initial sync, backfill, seeding (that's the person set).
+
+**Dormant**:
+An undated film that has been quiet for N days — no `film_field_change` row *and* no linked
+story. Dormant films leave `active_film_clause`, and with it the candidate retrieval index, the
+per-film query list, and the seed-person query; they keep their page, their events, and a
+**reduced-cadence refresh**. That last part is not a concession: detecting the change that
+revives a film requires re-fetching it, so a dormancy that stopped the refresh would be a
+one-way door. Keyed on **quiescence**, never on age — a film can be real and quiet for a year.
+Dormancy is load-bearing for three separate cost curves at once, which is why N is measured
+rather than picked.
+_Avoid_: inactive (that's `active_film_clause`'s whole predicate), stale, archived, retired,
+abandoned.
+
+**Reachable**:
+Whether the dated `/discover/movie` roster can see a film at all. Unreachable films — undated
+ones, and dated ones sitting below the popularity floor where discover stops paging — are the
+sweep's refresh set, identified by `film.updated_at` predating the last `tmdb` run. Scoping the
+refresh on reachability rather than on datedness is what closes the **promotion gap**: a film
+that finally gets a date but stays under the floor would otherwise fall out of the sweep without
+ever falling into discover, and freeze permanently.
+_Avoid_: in-window, discoverable, indexed.
+
+**In play**:
+A film that has neither released nor been called off — `active_film_clause` without its
+dormancy term (`in_play_clause`). It exists for exactly one caller: the sweep's refresh phase,
+which spans **both** sides of dormancy and so cannot ask the composed question. Everywhere the
+working set is being *spent* — the retrieval index, the per-film query list, the seed-person
+query — the word is **active**, and dormancy is part of what it means.
+_Avoid_: active (that's the composed predicate), live, current, open.
+
+**Discover watermark**:
+The start of the last **finished** `tmdb` run, the timestamp the refresh set is cut against: a
+film whose `updated_at` predates it is one discover did not reach. Finished, not succeeded, and
+the difference is load-bearing — the refresh writes, so its own upserts lift a film past the
+watermark that selected it. Pinned to the last *success*, a `tmdb` stage that stays broken
+freezes the watermark, one sweep pass carries the whole catalog over it, and every later pass
+selects nothing at all.
+_Avoid_: cutoff, high-water mark, last sync, refresh cursor.

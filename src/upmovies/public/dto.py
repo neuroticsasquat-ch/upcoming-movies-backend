@@ -18,6 +18,10 @@ class EventOut(BaseModel):
     created_at: datetime
     summary: str
     summary_edited: bool
+    # "story" | "catalog". A `catalog` event was created by a TMDB field or credit change with
+    # no story behind it, so `sources` may legitimately be empty and the card attributes to
+    # TMDB in place of outlets (ADR-0014).
+    provenance: str
     sources: list[SourceOut]
 
 
@@ -95,6 +99,7 @@ class FeedItem(BaseModel):
     occurred_at: datetime
     created_at: datetime
     summary: str
+    provenance: str  # see EventOut.provenance
     sources: list[SourceOut]
 
 
@@ -110,6 +115,9 @@ class FeedDayItem(BaseModel):
     film_title: str
     release_year: int | None
     poster_path: str | None
+    # Rendered in the release year's slot for an undated film (NEU-1085), so it has to
+    # ride along on the row — it is not derivable client-side from release_year.
+    arc_stage: str
     day: date
     top_event_type: str
     event_count: int

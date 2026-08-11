@@ -1,12 +1,18 @@
 import time
+from datetime import date
 
 import httpx
 import pytest
 import respx
 
-from tests.fixtures.tmdb import make_details
+from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
 from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient
-from upmovies.ingest.tmdb.schemas import TMDBCredits, TMDBDiscoverResponse, TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import (
+    TMDBCredits,
+    TMDBDiscoverResponse,
+    TMDBMovieDetails,
+    TMDBPersonMovieCredits,
+)
 
 BASE_URL = "https://api.themoviedb.org/3"
 
@@ -304,3 +310,75 @@ async def test_movie_details_parses_appended_release_dates_block_and_captures_in
     assert details.release_dates.results[0].release_dates[0].type == 3
     # Also present in raw payload
     assert details.tmdb_raw["release_dates"] == release_dates_block
+
+
+@respx.mock
+async def test_person_movie_credits_parses_cast_and_crew_roles():
+    route = respx.get(f"{BASE_URL}/person/42/movie_credits").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_person_movie_credits(
+                42,
+                cast=[make_credit_entry(1, order=0, character="Her")],
+                crew=[make_credit_entry(2, department="Directing", job="Director")],
+            ),
+        )
+    )
+    async with _client() as c:
+        credits = await c.person_movie_credits(42)
+
+    assert isinstance(credits, TMDBPersonMovieCredits)
+    assert credits.id == 42
+    assert [(e.id, e.order) for e in credits.cast] == [(1, 0)]
+    assert [(e.id, e.job) for e in credits.crew] == [(2, "Director")]
+    assert route.calls.last.request.url.params.get("api_key") == "test-key"
+
+
+@respx.mock
+async def test_person_movie_credits_reads_undated_entries_as_none():
+    # TMDB sends "" for an unannounced film on this endpoint, and null elsewhere; both
+    # must land as None so callers never special-case the empty string.
+    respx.get(f"{BASE_URL}/person/42/movie_credits").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_person_movie_credits(
+                42,
+                cast=[
+                    make_credit_entry(1, release_date=""),
+                    make_credit_entry(2, release_date=None),
+                    make_credit_entry(3, release_date="2027-01-01"),
+                ],
+                crew=[make_credit_entry(4, job="Director")],
+            ),
+        )
+    )
+    async with _client() as c:
+        credits = await c.person_movie_credits(42)
+
+    assert [e.release_date for e in credits.cast] == [None, None, date(2027, 1, 1)]
+    assert [e.release_date for e in credits.crew] == [None]
+
+
+@respx.mock
+async def test_person_movie_credits_handles_a_person_with_no_credits():
+    respx.get(f"{BASE_URL}/person/42/movie_credits").mock(
+        return_value=httpx.Response(200, json=make_person_movie_credits(42))
+    )
+    async with _client() as c:
+        credits = await c.person_movie_credits(42)
+
+    assert credits.id == 42
+    assert credits.cast == []
+    assert credits.crew == []
+
+
+@respx.mock
+async def test_person_movie_credits_does_not_retry_on_404():
+    route = respx.get(f"{BASE_URL}/person/9999/movie_credits").mock(
+        return_value=httpx.Response(404)
+    )
+    async with _client() as c:
+        with pytest.raises(httpx.HTTPStatusError):
+            await c.person_movie_credits(9999)
+
+    assert route.call_count == 1

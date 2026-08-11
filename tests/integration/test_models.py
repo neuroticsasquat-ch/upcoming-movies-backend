@@ -285,3 +285,59 @@ async def test_event_region_defaults_none_and_persists(session):
 
     assert tagged.region == "IN"
     assert untagged.region is None
+
+
+async def test_one_catalog_change_can_only_card_once(session):
+    """The field-change reader re-reads a rolling window of changes every run (ADR-0014), so
+    its own skip check is the fast path and this index is what makes a double card
+    impossible. Keyed on the change's natural identity: film, type, and the `changed_at` the
+    event is dated to."""
+    from upmovies.catalog.models import Film
+    from upmovies.news.models import Event
+
+    film = Film(tmdb_id=920002, title="Carded Twice")
+    session.add(film)
+    await session.flush()
+    changed_at = datetime(2026, 7, 1, tzinfo=UTC)
+
+    def _carded():
+        return Event(
+            film_id=film.id,
+            event_type="release_date",
+            confidence="confirmed",
+            provenance="catalog",
+            occurred_at=changed_at,
+        )
+
+    session.add(_carded())
+    await session.commit()
+
+    session.add(_carded())
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()
+
+
+async def test_two_story_events_may_share_a_timestamp(session):
+    """The index is partial on purpose — the story path routinely dates several events on
+    one film to the same story's publication."""
+    from upmovies.catalog.models import Film
+    from upmovies.news.models import Event
+
+    film = Film(tmdb_id=920003, title="Same Minute")
+    session.add(film)
+    await session.flush()
+    occurred_at = datetime(2026, 7, 1, tzinfo=UTC)
+    session.add_all(
+        [
+            Event(
+                film_id=film.id,
+                event_type="release_date",
+                confidence="confirmed",
+                occurred_at=occurred_at,
+            )
+            for _ in range(2)
+        ]
+    )
+
+    await session.commit()

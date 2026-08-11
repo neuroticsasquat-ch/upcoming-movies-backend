@@ -25,6 +25,13 @@ from upmovies.catalog.models import (
     SpokenLanguage,
 )
 from upmovies.catalog.slug import assign_slug
+from upmovies.ingest.tmdb.credit_history import (
+    diff_seed_credits,
+    load_seed_credits,
+    mark_credits_observed,
+    record_credit_changes,
+    seed_credits_from_details,
+)
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 
 
@@ -270,9 +277,17 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     in multiple films only grows the catalog — never raises a duplicate-key error.
     Film credits are rebuilt (delete-and-reinsert) each run so that a person dropped
     from the cast/crew between runs is correctly removed.
+
+    The rebuild is also where seed-grade credit *history* is captured: both sides of the
+    diff are in hand here and nowhere else, so `catalog.film_credit_change` is written from
+    them before the old side is destroyed. First observation is a baseline, never a change —
+    see `ingest.tmdb.credit_history`.
     """
     if not details.credits:
         return
+
+    # Read the stored side before the delete below wipes it.
+    previous_seed_credits = await load_seed_credits(session, film_id)
 
     # Step 1 — People: union of cast + crew, deduped by TMDB person id.
     people_by_id: dict[int, dict] = {}
@@ -345,3 +360,14 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
 
     if credit_rows:
         await session.execute(insert(FilmCredit).values(list(credit_rows.values())))
+
+    # Step 3 — History: what the rebuild would otherwise have thrown away. The marker is set
+    # last and only here, so the very first pass writes a baseline and every later one a diff.
+    await record_credit_changes(
+        session,
+        film_id,
+        diff_seed_credits(
+            previous=previous_seed_credits, current=seed_credits_from_details(details)
+        ),
+    )
+    await mark_credits_observed(session, film_id)

@@ -10,8 +10,8 @@ from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run as _create_run
 from upmovies.llm import CallResult
 from upmovies.news.models import Event, EventStory, EventSummary, Story
-from upmovies.synthesize.pipeline import _select_pending, _upsert_summary, run_synthesize_ingest
-from upmovies.synthesize.summarizer import SummaryResult
+from upmovies.synthesize.pipeline import _select_pending, run_synthesize_ingest
+from upmovies.synthesize.store import upsert_summary
 from upmovies.synthesize.url_resolution import ResolveResult, mark_displayed_eligible
 
 
@@ -153,13 +153,14 @@ async def test_upsert_summary_inserts_then_updates_idempotently(session):
     event = await _event_with_story(session, film)
     await session.commit()
 
-    first = SummaryResult(
+    await upsert_summary(
+        session,
+        event_id=event.id,
         summary="First.",
         model="claude-haiku-4-5",
         prompt_version="1",
         source_updated_at=event.updated_at,
     )
-    await _upsert_summary(session, event.id, first)
     await session.commit()
 
     rows = (
@@ -175,13 +176,14 @@ async def test_upsert_summary_inserts_then_updates_idempotently(session):
     assert len(rows) == 1
     assert rows[0].summary == "First."
 
-    second = SummaryResult(
+    await upsert_summary(
+        session,
+        event_id=event.id,
         summary="Second.",
         model="claude-haiku-4-5",
         prompt_version="2",
         source_updated_at=event.updated_at,
     )
-    await _upsert_summary(session, event.id, second)
     await session.commit()
 
     row = (

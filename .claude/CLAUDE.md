@@ -4,8 +4,9 @@ FastAPI service backing the Upcoming Movies Tracker. Python 3.13, SQLAlchemy 2 (
 
 ## Linear
 
-- `linear_initiative`: Upcoming Movies Tracker
+- `linear_initiative`: backlotter
 - `linear_team`: Neuroticsasquatch
+- `loop_base`: release/v0.3.0
 
 ## Golden rule: everything runs in the container via `task`
 

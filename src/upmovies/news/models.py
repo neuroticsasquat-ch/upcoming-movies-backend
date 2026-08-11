@@ -65,6 +65,11 @@ class Story(Base):
     )
 
 
+# Where an event came from. `story` is the ADR-0002 path — a trade story reported it and TMDB's
+# change history corroborated it. `catalog` is the ADR-0014 path — a TMDB field or credit change
+# created the event with no story behind it, so it carries a deterministic summary and attributes
+# to TMDB rather than to outlets. Stories may still cluster onto a `catalog` event later; the
+# provenance records how it was *born* and does not change when they do.
 class Event(Base):
     """A distinct per-film news event (a real beat: casting, trailer, release-date change,
     production milestone, …), grouping the stories that report it. The contract Synthesis
@@ -73,12 +78,30 @@ class Event(Base):
     __tablename__ = "event"
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('announced', 'casting', 'production_start', "
+            "event_type IN ('announced', 'casting', 'crew_attached', 'production_start', "
             "'production_wrap', 'release_date', 'trailer', 'first_look', 'other')",
             name="ck_event_type",
         ),
         CheckConstraint("confidence IN ('confirmed', 'rumored')", name="ck_event_confidence"),
+        CheckConstraint(
+            "provenance IN ('story', 'catalog')",
+            name="ck_event_provenance",
+        ),
         Index("ix_event_film_id", "film_id"),
+        # One catalog change, one event — structurally, not by convention. The field-change
+        # reader sets `occurred_at` to the change's own `changed_at`, so this triple is that
+        # change's natural key, and the reader re-reads a rolling window of changes every run
+        # (ADR-0014). Its own skip check is the fast path; this is the backstop that makes a
+        # double card impossible rather than merely unlikely. Partial, so the story path —
+        # where two events on one film may legitimately share a timestamp — is untouched.
+        Index(
+            "uq_event_catalog_change",
+            "film_id",
+            "event_type",
+            "occurred_at",
+            unique=True,
+            postgresql_where=text("provenance = 'catalog'"),
+        ),
         {"schema": "news"},
     )
 
@@ -90,6 +113,7 @@ class Event(Base):
     )
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'story'"))
     region: Mapped[str | None] = mapped_column(Text, nullable=True)
     subject_key: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -138,9 +162,10 @@ class EventSummary(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     # Human-edit marker: NULL edited_at = machine-generated; non-NULL = an admin edited the text
-    # (edited_by is the editing user, nulled if that account is deleted). Not a selection guard —
-    # write-once (_select_pending) already keeps summaries frozen; these drive the summary_edited
-    # DTO flag and gate the reset-to-AI action.
+    # (edited_by is the editing user, nulled if that account is deleted). Barely a selection
+    # guard — write-once (_select_pending) is what keeps summaries frozen, and edited_at only
+    # narrows the one case write-once does not cover (a deterministic body being superseded,
+    # ADR-0014). Mainly these drive the summary_edited DTO flag and gate the reset-to-AI action.
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     edited_by: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="SET NULL"), nullable=True

@@ -280,6 +280,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             created_at=event.created_at,
             summary=summary,
             summary_edited=edited_at is not None,
+            provenance=event.provenance,
             sources=[
                 SourceOut(
                     url=source_url(story),
@@ -511,6 +512,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
                 occurred_at=event.occurred_at,
                 created_at=event.created_at,
                 summary=summary,
+                provenance=event.provenance,
                 sources=[
                     SourceOut(
                         url=source_url(story),
@@ -551,6 +553,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 Film.title.label("title"),
                 Film.release_date.label("release_date"),
                 Film.poster_path.label("poster_path"),
+                Film.status.label("status"),
                 day.label("day"),
                 func.count().label("event_count"),
                 func.array_agg(distinct(Event.event_type)).label("event_types"),
@@ -566,15 +569,16 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
 
     items = [
         FeedDayItem(
-            film_slug=slug,
-            film_title=title,
-            release_year=_release_year(release_date),
-            poster_path=poster_path,
-            day=day_value,
-            top_event_type=most_significant_event_type(event_types),
-            event_count=event_count,
+            film_slug=row.slug,
+            film_title=row.title,
+            release_year=_release_year(row.release_date),
+            poster_path=row.poster_path,
+            arc_stage=derive_arc_stage(row.status),
+            day=row.day,
+            top_event_type=most_significant_event_type(row.event_types),
+            event_count=row.event_count,
         )
-        for slug, title, release_date, poster_path, day_value, event_count, event_types in rows
+        for row in rows
     ]
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 

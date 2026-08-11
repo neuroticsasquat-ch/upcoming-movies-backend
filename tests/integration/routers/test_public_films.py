@@ -1116,3 +1116,26 @@ async def test_arc_stage_ignores_events_and_tracks_tmdb_status(client, make_film
     r = await client.get("/films/mshale-2027")
     assert r.status_code == 200
     assert r.json()["arc_stage"] == "shooting"
+
+
+async def test_detail_renders_a_catalog_sourced_event_with_no_outlets(client, make_film, add_event):
+    """The film page is the other read path that inner-joins EventSummary, so a catalog event
+    with a deterministic body has to appear here too (spec §5.4)."""
+    film = await make_film(slug="undated-detail", title="An Undated Film")
+    await add_event(
+        film=film,
+        event_type="release_date",
+        confidence="rumored",
+        summary="Release date set to 14 August 2026.",
+        provenance="catalog",
+        summary_model="deterministic",
+    )
+    await add_event(film=film, event_type="casting", summary="Someone joined the cast.")
+
+    r = await client.get("/films/undated-detail")
+    assert r.status_code == 200
+    events = {e["event_type"]: e for e in r.json()["events"]}
+    assert events["release_date"]["provenance"] == "catalog"
+    assert events["release_date"]["summary"] == "Release date set to 14 August 2026."
+    assert events["release_date"]["sources"] == []
+    assert events["casting"]["provenance"] == "story"

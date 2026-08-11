@@ -1,5 +1,6 @@
-"""Run-tracking for the ingestion pipelines: the DB helpers (pure I/O — callers own commits)
-plus `StageCounts`, the pure rule a pipeline consults to decide a run's terminal status."""
+"""Run-tracking for the ingestion pipelines: the DB helpers (pure I/O — callers own commits),
+`StageCounts` (the pure rule a pipeline consults to decide a run's terminal status), and the
+shared shape of the `detail` line those runs report themselves through."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -119,6 +120,20 @@ def _kind_of(stage: str) -> StageKind:
         ) from None
 
 
+def format_skip_detail(skip_counts: Mapping[str, int]) -> str:
+    """The `skipped N (reason=n, ...)` clause of a run's `detail` line.
+
+    Shared rather than restated per stage: `/admin/runs` puts a sweep row next to a `tmdb`
+    row, and an operator comparing what each one let through should not have to read two
+    dialects of the same sentence. Reasons are sorted so the clause is diffable across runs.
+    """
+    total = sum(skip_counts.values())
+    if not skip_counts:
+        return f"skipped {total}"
+    breakdown = ", ".join(f"{reason}={n}" for reason, n in sorted(skip_counts.items()))
+    return f"skipped {total} ({breakdown})"
+
+
 async def create_run(session: AsyncSession, kind: str) -> UUID:
     """Open a new run in the `running` state and return its id. Caller commits."""
     run = IngestRun(kind=kind, status="running")
@@ -161,6 +176,35 @@ async def finalize_run(
     if detail is not None:
         values["detail"] = detail
     await session.execute(update(IngestRun).where(IngestRun.id == run_id).values(**values))
+
+
+async def last_finished_run_started_at(session: AsyncSession, kind: str) -> datetime | None:
+    """When the most recent **finished** run of `kind` began, or None if none has.
+
+    The sweep's refresh phase uses this as a watermark: `_upsert_film_row` bumps
+    `film.updated_at` on every upsert, so a film whose `updated_at` predates the last
+    `tmdb` run is one discover did not reach (spec §4.5).
+
+    Finished — any terminal status — rather than `succeeded`, and the difference is not
+    cosmetic. The refresh *writes*, so its own upserts lift a film's `updated_at` above
+    whatever watermark selected it. Pin the watermark to the last success and a `tmdb`
+    stage that stays broken freezes it: one sweep pass lifts the whole catalog past it and
+    every later pass selects nothing, silently, for as long as the outage lasts — which is
+    exactly the failure §6.2 is about, and `run_daily` being fail-fast makes a stretch of
+    failed `tmdb` runs the likely case rather than the exotic one. Reading any finished run
+    keeps the watermark moving with the schedule. The cost of trusting a run that failed
+    early is one day of not refreshing what it never reached; the next pass takes them.
+
+    A run still `running` is excluded: it started moments ago and would mark the whole
+    catalog stale.
+    """
+    stmt = (
+        select(IngestRun.started_at)
+        .where(IngestRun.kind == kind, IngestRun.status != "running")
+        .order_by(IngestRun.started_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def mark_stale_runs_cancelled(session: AsyncSession, *, stale_after_minutes: int) -> int:
