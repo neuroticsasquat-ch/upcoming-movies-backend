@@ -257,3 +257,50 @@ async def test_grouped_first_look_is_visible_with_its_top_type(client, make_film
     body = (await client.get("/feed/grouped")).json()
     assert body["total"] == 1
     assert body["items"][0]["top_event_type"] == "first_look"
+
+
+async def test_grouped_carries_arc_stage_derived_from_status(client, make_film, add_event):
+    # The feed renders the arc-stage label where an undated film's release year would go
+    # (NEU-1085), so the row has to carry the stage — it is not inferable from release_year.
+    undated = await make_film(
+        slug="undated-film", status="Planned", release_date=None, popularity=90.0
+    )
+    shooting = await make_film(
+        slug="shooting-film", status="In Production", release_date=None, popularity=5.0
+    )
+    await add_event(film=undated, summary="a", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+    await add_event(film=shooting, summary="b", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+
+    body = (await client.get("/feed/grouped")).json()
+    assert [(i["film_slug"], i["release_year"], i["arc_stage"]) for i in body["items"]] == [
+        ("undated-film", None, "announced"),
+        ("shooting-film", None, "shooting"),
+    ]
+
+
+async def test_grouped_dated_film_still_carries_its_arc_stage(client, make_film, add_event):
+    film = await make_film(slug="film-2026", status="Released")
+    await add_event(film=film, summary="a", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["release_year"] == 2026
+    assert item["arc_stage"] == "released"
+
+
+async def test_grouped_arc_stage_covers_wrapped_and_the_unknown_status_fallback(
+    client, make_film, add_event
+):
+    # `derive_arc_stage` defaults an absent/unmapped status to "announced". That fallback now
+    # reaches a third surface, so pin it here rather than inferring it from the other two.
+    wrapped = await make_film(
+        slug="wrapped-film", status="Post Production", release_date=None, popularity=90.0
+    )
+    unknown = await make_film(slug="unknown-film", status=None, release_date=None, popularity=5.0)
+    await add_event(film=wrapped, summary="a", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+    await add_event(film=unknown, summary="b", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+
+    body = (await client.get("/feed/grouped")).json()
+    assert [(i["film_slug"], i["arc_stage"]) for i in body["items"]] == [
+        ("wrapped-film", "wrapped"),
+        ("unknown-film", "announced"),
+    ]
