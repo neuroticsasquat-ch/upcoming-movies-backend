@@ -9,7 +9,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,6 +161,20 @@ async def record_progress(
     )
 
 
+async def touch_run(session: AsyncSession, run_id: UUID) -> None:
+    """Bump `last_progress_at` and nothing else — the run is *alive*, not productive.
+
+    Deliberately not `record_progress(processed_delta=0)`: that function's name is a promise
+    about the counters `/admin/runs` reads as work done, and a phase calling it to mean "still
+    breathing" would make the two indistinguishable at the call site. Separating them is what
+    lets `last_progress_at` carry liveness for every loop — including the ones that legitimately
+    produce nothing — while `items_processed` keeps meaning rows written (NEU-1117).
+    """
+    await session.execute(
+        update(IngestRun).where(IngestRun.id == run_id).values(last_progress_at=datetime.now(UTC))
+    )
+
+
 async def finalize_run(
     session: AsyncSession,
     run_id: UUID,
@@ -169,7 +183,15 @@ async def finalize_run(
     error: str | None = None,
     detail: str | None = None,
 ) -> None:
-    """Move a run to a terminal status and stamp finished_at."""
+    """Move a run to a terminal status and stamp finished_at.
+
+    Deliberately unconditional — it will overwrite a row `mark_stale_runs_cancelled` has
+    already marked `cancelled`, and that is the wanted behaviour, not a race to close. The
+    canceller cannot stop the process that owns a run, only relabel its row, so a run wrongly
+    cancelled while still alive reclaims its real status and its detail line the moment it
+    finishes. Gating this on `status = 'running'` would freeze the false positive instead and
+    throw away every counter the run reported (NEU-1117).
+    """
     values: dict[str, object] = {"status": status, "finished_at": datetime.now(UTC)}
     if error is not None:
         values["error"] = error
@@ -208,17 +230,29 @@ async def last_finished_run_started_at(session: AsyncSession, kind: str) -> date
 
 
 async def mark_stale_runs_cancelled(session: AsyncSession, *, stale_after_minutes: int) -> int:
-    """Cancel any run still `running` that started longer ago than the staleness window.
-    Returns the number of runs cancelled. Used by startup cleanup to clear runs orphaned
-    by a crash/restart."""
+    """Cancel any run still `running` that has not been heard from inside the staleness
+    window. Returns the number of runs cancelled. Clears runs orphaned by a crash, a
+    restart, or a scheduled-task timeout.
+
+    Keyed on `last_progress_at` — *when was this run last alive* — rather than on
+    `started_at`, which cannot tell an orphan from a long healthy run and so has no value
+    that is right for both (NEU-1117). Every sweep loop heartbeats (`sweep/phase.py`), and
+    the other pipelines record per item or per batch, so a window of tens of minutes now
+    clears an orphan promptly without ever cancelling a six-hour sweep mid-flight.
+
+    `COALESCE` to `started_at` for a run that has not heartbeated yet: NULL means the run
+    died before its first item, which is precisely the 2026-08-11 incident, and treating it
+    as immortal would leave the phantom row this function exists to clear.
+    """
     cutoff = datetime.now(UTC) - timedelta(minutes=stale_after_minutes)
+    last_alive = func.coalesce(IngestRun.last_progress_at, IngestRun.started_at)
     result = await session.execute(
         update(IngestRun)
-        .where(IngestRun.status == "running", IngestRun.started_at < cutoff)
+        .where(IngestRun.status == "running", last_alive < cutoff)
         .values(
             status="cancelled",
             finished_at=datetime.now(UTC),
-            error="cancelled by startup cleanup (stale run)",
+            error=f"cancelled by stale-run cleanup (no heartbeat for {stale_after_minutes}m)",
         )
     )
     return result.rowcount or 0  # type: ignore[attr-defined]  # CursorResult has rowcount

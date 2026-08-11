@@ -35,7 +35,7 @@ from sqlalchemy import select
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun
-from upmovies.ingest.runs import create_run, finalize_run
+from upmovies.ingest.runs import create_run, finalize_run, mark_stale_runs_cancelled
 from upmovies.ingest.sweep import (
     AdmissionTranches,
     CreditEventResult,
@@ -330,9 +330,36 @@ _DAILY_STAGES: list[tuple[str, StageRunner]] = [
 ]
 
 
+async def _clear_stale_runs(settings: Settings) -> None:
+    """Cancel runs orphaned by a crash, a restart, or a killed scheduled task, before this
+    task opens its own.
+
+    The app's lifespan runs the same cleanup, but under Coolify that fires only on deploy —
+    so before this, a run orphaned at 05:00 sat `running` until the next release. On
+    2026-08-11 one had to be cancelled by hand. Running it from every scheduled task means
+    the hourly slot clears an orphan within the hour (NEU-1117).
+
+    Safe to run from a task that may overlap a live sweep only because expiry is
+    heartbeat-based: a sweep in its silent enumerate stretch is still ticking
+    `last_progress_at`, so it is not an orphan. Best-effort — a cleanup that fails must not
+    cost the pipeline its run.
+    """
+    try:
+        async with SessionLocal() as s:
+            cancelled = await mark_stale_runs_cancelled(
+                s, stale_after_minutes=settings.ingest_stale_run_minutes
+            )
+            await s.commit()
+        if cancelled:
+            log.warning("cancelled %d stale run(s) before starting", cancelled)
+    except Exception:
+        log.exception("stale-run cleanup failed; continuing")
+
+
 async def run_daily(settings: Settings) -> bool:
     """Run the full daily chain sequentially, fail-fast. Returns True iff every stage
     succeeded. Pings the daily deadman check at start / success / failure."""
+    await _clear_stale_runs(settings)
     await _ping(settings.healthcheck_daily_url, "/start")
     for kind, runner in _DAILY_STAGES:
         status = await _run_tracked_stage(kind, runner, settings)
@@ -348,6 +375,7 @@ async def run_daily(settings: Settings) -> bool:
 async def run_hourly(settings: Settings) -> bool:
     """Run the light hourly feeds pass (per_film=false). Returns True iff it succeeded.
     Pings the hourly deadman check at start / success / failure."""
+    await _clear_stale_runs(settings)
     await _ping(settings.healthcheck_hourly_url, "/start")
     status = await _run_tracked_stage(
         "feeds", lambda rid, s: run_feeds_stage(rid, s, per_film_override=False), settings
@@ -364,6 +392,7 @@ async def run_hourly(settings: Settings) -> bool:
 async def run_sweep(settings: Settings) -> bool:
     """Run the undated-film sweep on its own run kind. Returns True iff it succeeded.
     Pings the sweep deadman check at start / success / failure."""
+    await _clear_stale_runs(settings)
     await _ping(settings.healthcheck_sweep_url, "/start")
     status = await _run_tracked_stage("sweep", lambda rid, s: run_sweep_stage(rid, s), settings)
     if status != "succeeded":

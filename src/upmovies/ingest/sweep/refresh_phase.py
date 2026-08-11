@@ -45,7 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import dormant_film_clause, in_play_clause
 from upmovies.ingest.runs import last_finished_run_started_at, record_progress
-from upmovies.ingest.sweep.phase import AbortGuard, owned_session
+from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.upsert import upsert_film
@@ -151,6 +151,7 @@ async def run_sweep_refresh(
     """Re-fetch every in-play film the last discover pass did not reach."""
     result = RefreshResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
+    heartbeat = Heartbeat(session_factory, run_id)
 
     async with owned_session(session_factory) as s:
         watermark = await last_finished_run_started_at(s, "tmdb")
@@ -178,6 +179,7 @@ async def run_sweep_refresh(
         targets=targets,
         result=result,
         guard=guard,
+        heartbeat=heartbeat,
         log_every=log_every,
     )
     log.info("refresh: %d refreshed, %d failed", result.refreshed, result.failures)
@@ -192,6 +194,7 @@ async def _refresh_films(
     targets: list[RefreshTarget],
     result: RefreshResult,
     guard: AbortGuard,
+    heartbeat: Heartbeat,
     log_every: int,
 ) -> None:
     """One `/movie/{id}` per film, straight into the existing upsert.
@@ -201,6 +204,7 @@ async def _refresh_films(
     record, and `active_film_clause` drops the film from the next pass on its own.
     """
     for i, target in enumerate(targets, start=1):
+        await heartbeat.tick()
         try:
             details = await client.movie_details(target.tmdb_id)
             async with owned_session(session_factory) as s:

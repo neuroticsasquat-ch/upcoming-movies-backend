@@ -67,6 +67,21 @@ fact about the provider's minimum cacheable length, not about the request — to
 sit below it, and the contract being inert is expected.
 _Avoid_: system block, cached block, `cache_control` (all vendor mechanism, adapter-internal).
 
+**Heartbeat**:
+A write that says *this run is still alive*, as distinct from *this run produced something*.
+`ingest_run.last_progress_at` carries both meanings and the second one is the newer: the sweep's
+enumerate phase spends 30–70 minutes issuing one credits request per seed person without
+admitting anything, so a column advanced only by output stays `NULL` through exactly the
+stretch a staleness rule most needs to read. Every sweep per-item loop therefore ticks a
+time-throttled heartbeat regardless of outcome, and `mark_stale_runs_cancelled` expires a run on
+`COALESCE(last_progress_at, started_at)`. The invariant is what makes one tight window serve a
+4-minute feeds pass and a 6-hour sweep alike: a live run is never quiet for longer than the
+heartbeat interval. Cadence is in **time**, not items — the window it feeds is a time window,
+and a per-N-items throttle makes the guarantee depend on how fast that particular loop happens
+to be.
+_Avoid_: progress (that's the output meaning, and the reason the column was ambiguous),
+keepalive, liveness probe, ping (that's the deadman).
+
 **Total stage failure**:
 A stage that produced **nothing at all** yet recorded failures — the case where per-item
 isolation degenerates into "discard everything and report success". It is the one condition a

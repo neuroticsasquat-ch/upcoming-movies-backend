@@ -62,8 +62,11 @@ Move both schedules off GitHub Actions to **Coolify scheduled tasks** that run t
 
 Because there is no external poll window, slow Anthropic batches no longer fail the
 pipeline; the deadman's grace period (daily ~2–3h, hourly ~30m) absorbs batch latency, so
-batch mode (`LINK_USE_BATCHES` etc.) stays on for its ~50% cost saving. The startup
-stale-run canceller (`main.py` lifespan) still bounds any run orphaned by a mid-run deploy.
+batch mode (`LINK_USE_BATCHES` etc.) stays on for its ~50% cost saving. The stale-run
+canceller still bounds any orphaned run, but no longer only on deploy and no longer on
+`started_at`: it runs from the scheduled-task entrypoint as well as the app's lifespan, and
+expires a run on `COALESCE(last_progress_at, started_at)` — a **heartbeat**, so a live
+multi-hour sweep is never mistaken for one orphaned by a crash (NEU-1117).
 
 ## Considered alternatives
 

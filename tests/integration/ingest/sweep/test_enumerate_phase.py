@@ -91,6 +91,27 @@ async def test_finds_candidates_and_admits_none_while_every_tranche_is_off(
 
 
 @respx.mock
+async def test_a_pass_that_admits_nothing_still_reports_itself_alive(
+    session, session_factory, tmdb_client, run_id
+):
+    """The silent-stretch case that caused the 2026-08-11 incident (NEU-1117): with every
+    tranche closed the phase records no progress at all, yet it is working. The heartbeat
+    has to advance `last_progress_at` anyway, or the staleness sweep reads it as an orphan.
+    """
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_details(100)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert result.admitted == 0
+    row = await _run_row(session, run_id)
+    assert (row.items_processed, row.items_failed) == (0, 0)
+    assert row.last_progress_at is not None
+
+
+@respx.mock
 async def test_an_open_tranche_admits_and_counts_the_film(
     session, session_factory, tmdb_client, run_id
 ):

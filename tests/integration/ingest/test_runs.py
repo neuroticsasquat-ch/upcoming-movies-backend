@@ -71,6 +71,89 @@ async def test_mark_stale_runs_cancelled_only_old_running_runs(session):
     assert fresh_row.status == "running"
 
 
+async def test_touch_run_advances_last_progress_at_without_touching_counters(session):
+    """The heartbeat says "alive", not "produced something" — so it must not move the
+    counters `/admin/runs` reads as work done (NEU-1117)."""
+    run_id = await runs.create_run(session, kind="sweep")
+    await runs.touch_run(session, run_id)
+    row = (await session.execute(select(IngestRun).where(IngestRun.id == run_id))).scalar_one()
+    assert row.last_progress_at is not None
+    assert (row.items_processed, row.items_failed) == (0, 0)
+
+
+async def test_a_heartbeating_run_survives_an_old_started_at(session):
+    """The whole point: a sweep that has been running for hours but is demonstrably alive
+    is not an orphan. Under the old `started_at` rule this row was cancelled."""
+    alive = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+        last_progress_at=datetime.now(UTC) - timedelta(seconds=30),
+    )
+    session.add(alive)
+    await session.flush()
+
+    assert await runs.mark_stale_runs_cancelled(session, stale_after_minutes=30) == 0
+
+    row = (
+        await session.execute(
+            select(IngestRun)
+            .where(IngestRun.id == alive.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.status == "running"
+
+
+async def test_a_run_whose_heartbeat_went_quiet_is_cancelled(session):
+    quiet = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+        last_progress_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    session.add(quiet)
+    await session.flush()
+
+    assert await runs.mark_stale_runs_cancelled(session, stale_after_minutes=30) == 1
+
+    row = (
+        await session.execute(
+            select(IngestRun)
+            .where(IngestRun.id == quiet.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.status == "cancelled"
+    assert row.finished_at is not None
+
+
+async def test_a_null_last_progress_at_falls_back_to_started_at(session):
+    """The incident case (2026-08-11): a sweep killed mid-enumerate by the scheduled-task
+    timeout never reached its first admission, so `last_progress_at` was NULL. It must
+    still expire on `started_at` rather than linger forever."""
+    orphan = IngestRun(
+        kind="sweep",
+        status="running",
+        started_at=datetime.now(UTC) - timedelta(hours=6),
+    )
+    fresh = IngestRun(kind="sweep", status="running")
+    session.add_all([orphan, fresh])
+    await session.flush()
+    assert orphan.last_progress_at is None
+
+    assert await runs.mark_stale_runs_cancelled(session, stale_after_minutes=30) == 1
+
+    orphan_row = (
+        await session.execute(select(IngestRun).where(IngestRun.id == orphan.id))
+    ).scalar_one()
+    fresh_row = (
+        await session.execute(select(IngestRun).where(IngestRun.id == fresh.id))
+    ).scalar_one()
+    assert orphan_row.status == "cancelled"
+    assert fresh_row.status == "running"
+
+
 async def test_sweep_is_an_accepted_run_kind(session):
     """The sweep gets its own run row rather than hiding inside the tmdb stage's counters,
     so `ck_ingest_run_kind` has to admit it (NEU-1074)."""

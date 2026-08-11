@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.catalog.seed_grade import crew_role
 from upmovies.ingest.runs import record_progress
-from upmovies.ingest.sweep.phase import AbortGuard, owned_session
+from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.credit_history import CREDIT_ADDED
 from upmovies.news.catalog_events import CREDIT_ROLE_EVENT_TYPES
@@ -257,6 +257,7 @@ async def run_credit_attachment_events(
     """Card every seed-grade credit attachment TMDB recorded in the window."""
     result = CreditEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
+    heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
     async with owned_session(session_factory) as s:
@@ -271,6 +272,7 @@ async def run_credit_attachment_events(
     )
 
     for group in groups:
+        await heartbeat.tick()
         try:
             async with owned_session(session_factory) as s:
                 created = await _card_group(s, group=group)

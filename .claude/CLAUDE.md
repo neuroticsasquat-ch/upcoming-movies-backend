@@ -8,6 +8,11 @@ FastAPI service backing the Upcoming Movies Tracker. Python 3.13, SQLAlchemy 2 (
 - `linear_team`: Neuroticsasquatch
 - `loop_base`: release/v0.3.0
 
+## Docs
+
+- `specs_dir`: `../docs` — the umbrella `~/projects/upcoming-movies/docs`, shared with the
+  frontend repo. Specs in `specs/`, plans in `plans/`.
+
 ## Golden rule: everything runs in the container via `task`
 
 Do **not** run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Use the `task` targets (they `docker compose exec` into the `upmovies-backend` container). Source is bind-mounted, so edits are picked up live; **dependency changes (`pyproject.toml`) require `task build`** to reinstall into the image.

@@ -64,7 +64,7 @@ def test_settings_has_sensible_ingestion_defaults(monkeypatch):
     assert s.tmdb_min_popularity == 1.0
     assert s.tmdb_excluded_statuses == frozenset({"Released", "Canceled"})
     assert s.ingest_consecutive_failure_threshold == 10
-    assert s.ingest_stale_run_minutes == 15
+    assert s.ingest_stale_run_minutes == 30
 
 
 def test_settings_excluded_statuses_parsed_and_overridable(monkeypatch):

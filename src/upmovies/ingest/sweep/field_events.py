@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import FilmFieldChange
 from upmovies.ingest.runs import record_progress
-from upmovies.ingest.sweep.phase import AbortGuard, owned_session
+from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.news.catalog_events import STATUS_EVENT_TYPES
 from upmovies.news.models import Event
@@ -234,6 +234,7 @@ async def run_field_change_events(
     """Card every release-date and production-status change TMDB recorded in the window."""
     result = FieldEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
+    heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
     async with owned_session(session_factory) as s:
@@ -242,6 +243,7 @@ async def run_field_change_events(
     log.info("field events: %d tracked changes since %s", result.changes_read, since.isoformat())
 
     for change in changes:
+        await heartbeat.tick()
         carded = classify_field_change(change.field, change.old_value, change.new_value)
         if carded is None:
             continue
