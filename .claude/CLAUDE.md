@@ -74,7 +74,7 @@ DB is split into Postgres **schemas**: `app`, `catalog`, `news`, `ingest`. Tests
 
 Use `/commit-msg` for commit messages and `/pr-desc` for PR descriptions, post-processed to Conventional Commits.
 
-- **Commits:** Conventional Commits subject (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, …). **No** Linear ID in the subject (optional `Refs NEU-123.` in the body); **no** `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`.
+- **Commits:** Conventional Commits subject with a trailing Linear ID parenthetical — `feat: add X (NEU-123)`, same format as the PR title. Drop the parenthetical when no ticket maps to the change (don't invent one). **No** `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`. Commits before 2026-08-11 keep the ID out of the subject and carry `Refs NEU-123.` in the body instead — that was the old rule; don't copy it from history.
 - **PR title:** Conventional Commits + trailing Linear ID parenthetical: `feat: add X (NEU-123)`. The `🤖 Generated with Claude Code` footer is fine in the PR **body** only.
 - The GitHub↔Linear connector moves ticket status automatically — don't touch it. Branch per ticket (Linear gives the branch name).
 
