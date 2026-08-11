@@ -88,6 +88,20 @@ class Event(Base):
             name="ck_event_provenance",
         ),
         Index("ix_event_film_id", "film_id"),
+        # One catalog change, one event — structurally, not by convention. The field-change
+        # reader sets `occurred_at` to the change's own `changed_at`, so this triple is that
+        # change's natural key, and the reader re-reads a rolling window of changes every run
+        # (ADR-0014). Its own skip check is the fast path; this is the backstop that makes a
+        # double card impossible rather than merely unlikely. Partial, so the story path —
+        # where two events on one film may legitimately share a timestamp — is untouched.
+        Index(
+            "uq_event_catalog_change",
+            "film_id",
+            "event_type",
+            "occurred_at",
+            unique=True,
+            postgresql_where=text("provenance = 'catalog'"),
+        ),
         {"schema": "news"},
     )
 

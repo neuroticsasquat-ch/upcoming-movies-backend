@@ -4,6 +4,11 @@ dated `/discover/movie` roster cannot reach (spec §3, §6)."""
 from upmovies.ingest.sweep.admission import AdmissionTranches as AdmissionTranches
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult as EnumerateResult
 from upmovies.ingest.sweep.enumerate_phase import run_sweep_enumerate as run_sweep_enumerate
+from upmovies.ingest.sweep.field_events import CatalogFieldEvent as CatalogFieldEvent
+from upmovies.ingest.sweep.field_events import FieldEventResult as FieldEventResult
+from upmovies.ingest.sweep.field_events import TrackedChange as TrackedChange
+from upmovies.ingest.sweep.field_events import classify_field_change as classify_field_change
+from upmovies.ingest.sweep.field_events import run_field_change_events as run_field_change_events
 from upmovies.ingest.sweep.refresh_phase import RefreshResult as RefreshResult
 from upmovies.ingest.sweep.refresh_phase import run_sweep_refresh as run_sweep_refresh
 from upmovies.ingest.sweep.seeds import CandidateTally as CandidateTally

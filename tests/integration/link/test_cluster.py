@@ -1947,3 +1947,198 @@ async def test_decision_log_keeps_a_model_supplied_type_parseable(session, caplo
         "stories": "1",
         "note": "-",
     }
+
+
+# ADR-0014 — the catalog path and the story path must not both card one change.
+#
+# The two paths are independent by design: a story-triggered release-date event still needs
+# TMDB corroboration, a catalog-triggered one fires from the change alone. But they read the
+# *same* `film_field_change` row, and the sweep runs ~2h ahead of the daily chain, so the
+# normal ordering is catalog-first. A held story that is finally corroborated must therefore
+# attach to the event that change already produced, not form a second one beside it.
+
+
+async def _catalog_event(session, film, *, event_type, occurred_at):
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="confirmed",
+        provenance="catalog",
+        occurred_at=occurred_at,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def test_corroborated_story_attaches_to_the_catalog_event_for_that_change(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    changed_at = datetime(2026, 6, 29, tzinfo=UTC)
+    _seed_release_date_change(
+        session, film, old="2026-08-12", new="2026-09-01", changed_at=changed_at
+    )
+    carded = await _catalog_event(session, film, event_type="release_date", occurred_at=changed_at)
+    await session.flush()
+
+    # The LLM is not offered the existing event and asks to create — the deterministic path
+    # has to catch this on its own.
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_story_corroborated_by_a_later_move_joins_the_card_the_earlier_one_raised(
+    session,
+):
+    """The date moved twice inside the corroboration window. `field_changed_at` returns only
+    the *latest* change, so an exact `occurred_at == changed_at` match would find nothing and
+    open a second release-date card beside the one the sweep already wrote for this film."""
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    first_move = datetime(2026, 6, 25, tzinfo=UTC)
+    _seed_release_date_change(session, film, old=None, new="2026-08-12", changed_at=first_move)
+    _seed_release_date_change(
+        session,
+        film,
+        old="2026-08-12",
+        new="2026-09-01",
+        changed_at=datetime(2026, 6, 29, tzinfo=UTC),
+    )
+    carded = await _catalog_event(session, film, event_type="release_date", occurred_at=first_move)
+    await session.flush()
+
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_catalog_event_for_a_different_move_does_not_swallow_the_story(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    changed_at = datetime(2026, 6, 29, tzinfo=UTC)
+    _seed_release_date_change(
+        session, film, old="2026-08-12", new="2026-09-01", changed_at=changed_at
+    )
+    # An older date move, already carded and long outside the corroboration window.
+    await _catalog_event(
+        session, film, event_type="release_date", occurred_at=datetime(2026, 1, 5, tzinfo=UTC)
+    )
+    await session.flush()
+
+    result, _ = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+
+
+async def test_story_reporting_a_milestone_attaches_to_the_catalog_event(session):
+    """A production milestone happens once per film, so the catalog event for it is the
+    only one there should ever be — a trade story reporting the same start upgrades that
+    card in place rather than opening a second one, however far behind TMDB it runs."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_event(
+        session,
+        film,
+        event_type="production_start",
+        occurred_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    story = await _linked_story(session, film, "https://e/start", title="begins production")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=date(2026, 7, 4),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_start",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+
+
+async def test_story_provenance_event_is_not_a_catalog_dedup_target(session):
+    """The rule is scoped to the ADR-0014 path. Two story-triggered milestone events on one
+    film is pre-existing behaviour and not this change's to alter."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="production_start",
+            confidence="confirmed",
+            occurred_at=datetime(2026, 3, 1, tzinfo=UTC),
+        )
+    )
+    story = await _linked_story(session, film, "https://e/start2", title="begins production")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=date(2026, 7, 4),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_start",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1

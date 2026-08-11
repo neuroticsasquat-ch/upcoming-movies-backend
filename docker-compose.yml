@@ -45,6 +45,7 @@ services:
       # the repo-root .env without editing this file.
       SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
       SWEEP_DORMANT_REFRESH_DAYS: "${SWEEP_DORMANT_REFRESH_DAYS:-30}"
+      SWEEP_EVENT_LOOKBACK_DAYS: "${SWEEP_EVENT_LOOKBACK_DAYS:-7}"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.upmovies-backend.rule=Host(`api.upmovies.localhost`)"

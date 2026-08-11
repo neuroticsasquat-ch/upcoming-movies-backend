@@ -1,9 +1,9 @@
-"""What both sweep phases share: a session per item, and the consecutive-failure abort.
+"""What the sweep's phases share: a session per item, and the consecutive-failure abort.
 
-Neither is specific to enumerating or to refreshing — they are the pipeline contract the
+Neither is specific to enumerating, refreshing, or carding — they are the pipeline contract the
 sweep inherits from `run_tmdb_ingest` (commit per item so one failure never rolls back the
 others; stop on an outage rather than burning a request per catalog film). Keeping one copy
-is what stops the two phases drifting into two different definitions of "gave up".
+is what stops them drifting into three different definitions of "gave up".
 """
 
 from collections.abc import AsyncIterator
