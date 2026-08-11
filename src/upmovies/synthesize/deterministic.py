@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
+from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.news.models import EventSummary
 from upmovies.synthesize.store import upsert_summary
 
 # Written to `event_summary.model` in place of a model id. Deliberately not a valid
@@ -96,6 +98,9 @@ def _render_status(change: StatusChanged) -> str:
 
 
 def _render_credit(change: CreditAttached) -> str:
+    # Unlike a TMDB status, `role` is set by our own trigger sites from a fixed vocabulary — an
+    # unknown one is a bug in the caller, not new data from upstream, so it raises rather than
+    # falling back to a body nobody wrote.
     match change.role:
         case "director":
             return f"{change.name} attached to direct."
@@ -128,11 +133,18 @@ async def write_deterministic_summary(
     change: CatalogChange,
     source_updated_at: datetime,
 ) -> str:
-    """Write the one `EventSummary` row for a catalog-sourced event and return its body.
+    """Write the one `EventSummary` row for a catalog-sourced event and return the body it
+    rendered.
 
     `source_updated_at` is the event's `updated_at`, matching what the summarizer records — so
     when a trade story later clusters on and the real summarizer supersedes this row, the two
-    are directly comparable. Caller owns the commit."""
+    are directly comparable.
+
+    **Supersession is one-directional.** A later catalog change on the same event (the status
+    moves again, another credit lands) must not walk an LLM summary — or an admin's wording —
+    back to a template, so the write only lands on a row that is still an unedited deterministic
+    one. The returned body is what this change *renders*, not necessarily what the row now
+    holds. Caller owns the commit."""
     body = render_summary(change)
     await upsert_summary(
         session,
@@ -141,5 +153,8 @@ async def write_deterministic_summary(
         model=DETERMINISTIC_MODEL,
         prompt_version=TEMPLATE_VERSION,
         source_updated_at=source_updated_at,
+        replace_when=and_(
+            EventSummary.model == DETERMINISTIC_MODEL, EventSummary.edited_at.is_(None)
+        ),
     )
     return body

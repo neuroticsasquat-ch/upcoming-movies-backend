@@ -12,7 +12,7 @@ Caller owns the commit.
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import ColumnElement, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +27,18 @@ async def upsert_summary(
     model: str,
     prompt_version: str,
     source_updated_at: datetime,
+    replace_when: ColumnElement[bool] | None = None,
 ) -> None:
     """Insert or replace the one summary row for an event. Refreshes `generated_at` on update.
-    Leaves the human-edit marker (`edited_at`/`edited_by`) alone — an edited row is never
-    selected for rewriting, so reaching here means there is no edit to preserve."""
+
+    `replace_when` narrows the conflict update to rows matching a predicate over the *existing*
+    row; a row that fails it is left untouched (Postgres skips the update, it is not an error).
+    Supersession runs one way only — the LLM body replaces a deterministic one, never the
+    reverse — so the deterministic writer passes a predicate and the summarizer does not.
+
+    The human-edit marker (`edited_at`/`edited_by`) is deliberately left alone: an edited row is
+    never *selected* for rewriting by the pipeline, and callers that can reach an edited row
+    anyway exclude it through `replace_when`."""
     stmt = pg_insert(EventSummary).values(
         event_id=event_id,
         summary=summary,
@@ -47,5 +55,6 @@ async def upsert_summary(
             "source_updated_at": source_updated_at,
             "generated_at": func.now(),
         },
+        where=replace_when,
     )
     await session.execute(stmt)

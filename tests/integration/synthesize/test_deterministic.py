@@ -211,3 +211,72 @@ async def test_an_edited_deterministic_summary_is_left_alone(session):
     await session.commit()
 
     assert await _select_pending(session) == []
+
+
+async def test_the_writer_never_walks_an_llm_summary_back_to_a_template(session):
+    """Supersession is one-directional (ADR-0014). A second catalog change on an event the
+    summarizer has already taken over — the status moves again, another credit lands — must not
+    replace real, sourced prose with a template."""
+    film = await _film(session)
+    event = await _catalog_event(session, film)
+    session.add(
+        EventSummary(
+            event_id=event.id,
+            summary="An LLM body.",
+            model="claude-haiku-4-5",
+            prompt_version="9",
+            source_updated_at=event.updated_at,
+        )
+    )
+    await session.commit()
+
+    await write_deterministic_summary(
+        session,
+        event_id=event.id,
+        change=CreditAttached(role="director", name="Denis Villeneuve"),
+        source_updated_at=event.updated_at,
+    )
+    await session.commit()
+
+    row = await _summary(session, event.id)
+    assert row.summary == "An LLM body."
+    assert row.model == "claude-haiku-4-5"
+
+
+async def test_the_writer_never_overwrites_an_admin_edit(session):
+    """`edited_at` survives the upsert, so an unguarded write would leave template text flagged
+    as human-authored on the card."""
+    film = await _film(session)
+    event = await _catalog_event(session, film)
+    await write_deterministic_summary(
+        session,
+        event_id=event.id,
+        change=ReleaseDateSet(new_date=date(2026, 8, 14)),
+        source_updated_at=event.updated_at,
+    )
+    await session.commit()
+    row = await _summary(session, event.id)
+    row.summary = "An admin's wording."
+    row.edited_at = datetime.now(UTC)
+    await session.commit()
+
+    await write_deterministic_summary(
+        session,
+        event_id=event.id,
+        change=ReleaseDateSet(new_date=date(2026, 10, 2)),
+        source_updated_at=event.updated_at,
+    )
+    await session.commit()
+
+    assert (await _summary(session, event.id)).summary == "An admin's wording."
+
+
+async def test_an_event_with_no_stories_is_never_selected_for_the_summarizer(session):
+    """A catalog event can lose its summary row — `reset_summary` deletes it — and would then
+    look like any un-summarized event. With no stories the summarizer has only a field diff to
+    work from, so it must not be handed the event at all (ADR-0014 rejected exactly that)."""
+    film = await _film(session)
+    await _catalog_event(session, film)
+    await session.commit()
+
+    assert await _select_pending(session) == []

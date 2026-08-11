@@ -62,32 +62,37 @@ async def _owned_session(session_factory: SessionFactory) -> AsyncIterator[Async
         yield s
 
 
+def _has_a_story() -> ColumnElement[bool]:
+    """The summarizer paraphrases stories; with none attached it would be inventing prose from
+    an event type and a film title, which is exactly the fabrication risk ADR-0014 rejected an
+    LLM body over for catalog-sourced events. Story-triggered events always satisfy this — it
+    exists for the story-less ones catalog events introduced."""
+    return select(1).where(EventStory.event_id == Event.id).exists()
+
+
 def _superseded_deterministic() -> ColumnElement[bool]:
     """The one exception to write-once: a catalog-sourced event whose deterministic body has
     since acquired stories (ADR-0014 §Presentation). Selecting it lets the real summarizer
     replace the template in place — `EventSummary` is keyed on the event, so the card upgrades
     with no special path.
 
-    Three guards, each load-bearing:
-    - `model` is the sentinel, so an LLM summary is still write-once.
-    - a story is attached, so the summarizer is never handed an event with nothing to
-      summarize (it would have only a field diff to work from — the fabrication risk ADR-0014
-      rejected an LLM body over in the first place).
-    - `edited_at` is NULL, so an admin's wording is not silently overwritten; the reset action
-      remains the only way back to a machine summary."""
+    Both guards are load-bearing: `model` is the sentinel, so an LLM summary is still
+    write-once; `edited_at` is NULL, so an admin's wording is not silently overwritten and the
+    reset action remains the only way back to a machine summary. (The story that does the
+    superseding is required of every selected event by `_has_a_story`.)"""
     return and_(
         EventSummary.model == DETERMINISTIC_MODEL,
         EventSummary.edited_at.is_(None),
-        select(1).where(EventStory.event_id == Event.id).exists(),
     )
 
 
 async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
-    """User-facing events needing a summary: those with no summary row yet, plus catalog-sourced
-    events whose deterministic body is now superseded by attached stories
-    (`_superseded_deterministic`). Otherwise write-once — an event whose LLM summary already
-    exists is never reselected, even if the event was later updated or the prompt version has
-    moved on. Hidden types are skipped outright (NEU-969): summarizing an event the public API
+    """User-facing events with at least one story to summarize (`_has_a_story`) that need one:
+    those with no summary row yet, plus catalog-sourced events whose deterministic body is now
+    superseded by attached stories (`_superseded_deterministic`). Otherwise write-once — an
+    event whose LLM summary already exists is never reselected, even if the event was later
+    updated or the prompt version has moved on. Hidden types are skipped outright (NEU-969):
+    summarizing an event the public API
     filters out spends tokens on text nobody reads, and `event_type` is immutable once set, so
     a skipped event can never later become visible and need the summary it was denied.
     Returns each mapped to an EventInput (plain dataclasses — safe to use after the session
@@ -99,6 +104,7 @@ async def _select_pending(session: AsyncSession) -> list[_PendingEvent]:
             .outerjoin(EventSummary, EventSummary.event_id == Event.id)
             .where(
                 or_(EventSummary.event_id.is_(None), _superseded_deterministic()),
+                _has_a_story(),
                 visible_events(),
             )
         )
