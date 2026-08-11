@@ -293,10 +293,13 @@ The scheduled pass that discovers and maintains films TMDB's dated `/discover/mo
 cannot reach. It runs as its own `ingest_run.kind` on its own schedule slot, roughly two hours
 ahead of the daily pipeline — deliberately *not* a stage in it, because the daily chain is
 fail-fast and a ~45-minute TMDB pass would take feeds, link and synthesize down with it. It has
-**two** phases and needs both: **enumerate** (walk seed people's credits for undated candidates)
-and **refresh** (re-fetch every active film discover did not touch). Dropping the refresh phase
-is the project's quietest failure mode — undated films sit outside the discover window, so
-without it they are never re-read, never upserted, and no catalog-sourced event ever fires.
+**three** phases and needs all of them: **enumerate** (walk seed people's credits for undated
+candidates), **refresh** (re-fetch every active film discover did not touch), and **events**
+(card the changes refreshing produced). Dropping the refresh phase is the project's quietest
+failure mode — undated films sit outside the discover window, so without it they are never
+re-read, never upserted, and no catalog-sourced event ever fires. Running the events phase last,
+in the same pass, is what makes a change TMDB published today a card today; running the whole
+sweep ahead of the daily chain is what puts that card in front of `link` rather than behind it.
 _Avoid_: crawl, scan, discovery run (that's the enumerate phase alone), Path B job.
 
 **Seed person**:
@@ -329,12 +332,26 @@ _Avoid_: role tier, credit weight, billing.
 An event created by a change in TMDB's own data — a release date assigned or moved, a status
 transition, a credit attached — with **no story behind it**. It carries a deterministic
 `EventSummary` (a template, never a model call: `model` is the sentinel `"deterministic"`) and
-attributes to **"via TMDB"** where a story-sourced event lists outlets. Confidence sits below a
-trade-sourced beat because TMDB is community-edited. When a trade story later clusters onto it,
-the LLM summary supersedes the deterministic one and real sources appear — the card upgrades in
-place. It exists because story supply is fixed at 8 trade feeds while the catalog is about to
-multiply: without it, most admitted films would be permanently blank pages.
+attributes to **"via TMDB"** where a story-sourced event lists outlets. Confidence follows the
+field: a release-date or status change is `confirmed`, because ADR-0002 already makes TMDB the
+system of record for its own scalar fields, while a credit — which any editor can add — sits
+below a trade-sourced beat. When a trade story later clusters onto it, the LLM summary
+supersedes the deterministic one and real sources appear — the card upgrades in place. It exists
+because story supply is fixed at 8 trade feeds while the catalog is about to multiply: without
+it, most admitted films would be permanently blank pages.
 _Avoid_: synthetic event, system event, auto event, TMDB event (that's the source, not the kind).
+
+**Double-carding**:
+The failure mode where the story path and the catalog path both raise an event for one TMDB
+change. They are independent by design — a story-triggered release-date event still needs
+corroboration, a catalog-triggered one fires from the change alone — but they read the *same*
+`film_field_change` row, so each has to check for the other's card. The catalog path skips a
+change already covered by a release-date event inside the corroboration window; the story path
+attaches to the catalog event born from the very change that corroborated it, rather than
+opening a second one beside it. Production milestones are matched on type alone: a film enters
+production once, so a story running a month behind TMDB's status flip still belongs on the
+existing card.
+_Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **First observation**:
 The first time the sweep reads a newly admitted film's credits. It is recorded as a **baseline

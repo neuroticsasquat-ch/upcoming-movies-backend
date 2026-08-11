@@ -12,7 +12,12 @@ from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
-from upmovies.ingest.sweep import AdmissionTranches, EnumerateResult, RefreshResult
+from upmovies.ingest.sweep import (
+    AdmissionTranches,
+    EnumerateResult,
+    FieldEventResult,
+    RefreshResult,
+)
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm import StageConfigurationError
 from upmovies.news.models import Story
@@ -474,12 +479,12 @@ def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
     assert pipeline_run.main(["daily"]) == 1
 
 
-# --- the sweep: two phases, one run row ----------------------------------------
+# --- the sweep: three phases, one run row --------------------------------------
 
 
-def _stub_phases(monkeypatch, *, enumerated=None, refreshed=None):
-    """Replace both sweep phases with fakes that record their kwargs and return the given
-    results. Returns (calls, captured) — call order and each phase's kwargs."""
+def _stub_phases(monkeypatch, *, enumerated=None, refreshed=None, carded=None):
+    """Replace all three sweep phases with fakes that record their kwargs and return the
+    given results. Returns (calls, captured) — call order and each phase's kwargs."""
     calls: list[str] = []
     captured: dict[str, dict] = {}
 
@@ -493,8 +498,14 @@ def _stub_phases(monkeypatch, *, enumerated=None, refreshed=None):
         captured["refresh"] = kwargs
         return refreshed if refreshed is not None else RefreshResult(selected=2, refreshed=2)
 
+    async def fake_events(**kwargs):
+        calls.append("events")
+        captured["events"] = kwargs
+        return carded if carded is not None else FieldEventResult(changes_read=1)
+
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_enumerate", fake_enumerate)
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_refresh", fake_refresh)
+    monkeypatch.setattr("upmovies.pipeline_run.run_field_change_events", fake_events)
     return calls, captured
 
 
@@ -513,26 +524,30 @@ async def test_sweep_stage_marks_run_failed_on_crash(session, monkeypatch):
     assert row.error and "simulated sweep crash" in row.error
 
 
-async def test_sweep_stage_runs_both_phases_and_reports_both_counters(session, monkeypatch):
-    """One run row, two phases: the terminal status is the entrypoint's to write, and the
-    detail line has to keep both sets of counters legible on /admin/runs (spec §6.2)."""
+async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, monkeypatch):
+    """One run row, three phases: the terminal status is the entrypoint's to write, and the
+    detail line has to keep all three sets of counters legible on /admin/runs (spec §6.2).
+    Order is load-bearing — the events phase reads the `film_field_change` rows refreshing
+    has just written, so it can only run last."""
     calls, _ = _stub_phases(
         monkeypatch,
         enumerated=EnumerateResult(seed_people=7, candidates_found=4),
         refreshed=RefreshResult(selected=5, refreshed=5),
+        carded=FieldEventResult(changes_read=9, events_created=3, skipped=6),
     )
     run_id = await create_run(session, kind="sweep")
     await session.commit()
 
     await pipeline_run.run_sweep_stage(run_id, get_settings())
 
-    assert calls == ["enumerate", "refresh"]
+    assert calls == ["enumerate", "refresh", "events"]
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
     assert row.error is None
     assert row.detail is not None
     assert "enumerate: 7 seeds, 4 candidates" in row.detail
     assert "refresh: 5/5 refreshed" in row.detail
+    assert "events: 3 carded from 9 changes" in row.detail
 
 
 async def test_sweep_stage_passes_the_sweep_settings_to_both_phases(session, monkeypatch):
@@ -557,8 +572,13 @@ async def test_sweep_stage_passes_the_sweep_settings_to_both_phases(session, mon
     refresh_kwargs = captured["refresh"]
     assert refresh_kwargs["dormancy_days"] == 200
     assert refresh_kwargs["dormant_refresh_days"] == 14
-    # Both phases share the run row, and both must guard against the same outage.
+    events_kwargs = captured["events"]
+    assert events_kwargs["lookback_days"] == settings.sweep_event_lookback_days
+    # The two paths that can card one date move share one definition of "the same move".
+    assert events_kwargs["corroboration_window_days"] == settings.link_release_change_window_days
+    # Every phase shares the run row, and all must guard against the same outage.
     assert enumerate_kwargs["run_id"] == run_id == refresh_kwargs["run_id"]
+    assert events_kwargs["run_id"] == run_id
     assert enumerate_kwargs["today"] == refresh_kwargs["today"]
 
 
@@ -575,7 +595,7 @@ async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkey
 
     await pipeline_run.run_sweep_stage(run_id, get_settings())
 
-    assert calls == ["enumerate", "refresh"]
+    assert calls == ["enumerate", "refresh", "events"]
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "aborted after 10 failures" in row.error
@@ -595,6 +615,21 @@ async def test_sweep_stage_fails_the_run_when_the_refresh_phase_aborted(session,
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "refresh" in row.error
+
+
+async def test_sweep_stage_fails_the_run_when_the_events_phase_aborted(session, monkeypatch):
+    _stub_phases(
+        monkeypatch,
+        carded=FieldEventResult(aborted=True, abort_error="aborted after 10 failures"),
+    )
+    run_id = await create_run(session, kind="sweep")
+    await session.commit()
+
+    await pipeline_run.run_sweep_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "events phase" in row.error
 
 
 async def test_run_sweep_opens_its_own_run_kind_and_pings(session, monkeypatch):

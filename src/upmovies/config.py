@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # it is a *reduced cadence*. Placeholder until the M4 tuning ticket sets it: erring
     # short only costs requests, erring long delays every revival by that much.
     sweep_dormant_refresh_days: int = Field(default=30, ge=1, alias="SWEEP_DORMANT_REFRESH_DAYS")
+    # How far back the sweep's field-change phase reads `catalog.film_field_change` for events
+    # to card (ADR-0014). A fixed rolling window, not a watermark: re-reading a carded change
+    # is a no-op, so the overlap costs a couple of indexed queries and means a failed sweep
+    # loses nothing. It is also the day-one guard — the table holds months of history, and
+    # without a floor the first pass after deploy would card every date move ever recorded.
+    sweep_event_lookback_days: int = Field(default=7, ge=1, alias="SWEEP_EVENT_LOOKBACK_DAYS")
 
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the

@@ -425,6 +425,55 @@ async def _recorded_cast_names(session: AsyncSession, film_id: UUID) -> set[str]
     return names
 
 
+# The event types the sweep's field-change phase cards on its own (ADR-0014). Only these can
+# have a catalog-sourced event standing where the story path is about to create one.
+_CATALOG_CARDED_TYPES = frozenset({"release_date", "production_start", "production_wrap"})
+
+
+async def _catalog_dedup_target(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    event_type: str,
+    changed_at: datetime | None,
+) -> Event | None:
+    """The catalog-sourced event this group would duplicate, if there is one (ADR-0014).
+
+    ADR-0002's corroboration rule is untouched — this runs only *after* a group has cleared
+    it, and only decides whether the beat forms a new event or joins the one TMDB's own
+    change already produced. The sweep runs ~2h ahead of the daily chain, so catalog-first is
+    the normal ordering: without this, a held story finally corroborated by change *C* would
+    card *C* a second time, next to the card the sweep wrote from *C* hours earlier.
+
+    Matching is by trigger, not by recency window:
+
+    - `release_date` — the catalog event whose `occurred_at` **is** the corroborating change's
+      `changed_at`, because that is exactly what the field-change phase writes. Same row on
+      both sides of the join, so an earlier date move on the same film cannot be swallowed.
+    - `production_start` / `production_wrap` — a film enters production once, so the film's
+      catalog event of that type is the target however old it is. Bounding this by a window
+      would mean a trade story running a month behind TMDB's status flip opens a second card
+      for the same milestone.
+
+    Scoped to `provenance='catalog'`: two *story*-triggered events of one type on one film is
+    pre-existing behaviour, governed by the LLM's own attach decision, and not this rule's to
+    change.
+    """
+    if event_type not in _CATALOG_CARDED_TYPES:
+        return None
+    stmt = select(Event).where(
+        Event.film_id == film_id,
+        Event.event_type == event_type,
+        Event.provenance == "catalog",
+    )
+    if event_type == "release_date":
+        if changed_at is None:
+            return None
+        stmt = stmt.where(Event.occurred_at == changed_at)
+    stmt = stmt.order_by(Event.occurred_at.desc(), Event.id.desc()).limit(1)
+    return (await session.execute(stmt)).scalars().first()
+
+
 _LOG_FIELD_MAX = 40
 
 
@@ -617,6 +666,7 @@ async def apply_cluster_decisions(
                         group_sids, llm=llm_intent, event_type=etype, note="casting-recorded"
                     )
                     continue
+            changed_at: datetime | None = None
             if etype == "release_date":
                 # NEU-718: a release_date event may form only when TMDB's own primary
                 # release_date actually changed within the corroboration window (a first
@@ -665,6 +715,14 @@ async def apply_cluster_decisions(
                 event = target
                 event.updated_at = now
                 outcome = "dedup_attach"
+            elif (
+                catalog_target := await _catalog_dedup_target(
+                    session, film_id=plan.film_id, event_type=etype, changed_at=changed_at
+                )
+            ) is not None:
+                event = catalog_target
+                event.updated_at = now
+                outcome = "catalog_attach"
             else:
                 conf = downgrade_confidence(
                     conf, best_tier((_tier_for(sid) for sid in group_sids), default=unresolved_tier)

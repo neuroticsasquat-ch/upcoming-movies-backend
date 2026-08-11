@@ -26,7 +26,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -39,7 +39,9 @@ from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.sweep import (
     AdmissionTranches,
     EnumerateResult,
+    FieldEventResult,
     RefreshResult,
+    run_field_change_events,
     run_sweep_enumerate,
     run_sweep_refresh,
     sweep_detail,
@@ -165,15 +167,16 @@ async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
 
 
 async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
-    """Both sweep phases against one run row: enumerate, then refresh, then the run's
-    terminal status.
+    """All three sweep phases against one run row: enumerate, refresh, card the changes
+    refreshing produced, then the run's terminal status.
 
     The odd one out among the stage runners: the phases it calls do **not** finalize. They
     share a single `ingest_run` row — one sweep, one row on `/admin/runs` — so the status,
-    the error, and the detail line carrying both phases' counters are written here (§6.2).
+    the error, and the detail line carrying every phase's counters are written here (§6.2).
     """
     try:
         today = date.today()
+        now = datetime.now(UTC)
         async with TMDBClient(
             base_url=settings.tmdb_base_url,
             api_key=settings.tmdb_api_key,
@@ -206,24 +209,43 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
                 dormant_refresh_days=settings.sweep_dormant_refresh_days,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )
+        # Outside the TMDB client: this phase reads the changes the two above wrote and makes
+        # no HTTP calls. Unconditional for the same reason refresh is — a refresh whose
+        # changes are never read produces exactly as much as no refresh at all — and it runs
+        # last so this pass's own upserts are already in `film_field_change` (ADR-0014).
+        carded = await run_field_change_events(
+            session_factory=_session_factory,
+            run_id=run_id,
+            now=now,
+            lookback_days=settings.sweep_event_lookback_days,
+            corroboration_window_days=settings.link_release_change_window_days,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
         # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
         # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
         # to be covered by the same net as the work it reports on.
-        await _finalize_sweep(run_id, enumerated, refreshed)
+        await _finalize_sweep(run_id, enumerated, refreshed, carded)
     except Exception as e:
         log.exception("sweep crashed")
         await _finalize_failed(run_id, str(e))
 
 
 async def _finalize_sweep(
-    run_id: UUID, enumerated: EnumerateResult, refreshed: RefreshResult
+    run_id: UUID,
+    enumerated: EnumerateResult,
+    refreshed: RefreshResult,
+    carded: FieldEventResult,
 ) -> None:
     """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
-    failures, and the both-phase detail line either way — a run that aborted still reports
+    failures, and the every-phase detail line either way — a run that aborted still reports
     what it managed to do before it did."""
     aborts = [
         f"{phase} phase {result.abort_error}"
-        for phase, result in (("enumerate", enumerated), ("refresh", refreshed))
+        for phase, result in (
+            ("enumerate", enumerated),
+            ("refresh", refreshed),
+            ("events", carded),
+        )
         if result.aborted
     ]
     async with SessionLocal() as s:
@@ -232,7 +254,7 @@ async def _finalize_sweep(
             run_id,
             status="failed" if aborts else "succeeded",
             error="; ".join(aborts) or None,
-            detail=sweep_detail(enumerated, refreshed),
+            detail=sweep_detail(enumerated, refreshed, carded),
         )
         await s.commit()
 
