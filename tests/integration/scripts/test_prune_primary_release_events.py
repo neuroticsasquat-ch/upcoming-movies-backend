@@ -16,6 +16,12 @@ NOW = datetime(2026, 8, 11, 5, 11, tzinfo=UTC)
 
 
 async def _event(session, film, *, event_type="release_date", provenance="catalog"):
+    # `created_at`, not `occurred_at`: the cutoff is a *deploy* boundary, so `prune` selects on
+    # when the row was written. It is set explicitly because the column is `server_default
+    # now()` — left to the default, a fixture row is stamped at real insert time, and these
+    # tests silently stopped selecting anything the moment the wall clock passed the cutoff on
+    # 2026-08-12. The guard below pinned `occurred_at`, which the query never reads, so it
+    # gave the appearance of protection while the actual window went unchecked.
     assert NOW < DEFAULT_CUTOFF  # the fixtures below must land inside the pruned window
     event = Event(
         film_id=film.id,
@@ -23,6 +29,7 @@ async def _event(session, film, *, event_type="release_date", provenance="catalo
         confidence="confirmed",
         provenance=provenance,
         occurred_at=NOW,
+        created_at=NOW,
     )
     session.add(event)
     await session.flush()
