@@ -485,6 +485,13 @@ def _compose_fallback(env_name: str) -> str:
     return match.group("value")
 
 
+@pytest.mark.skipif(
+    not _PROD_COMPOSE.exists(),
+    reason=(
+        "docker-compose.prod.yml is not visible from inside the dev container — CI runs "
+        "pytest against the checkout, where it is, and is the enforcement point"
+    ),
+)
 @pytest.mark.parametrize(("env_name", "field"), _PINNED_PROD_FALLBACKS)
 def test_prod_compose_fallbacks_match_the_code_defaults(monkeypatch, env_name, field):
     """A stale fallback in `docker-compose.prod.yml` silently overrides a retune.
@@ -494,15 +501,26 @@ def test_prod_compose_fallbacks_match_the_code_defaults(monkeypatch, env_name, f
     `${LINK_RETRIEVAL_MAX_CANDIDATES:-25}`, so the new code default was dead on arrival and
     the deploy looked entirely successful. Nothing failed; the retune simply did not happen.
 
-    The compose file's own comment claims the fallbacks "repeat the code defaults
-    deliberately". This is what makes that claim true rather than aspirational.
+    **What this does not guarantee, and it is the more important half.** On Coolify a
+    `${NAME:-default}` reference is a *seed*, not a runtime default: Coolify parses it the
+    first time it sees the variable, stores a UI entry holding that value, and from then on
+    the UI entry is what reaches the container. Editing the fallback afterwards changes
+    nothing in production. So this test guards the value a **fresh** environment is seeded
+    with — a genuinely new variable, a rebuilt app, or a bare
+    `docker compose -f docker-compose.prod.yml up` — and it cannot see Coolify at all.
 
-    **CI is the authoritative run.** There the file is read straight from the checkout. In the
-    dev container it arrives as a single-file bind mount, and those track the *inode* — an
-    editor that writes-then-renames (`sed -i`, and plenty of editors by default) leaves the
-    container reading the pre-edit copy. That can only ever produce a false *pass* locally,
-    never a false failure, and `docker compose up -d --force-recreate upmovies-backend`
-    clears it."""
+    NEU-1088 is the worked example: K moved 25 → 35 in the code *and* here, CI was green, the
+    deploy succeeded, and production went on running 25 because a Coolify entry seeded months
+    earlier was shadowing the file. **Retuning a constant is a code change and a Coolify env
+    change.** See the deploy checklist in `.claude/CLAUDE.md`.
+
+    **CI is the enforcement point, and deliberately the only one.** There pytest runs against
+    the checkout and the file is simply present. Inside the dev container it is not: it was
+    briefly bind-mounted, and a single-file bind mount tracks the *inode*, so every
+    `git checkout` between branches replaced the file and left the mount dangling — the whole
+    suite then failed on a missing path that was sitting right there on the host. A static
+    consistency check between two files in the repo is not worth breaking the local loop on
+    every branch switch, so it skips here and runs there."""
     _set_required(monkeypatch)
     _clear_retrieval(monkeypatch)
     settings = Settings()  # type: ignore[call-arg]

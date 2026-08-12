@@ -59,8 +59,11 @@ services:
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
-      # to boot. **They are pinned to the code defaults by test** — a stale fallback here
-      # silently overrides a retune, which is exactly what happened to NEU-1088's K=35.
+      # to boot. **They are pinned to the code defaults by test**, which keeps a fresh
+      # environment seeded correctly — but note what that does *not* cover: Coolify reads
+      # each `${NAME:-default}` once, stores a UI entry, and thereafter that entry is what
+      # reaches the container. Editing a fallback here does not change a running deployment.
+      # NEU-1088's K=35 landed in the code and in this file and prod kept running 25.
       # `LINK_RETRIEVAL_MODE` was retired with the roster path (NEU-1004) — retrieval
       # is now the only link path, and rollback is a revert and redeploy (spec §5.5).
       LINK_RETRIEVAL_THRESHOLD: "${LINK_RETRIEVAL_THRESHOLD:-0.5}"
