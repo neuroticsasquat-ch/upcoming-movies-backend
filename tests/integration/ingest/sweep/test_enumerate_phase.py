@@ -35,6 +35,8 @@ DORMANCY_DAYS = 365
 DATED = TODAY + timedelta(days=90)
 
 DIRECTORS_ONLY = AdmissionTranches(enabled=True, directors=True)
+WRITERS_ONLY = AdmissionTranches(enabled=True, writers=True)
+DIRECTORS_AND_WRITERS = AdmissionTranches(enabled=True, directors=True, writers=True)
 
 
 async def _seed_director(session, person_id: int = 10, film_tmdb_id: int = 1):
@@ -461,6 +463,84 @@ async def test_a_candidate_reached_only_through_a_writer_waits_for_its_tranche(
     assert "seed attachments: 1×1" in sweep_detail(
         result, RefreshResult(), FieldEventResult(), CreditEventResult(), ReleaseEventResult()
     )
+
+
+@pytest.mark.parametrize("job", ["Writer", "Screenplay"])
+@respx.mock
+async def test_the_writers_tranche_admits_a_candidate_reached_only_through_a_writer(
+    session, session_factory, tmdb_client, run_id, job
+):
+    """The other half of the step above — same candidate, same seed person, and the flag is
+    the only thing that changed (NEU-1089). Both writing jobs are the same seed grade
+    (§3.2), so `Screenplay` starts admitting films for the first time with this tranche.
+    """
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 11, credit_type="crew", department="Writing", job=job)
+    await session.commit()
+    _mock_credits(11, crew=[make_credit_entry(100, department="Writing", job=job)])
+    _mock_details(100, title="Untitled Script")
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=WRITERS_ONLY)
+
+    assert (result.admitted, result.withheld) == (1, 0)
+    admitted = (await session.execute(select(Film).where(Film.tmdb_id == 100))).scalar_one()
+    assert admitted.title == "Untitled Script"
+
+
+@pytest.mark.parametrize(
+    ("tranches", "expected"), [(DIRECTORS_ONLY, (0, 1)), (WRITERS_ONLY, (1, 0))]
+)
+@respx.mock
+async def test_a_director_seed_who_only_wrote_the_candidate_is_a_writers_admission(
+    session, session_factory, tmdb_client, run_id, tranches, expected
+):
+    """The grade that admits is the one held *on the candidate film*, not the one that made
+    the person a seed (§4.1 rule 2) — a director whose next project is one they only wrote
+    is a writers admission. Were it read off the person instead, the directors tranche would
+    have been admitting writer-reached films all along and the ramp would measure nothing.
+    """
+    await _seed_director(session)
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Writing", job="Writer")])
+    _mock_details(100)
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=tranches)
+
+    assert (result.admitted, result.withheld) == expected
+
+
+@pytest.mark.parametrize(
+    ("tranches", "admitted_ids", "counts"),
+    [(DIRECTORS_ONLY, [100], (1, 1)), (DIRECTORS_AND_WRITERS, [100, 101], (2, 0))],
+)
+@respx.mock
+async def test_opening_writers_admits_the_writer_reached_film_and_nothing_else_changes(
+    session, session_factory, tmdb_client, run_id, tranches, admitted_ids, counts
+):
+    """The ramp only measures anything if each step is additive (§7.4): opening writers adds
+    the film a writer reached and leaves the director-reached one exactly as it was, so a
+    precision drop after the flip names the grade that caused it."""
+    film = await _seed_director(session)
+    await add_credit(session, film, 11, credit_type="crew", department="Writing", job="Writer")
+    await session.commit()
+    _mock_credits(10, crew=[make_credit_entry(100, department="Directing", job="Director")])
+    _mock_credits(11, crew=[make_credit_entry(101, department="Writing", job="Writer")])
+    _mock_details(100)
+    _mock_details(101)
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=tranches)
+
+    admitted = (
+        (
+            await session.execute(
+                select(Film.tmdb_id).where(Film.tmdb_id.in_([100, 101])).order_by(Film.tmdb_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert admitted == admitted_ids
+    assert (result.admitted, result.withheld) == counts
 
 
 @respx.mock

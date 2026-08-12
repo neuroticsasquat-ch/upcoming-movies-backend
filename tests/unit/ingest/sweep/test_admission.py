@@ -10,6 +10,10 @@ from upmovies.ingest.sweep import AdmissionTranches
 
 ALL_ROLES = {"director", "writer", "cast"}
 
+DIRECTORS_ONLY = AdmissionTranches(enabled=True, directors=True)
+WRITERS_ONLY = AdmissionTranches(enabled=True, writers=True)
+CAST_ONLY = AdmissionTranches(enabled=True, cast=True)
+
 
 def test_nothing_is_admitted_by_default():
     assert AdmissionTranches().admits(ALL_ROLES) is False
@@ -26,29 +30,46 @@ def test_the_master_switch_overrides_every_open_tranche(roles):
 
 @pytest.mark.parametrize(
     ("tranches", "role"),
-    [
-        (AdmissionTranches(enabled=True, directors=True), "director"),
-        (AdmissionTranches(enabled=True, writers=True), "writer"),
-        (AdmissionTranches(enabled=True, cast=True), "cast"),
-    ],
+    [(DIRECTORS_ONLY, "director"), (WRITERS_ONLY, "writer"), (CAST_ONLY, "cast")],
 )
 def test_an_open_tranche_admits_its_own_seed_grade(tranches, role):
     assert tranches.admits({role}) is True
 
 
-@pytest.mark.parametrize("role", ["writer", "cast"])
-def test_an_open_tranche_admits_nothing_else(role):
-    """The ramp is per grade, so the directors tranche must not carry the other two in
-    with it — otherwise the retrieval-health guard sees one cliff instead of three steps."""
-    assert AdmissionTranches(enabled=True, directors=True).admits({role}) is False
+@pytest.mark.parametrize(
+    ("tranches", "role"),
+    [
+        (DIRECTORS_ONLY, "writer"),
+        (DIRECTORS_ONLY, "cast"),
+        (WRITERS_ONLY, "director"),
+        (WRITERS_ONLY, "cast"),
+        (CAST_ONLY, "director"),
+        (CAST_ONLY, "writer"),
+    ],
+)
+def test_an_open_tranche_admits_nothing_else(tranches, role):
+    """The ramp is per grade, so no tranche may carry another in with it — otherwise the
+    retrieval-health guard sees one cliff instead of three steps, and a precision drop can
+    no longer be attributed to the grade that caused it."""
+    assert tranches.admits({role}) is False
+
+
+@pytest.mark.parametrize(
+    ("roles", "admitted"),
+    [(set(), False), ({"director"}, True), ({"cast"}, False), ({"director", "cast"}, True)],
+)
+def test_opening_writers_changes_no_verdict_that_did_not_involve_a_writer(roles, admitted):
+    """The ramp's second step (NEU-1089) has to be *additive*: a candidate no writer reached
+    is admitted or withheld exactly as it was before the flip. Otherwise the before/after
+    precision comparison §7.4 asks for carries two variables instead of one."""
+    assert DIRECTORS_ONLY.admits(roles) is admitted
+    assert AdmissionTranches(enabled=True, directors=True, writers=True).admits(roles) is admitted
 
 
 def test_one_open_tranche_is_enough():
     """A candidate reached at several grades is admitted as soon as any one of them is
     open — the film is the unit of admission, not the credit."""
-    tranches = AdmissionTranches(enabled=True, directors=True)
-
-    assert tranches.admits({"cast", "director"}) is True
+    assert DIRECTORS_ONLY.admits({"cast", "director"}) is True
 
 
 def test_no_seed_grade_role_is_never_admitted():

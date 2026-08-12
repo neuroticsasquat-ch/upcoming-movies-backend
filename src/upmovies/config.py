@@ -64,8 +64,37 @@ class Settings(BaseSettings):
     sweep_enabled: bool = Field(default=False, alias="SWEEP_ENABLED")
     # Admission ramps one seed grade at a time — directors, then writers, then top-5 cast
     # (§7.4) — so the retrieval-health guard reacts to a 1,446-person expansion before a
-    # 7,519-person one, and a precision drop names the grade that caused it. All off until
-    # the M4 tranche tickets open them, which makes each one an env change, not a deploy.
+    # 7,519-person one, and a precision drop names the grade that caused it. Every flag
+    # ships false whatever the ramp has reached: which tranches are *open* is env, so
+    # opening one is a Coolify change rather than a deploy, and closing it is the same move
+    # in reverse. Directors went live 2026-08-11 (NEU-1086).
+    #
+    # **Writers is a supported path as of NEU-1089**, and a deliberately small step. Measured
+    # on the pre-expansion probe, counting only films no director reached (spec §7.4, §4.3):
+    # **+270 films**, about 12% catalog growth on top of the directors tranche's 639, at a
+    # status profile close to directors' — `Rumored` is 18% against 19%, and the rest sits
+    # within four points. Read it as a lower bound: the probe predates the directors flip,
+    # whose admissions have since contributed 486 seed people that reach films it could not
+    # see. What it buys is the earliest signal the product can get — a script with no
+    # director attached to it yet.
+    #
+    # It costs **no additional enumerate requests**, which corrects the ticket: the seed query
+    # is not tranche-scoped, so every seed person at all three grades — 7,666 of them after
+    # the directors flip (§4.3) — is already enumerated on every sweep, and the writers
+    # grade's 1,745 are among them. Enumerating regardless of the flags is deliberate: it is
+    # what makes `withheld` and the attachment histogram an honest answer to "what would
+    # opening this tranche admit". Flipping the flag adds the refresh cost of 270 more films
+    # and whatever seeds they contribute back (§3.3), not a fresh grade's worth of requests.
+    #
+    # **No tuning constant moves with it.** The corroboration threshold was measured against
+    # the *director-reached* distribution (below), and +270 films at a near-identical status
+    # profile is not evidence to reopen it; T and K were re-derived at NEU-1088 over a
+    # catalog this grows by ~12%, and `link/retrieval/select.py` already prices that as
+    # likely moving nothing. The cast tranche is where both are expected to move.
+    #
+    # **Flip it only once retrieval health is green on directors.** That sequencing is the
+    # only thing that ever says which seed grade cost precision; two grades degrading at once
+    # are indistinguishable, which is the whole reason the ramp is three moves and not one.
     sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
     sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
