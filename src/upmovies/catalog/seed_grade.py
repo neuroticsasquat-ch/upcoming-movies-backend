@@ -16,6 +16,31 @@ four attachments.
 DIRECTOR_JOB = "Director"
 WRITER_JOBS = frozenset({"Writer", "Screenplay"})
 # "Top-5 billed" is TMDB's `order`, which is 0-indexed.
+#
+# **Measured at NEU-1090; do not tighten this to 3.** Cutting to top-3 is the obvious volume
+# lever on the largest tranche, so it was re-run against the same frozen pre-expansion
+# snapshot rather than argued (rows with the project's measurements, beside the design spec).
+# It makes the surviving pool *more* speculative, not less: the `Rumored` share rises
+# 7.4% -> 8.5%. Of the ~670 cast-only films it drops, 70% are `In Production` or `Post
+# Production` and 5% are `Rumored` — discarding roughly 470 films demonstrably shooting or cut
+# to remove roughly 33 rumored ones, a 14:1 trade against NEU-1087's 1.5:1. (The counts are
+# approximate on purpose: 665 is the *net* change in cast-only adds, 2,341 -> 1,676, while
+# counting the individually dropped films gives 678. The shares, and the ratio that decides
+# this, are unaffected.)
+#
+# The mechanism is that **billing depth proxies production maturity, not realness**: a film in
+# post has a complete ordered cast so slots 4 and 5 are filled, while a rumored project has
+# one or two names and never reaches a fourth billing. Cutting depth cuts the mature end.
+#
+# It would also degrade the *live* directors tranche, which is the part that makes this a
+# one-way mistake rather than a tuning choice. Seed grade gates who is enumerated at all, so
+# someone qualifying only through a 4th-billed role stops being a seed and undated films they
+# later **direct** are never reached: director-reached falls 639 -> 597, 6.6% of a tranche
+# whose own rule did not change. And because the credit-history writer shares this cut,
+# 4th- and 5th-billed casting announcements would stop carding as `casting` events too.
+#
+# If cast-tranche volume needs controlling, use a lever that correlates with realness or
+# newsworthiness — a popularity floor, or corroboration — not billing depth.
 TOP_BILLED_ORDER = 5
 # Strongest attachment first, so a rendered role list reads the way §3.2 lists the seed
 # grades and groups stably.

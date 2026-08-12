@@ -1,11 +1,19 @@
 """The sweep's two catalog reads: the seed people, and the films we already hold. Moved
-from the probe's suite (NEU-1073) along with the queries themselves."""
+from the probe's suite (NEU-1073) along with the queries themselves.
+
+One test here also calls `seed_attachments`, which needs no database — it is the only place
+the SQL-side and Python-side halves of the top-billed cut can be asserted to agree, and that
+agreement is the point of it."""
 
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
 from tests.fixtures.catalog import add_credit, add_film
+from tests.fixtures.tmdb import make_credit_entry, make_person_movie_credits
 from upmovies.catalog.models import FilmFieldChange
-from upmovies.ingest.sweep import load_known_film_tmdb_ids, load_seed_person_ids
+from upmovies.ingest.sweep import load_known_film_tmdb_ids, load_seed_person_ids, seed_attachments
+from upmovies.ingest.tmdb.schemas import TMDBPersonMovieCredits
 
 EXCLUDED = frozenset({"Released", "Canceled"})
 TODAY = date(2026, 8, 10)
@@ -27,6 +35,39 @@ async def test_seed_people_are_directors_writers_and_top_five_cast(session):
     await add_credit(session, film, 13, credit_type="cast", department="Acting", credit_order=4)
 
     assert await _seed_ids(session) == [10, 11, 12, 13]
+
+
+@pytest.mark.parametrize(
+    ("credit_order", "seed_grade"), [(0, True), (4, True), (5, False), (None, False)]
+)
+async def test_the_top_billed_cut_agrees_on_both_sides_of_the_sweep(
+    session, credit_order, seed_grade
+):
+    """`credit_order < TOP_BILLED_ORDER` is expressed **twice**: inlined into
+    `load_seed_person_ids`'s SQL, which decides whose filmography is worth a request, and
+    via `is_top_billed` in `seed_attachments`, which decides whether their role on a
+    candidate film can admit it (§3.2). The existing tests pin each side on its own; this
+    one pins them to each other, at the boundary and off both ends of it.
+
+    Two encodings of one cut can drift, and the cast tranche is what makes that expensive
+    — it is the grade the two would disagree about, and a person the SQL drops is one whose
+    films are never reached at *any* grade, silently (NEU-1090).
+
+    The billing positions are **literals, not `TOP_BILLED_ORDER` arithmetic**: expressing
+    them in terms of the constant would make the test agree with whatever the constant says,
+    and the measurement in `catalog/seed_grade.py` is specifically that 5 is the right value
+    and tightening to 3 is backwards. This has to fail if someone moves it.
+    """
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(
+        session, film, 30, credit_type="cast", department="Acting", credit_order=credit_order
+    )
+    credits = TMDBPersonMovieCredits.model_validate(
+        make_person_movie_credits(30, cast=[make_credit_entry(100, order=credit_order)])
+    )
+
+    assert await _seed_ids(session) == ([30] if seed_grade else [])
+    assert bool(seed_attachments(30, credits)) is seed_grade
 
 
 async def test_weaker_credits_are_not_seed_grade(session):

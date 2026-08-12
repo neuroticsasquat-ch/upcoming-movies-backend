@@ -92,9 +92,34 @@ class Settings(BaseSettings):
     # catalog this grows by ~12%, and `link/retrieval/select.py` already prices that as
     # likely moving nothing. The cast tranche is where both are expected to move.
     #
-    # **Flip it only once retrieval health is green on directors.** That sequencing is the
-    # only thing that ever says which seed grade cost precision; two grades degrading at once
-    # are indistinguishable, which is the whole reason the ramp is three moves and not one.
+    # **Cast is a supported path as of NEU-1090**, and it is the one that stresses the system:
+    # **+2,341 films**, which against a post-writers catalog of roughly 2,500 is about a 93%
+    # increase — near enough to say it doubles the catalog, and note the ticket's "104%" takes
+    # the *pre*-writers baseline. The same correction as above applies to its seed-count claim
+    # too: cast does not add 5,299 seed people or take the set "to its full 7,519", because
+    # the query is not tranche-scoped and they are all enumerated today. What doubles is the
+    # refresh phase, and the rate at which admitted films contribute their own cast back.
+    #
+    # It is also, against the premise the ramp was designed on, the **cleanest** grade by
+    # status: 7% `Rumored` against directors' 19%, and 62% already `In Production` or `Post
+    # Production`. Top-billed cast attach late, so by the time casting is announced the film
+    # is usually real. The §7.4 ramp order still stands, but on **retrieval-precision**
+    # grounds — collision risk scales with catalog size however real the films are — not on
+    # the vaporware grounds originally argued. Do not plan it expecting to raise the
+    # corroboration threshold; the data points the other way. Nor to tighten the billing cut
+    # (see `catalog/seed_grade.py`, where that was measured and rejected).
+    #
+    # **Expect it to breach the retrieval soft tier, by design** — breaching is what schedules
+    # the third T/K pass rather than leaving it to be rediscovered by hand. How far past the
+    # threshold is deliberately not projected here; `link/retrieval/health.py` owns that
+    # reasoning, including why the obvious linear extrapolation is a floor rather than an
+    # estimate. The *hard* tier is the one to actually fear, and zero-candidate falls as the
+    # catalog grows.
+    #
+    # **Flip each one only once retrieval health is green on the tranche before it** —
+    # directors before writers, writers before cast. That sequencing is the only thing that
+    # ever says which seed grade cost precision; two grades degrading at once are
+    # indistinguishable, which is the whole reason the ramp is three moves and not one.
     sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
     sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
@@ -113,6 +138,11 @@ class Settings(BaseSettings):
     # the product sells. It would also discard 113 films already `In Production` or `Post
     # Production` to remove 74 `Rumored` ones. Only at 3 does the `Rumored` share fall, on a
     # tranche of 87. Full table in spec §4.3.
+    #
+    # **The cast tranche does not reopen this either (NEU-1090).** The ramp was scoped
+    # expecting cast to be the grade that forced the bar up, being the loosest signal; by
+    # status it is the tightest of the three, so the tranche that was going to demand a
+    # higher threshold is instead the argument for leaving it alone.
     #
     # Ground truth is still owed: "was it real" properly means what fraction later went
     # dormant, and nothing can go dormant until 2027 at the current N (NEU-1118). Status is

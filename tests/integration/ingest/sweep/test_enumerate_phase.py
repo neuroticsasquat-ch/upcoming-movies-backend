@@ -37,6 +37,7 @@ DATED = TODAY + timedelta(days=90)
 DIRECTORS_ONLY = AdmissionTranches(enabled=True, directors=True)
 WRITERS_ONLY = AdmissionTranches(enabled=True, writers=True)
 DIRECTORS_AND_WRITERS = AdmissionTranches(enabled=True, directors=True, writers=True)
+CAST_ONLY = AdmissionTranches(enabled=True, cast=True)
 
 
 async def _seed_director(session, person_id: int = 10, film_tmdb_id: int = 1):
@@ -541,6 +542,52 @@ async def test_opening_writers_admits_the_writer_reached_film_and_nothing_else_c
     )
     assert admitted == admitted_ids
     assert (result.admitted, result.withheld) == counts
+
+
+@respx.mock
+async def test_the_cast_tranche_admits_a_candidate_reached_at_the_fifth_billing(
+    session, session_factory, tmdb_client, run_id
+):
+    """`order` is 0-indexed, so 4 is the fifth billing — the last one inside the cut, and
+    the boundary the whole grade turns on (§3.2, NEU-1090)."""
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=4)
+    await session.commit()
+    _mock_credits(11, cast=[make_credit_entry(100, order=4)])
+    _mock_details(100, title="Untitled Ensemble Picture")
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=CAST_ONLY)
+
+    assert (result.admitted, result.withheld) == (1, 0)
+    admitted = (await session.execute(select(Film).where(Film.tmdb_id == 100))).scalar_one()
+    assert admitted.title == "Untitled Ensemble Picture"
+
+
+@respx.mock
+async def test_a_sixth_billed_credit_is_never_reached_rather_than_withheld(
+    session, session_factory, tmdb_client, run_id
+):
+    """The other half of the boundary, and it fails *earlier* than a closed tranche does: a
+    sixth-billed credit is not seed grade at all, so the film is never a candidate. That
+    distinction is the one the run's detail line reports — `no_tranche` says "an operator
+    could open this", and a film outside the billing cut is not that. Opening every tranche
+    must not reach it either, which is what separates the cut from the ramp."""
+    film = await add_film(session, 1, release_date=DATED)
+    await add_credit(session, film, 11, credit_type="cast", department="Acting", credit_order=0)
+    await session.commit()
+    _mock_credits(11, cast=[make_credit_entry(100, order=5)])
+    details = respx.get(f"{BASE_URL}/movie/100")
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=AdmissionTranches(enabled=True, directors=True, writers=True, cast=True),
+    )
+
+    assert (result.candidates_found, result.admitted, result.withheld) == (0, 0, 0)
+    assert not details.called, "an unreached candidate must not cost a details fetch"
+    assert await _film_count(session) == 1
 
 
 @respx.mock
