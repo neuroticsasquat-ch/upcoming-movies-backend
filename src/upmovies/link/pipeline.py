@@ -31,9 +31,11 @@ from upmovies.link.linker import (
 from upmovies.link.retrieval.health import (
     MAX_ZERO_CANDIDATE_RATE,
     MIN_STORIES_FOR_BREACH,
+    SATURATION_WARN_RATE,
     RetrievalTally,
     hard_breach_error,
     record_retrieval_health,
+    soft_breach_note,
 )
 from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index
 from upmovies.link.retrieval.select import (
@@ -293,6 +295,7 @@ async def run_link_ingest(
     retrieval_max_candidates: int = DEFAULT_CANDIDATE_LIMIT,
     retrieval_max_zero_candidate_rate: float = MAX_ZERO_CANDIDATE_RATE,
     retrieval_health_min_stories: int = MIN_STORIES_FOR_BREACH,
+    retrieval_saturation_warn_rate: float = SATURATION_WARN_RATE,
 ) -> LinkIngestResult:
     run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
@@ -327,11 +330,22 @@ async def run_link_ingest(
         limit=retrieval_max_candidates,
         tally=tally,
     )
+    # Both tiers are read off the tally rather than off the row: that write is best-effort by
+    # contract, and an outage that swallowed it must not also disarm the guards.
+    saturation_note = soft_breach_note(
+        tally,
+        warn_rate=retrieval_saturation_warn_rate,
+        min_stories=retrieval_health_min_stories,
+    )
     # Immediately after the stage that produced the numbers: a *missing* health row is how
     # "retrieval did not run at all" is told apart from a run whose retrieval found nothing.
-    await record_retrieval_health(session_factory, run_id=run_id, tally=tally)
-    # Read off the tally rather than the row just written: that write is best-effort by
-    # contract, and an outage that swallowed it must not also disarm the guard.
+    # The soft-tier verdict is written with it, so the row and the detail line below cannot
+    # disagree about the run they both describe.
+    await record_retrieval_health(
+        session_factory, run_id=run_id, tally=tally, soft_breach=saturation_note is not None
+    )
+    if saturation_note:
+        log.warning("%s", saturation_note)
     retrieval_breach = hard_breach_error(
         tally,
         max_zero_candidate_rate=retrieval_max_zero_candidate_rate,
@@ -446,10 +460,18 @@ async def run_link_ingest(
             run_id,
             status="failed" if error else "succeeded",
             error=error,
-            detail=(
-                f"linked {linked}, rejected {rejected}; "
-                f"{events_created} events from {stories_clustered} stories "
-                f"({stories_rejected} stale-stage rejected)"
+            # The soft tier's clause is appended, not interpolated: it is absent on a healthy
+            # run, and a "saturation fine" present on every line is one the eye stops seeing.
+            detail="; ".join(
+                filter(
+                    None,
+                    (
+                        f"linked {linked}, rejected {rejected}",
+                        f"{events_created} events from {stories_clustered} stories "
+                        f"({stories_rejected} stale-stage rejected)",
+                        saturation_note,
+                    ),
+                )
             ),
         )
         await s.commit()

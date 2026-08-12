@@ -60,6 +60,7 @@ def _fields(health: RunRetrievalHealth, totals: tuple[int, int]) -> dict:
         "stories_retrieved": health.stories_retrieved,
         "zero_candidate_stories": health.zero_candidate_stories,
         "saturated_stories": health.saturated_stories,
+        "soft_breach": health.soft_breach,
         "mean_candidates": health.mean_candidates,
         "roster_picks": picks,
         "roster_picks_retrieved": retrieved,

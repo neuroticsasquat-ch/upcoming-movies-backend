@@ -415,3 +415,65 @@ class TestHardBreach:
         assert run.status == "failed"
         assert run.error and "link stage produced nothing" in run.error
         assert "no candidates" in run.error
+
+
+class TestSoftBreach:
+    """The soft tier (ADR-0010, NEU-1088 §3.6): a cap-saturation rate past the warn threshold
+    flags the health row and names itself in the run's detail line — and the run still
+    succeeds. Saturation had no threshold at all before this, which is why it went 0% to 7.9%
+    in three days with nothing raising a hand; it was found by querying prod by hand."""
+
+    async def _saturating(self, session, **kwargs):
+        # Two films clear T=0.5 on the same headline ("Runner" is one of two distinct title
+        # tokens each), so a cap of 1 discards one that scored — which is saturation.
+        await _catalog(
+            session,
+            films={1: "Runner Alpha", 2: "Runner Beta"},
+            stories={"https://e/hit": "Runner news"},
+        )
+        return await _run(
+            session, retrieval_max_candidates=1, retrieval_health_min_stories=1, **kwargs
+        )
+
+    async def test_a_drifting_run_flags_the_row_and_names_it_in_the_detail(self, session):
+        run_id = await self._saturating(session, retrieval_saturation_warn_rate=0.5)
+
+        health = await _health(session, run_id)
+        assert health is not None
+        assert (health.saturated_stories, health.soft_breach) == (1, True)
+        run = await _run_row(session, run_id)
+        assert run.detail is not None and "cap saturation" in run.detail
+        # The pre-existing clauses survive: the tier appends, it does not replace.
+        assert "linked" in run.detail and "stale-stage rejected" in run.detail
+
+    async def test_the_run_still_succeeds(self, session):
+        """The decision the tier turns on. `run_daily` is fail-fast, so a hard tier here would
+        publish no summaries at all on a day when nothing was actually broken — and rising
+        saturation is drift, the signal that says *retune* rather than *outage*."""
+        run_id = await self._saturating(session, retrieval_saturation_warn_rate=0.5)
+
+        run = await _run_row(session, run_id)
+        assert run.status == "succeeded"
+        assert run.error is None
+
+    async def test_a_run_inside_the_threshold_says_nothing(self, session):
+        run_id = await self._saturating(session, retrieval_saturation_warn_rate=1.0)
+
+        health = await _health(session, run_id)
+        assert health is not None
+        # Still saturated — the count is telemetry and is recorded either way. What the
+        # threshold governs is whether that reads as *drift*.
+        assert (health.saturated_stories, health.soft_breach) == (1, False)
+        run = await _run_row(session, run_id)
+        assert run.detail is not None and "cap saturation" not in run.detail
+
+    async def test_the_row_and_the_detail_line_cannot_disagree(self, session):
+        """Both come from the one `soft_breach_note` call. Recomputing the flag inside the
+        health write would ask a different question — the threshold is a setting, so
+        "recompute with the defaults" is not the same as "what did this run breach"."""
+        run_id = await self._saturating(session, retrieval_saturation_warn_rate=0.5)
+
+        health = await _health(session, run_id)
+        run = await _run_row(session, run_id)
+        assert health is not None and run.detail is not None
+        assert health.soft_breach == ("cap saturation" in run.detail)
