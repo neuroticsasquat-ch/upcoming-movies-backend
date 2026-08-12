@@ -67,7 +67,10 @@ class Settings(BaseSettings):
     # 7,519-person one, and a precision drop names the grade that caused it. Every flag
     # ships false whatever the ramp has reached: which tranches are *open* is env, so
     # opening one is a Coolify change rather than a deploy, and closing it is the same move
-    # in reverse. Directors went live 2026-08-11 (NEU-1086).
+    # in reverse. Directors went live 2026-08-11 (NEU-1086); **writers went live
+    # 2026-08-12**, and the first sweep with it open admitted 407 films, 138 of them reached
+    # through a writer credit with no director attached — against the +270 the pre-flip probe
+    # predicted as a lower bound. Cast is still closed.
     #
     # **Writers is a supported path as of NEU-1089**, and a deliberately small step. Measured
     # on the pre-expansion probe, counting only films no director reached (spec §7.4, §4.3):
@@ -120,6 +123,12 @@ class Settings(BaseSettings):
     # directors before writers, writers before cast. That sequencing is the only thing that
     # ever says which seed grade cost precision; two grades degrading at once are
     # indistinguishable, which is the whole reason the ramp is three moves and not one.
+    #
+    # **Flip in the window after a reading, not the evening before.** The daily order is the
+    # sweep at 07:00 UTC and the link run that measures at 09:05, so a flag set overnight
+    # admits its grade two hours *before* the next reading is taken — and that reading then
+    # covers both grades at once, which is the one thing the ramp exists to prevent. The
+    # grade below it never gets a clean measurement, and no later run can recover one.
     sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
     sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
