@@ -1,3 +1,5 @@
+import re
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -450,3 +452,61 @@ def test_settings_retrieval_saturation_warn_rate_rejects_out_of_range(monkeypatc
     monkeypatch.setenv("LINK_RETRIEVAL_SATURATION_WARN_RATE", rate)
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]
+
+
+# --- prod compose drift (NEU-1088) ---------------------------------------------------
+
+_PROD_COMPOSE = Path(__file__).parents[2] / "docker-compose.prod.yml"
+
+# Every retrieval setting `docker-compose.prod.yml` passes through, against the `Settings`
+# field it feeds. Production reads its environment from that file, so a fallback left behind
+# here does not merely disagree with the code — it *wins over* it, silently.
+_PINNED_PROD_FALLBACKS = (
+    ("LINK_RETRIEVAL_THRESHOLD", "link_retrieval_threshold"),
+    ("LINK_RETRIEVAL_MAX_CANDIDATES", "link_retrieval_max_candidates"),
+    ("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", "link_retrieval_max_zero_candidate_rate"),
+    ("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "link_retrieval_health_min_stories"),
+    ("LINK_RETRIEVAL_SATURATION_WARN_RATE", "link_retrieval_saturation_warn_rate"),
+)
+
+
+def _compose_fallback(env_name: str) -> str:
+    """The `VALUE` out of a `NAME: "${NAME:-VALUE}"` line in the prod compose file.
+
+    Read with a regex rather than a YAML parse: what is being checked is the *interpolation
+    default* inside the string, which no YAML loader resolves — to a parser the value is
+    opaquely `${NAME:-VALUE}`, so parsing would buy nothing and cost a dependency."""
+    match = re.search(
+        rf'^\s*{env_name}:\s*"\$\{{{env_name}:-(?P<value>[^}}]*)\}}"\s*$',
+        _PROD_COMPOSE.read_text(),
+        re.MULTILINE,
+    )
+    assert match is not None, f"{env_name} is not passed through docker-compose.prod.yml"
+    return match.group("value")
+
+
+@pytest.mark.parametrize(("env_name", "field"), _PINNED_PROD_FALLBACKS)
+def test_prod_compose_fallbacks_match_the_code_defaults(monkeypatch, env_name, field):
+    """A stale fallback in `docker-compose.prod.yml` silently overrides a retune.
+
+    This is not hypothetical. NEU-1088 moved K from 25 to 35 and the zero-candidate ceiling
+    from 0.25 to 0.10, and production kept running the old pair — the compose file pinned
+    `${LINK_RETRIEVAL_MAX_CANDIDATES:-25}`, so the new code default was dead on arrival and
+    the deploy looked entirely successful. Nothing failed; the retune simply did not happen.
+
+    The compose file's own comment claims the fallbacks "repeat the code defaults
+    deliberately". This is what makes that claim true rather than aspirational.
+
+    **CI is the authoritative run.** There the file is read straight from the checkout. In the
+    dev container it arrives as a single-file bind mount, and those track the *inode* — an
+    editor that writes-then-renames (`sed -i`, and plenty of editors by default) leaves the
+    container reading the pre-edit copy. That can only ever produce a false *pass* locally,
+    never a false failure, and `docker compose up -d --force-recreate upmovies-backend`
+    clears it."""
+    _set_required(monkeypatch)
+    _clear_retrieval(monkeypatch)
+    settings = Settings()  # type: ignore[call-arg]
+    expected = getattr(settings, field)
+    # Compared as the *field's* type, not as text: "0.10" and "0.1" are the same threshold,
+    # and a test that insisted on the spelling would fail on a harmless reformat.
+    assert type(expected)(_compose_fallback(env_name)) == expected
