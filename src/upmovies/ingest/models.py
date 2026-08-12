@@ -314,6 +314,17 @@ class RunRetrievalHealth(Base):
     """Mean candidate-set size per story — post-cap, so it is bounded by K and reads as
     prompt size rather than match volume; `saturated_stories` is what says how often the cap
     bit. NULL when there were no stories to average."""
+    soft_breach: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    """Whether this run's cap-saturation rate cleared the warn threshold — retrieval health's
+    soft tier (ADR-0010, NEU-1088 §3.6). The run still succeeds: saturation is drift, and
+    `run_daily` is fail-fast, so a hard tier here would publish no summaries on a day when
+    nothing was actually broken.
+
+    **Stored rather than derived** from `saturated_stories / stories_retrieved` at read time.
+    The threshold is a setting precisely so it can move as the catalog grows, and a derived
+    flag would silently re-judge every historical run against today's value — turning the one
+    question the row exists to answer ("did this look wrong *at the time*?") into a moving
+    target. False on every row predating the tier, which is accurate: nothing warned."""
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

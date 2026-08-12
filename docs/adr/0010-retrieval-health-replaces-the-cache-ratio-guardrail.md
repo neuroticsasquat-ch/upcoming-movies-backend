@@ -48,6 +48,28 @@ Delivery is two-tier, reusing what exists rather than adding infrastructure:
 - **Soft signal** — drift below that threshold is recorded per run and surfaced on
   `/admin/runs` for inspection.
 
+> **Amended 2026-08-11 (NEU-1088): the soft tier gains a threshold.** As delivered, "soft
+> signal" meant *recorded and visible* — cap saturation had no threshold at all, and only the
+> zero-candidate rate was ever compared against one. That gap did exactly what this ADR was
+> written to prevent, one metric over: after the directors tranche, saturation went 0% → 7.9%
+> in three days and nothing raised a hand. It was found by querying production by hand.
+>
+> The soft tier is now a **soft breach**: a saturation rate above
+> `LINK_RETRIEVAL_SATURATION_WARN_RATE` sets `soft_breach` on the run's health row and names
+> itself in the run's `detail` line. **It does not fail the run.** That is the doctrine this
+> ADR already implies, stated outright — the hard tier catches collapse, the soft tier catches
+> drift, and rising saturation is drift by definition: the signal that says *retune*, not
+> *outage*. `run_daily` is fail-fast, so a hard tier on saturation would publish no summaries
+> at all on a day when nothing was actually broken.
+>
+> Two-tier now means two *thresholds*, not one threshold and one dashboard.
+>
+> The same ticket tightened the hard tier's ceiling from 25% to 10%. The reasoning is the
+> asymmetry this ADR's own framing depends on: the ceiling has to sit below what a mis-set T
+> would produce or it cannot catch the failure named above, and that margin decays without
+> anyone touching it, because zero-candidate rates fall as the catalog grows. See design spec
+> §5.13.
+
 ## Considered alternatives
 
 - **Build both, retiring the cache alert at cutover.** Rejected: an alert with a known expiry

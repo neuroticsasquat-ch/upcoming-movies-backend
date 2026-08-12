@@ -21,6 +21,13 @@ class RetrievalHealthOut(BaseModel):
     """The denominator: every story retrieval ran over, zero-candidate ones included."""
     zero_candidate_stories: int
     saturated_stories: int
+    soft_breach: bool = False
+    """Whether this run's saturation rate breached the warn threshold in force at the time
+    (NEU-1088 §3.6). Not derived from `saturation_rate` below: the threshold is a setting, so
+    a rate the reader can compare against *today's* value says nothing about what the run was
+    judged by. Rows written before the tier existed read False, from the column's
+    `server_default` rather than from the default here — accurately, since nothing warned,
+    which is why the drift was found by hand."""
     mean_candidates: float | None
     roster_picks: int
     """Stories the roster linked, so retrieval had a pick to be measured against — a

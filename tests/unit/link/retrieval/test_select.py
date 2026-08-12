@@ -170,9 +170,11 @@ class TestCapAndOrdering:
         assert not got.saturated
 
     def test_the_default_cap_is_the_value_tuned_against_production_traffic(self):
-        # NEU-1001: p99 of the over-threshold set is 18 films and the deepest roster pick
-        # sits at rank 21, so 25 caps the tail without discarding a pick.
-        assert DEFAULT_CANDIDATE_LIMIT == 25
+        # NEU-1088, re-derived over the post-directors-tranche catalog: the deepest pick that
+        # clears T sits at rank 31, plus a named margin of 4. The rule is recall, not
+        # saturation — p99 set size grows with the catalog without bound, so chasing it with
+        # K would buy prompt size indefinitely to reach picks that are not there.
+        assert DEFAULT_CANDIDATE_LIMIT == 35
 
 
 class TestTelemetryInterface:

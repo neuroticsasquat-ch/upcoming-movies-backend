@@ -119,27 +119,41 @@ class Settings(BaseSettings):
     link_release_change_window_days: int = Field(
         default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
     )
-    # T and K for `link.retrieval.select`, tuned at NEU-1001 over 98,662 real stories
-    # against the 1,226-film production catalog (design spec §5.2). They stay settings so
-    # the next catalog expansion is answered by config rather than by a deploy. They mirror
-    # the selector's own module defaults; `config` cannot import those (retrieval/index.py
-    # reads settings, so it would be a cycle), so a test pins the two together instead.
+    # T and K for `link.retrieval.select`, re-derived at NEU-1088 over the post-directors-
+    # tranche catalog (1,997 active films) — see that module's docstring and design spec
+    # §5.13. They stay settings so the *next* catalog expansion is answered by config rather
+    # than by a deploy, which is expected: the cast tranche (NEU-1090) roughly doubles the
+    # catalog again. They mirror the selector's own module defaults; `config` cannot import
+    # those (retrieval/index.py reads settings, so it would be a cycle), so a test pins the
+    # two together instead.
     link_retrieval_threshold: float = Field(
         default=0.5, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
     )
     link_retrieval_max_candidates: int = Field(
-        default=25, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
+        default=35, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
     )
     # The hard-breach guard (NEU-1002, ADR-0010): a zero-candidate rate above the ceiling
     # finalizes the run `failed`, which aborts the daily chain and pings the deadman. Mirrors
     # `link.retrieval.health`'s own constants — same duplication, same pinning test, same
     # reason — and both stay settings so an incident is answered from env: 1.0 disarms the
     # guard, and the minimum denominator is what stops a quiet news day tripping it.
+    #
+    # Tightened 0.25 → 0.10 at NEU-1088. The ceiling has to stay *below* what a mis-set T
+    # would produce or it cannot catch the failure ADR-0010 names, and the gap had gone
+    # slack: zero-candidate falls as the catalog grows, so T=0.6's rate fell from 32.6% to
+    # 25.6% and left 0.25 clearing it by 0.6pp (spec §5.13).
     link_retrieval_max_zero_candidate_rate: float = Field(
-        default=0.25, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE"
+        default=0.10, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE"
     )
     link_retrieval_health_min_stories: int = Field(
         default=50, ge=0, alias="LINK_RETRIEVAL_HEALTH_MIN_STORIES"
+    )
+    # The soft tier (NEU-1088 §3.6): a cap-saturation rate above this flags the health row
+    # and names itself in the run's detail line. It does **not** fail the run — saturation is
+    # drift, and `run_daily` is fail-fast. Provisional: calibrated on one post-flip run plus
+    # one offline grid, and the cast tranche is expected to move it.
+    link_retrieval_saturation_warn_rate: float = Field(
+        default=0.05, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_SATURATION_WARN_RATE"
     )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")

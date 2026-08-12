@@ -6,11 +6,23 @@ pin that derivation, because a sweep that miscounts is worse than no sweep: it s
 constants the live stage runs on.
 """
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from scripts.tune_retrieval import MIN_RECORDED_SCORE, StoryScores, percentile, score_story, sweep
+from scripts.tune_retrieval import (
+    MIN_RECORDED_SCORE,
+    StoryScores,
+    deepest_pick_rank,
+    only_retrieval_authored_picks,
+    percentile,
+    score_story,
+    sweep,
+    without_retrieval_authored_picks,
+)
 from upmovies.link.retrieval.index import build_index, indexed_film
 from upmovies.news.models import Story
+
+CUTOVER = datetime(2026, 8, 8, 20, 30, tzinfo=UTC)
 
 
 def _story(*scores: float, pick: float | None = None) -> StoryScores:
@@ -141,3 +153,102 @@ class TestScoreStory:
         assert MIN_RECORDED_SCORE == 0.2
         assert row.has_pick
         assert (row.pick_score, row.pick_index) == (None, None)
+
+
+class TestRetrievalAuthoredPicks:
+    """The circularity guard (NEU-1088 §3.4).
+
+    After the 2026-08-08 cutover a pick's verdict comes from retrieval itself at T=0.5/K=25,
+    so scoring recall against it asks the retriever to grade its own homework — a pick that
+    saturated out of the cap was never linked, so it cannot appear in the denominator as a
+    miss. These pin the partition that keeps the roster-era denominator independent."""
+
+    def _pick(self, linked_at: datetime | None) -> StoryScores:
+        return StoryScores(
+            scores=(1.0,), has_pick=True, pick_score=1.0, pick_index=0, pick_linked_at=linked_at
+        )
+
+    def test_a_pick_linked_after_the_cutover_leaves_the_denominator(self):
+        rows = without_retrieval_authored_picks([self._pick(CUTOVER)], CUTOVER)
+        assert sweep(rows, threshold=0.5, limit=10).picks == 0
+
+    def test_a_pick_linked_before_the_cutover_stays_in_it(self):
+        rows = without_retrieval_authored_picks(
+            [self._pick(CUTOVER - timedelta(seconds=1))], CUTOVER
+        )
+        assert sweep(rows, threshold=0.5, limit=10).picks == 1
+
+    def test_excluding_a_pick_keeps_its_story_in_the_corpus(self):
+        """The exclusion is of the *verdict*, not the story. Set size and the zero-candidate
+        rate are measured over every story retrieval ran over, and dropping the row outright
+        would quietly change the denominator those columns are read against."""
+        rows = without_retrieval_authored_picks([self._pick(CUTOVER)], CUTOVER)
+        row = sweep(rows, threshold=0.5, limit=10)
+        assert row.stories == 1
+        assert row.over_threshold == (1,)
+
+    def test_the_excluded_picks_are_recoverable_as_their_own_corpus(self):
+        """The control (§3.4): their recall should come back at or near 1.000 by
+        construction, which is the evidence the circularity is real rather than assumed."""
+        rows = [self._pick(CUTOVER), self._pick(CUTOVER - timedelta(days=1))]
+        control = only_retrieval_authored_picks(rows, CUTOVER)
+        assert sweep(control, threshold=0.5, limit=10).picks == 1
+
+    def test_no_cutoff_keeps_every_pick_and_leaves_no_control(self):
+        rows = [self._pick(CUTOVER), self._pick(None)]
+        assert (
+            sweep(without_retrieval_authored_picks(rows, None), threshold=0.5, limit=10).picks == 2
+        )
+        assert only_retrieval_authored_picks(rows, None) == []
+
+    def test_a_pick_with_no_linked_at_is_never_treated_as_retrieval_authored(self):
+        """`linked_at` is the only discriminator available — `link_note` is null on a
+        successful link — so a pick without one cannot be shown to be contaminated. Keeping
+        it errs toward a denominator that is too large, which understates recall rather than
+        flattering it."""
+        rows = without_retrieval_authored_picks([self._pick(None)], CUTOVER)
+        assert sweep(rows, threshold=0.5, limit=10).picks == 1
+        assert only_retrieval_authored_picks([self._pick(None)], CUTOVER) == []
+
+
+class TestScoreStoryRecordsLinkedAt:
+    def test_a_linked_story_records_when_it_was_linked(self):
+        index = build_index([indexed_film(film_id=uuid4(), title="Avatar Fire and Ash")])
+        film_id = index.films[0].film_id
+        story = Story(
+            id=uuid4(),
+            source="test",
+            url=f"https://example.test/{uuid4()}",
+            title="Avatar Fire and Ash",
+            raw={},
+            link_status="linked",
+            film_id=film_id,
+            linked_at=CUTOVER,
+        )
+        assert score_story(index, story).pick_linked_at == CUTOVER
+
+
+class TestDeepestPickRank:
+    """The number §3.2's K rule is defined against — the smallest K that loses no pick.
+
+    Reported rather than bisected out of the cap table: the rule is "that rank, plus a named
+    margin", and a grid can only bracket it. §3.1 expects a third pass after the cast tranche,
+    and this is what keeps that pass from re-deriving the number by hand."""
+
+    def test_the_deepest_pick_is_the_smallest_cap_that_loses_none(self):
+        rows = [_story(*[1.0] * 5, 0.9, pick=0.9), _story(1.0, pick=1.0)]
+        assert deepest_pick_rank(rows, 0.5) == 6
+        assert sweep(rows, threshold=0.5, limit=6).lost_to_cap == 0
+        assert sweep(rows, threshold=0.5, limit=5).lost_to_cap == 1
+
+    def test_picks_below_the_threshold_do_not_set_the_rank(self):
+        """They are lost to T, not to the cap — raising K cannot recover them, so letting one
+        drive the margin would buy prompt size that provably reaches nothing."""
+        assert deepest_pick_rank([_story(*[1.0] * 9, 0.4, pick=0.4)], 0.5) is None
+
+    def test_a_corpus_with_no_picks_has_no_rank(self):
+        assert deepest_pick_rank([_story(1.0)], 0.5) is None
+
+    def test_an_unscored_pick_does_not_set_the_rank(self):
+        unscored = StoryScores(scores=(1.0,), has_pick=True)
+        assert deepest_pick_rank([unscored], 0.5) is None

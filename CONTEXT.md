@@ -195,9 +195,22 @@ was built instead of the briefed cache-ratio alert (ADR-0010). Read on every `li
 retrieval is the only link path since NEU-1004 — and only above a minimum story count, because
 a rate over a handful of stories cannot tell a collapse from a quiet news day. It
 watches a *rate*, which is exactly what a **total stage failure** refuses to do — two guards,
-kept apart on purpose.
+kept apart on purpose. Its counterpart is the **soft breach**, which watches a different rate
+and does not fail anything.
 _Avoid_: alert (nothing is sent; the deadman notices a ping that never came), threshold
-breach (ambiguous with **T**, retrieval's score threshold).
+breach (ambiguous with **T**, retrieval's score threshold), breach unqualified (there are two
+tiers, and only one of them stops the chain).
+
+**Soft breach**:
+A run whose cap-saturation rate exceeds the warn threshold, flagged on the health row and
+named in the run's detail line — **retrieval health**'s soft tier. It does not fail the run:
+saturation is drift, and the daily chain is fail-fast. Where a **hard breach** says retrieval
+has collapsed, this says **K** no longer fits the catalog — it is the signal that schedules a
+retune (ADR-0010, NEU-1088). Stored per run rather than recomputed, because the threshold is a
+setting that moves as the catalog grows and the question is what the run was judged by at the
+time.
+_Avoid_: saturation breach (the flag is about the rate, not the cap), warning (too vague — the
+hard tier warns too).
 
 ### News sources
 

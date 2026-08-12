@@ -18,31 +18,46 @@ rejection downstream — no model call, `link_note = 'no-candidates'` (ADR-0009)
 is the majority of the stage's workload on the measured corpus, so the empty set is the
 common case rather than the edge one.
 
-**Ranking is deliberately plain.** Over 98,662 production stories at a 1,226-film catalog,
-262 of the 361 roster picks retrieval reaches rank first and the p99 rank is 8: misses are
-score-zero misses, not ranking failures, so there is nothing for a more elaborate ranker to
-recover. What the order does have to be is *deterministic* — score, then title, then id —
-because the offline harnesses record the rank the expected film landed at, and a rank that
-moved between runs for no reason would be unreadable.
+**Ranking is deliberately plain.** Misses are score-zero misses rather than ranking
+failures, so there is nothing for a more elaborate ranker to recover. What the order does
+have to be is *deterministic* — score, then title, then id — because the offline harnesses
+record the rank the expected film landed at, and a rank that moved between runs for no
+reason would be unreadable.
 
-**The constants below are tuned, not assumed** (NEU-1001, design spec §5.2). Measured over
-that corpus, against 365 roster picks whose film is still in the active catalog:
+**The constants below are tuned, not assumed** — retuned at NEU-1088 (design spec §5.13)
+after the directors tranche took the catalog from 1,226 to **1,997 active films**, 1.6x.
+The measurement is `scripts/tune_retrieval.py` over **4,841 stories** in the trailing
+21 days and **191 picks** still in the active catalog:
 
-- **T = 0.5 is the top of the flat region.** No pick scores between zero and 0.5 — the 361
-  retrieval reaches all score 0.5 or better, and the four it misses share no title token
-  with their story at all. Recall is therefore identical for every T from 0 to 0.5 (0.989),
-  and those four are the lexical floor rather than a threshold effect. T=0.6 costs 11 picks.
-  Taking the highest T that loses nothing is what resists catalog growth: what degrades as
-  the catalog expands is candidate-set size, and a higher threshold admits fewer collisions.
-- **K = 25 caps the tail without discarding a pick.** The over-threshold set runs median 3,
-  p90 9, p99 18, max 44, and the deepest pick observed sits at rank 21. K is a prompt-size
-  guard, as designed — but at this catalog it is no longer free: K=10 would saturate 7.3%
-  of stories and lose two picks outright.
+- **T = 0.5 still tops the flat region.** Recall is identical (0.984) at every T from 0.25
+  to 0.5 and falls at 0.6, so the flat region did *not* move with the catalog — it is a
+  property of the scoring function, not of catalog size. Taking the highest T that loses
+  nothing is what resists catalog growth: what degrades as the catalog expands is
+  candidate-set size, and a higher threshold admits fewer collisions. T=0.6 would also take
+  the zero-candidate rate from 0.5% to 25.6%, breaching the hard tier outright.
+- **K = 35 is the deepest observed pick, rank 31, plus a named margin of 4.** The rule is
+  recall, not saturation: find the smallest K that loses no pick, then add margin over it
+  and price the margin. Both the 21- and 45-day windows put the deepest pick at rank 31
+  (they are nested, so that is one observation, not two). The margin costs **+10 input
+  tokens per story** at the measured mean — K=31 offers 12.67 candidates per story against
+  K=35's 12.77, at ~98 tokens per rendered candidate. The whole move from K=25 costs
+  **+43 tok/story**.
 
-Cap saturation is the health signal to watch as the catalog grows (`retrieval/health.py`):
-at K=25 it is 0.1% today, low enough that a rise means something. It will rise — measured
-against sub-catalogs, p90 candidates grows about linearly with catalog size, so the
-undated-film expansion is expected to saturate this cap and force a retune (spec §5.2).
+**Headroom is no longer nearly free, which is why the rule is stated in recall.** At
+NEU-1001 the mean offered set was 4.23 candidates; at the *same* K=25 it is now 12.33, so at
+fixed K the candidate block has roughly tripled — about 415 to 1,210 tokens per story, at the
+~98 tokens per rendered candidate measured here. Meanwhile p99 set
+size scales with the catalog without bound. Chasing saturation with K would therefore buy
+prompt size indefinitely to reach picks that are not there — so **saturation is reported,
+not chased**: K=35 saturates 1.8% of stories, down from 7.6% at K=25, and that number is
+watched rather than targeted (`retrieval/health.py`'s soft tier).
+
+**Expect to do this again.** The writers tranche (NEU-1089, +270 films) is small enough
+that it likely moves nothing, but the cast tranche (NEU-1090, +2,341) roughly doubles the
+catalog and is expected to force a third pass. These constants are set from today's
+catalog rather than from an extrapolation of that one, deliberately: the growth curve is a
+predictor, not a promise, and setting live constants from it is what NEU-1001 existed to
+stop doing (spec §5.13).
 """
 
 from dataclasses import dataclass
@@ -53,8 +68,9 @@ from upmovies.link.retrieval.normalize import significant_tokens, squash_fold
 
 # Tuned against production traffic — see the module docstring. `config.Settings` carries the
 # same two values so they can be moved without a deploy; a test pins the pair together.
+# Last re-derived at NEU-1088, over the post-directors-tranche catalog.
 DEFAULT_SCORE_THRESHOLD = 0.5
-DEFAULT_CANDIDATE_LIMIT = 25
+DEFAULT_CANDIDATE_LIMIT = 35
 
 
 @dataclass(frozen=True)

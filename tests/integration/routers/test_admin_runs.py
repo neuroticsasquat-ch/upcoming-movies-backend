@@ -228,6 +228,7 @@ async def _seed_retrieval_health(
     zero_candidate_stories: int = 50,
     saturated_stories: int = 10,
     mean_candidates: float | None = 2.5,
+    soft_breach: bool = False,
     picks: Sequence[bool] = (),
 ) -> IngestRun:
     """A `link` run with a health row, plus one probe row per entry in `picks` (True where
@@ -244,6 +245,7 @@ async def _seed_retrieval_health(
             zero_candidate_stories=zero_candidate_stories,
             saturated_stories=saturated_stories,
             mean_candidates=mean_candidates,
+            soft_breach=soft_breach,
         )
     )
     for index, retrieved in enumerate(picks):
@@ -282,6 +284,7 @@ async def test_run_detail_includes_retrieval_health_rates(admin_authed_client, s
     assert health["roster_picks"] == 4
     assert health["roster_picks_retrieved"] == 3
     assert health["roster_pick_recall"] == 0.75
+    assert health["soft_breach"] is False
 
 
 async def test_run_list_includes_retrieval_health(admin_authed_client, session):
@@ -389,3 +392,15 @@ async def test_trend_since_without_an_offset_is_read_as_utc(admin_authed_client,
         "/admin/runs/retrieval-health", params={"since": "2026-08-01T00:00:00"}
     )
     assert [point["run_id"] for point in r.json()] == [str(run.id)]
+
+
+async def test_run_detail_surfaces_the_soft_breach_flag(admin_authed_client, session):
+    """The soft tier has to be visible where drift is read (NEU-1088 §3.6). The flag is the
+    run's verdict against the threshold in force *at the time*, which `saturation_rate` beside
+    it cannot reconstruct — the threshold is a setting, and it is expected to move."""
+    run = await _seed_retrieval_health(session, saturated_stories=40, soft_breach=True)
+    r = await admin_authed_client.get(f"/admin/runs/{run.id}")
+    assert r.status_code == 200
+    health = r.json()["retrieval_health"]
+    assert health["soft_breach"] is True
+    assert health["saturation_rate"] == 0.2

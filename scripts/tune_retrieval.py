@@ -36,9 +36,8 @@ import json
 import logging
 import math
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from anthropic import AsyncAnthropic
 from sqlalchemy import func, select
@@ -56,6 +55,7 @@ from upmovies.link.linker import (
 from upmovies.link.retrieval.index import CandidateIndex, build_candidate_index, build_index
 from upmovies.link.retrieval.render import render_candidates
 from upmovies.link.retrieval.select import select_candidates
+from upmovies.llm.types import Prompt
 from upmovies.news.models import Story
 
 # Scores below this are recorded as "did not clear", not kept. Every threshold in the sweep
@@ -79,6 +79,18 @@ SCALING_SAMPLE = 10_000
 # Stories whose rendered candidate list is token-counted, for the per-candidate cost.
 _CANDIDATE_COST_SAMPLE = 20
 
+# The retrieval cutover: the first `link` run whose candidate sets came from retrieval rather
+# than the roster (NEU-1004). Picks linked at or after it were authored by the path this
+# script measures, which makes them circular as ground truth — a pick that saturated out of
+# the cap was never linked, so it cannot appear in the recall denominator as a miss (NEU-1088
+# §3.4). Excluded by default; `--picks-linked-before none` keeps them.
+#
+# **20:30, not midnight.** The cutover is the deploy, not the date: the 2026-08-08 09:05 run
+# was still roster-decided, and a midnight boundary would discard its ten picks as
+# contaminated. This timestamp is the first `ingest.run_retrieval_health` row's run start,
+# and prod's `linked_at` values leave a clean eleven-hour gap either side of it.
+RETRIEVAL_CUTOVER = datetime(2026, 8, 8, 20, 30, tzinfo=UTC)
+
 
 @dataclass(frozen=True)
 class StoryScores:
@@ -101,6 +113,10 @@ class StoryScores:
     has_pick: bool = False
     pick_score: float | None = None
     pick_index: int | None = None
+    pick_linked_at: datetime | None = None
+    """When the pick was linked — what separates a roster-era verdict from one retrieval
+    authored itself. Recorded on the row rather than filtered in the query so that both
+    populations come out of the single scoring pass the grid's affordability rests on."""
 
 
 @dataclass(frozen=True)
@@ -193,6 +209,68 @@ def sweep(rows: Sequence[StoryScores], *, threshold: float, limit: int) -> Sweep
     )
 
 
+def deepest_pick_rank(rows: Sequence[StoryScores], threshold: float) -> int | None:
+    """The rank of the deepest pick that cleared `threshold`, or None if there are none.
+
+    §3.2's rule is stated against this number: K is *this rank plus a named margin*, not
+    whatever clears the p99 set size. Only picks that cleared T count — one below it is lost
+    to T, and raising K to reach it would buy prompt size that provably reaches nothing.
+
+    A rank, so 1-based: it is directly the smallest K that loses no pick."""
+    ranks = [
+        row.pick_index + 1
+        for row in rows
+        if row.has_pick
+        and row.pick_index is not None
+        and row.pick_score is not None
+        and row.pick_score >= threshold
+    ]
+    return max(ranks) if ranks else None
+
+
+def without_retrieval_authored_picks(
+    rows: Sequence[StoryScores], cutoff: datetime | None
+) -> list[StoryScores]:
+    """`rows` with every pick linked at or after `cutoff` demoted to a non-pick.
+
+    The circularity guard (§3.4). What is dropped is the **verdict**, not the story: set
+    size, the zero-candidate rate and saturation are measured over every story retrieval ran
+    over, so removing the row outright would move the denominator those columns are read
+    against while claiming only to have touched recall.
+
+    A pick with no `linked_at` is kept. It is the only discriminator available — `link_note`
+    is null on a successful link — so an absent one cannot show contamination, and keeping it
+    errs toward a denominator that is too large, which understates recall rather than
+    flattering it."""
+    if cutoff is None:
+        return list(rows)
+    return [
+        replace(row, has_pick=False, pick_score=None, pick_index=None)
+        if row.has_pick and row.pick_linked_at is not None and row.pick_linked_at >= cutoff
+        else row
+        for row in rows
+    ]
+
+
+def only_retrieval_authored_picks(
+    rows: Sequence[StoryScores], cutoff: datetime | None
+) -> list[StoryScores]:
+    """Just the picks `without_retrieval_authored_picks` drops — the control corpus.
+
+    Swept on its own it should return recall at or near 1.000 by construction, which is what
+    makes the circularity evidence rather than assumption: these picks exist *because*
+    retrieval offered their film. A control that comes back materially short says the pick
+    model is not what §3.4 thinks it is, and the exclusion needs re-arguing before the grid
+    it produced is trusted."""
+    if cutoff is None:
+        return []
+    return [
+        row
+        for row in rows
+        if row.has_pick and row.pick_linked_at is not None and row.pick_linked_at >= cutoff
+    ]
+
+
 def score_story(index: CandidateIndex, story: Story) -> StoryScores:
     """Retrieve for one story and record what tuning needs to know about the result.
 
@@ -219,11 +297,15 @@ def score_story(index: CandidateIndex, story: Story) -> StoryScores:
     for position, candidate in enumerate(candidates.scored):
         if candidate.film.film_id == story.film_id:
             return StoryScores(
-                scores=scores, has_pick=True, pick_score=candidate.score, pick_index=position
+                scores=scores,
+                has_pick=True,
+                pick_score=candidate.score,
+                pick_index=position,
+                pick_linked_at=story.linked_at,
             )
     # Below `MIN_RECORDED_SCORE`: a pick with no score and no rank, which every threshold in
     # the grid counts as a miss. It stays in the denominator — that is what `has_pick` is for.
-    return StoryScores(scores=scores, has_pick=True)
+    return StoryScores(scores=scores, has_pick=True, pick_linked_at=story.linked_at)
 
 
 async def load_scores(
@@ -272,7 +354,13 @@ def format_threshold_table(rows: Sequence[StoryScores], thresholds: Iterable[flo
 
 def format_cap_table(rows: Sequence[StoryScores], threshold: float, limits: Iterable[int]) -> str:
     """K at a fixed T — what the cap costs in recall and what it saves in prompt size."""
+    deepest = deepest_pick_rank(rows, threshold)
     lines = [
+        f"Deepest pick that cleared T={threshold}: **rank "
+        + (f"{deepest}" if deepest is not None else "—")
+        + "**. That is the smallest K losing no pick, and the number §3.2's margin is "
+        "added to — the grid below only brackets it.",
+        "",
         f"| K (at T={threshold}) | recall | lost to cap | saturated | mean offered |",
         "|---|---|---|---|---|",
     ]
@@ -284,6 +372,24 @@ def format_cap_table(rows: Sequence[StoryScores], threshold: float, limits: Iter
             f"{row.saturated} ({row.saturated_pct:.1f}%) | {row.mean_offered:.2f} |"
         )
     return "\n".join(lines)
+
+
+def format_control_line(control: Sequence[StoryScores], *, threshold: float, limit: int) -> str:
+    """The excluded picks' recall at the live (T, K) — the circularity control (§3.4).
+
+    Expected at or near 1.000 by construction: these picks exist because retrieval offered
+    their film at these very constants. Reported rather than asserted, because the interesting
+    outcome is the one that comes back short."""
+    if not control:
+        return "No excluded picks in this window, so the control is empty."
+    row = sweep(control, threshold=threshold, limit=limit)
+    recall = f"{row.recall:.3f}" if row.recall is not None else "—"
+    return (
+        f"Control — the {row.picks} excluded picks swept on their own at T={threshold}/"
+        f"K={limit}: recall **{recall}** ({row.lost_to_threshold} lost to T, "
+        f"{row.lost_to_cap} lost to the cap). At or near 1.000 is the expected result, and "
+        "the evidence that the exclusion is warranted rather than assumed."
+    )
 
 
 def format_scaling_table(
@@ -326,8 +432,8 @@ def _estimate_tokens(text: str) -> int:
     return round(len(text) / 4)
 
 
-def _request_text(system: list[dict[str, Any]], messages: list[dict[str, Any]]) -> str:
-    return "".join(block["text"] for block in system) + "".join(str(m["content"]) for m in messages)
+def _request_text(prompt: Prompt) -> str:
+    return prompt.stable_prefix + prompt.user
 
 
 def _reply_for(batch: Sequence[StoryCandidates]) -> str:
@@ -375,15 +481,18 @@ async def format_batch_table(
     Its lifetime belongs to the caller — a measurement helper should not be deciding when an
     HTTP client closes."""
 
-    async def tokens(system: list[dict[str, Any]], messages: list[dict[str, Any]]) -> int:
+    async def tokens(prompt: Prompt) -> int:
+        """Input tokens for one `Prompt`, mapped onto Anthropic's counting endpoint.
+
+        The builders return the provider-neutral `Prompt` (spec §5.1), so the vendor shape is
+        reconstructed here rather than carried around: `stable_prefix` is the system block and
+        `user` the single user turn, which is exactly what the Anthropic adapter serializes."""
         if counter is None:
-            return _estimate_tokens(_request_text(system, messages))
-        # Same `type: ignore` the production client carries: the request builders hand back
-        # plain dicts, which the SDK's TypedDict params do not accept structurally.
+            return _estimate_tokens(_request_text(prompt))
         counted = await counter.messages.count_tokens(
             model=get_settings().link_model,
-            system=system,  # type: ignore[arg-type]
-            messages=messages,  # type: ignore[arg-type]
+            system=[{"type": "text", "text": prompt.stable_prefix}],
+            messages=[{"role": "user", "content": prompt.user}],
         )
         return counted.input_tokens
 
@@ -417,9 +526,7 @@ async def format_batch_table(
     # before the call (ADR-0009), so they cost nothing and must not pad the batch's size.
     entries = [e for e in entries if not e.candidates.is_empty]
 
-    instructions = await tokens(
-        [{"type": "text", "text": _RETRIEVAL_INSTRUCTIONS}], [{"role": "user", "content": "{}"}]
-    )
+    instructions = await tokens(Prompt(stable_prefix=_RETRIEVAL_INSTRUCTIONS, user="{}"))
     candidate_tokens = [
         await reply_tokens(json.dumps(render_candidates(entry.candidates), ensure_ascii=False))
         for entry in entries[:_CANDIDATE_COST_SAMPLE]
@@ -443,7 +550,7 @@ async def format_batch_table(
         if not chunks:
             break
         counted = [
-            await tokens(*build_retrieval_link_request(chunk, datetime.now(UTC).date()))
+            await tokens(build_retrieval_link_request(chunk, datetime.now(UTC).date()))
             for chunk in chunks
         ]
         stories_counted = sum(len(chunk) for chunk in chunks)
@@ -508,14 +615,30 @@ async def _amain(args: argparse.Namespace) -> None:
         if counter is not None:
             await counter.close()
 
+    cutoff: datetime | None = args.picks_linked_before
+    control = only_retrieval_authored_picks(rows, cutoff)
+    rows = without_retrieval_authored_picks(rows, cutoff)
+
     picks = sum(1 for r in rows if r.has_pick)
     print(f"# Retrieval tuning — {datetime.now(UTC).date().isoformat()}\n")
     print(
         f"Corpus: **{len(rows)} stories** over the last {args.days} days, "
-        f"**{picks} roster picks** still in the active catalog. "
+        f"**{picks} picks** still in the active catalog. "
         f"Index: **{index.size} films**, {index.token_count} tokens, "
         f"{len(index.rescue_folds)} rescue folds.\n"
     )
+    if cutoff is None:
+        print(
+            "Picks are **not** filtered by `linked_at`: every verdict is in the denominator, "
+            "including those retrieval authored itself. The recall column is circular to that "
+            "extent (§3.4).\n"
+        )
+    else:
+        print(
+            f"Picks linked at or after **{cutoff.isoformat()}** are excluded — retrieval "
+            f"authored those verdicts, so they cannot appear in the denominator as misses "
+            f"(§3.4). {format_control_line(control, threshold=args.threshold, limit=args.limit)}\n"
+        )
     print("## Threshold (uncapped)\n")
     print(format_threshold_table(rows, args.thresholds))
     print("\n## Cap\n")
@@ -532,6 +655,17 @@ def _floats(raw: str) -> tuple[float, ...]:
 
 def _ints(raw: str) -> tuple[int, ...]:
     return tuple(int(part) for part in raw.split(","))
+
+
+def _cutoff(raw: str) -> datetime | None:
+    """`--picks-linked-before` as an aware UTC instant; "none" disables the exclusion.
+
+    A naive input is read as UTC rather than rejected: `linked_at` is stored aware, and
+    comparing the two would raise deep inside the sweep rather than at the argument."""
+    if raw.lower() == "none":
+        return None
+    parsed = datetime.fromisoformat(raw)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def main() -> None:
@@ -554,6 +688,14 @@ def main() -> None:
         type=int,
         default=settings.link_retrieval_max_candidates,
         help="the K the batch table is measured at",
+    )
+    parser.add_argument(
+        "--picks-linked-before",
+        type=_cutoff,
+        default=RETRIEVAL_CUTOVER,
+        help="drop picks linked at or after this timestamp from the recall denominator — "
+        "they were authored by retrieval itself, which makes them circular as ground truth "
+        f"(default: {RETRIEVAL_CUTOVER.isoformat()}, the cutover). Pass 'none' to keep them.",
     )
     parser.add_argument(
         "--count-tokens",

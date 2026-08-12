@@ -43,21 +43,48 @@ SessionFactory = Callable[[], AsyncSession]
 # it does for T and K — `config` cannot import this package, `retrieval/index.py` reading
 # settings would make it a cycle.
 #
-# **The threshold is a collapse detector, not a drift detector.** At T=0.5/K=25 the measured
-# zero-candidate rate is 5.4% over 98,662 production stories, and the catalog-growth curve
-# has it falling further as the catalog expands (spec §5.2) — so 25% is roughly 4.6x the
-# observed rate and safely under the 32.6% a mis-set T=0.6 would produce. It is deliberately
-# not tighter: `run_daily` is fail-fast, so a false breach publishes no summaries at all that
-# day, and ordinary drift has the soft tier on `/admin/runs` to be seen in. What this catches
-# is the failure ADR-0010 names — an index that built empty or a normalization regression
-# silently rejecting the backlog, in a lossy stage, permanently.
-MAX_ZERO_CANDIDATE_RATE = 0.25
+# **The threshold is a collapse detector, not a drift detector.** It has to clear the observed
+# rate by a wide margin *and* sit below what a mis-set T would produce — the failure ADR-0010
+# names, an index that built empty or a normalization regression silently rejecting the
+# backlog, in a lossy stage, permanently. Drift is the soft tier's job, below.
+#
+# **Retuned 0.25 → 0.10 at NEU-1088** (spec §5.13), because the second half of that pair had
+# gone slack. Zero-candidate *falls* as the catalog grows, so a mis-set T's rate falls with
+# it: T=0.6 produced 32.6% when 0.25 was set and produces 25.6% now, leaving the old ceiling
+# clearing it by 0.6pp — inside ordinary run-to-run movement. At T=0.5 the observed rate is
+# 0.5%, so 0.10 is ~17x the observed rate and ~2.6x below the rate it must catch, where 0.25
+# had an enormous margin on the half that does not matter and almost none on the half that
+# does. Still deliberately loose: `run_daily` is fail-fast, so a false breach publishes no
+# summaries at all that day.
+MAX_ZERO_CANDIDATE_RATE = 0.10
+
+# The soft tier's constant (NEU-1088 §3.6, ADR-0010). Mirrored in `config.Settings` and pinned
+# by the same test as the pair above.
+#
+# **This one warns; it does not fail the run.** Saturation is drift — the signal that says
+# *retune*, not *outage* — and `run_daily` is fail-fast, so a hard tier here would publish no
+# summaries at all on a day when nothing was actually broken.
+#
+# Calibrated at K=35 against the 21-day grid (NEU-1088), where saturation measures **1.8%**.
+# The grid tracks production closely enough to set a live threshold from: at the old K=25 it
+# reads 7.6% against the 7.89% the 2026-08-11 run actually recorded. So 1.8% is what K=35 is
+# expected to show in production, and 5% is roughly 2.8x it — high enough to absorb ordinary
+# run-to-run movement, low enough that the next expansion does not pass under it. The cast
+# tranche (NEU-1090) roughly doubles the catalog again and is expected to breach this, which
+# is the intent: breaching it is what schedules the third tuning pass rather than leaving it
+# to be rediscovered by hand.
+#
+# **Provisional, and labelled so deliberately.** The calibrating evidence is essentially one
+# post-flip production run (n=228) plus one offline grid. Expect the third pass to move it.
+SATURATION_WARN_RATE = 0.05
 
 # The minimum denominator, mirroring `total_failure_error`'s refusal to let a thin backlog
 # fail the chain daily. A rate over a handful of stories is noise: a quiet day whose four
 # stories all miss is indistinguishable from a collapse, and treating it as one would abort
 # the daily chain for a news lull. 50 sits far below an ordinary run's pending set (~2,300
-# stories a day are retained) and far above the level where one story moves the rate.
+# stories a day are retained) and far above the level where one story moves the rate. Read by
+# both tiers: a soft tier that cries drift on a quiet day's four stories is one nobody believes
+# on the day the drift is real.
 MIN_STORIES_FOR_BREACH = 50
 
 
@@ -98,6 +125,17 @@ class RetrievalTally:
         if not self.stories_retrieved:
             return None
         return self.candidates_offered / self.stories_retrieved
+
+    @property
+    def saturation_rate(self) -> float | None:
+        """The share of stories the cap truncated, or None with no denominator.
+
+        The soft tier's input, and the number `saturated_stories` alone cannot give: the
+        count rises with traffic volume, and it is the *rate* that says whether K still fits
+        the catalog."""
+        if not self.stories_retrieved:
+            return None
+        return self.saturated_stories / self.stories_retrieved
 
     @property
     def zero_candidate_rate(self) -> float | None:
@@ -142,15 +180,57 @@ def hard_breach_error(
     )
 
 
+def soft_breach_note(
+    tally: RetrievalTally,
+    *,
+    warn_rate: float = SATURATION_WARN_RATE,
+    min_stories: int = MIN_STORIES_FOR_BREACH,
+) -> str | None:
+    """Describe the run's cap-saturation drift, or None when there is none.
+
+    Shaped like `hard_breach_error` and deliberately *not* one. That function's return value
+    is joined into the run's `error`, and anything landing there finalizes the run `failed`;
+    this one returns a clause for the run's **detail** line, which is durable on `/admin/runs`
+    and costs nothing when it is wrong. The difference is ADR-0010's doctrine: the hard tier
+    catches collapse, the soft tier catches drift, and rising saturation is drift by
+    definition — the signal that says *retune*, not *outage*. `run_daily` being fail-fast is
+    what makes that distinction expensive to get wrong in the other direction.
+
+    Silent when healthy, rather than reassuring. The detail line is read at a glance, and a
+    clause present on every run is one the eye stops seeing.
+
+    The same two escapes as the hard tier, for the same reasons: below `min_stories` the rate
+    is noise, and `warn_rate` is the highest *acceptable* rate rather than the first warning
+    one, so 1.0 switches the tier off from env rather than by a deploy."""
+    rate = tally.saturation_rate
+    if rate is None or tally.stories_retrieved < min_stories:
+        return None
+    if rate <= warn_rate:
+        return None
+    return (
+        f"cap saturation {tally.saturated_stories}/{tally.stories_retrieved} "
+        f"({rate:.1%}, over the {warn_rate:.1%} warn rate)"
+    )
+
+
 async def record_retrieval_health(
-    session_factory: SessionFactory, *, run_id: UUID, tally: RetrievalTally
+    session_factory: SessionFactory,
+    *,
+    run_id: UUID,
+    tally: RetrievalTally,
+    soft_breach: bool = False,
 ) -> None:
     """Write the run's aggregate row. Logs and returns on failure; never raises.
 
     Written once at the end of the link stage rather than incremented per batch: the row is
     a whole-run rate, and a partial one would understate the denominator it is read against.
     Written even when the run had nothing pending, so that a *missing* row keeps its own
-    meaning — retrieval did not run at all."""
+    meaning — retrieval did not run at all.
+
+    `soft_breach` is passed in rather than recomputed from `tally` here. The caller already
+    holds the clause it puts on the run's detail line, and deriving the flag a second time
+    would let the row and that line disagree about the same run — the threshold is a setting,
+    so "recompute with the defaults" is not the same question."""
     try:
         async with _owned_session(session_factory) as s:
             s.add(
@@ -160,15 +240,18 @@ async def record_retrieval_health(
                     zero_candidate_stories=tally.zero_candidate_stories,
                     saturated_stories=tally.saturated_stories,
                     mean_candidates=tally.mean_candidates,
+                    soft_breach=soft_breach,
                 )
             )
             await s.commit()
         log.info(
-            "retrieval health: stories=%d zero_candidate=%d saturated=%d mean_candidates=%s",
+            "retrieval health: stories=%d zero_candidate=%d saturated=%d mean_candidates=%s "
+            "soft_breach=%s",
             tally.stories_retrieved,
             tally.zero_candidate_stories,
             tally.saturated_stories,
             tally.mean_candidates,
+            soft_breach,
         )
     except Exception:
         log.exception("recording retrieval health failed")

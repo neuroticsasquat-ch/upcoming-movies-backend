@@ -9,6 +9,7 @@ from upmovies.link.retrieval import (
     DEFAULT_SCORE_THRESHOLD,
     MAX_ZERO_CANDIDATE_RATE,
     MIN_STORIES_FOR_BREACH,
+    SATURATION_WARN_RATE,
 )
 from upmovies.llm.registry import PROVIDERS
 
@@ -304,6 +305,7 @@ _RETRIEVAL_ENV = (
     "LINK_RETRIEVAL_MAX_CANDIDATES",
     "LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE",
     "LINK_RETRIEVAL_HEALTH_MIN_STORIES",
+    "LINK_RETRIEVAL_SATURATION_WARN_RATE",
 )
 
 
@@ -317,11 +319,11 @@ def test_settings_link_retrieval_tuning_defaults(monkeypatch):
     _set_required(monkeypatch)
     _clear_retrieval(monkeypatch)
     s = Settings()  # type: ignore[call-arg]
-    # Tuned at NEU-1001 against 98,662 real stories and a 1,226-film catalog: T=0.5 is the
-    # top of the flat region (every reachable roster pick scores 0.5 or better) and K=25
-    # clears both the p99 candidate set of 18 and the deepest pick seen, at rank 21.
+    # Re-derived at NEU-1088 over the post-directors-tranche catalog (1,997 active films):
+    # T=0.5 still tops the flat region — recall is identical from 0.25 to 0.5 and falls at
+    # 0.6 — and K=35 is the deepest pick seen, at rank 31, plus a named margin of 4.
     assert s.link_retrieval_threshold == 0.5
-    assert s.link_retrieval_max_candidates == 25
+    assert s.link_retrieval_max_candidates == 35
 
 
 def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
@@ -375,6 +377,7 @@ def test_settings_retrieval_health_guard_defaults_match_the_rule(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.link_retrieval_max_zero_candidate_rate == MAX_ZERO_CANDIDATE_RATE
     assert s.link_retrieval_health_min_stories == MIN_STORIES_FOR_BREACH
+    assert s.link_retrieval_saturation_warn_rate == SATURATION_WARN_RATE
 
 
 def test_settings_retrieval_health_guard_overrides_from_env(monkeypatch):
@@ -428,3 +431,22 @@ def test_settings_reads_sweep_admission_flags_from_env(monkeypatch):
     assert s.sweep_enabled is True
     assert s.sweep_admit_directors is True
     assert (s.sweep_admit_writers, s.sweep_admit_cast) == (False, False)
+
+
+def test_settings_retrieval_saturation_warn_rate_overrides_from_env(monkeypatch):
+    """The soft tier is retunable from env for the same reason the hard one is, and 1.0 is
+    how it is switched off — no rate being above it. Expected to be exercised: the threshold
+    is provisional, calibrated on one post-flip run plus one offline grid (NEU-1088 §3.6)."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_SATURATION_WARN_RATE", "0.2")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.link_retrieval_saturation_warn_rate == 0.2
+
+
+@pytest.mark.parametrize("rate", ["-0.1", "1.5"])
+def test_settings_retrieval_saturation_warn_rate_rejects_out_of_range(monkeypatch, rate):
+    """A share of the run's stories, same as the zero-candidate ceiling beside it."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("LINK_RETRIEVAL_SATURATION_WARN_RATE", rate)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
