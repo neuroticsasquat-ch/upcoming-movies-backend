@@ -12,6 +12,10 @@ services:
       - ./tests:/app/tests
       - ./scripts:/app/scripts
       - ./htmlcov:/app/htmlcov
+      # Read-only, and only so `test_prod_compose_fallbacks_match_the_code_defaults` can read
+      # it. CI runs pytest against the checked-out repo where this file is simply present; the
+      # container needs it mounted or the guard would pass locally by being skipped.
+      - ./docker-compose.prod.yml:/app/docker-compose.prod.yml:ro
     environment:
       DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies"
       TEST_DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies_test"
