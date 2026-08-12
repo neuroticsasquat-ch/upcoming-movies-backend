@@ -66,6 +66,23 @@ def test_opening_writers_changes_no_verdict_that_did_not_involve_a_writer(roles,
     assert AdmissionTranches(enabled=True, directors=True, writers=True).admits(roles) is admitted
 
 
+@pytest.mark.parametrize(
+    ("roles", "admitted"),
+    [(set(), False), ({"director"}, True), ({"writer"}, True), ({"director", "writer"}, True)],
+)
+def test_opening_cast_changes_no_verdict_that_did_not_involve_cast(roles, admitted):
+    """The ramp's last move (NEU-1090), and the largest — it roughly doubles the catalog, so
+    it is the one most likely to be blamed for a precision drop it did not cause. Additivity
+    is what keeps that attributable."""
+    before = AdmissionTranches(enabled=True, directors=True, writers=True)
+
+    assert before.admits(roles) is admitted
+    assert (
+        AdmissionTranches(enabled=True, directors=True, writers=True, cast=True).admits(roles)
+        is admitted
+    )
+
+
 def test_one_open_tranche_is_enough():
     """A candidate reached at several grades is admitted as soon as any one of them is
     open — the film is the unit of admission, not the credit."""

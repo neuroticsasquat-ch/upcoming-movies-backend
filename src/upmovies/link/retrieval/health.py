@@ -80,9 +80,16 @@ MAX_ZERO_CANDIDATE_RATE = 0.10
 #
 # The cast tranche (NEU-1090) roughly doubles the catalog again and is expected to breach
 # this, which is the intent: breaching it is what schedules the third tuning pass rather than
-# leaving it to be rediscovered by hand. On the observed 2.79% that projects to ~5.6% — still
-# a breach, but a narrower one than the grid implied, so do not read a near-miss as "the cast
-# tranche was cheaper than expected".
+# leaving it to be rediscovered by hand.
+#
+# **Do not extrapolate that breach linearly.** Scaling the observed 2.79% by a doubled catalog
+# gives ~5.6%, and that figure is a **floor, not an estimate**. Saturation is the fraction of
+# stories whose candidate set exceeds a fixed K — a tail quantity against a fixed threshold,
+# so it climbs faster than the catalog does once the bulk of the distribution approaches K.
+# The one expansion actually observed bears that out: ADR-0010's amendment records saturation
+# going 0% -> 7.9% across the directors tranche, a +39.4% catalog step at fixed K=25 (spec
+# §4.3). A 100% step could land far past 5.6%, and planning for a near-miss would be planning
+# on the one shape this metric has already been seen not to have.
 #
 # **Provisional, and labelled so deliberately.** Two production runs and one offline grid,
 # only one of those runs at the live K. Expect the third pass to move it.
