@@ -50,7 +50,9 @@ fixed K the candidate block has roughly tripled — about 415 to 1,210 tokens pe
 size scales with the catalog without bound. Chasing saturation with K would therefore buy
 prompt size indefinitely to reach picks that are not there — so **saturation is reported,
 not chased**: K=35 saturates 1.8% of stories, down from 7.6% at K=25, and that number is
-watched rather than targeted (`retrieval/health.py`'s soft tier).
+watched rather than targeted (`retrieval/health.py`'s soft tier). **In production it came in
+at 2.79%** on the first run at K=35 (2026-08-12, n=215) — the move off K=25 is confirmed, but
+take the grid's saturation figure as a floor rather than an estimate; see that module's note.
 
 **Expect to do this again.** The writers tranche (NEU-1089, +270 films) is small enough
 that it likely moves nothing, but the cast tranche (NEU-1090, +2,341) roughly doubles the

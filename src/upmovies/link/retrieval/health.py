@@ -65,17 +65,27 @@ MAX_ZERO_CANDIDATE_RATE = 0.10
 # *retune*, not *outage* — and `run_daily` is fail-fast, so a hard tier here would publish no
 # summaries at all on a day when nothing was actually broken.
 #
-# Calibrated at K=35 against the 21-day grid (NEU-1088), where saturation measures **1.8%**.
-# The grid tracks production closely enough to set a live threshold from: at the old K=25 it
-# reads 7.6% against the 7.89% the 2026-08-11 run actually recorded. So 1.8% is what K=35 is
-# expected to show in production, and 5% is roughly 2.8x it — high enough to absorb ordinary
-# run-to-run movement, low enough that the next expansion does not pass under it. The cast
-# tranche (NEU-1090) roughly doubles the catalog again and is expected to breach this, which
-# is the intent: breaching it is what schedules the third tuning pass rather than leaving it
-# to be rediscovered by hand.
+# Calibrated at K=35 against the 21-day grid (NEU-1088), where saturation measures **1.8%**,
+# and 5% was set as roughly 2.8x that — high enough to absorb ordinary run-to-run movement,
+# low enough that the next expansion does not pass under it.
 #
-# **Provisional, and labelled so deliberately.** The calibrating evidence is essentially one
-# post-flip production run (n=228) plus one offline grid. Expect the third pass to move it.
+# **The first production run at K=35 came in at 2.79%** (2026-08-12 01:48 UTC, n=215, over
+# the directors-tranche catalog and before the writers tranche admitted anything). So the
+# margin is really about **1.8x**, not 2.8x: the grid runs optimistic on saturation, by half
+# again on the one comparison available. It is not optimistic everywhere — mean candidates
+# came in at 12.89 against the 12.77 it predicted, and at K=25 it read 7.6% against the 7.89%
+# the 2026-08-11 run recorded, both close. Saturation is the figure to distrust it on, which
+# makes sense: it is the tail of the distribution, and a 16-hour story slice samples that tail
+# differently than 21 days of traffic.
+#
+# The cast tranche (NEU-1090) roughly doubles the catalog again and is expected to breach
+# this, which is the intent: breaching it is what schedules the third tuning pass rather than
+# leaving it to be rediscovered by hand. On the observed 2.79% that projects to ~5.6% — still
+# a breach, but a narrower one than the grid implied, so do not read a near-miss as "the cast
+# tranche was cheaper than expected".
+#
+# **Provisional, and labelled so deliberately.** Two production runs and one offline grid,
+# only one of those runs at the live K. Expect the third pass to move it.
 SATURATION_WARN_RATE = 0.05
 
 # The minimum denominator, mirroring `total_failure_error`'s refusal to let a thin backlog
