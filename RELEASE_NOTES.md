@@ -1,5 +1,14 @@
 # Release notes
 
+## 0.3.2 — 2026-08-13
+
+### General
+
+- Retune retrieval K to 47 for the post-writers catalog ([NEU-1135](https://linear.app/neuroticsasquatch/issue/NEU-1135))
+- Expose the news-backed signal on the grouped feed ([NEU-1137](https://linear.app/neuroticsasquatch/issue/NEU-1137))
+- List every beat a film-day carries on the grouped feed ([NEU-1139](https://linear.app/neuroticsasquatch/issue/NEU-1139))
+- Resolve film URLs on a leading TMDB id with a regenerated slug ([NEU-1143](https://linear.app/neuroticsasquatch/issue/NEU-1143))
+
 ## 0.3.1 — 2026-08-13
 
 ### General
