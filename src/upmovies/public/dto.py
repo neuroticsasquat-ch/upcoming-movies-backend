@@ -120,6 +120,11 @@ class FeedDayItem(BaseModel):
     arc_stage: str
     day: date
     top_event_type: str
+    # Every distinct beat this film-day carries, most-significant first — so `event_types[0]`
+    # is always `top_event_type`. The feed labels the whole set beneath the title, which the
+    # lead type alone can't express: a day that pairs a trailer with a casting beat reads as
+    # trailer-only otherwise.
+    event_types: list[str]
     event_count: int
     # True when *any* of this film-day's visible events has a linked story — i.e. a news
     # outlet reported some part of the day's activity (NEU-1137). Derived from

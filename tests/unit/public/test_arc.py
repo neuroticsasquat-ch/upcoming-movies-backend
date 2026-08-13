@@ -1,4 +1,4 @@
-from upmovies.public.arc import derive_arc_stage, most_significant_event_type
+from upmovies.public.arc import derive_arc_stage, most_significant_event_type, ordered_event_types
 
 
 def test_status_baselines():
@@ -57,3 +57,32 @@ def test_crew_attached_does_not_move_the_arc_stage():
     more than a news event is."""
     assert derive_arc_stage("Planned") == "announced"
     assert derive_arc_stage("In Production") == "shooting"
+
+
+def test_ordered_event_types_most_significant_first():
+    assert ordered_event_types(["casting", "trailer", "announced"]) == [
+        "trailer",
+        "casting",
+        "announced",
+    ]
+
+
+def test_ordered_event_types_dedupes():
+    assert ordered_event_types(["casting", "casting", "trailer"]) == ["trailer", "casting"]
+
+
+def test_ordered_event_types_breaks_rank_ties_alphabetically():
+    """`first_look` and `other` share the -1 fallback rank, so rank alone leaves their order
+    up to whatever Postgres' array_agg happened to return. The alphabetical tie-break keeps
+    the rendered label row stable between requests."""
+    assert ordered_event_types(["other", "first_look"]) == ["first_look", "other"]
+    assert ordered_event_types(["first_look", "other"]) == ["first_look", "other"]
+
+
+def test_ordered_event_types_leads_with_the_most_significant_type():
+    for types in (["announced", "casting", "trailer"], ["other"], ["crew_attached", "casting"]):
+        assert ordered_event_types(types)[0] == most_significant_event_type(types)
+
+
+def test_ordered_event_types_empty():
+    assert ordered_event_types([]) == []
