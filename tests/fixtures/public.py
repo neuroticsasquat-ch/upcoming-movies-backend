@@ -16,6 +16,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
+from upmovies.catalog.ref import film_ref
 from upmovies.main import app
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 
@@ -24,6 +25,17 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 async def client(test_engine: AsyncEngine) -> AsyncIterator[AsyncClient]:  # noqa: ARG001
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as c:
         yield c
+
+
+def ref(film: Film) -> str:
+    """The canonical URL ref the public API reports for a film — `<tmdb_id>-<title-slug>`.
+
+    Tests assert against this rather than the slug they passed to `make_film`: a ref is derived
+    from tmdb_id and the *current* title, and `make_film` assigns tmdb_ids by creation order, so
+    it cannot be written as a literal. `test_ref.py` covers the derivation itself; here the
+    question is only which film a row points at.
+    """
+    return film_ref(film.tmdb_id, film.title)
 
 
 @pytest.fixture

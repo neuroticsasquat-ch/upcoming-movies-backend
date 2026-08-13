@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from tests.fixtures.public import ref
+
 
 async def test_grouped_one_row_per_film_day_with_count_and_top_type(client, make_film, add_event):
     film = await make_film(slug="film-2026", title="A Film")
@@ -28,7 +30,7 @@ async def test_grouped_one_row_per_film_day_with_count_and_top_type(client, make
     assert body["offset"] == 0
     assert len(body["items"]) == 1
     item = body["items"][0]
-    assert item["film_slug"] == "film-2026"
+    assert item["film_ref"] == ref(film)
     assert item["film_title"] == "A Film"
     assert item["release_year"] == 2026
     assert item["poster_path"] == "/poster.jpg"
@@ -67,7 +69,7 @@ async def test_grouped_newest_day_first_across_films(client, make_film, add_even
     await add_event(film=b, summary="B", created_at=datetime(2026, 6, 2, tzinfo=UTC))
 
     body = (await client.get("/feed/grouped")).json()
-    assert [i["film_slug"] for i in body["items"]] == ["b-2026", "a-2026"]
+    assert [i["film_ref"] for i in body["items"]] == [ref(b), ref(a)]
 
 
 async def test_grouped_within_day_orders_by_popularity(client, make_film, add_event):
@@ -80,7 +82,7 @@ async def test_grouped_within_day_orders_by_popularity(client, make_film, add_ev
     await add_event(film=high, summary="high", created_at=datetime(2026, 6, 5, 8, tzinfo=UTC))
 
     items = (await client.get("/feed/grouped")).json()["items"]
-    assert [i["film_slug"] for i in items] == ["zzz-blockbuster", "aaa-popular"]
+    assert [i["film_ref"] for i in items] == [ref(high), ref(low)]
 
 
 async def test_grouped_within_day_null_popularity_sorts_last(client, make_film, add_event):
@@ -92,7 +94,7 @@ async def test_grouped_within_day_null_popularity_sorts_last(client, make_film, 
     await add_event(film=haspop, summary="haspop", created_at=datetime(2026, 6, 5, tzinfo=UTC))
 
     items = (await client.get("/feed/grouped")).json()["items"]
-    assert [i["film_slug"] for i in items] == ["zzz-haspop", "aaa-nopop"]
+    assert [i["film_ref"] for i in items] == [ref(haspop), ref(nopop)]
 
 
 async def test_grouped_within_day_equal_popularity_ties_break_by_slug(client, make_film, add_event):
@@ -104,7 +106,7 @@ async def test_grouped_within_day_equal_popularity_ties_break_by_slug(client, ma
     await add_event(film=b, summary="b", created_at=datetime(2026, 6, 5, 22, tzinfo=UTC))
 
     items = (await client.get("/feed/grouped")).json()["items"]
-    assert [i["film_slug"] for i in items] == ["aaa-2026", "bbb-2026"]
+    assert [i["film_ref"] for i in items] == [ref(a), ref(b)]
 
 
 async def test_grouped_only_counts_summarized_events(client, make_film, add_event):
@@ -150,7 +152,7 @@ async def test_grouped_excludes_films_without_slug(client, make_film, add_event)
     await add_event(film=unslugged, summary="hidden", created_at=datetime(2026, 6, 1, tzinfo=UTC))
 
     body = (await client.get("/feed/grouped")).json()
-    assert [i["film_slug"] for i in body["items"]] == ["has-slug-2026"]
+    assert [i["film_ref"] for i in body["items"]] == [ref(slugged)]
     assert body["total"] == 1
 
 
@@ -210,11 +212,11 @@ async def test_grouped_paginates_by_day_not_film_rows(client, make_film, add_eve
     page1 = (await client.get("/feed/grouped", params={"limit": 1, "offset": 0})).json()
     assert page1["total"] == 2  # two distinct days, not three film rows
     assert [i["day"] for i in page1["items"]] == ["2026-06-02", "2026-06-02"]
-    assert [i["film_slug"] for i in page1["items"]] == ["a1-2026", "a2-2026"]  # popularity order
+    assert [i["film_ref"] for i in page1["items"]] == [ref(a1), ref(a2)]  # popularity order
 
     page2 = (await client.get("/feed/grouped", params={"limit": 1, "offset": 1})).json()
     assert page2["total"] == 2
-    assert [i["film_slug"] for i in page2["items"]] == ["b1-2026"]
+    assert [i["film_ref"] for i in page2["items"]] == [ref(b1)]
 
 
 async def test_grouped_rejects_out_of_range_pagination(client):
@@ -272,9 +274,9 @@ async def test_grouped_carries_arc_stage_derived_from_status(client, make_film, 
     await add_event(film=shooting, summary="b", created_at=datetime(2026, 6, 3, tzinfo=UTC))
 
     body = (await client.get("/feed/grouped")).json()
-    assert [(i["film_slug"], i["release_year"], i["arc_stage"]) for i in body["items"]] == [
-        ("undated-film", None, "announced"),
-        ("shooting-film", None, "shooting"),
+    assert [(i["film_ref"], i["release_year"], i["arc_stage"]) for i in body["items"]] == [
+        (ref(undated), None, "announced"),
+        (ref(shooting), None, "shooting"),
     ]
 
 
@@ -300,9 +302,9 @@ async def test_grouped_arc_stage_covers_wrapped_and_the_unknown_status_fallback(
     await add_event(film=unknown, summary="b", created_at=datetime(2026, 6, 3, tzinfo=UTC))
 
     body = (await client.get("/feed/grouped")).json()
-    assert [(i["film_slug"], i["arc_stage"]) for i in body["items"]] == [
-        ("wrapped-film", "wrapped"),
-        ("unknown-film", "announced"),
+    assert [(i["film_ref"], i["arc_stage"]) for i in body["items"]] == [
+        (ref(wrapped), "wrapped"),
+        (ref(unknown), "announced"),
     ]
 
 
@@ -456,9 +458,9 @@ async def test_grouped_news_backed_is_per_film_not_per_day(client, make_film, ad
     await add_event(film=tmdb_only, summary="tmdb", created_at=day, provenance="catalog")
 
     items = (await client.get("/feed/grouped")).json()["items"]
-    assert [(i["film_slug"], i["news_backed"]) for i in items] == [
-        ("tmdb-film", False),
-        ("reported-film", True),
+    assert [(i["film_ref"], i["news_backed"]) for i in items] == [
+        (ref(tmdb_only), False),
+        (ref(reported), True),
     ]
 
 
