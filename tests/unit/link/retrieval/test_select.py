@@ -170,11 +170,11 @@ class TestCapAndOrdering:
         assert not got.saturated
 
     def test_the_default_cap_is_the_value_tuned_against_production_traffic(self):
-        # NEU-1088, re-derived over the post-directors-tranche catalog: the deepest pick that
-        # clears T sits at rank 31, plus a named margin of 4. The rule is recall, not
+        # NEU-1135, re-derived over the post-writers-tranche catalog: the deepest pick that
+        # clears T sits at rank 43, plus the same named margin of 4. The rule is recall, not
         # saturation — p99 set size grows with the catalog without bound, so chasing it with
         # K would buy prompt size indefinitely to reach picks that are not there.
-        assert DEFAULT_CANDIDATE_LIMIT == 35
+        assert DEFAULT_CANDIDATE_LIMIT == 47
 
 
 class TestTelemetryInterface:

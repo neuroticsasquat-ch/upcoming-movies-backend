@@ -321,11 +321,11 @@ def test_settings_link_retrieval_tuning_defaults(monkeypatch):
     _set_required(monkeypatch)
     _clear_retrieval(monkeypatch)
     s = Settings()  # type: ignore[call-arg]
-    # Re-derived at NEU-1088 over the post-directors-tranche catalog (1,997 active films):
-    # T=0.5 still tops the flat region — recall is identical from 0.25 to 0.5 and falls at
-    # 0.6 — and K=35 is the deepest pick seen, at rank 31, plus a named margin of 4.
+    # Re-derived at NEU-1135 over the post-writers-tranche catalog (2,695 active films):
+    # T=0.5 is the last value before a cliff that breaches the hard tier, and K=47 is the
+    # deepest pick seen, at rank 43, plus the same named margin of 4.
     assert s.link_retrieval_threshold == 0.5
-    assert s.link_retrieval_max_candidates == 35
+    assert s.link_retrieval_max_candidates == 47
 
 
 def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):

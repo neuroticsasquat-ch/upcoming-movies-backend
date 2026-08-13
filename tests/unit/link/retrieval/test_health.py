@@ -148,17 +148,27 @@ class TestHardBreach:
         """The separation test's load-bearing half (§3.5). The ceiling has to sit *below*
         what a one-step-too-high T produces or it cannot catch the failure ADR-0010 names —
         and that margin decays on its own as the catalog grows, because a mis-set T's
-        zero-candidate rate falls with everything else. T=0.6 measures 25.6% on the 21-day
-        grid, against 32.6% at NEU-1001, which is what took 0.25 down to 0.10."""
-        assert hard_breach_error(_tally(stories=1000, zero_candidate=256)) is not None
+        zero-candidate rate falls with everything else. T=0.6 measures 18.4% on the 21-day
+        grid at NEU-1135, against 25.6% at NEU-1088 and 32.6% at NEU-1001 — still clearing
+        the 0.10 ceiling, but by 8.4pp where NEU-1088 had 15.6pp. The decay this ceiling was
+        retuned to stop is still running; the next pass re-checks it."""
+        assert hard_breach_error(_tally(stories=1000, zero_candidate=184)) is not None
 
 
 def test_the_warn_rate_default_is_calibrated_at_the_chosen_k():
-    """1.8% is what K=35 saturates on the 21-day grid; 5% is ~2.8x that, which clears the
-    run-to-run spread the live rows show (0.00%–7.89% across four days at the old K=25)
-    without sitting so high the next expansion passes under it (§3.6)."""
+    """1.89% is what K=47 saturates on the 21-day grid; 5% is ~2.6x that (§3.6).
+
+    **Reaffirmed at NEU-1135, not re-derived.** The like-for-like comparison is over one
+    corpus and one catalog: 6.83% at the old K=35, 1.89% at the new K=47. NEU-1088's 1.8% is
+    a different catalog *and* a different K, so it is not the other end of a measurement.
+
+    The margin is stated against the *floor at the chosen K*, deliberately, and not against
+    the spread of live readings — that spread runs to 7.89% and 7.61%, both well over 5%.
+    Those are readings at a superseded K, and each is a soft breach that did its job: it
+    scheduled the retune that moved K out from under it. A warn rate wide enough to cover
+    them would be a warn rate that never fires."""
     assert SATURATION_WARN_RATE == 0.05
-    assert soft_breach_note(RetrievalTally(stories_retrieved=1000, saturated_stories=18)) is None
+    assert soft_breach_note(RetrievalTally(stories_retrieved=1000, saturated_stories=19)) is None
     assert (
         soft_breach_note(RetrievalTally(stories_retrieved=1000, saturated_stories=200)) is not None
     )

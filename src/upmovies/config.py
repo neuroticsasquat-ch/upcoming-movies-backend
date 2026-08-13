@@ -187,18 +187,25 @@ class Settings(BaseSettings):
     link_release_change_window_days: int = Field(
         default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
     )
-    # T and K for `link.retrieval.select`, re-derived at NEU-1088 over the post-directors-
-    # tranche catalog (1,997 active films) — see that module's docstring and design spec
-    # §5.13. They stay settings so the *next* catalog expansion is answered by config rather
+    # T and K for `link.retrieval.select`, re-derived at NEU-1135 over the post-writers-
+    # tranche catalog (2,695 active films) — see that module's docstring, and the
+    # candidate-retrieval design spec §5.14 for the tuning record (§5.13 is NEU-1088's). The
+    # *project* spec §7.2 is a different document; it is what made this a ticket rather than
+    # a follow-on. They stay settings so the next catalog expansion is answered by config
     # than by a deploy, which is expected: the cast tranche (NEU-1090) roughly doubles the
     # catalog again. They mirror the selector's own module defaults; `config` cannot import
     # those (retrieval/index.py reads settings, so it would be a cycle), so a test pins the
     # two together instead.
+    #
+    # **Only K is really settable.** T looks like the other half of the pair and is not: the
+    # grid finds no usable value above 0.5 at all — the next step up, whatever its spelling,
+    # takes zero-candidate from 0.2% to 18.4% and breaches the hard ceiling below. Raising
+    # this one from env is an incident action, not a tuning action.
     link_retrieval_threshold: float = Field(
         default=0.5, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
     )
     link_retrieval_max_candidates: int = Field(
-        default=35, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
+        default=47, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
     )
     # The hard-breach guard (NEU-1002, ADR-0010): a zero-candidate rate above the ceiling
     # finalizes the run `failed`, which aborts the daily chain and pings the deadman. Mirrors
@@ -209,7 +216,9 @@ class Settings(BaseSettings):
     # Tightened 0.25 → 0.10 at NEU-1088. The ceiling has to stay *below* what a mis-set T
     # would produce or it cannot catch the failure ADR-0010 names, and the gap had gone
     # slack: zero-candidate falls as the catalog grows, so T=0.6's rate fell from 32.6% to
-    # 25.6% and left 0.25 clearing it by 0.6pp (spec §5.13).
+    # 25.6% and left 0.25 clearing it by 0.6pp (spec §5.13). **Left at 0.10 at NEU-1135**,
+    # where T=0.6 measures 18.4% — still caught, but the margin is down to 8.4pp from 15.6pp.
+    # The decay has not stopped; the next pass re-checks it rather than assuming it holds.
     link_retrieval_max_zero_candidate_rate: float = Field(
         default=0.10, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE"
     )
@@ -218,8 +227,11 @@ class Settings(BaseSettings):
     )
     # The soft tier (NEU-1088 §3.6): a cap-saturation rate above this flags the health row
     # and names itself in the run's detail line. It does **not** fail the run — saturation is
-    # drift, and `run_daily` is fail-fast. Provisional: calibrated on one post-flip run plus
-    # one offline grid, and the cast tranche is expected to move it.
+    # drift, and `run_daily` is fail-fast. **Reaffirmed rather than re-derived at NEU-1135**:
+    # on the post-writers catalog the floor is 1.89% at the new K=47, against 6.83% at the old
+    # K=35 over the same corpus, so 5% keeps the ~2.6x margin it was designed with. Still
+    # provisional — reaffirming is not promotion to settled, and the cast tranche is the first
+    # expansion this value will meet that it was calibrated before.
     link_retrieval_saturation_warn_rate: float = Field(
         default=0.05, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_SATURATION_WARN_RATE"
     )
