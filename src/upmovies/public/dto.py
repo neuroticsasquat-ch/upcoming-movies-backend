@@ -26,7 +26,7 @@ class EventOut(BaseModel):
 
 
 class FilmIndexItem(BaseModel):
-    slug: str
+    ref: str
     title: str
     release_year: int | None
     poster_path: str | None
@@ -66,7 +66,7 @@ class CrewMemberOut(BaseModel):
 
 
 class FilmDetailResponse(BaseModel):
-    slug: str
+    ref: str
     title: str
     tmdb_id: int
     imdb_id: str | None = None
@@ -92,7 +92,7 @@ class FilmDetailResponse(BaseModel):
 
 
 class FeedItem(BaseModel):
-    film_slug: str
+    film_ref: str
     film_title: str
     event_type: str
     confidence: str
@@ -111,7 +111,7 @@ class FeedResponse(BaseModel):
 
 
 class FeedDayItem(BaseModel):
-    film_slug: str
+    film_ref: str
     film_title: str
     release_year: int | None
     poster_path: str | None
@@ -145,7 +145,7 @@ class FeedDayResponse(BaseModel):
 
 
 class CalendarItem(BaseModel):
-    film_slug: str
+    film_ref: str
     film_title: str
     release_year: int | None
     poster_path: str | None

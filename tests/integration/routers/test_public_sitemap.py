@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime
 from xml.etree import ElementTree
 
+from tests.fixtures.public import ref
 from upmovies.config import get_settings
 
 _NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
@@ -9,7 +10,7 @@ _NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 async def test_sitemap_lists_indexed_films_plus_root(client, make_film, add_event):
     shown = await make_film(slug="shown-2026")
     await add_event(film=shown, summary="s", occurred_at=datetime(2025, 5, 1, tzinfo=UTC))
-    await make_film(slug="bare-2026")  # no summarized event -> excluded
+    bare = await make_film(slug="bare-2026")  # no summarized event -> excluded
 
     r = await client.get("/sitemap.xml")
     assert r.status_code == 200
@@ -18,8 +19,8 @@ async def test_sitemap_lists_indexed_films_plus_root(client, make_film, add_even
     root = ElementTree.fromstring(r.text)
     locs = [el.text for el in root.findall(".//sm:url/sm:loc", _NS)]
     assert "http://localhost:5173/" in locs
-    assert "http://localhost:5173/film/shown-2026" in locs
-    assert all("bare-2026" not in (loc or "") for loc in locs)
+    assert f"http://localhost:5173/film/{ref(shown)}" in locs
+    assert all(ref(bare) not in (loc or "") for loc in locs)
 
 
 async def test_sitemap_lastmod_is_a_valid_date(client, make_film, add_event):
@@ -58,5 +59,5 @@ async def test_sitemap_uses_overridden_base_url(client, make_film, add_event, mo
     root = ElementTree.fromstring(r.text)
     locs = [el.text for el in root.findall(".//sm:url/sm:loc", _NS)]
     assert "https://backlotter.com/" in locs
-    assert "https://backlotter.com/film/wired-film-2026" in locs
+    assert f"https://backlotter.com/film/{ref(film)}" in locs
     assert not any("localhost" in (loc or "") for loc in locs)

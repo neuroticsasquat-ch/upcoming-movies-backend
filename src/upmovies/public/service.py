@@ -31,6 +31,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
+from upmovies.catalog.ref import film_ref, parse_film_ref
 from upmovies.catalog.release_grade import (
     PRIMARY_REGION,
     RELEASE_TYPE_BUCKETS,
@@ -135,10 +136,9 @@ def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
     """Build FilmIndexItem list for a page of Film rows."""
     items: list[FilmIndexItem] = []
     for film in films:
-        assert film.slug is not None
         items.append(
             FilmIndexItem(
-                slug=film.slug,
+                ref=film_ref(film.tmdb_id, film.title),
                 title=film.title,
                 release_year=_release_year(film.release_date),
                 poster_path=film.poster_path,
@@ -241,7 +241,8 @@ async def get_film_search(
     # Search spans the whole catalog: any slugged film whose title matches, regardless of
     # whether it has news events yet or is upcoming. This is deliberately broader than the
     # /films index and /feed, which gate on a visible, summarized event. The slug guard stays
-    # because FilmIndexItem requires a non-null slug for its detail link.
+    # as the "is this film public at all" marker: a film without one was never published, and
+    # its URL ref is now built from tmdb_id + title rather than read from the column.
     where = (Film.slug.is_not(None), _title_match(nq))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
     films = (
@@ -266,11 +267,21 @@ async def get_film_search(
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailResponse | None:
-    film = (await session.execute(select(Film).where(Film.slug == slug))).scalar_one_or_none()
+async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse | None:
+    """Resolve a film by URL ref (`<tmdb_id>-<title-slug>`), falling back to the legacy immutable
+    `film.slug` for URLs minted before NEU-1143.
+
+    Both candidates go in one query, and an exact slug match wins. They can genuinely collide: a
+    numeric title slugs to something that reads as a ref — the film "1917" is slugged `1917-2019`
+    and parses as id 1917, a different real film. Preferring the slug points the ambiguous string
+    at the URL that was actually minted for it, which is the one search engines already hold.
+    """
+    tmdb_id = parse_film_ref(ref)
+    where = Film.slug == ref if tmdb_id is None else or_(Film.slug == ref, Film.tmdb_id == tmdb_id)
+    candidates = (await session.execute(select(Film).where(where))).scalars().all()
+    film = next((c for c in candidates if c.slug == ref), None) or next(iter(candidates), None)
     if film is None:
         return None
-    assert film.slug is not None
 
     arc_stage = derive_arc_stage(film.status)
 
@@ -448,7 +459,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
     ]
 
     return FilmDetailResponse(
-        slug=film.slug,
+        ref=film_ref(film.tmdb_id, film.title),
         title=film.title,
         tmdb_id=film.tmdb_id,
         imdb_id=film.imdb_id,
@@ -476,22 +487,25 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
 
 @dataclass
 class SitemapFilm:
-    slug: str
+    ref: str
     lastmod: datetime
 
 
 async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
     rows = (
         await session.execute(
-            select(Film.slug, func.max(Event.created_at))
+            select(Film.tmdb_id, Film.title, func.max(Event.created_at))
             .join(Event, Event.film_id == Film.id)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .where(visible_events(), _region_visible())
-            .group_by(Film.id, Film.slug)
+            .group_by(Film.id, Film.tmdb_id, Film.title)
             .order_by(Film.slug.asc())
         )
     ).all()
-    return [SitemapFilm(slug=slug, lastmod=last_event_created) for slug, last_event_created in rows]
+    return [
+        SitemapFilm(ref=film_ref(tmdb_id, title), lastmod=lastmod)
+        for tmdb_id, title, lastmod in rows
+    ]
 
 
 async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedResponse:
@@ -504,7 +518,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
     )
     rows = (
         await session.execute(
-            select(Event, EventSummary.summary, Film.slug, Film.title)
+            select(Event, EventSummary.summary, Film.tmdb_id, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(Film.slug.is_not(None), visible_events(), _region_visible())
@@ -514,7 +528,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _slug, _title in rows]
+    event_ids = [event.id for event, _summary, _tmdb_id, _title in rows]
     sources_by_event: dict[UUID, list[Story]] = {}
     if event_ids:
         source_rows = (
@@ -529,11 +543,10 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
             sources_by_event.setdefault(event_id, []).append(story)
 
     items: list[FeedItem] = []
-    for event, summary, slug, title in rows:
-        assert slug is not None
+    for event, summary, tmdb_id, title in rows:
         items.append(
             FeedItem(
-                film_slug=slug,
+                film_ref=film_ref(tmdb_id, title),
                 film_title=title,
                 event_type=event.event_type,
                 confidence=event.confidence,
@@ -581,7 +594,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     rows = (
         await session.execute(
             select(
-                Film.slug.label("slug"),
+                Film.tmdb_id.label("tmdb_id"),
                 Film.title.label("title"),
                 Film.release_date.label("release_date"),
                 Film.poster_path.label("poster_path"),
@@ -595,14 +608,14 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(*visible, day.in_(select(window.c.day)))
-            .group_by(Film.id, Film.slug, Film.title, Film.release_date, Film.poster_path, day)
+            .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
             .order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
         )
     ).all()
 
     items = [
         FeedDayItem(
-            film_slug=row.slug,
+            film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
             release_year=_release_year(row.release_date),
             poster_path=row.poster_path,
@@ -728,7 +741,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         await session.execute(
             select(
                 Film.id.label("film_id"),
-                Film.slug.label("slug"),
+                Film.tmdb_id.label("tmdb_id"),
                 Film.title.label("title"),
                 Film.release_date.label("film_release_date"),
                 Film.poster_path.label("poster_path"),
@@ -740,7 +753,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
             .where(*visible, rel_day.in_(select(window.c.d)))
             .group_by(
                 Film.id,
-                Film.slug,
+                Film.tmdb_id,
                 Film.title,
                 Film.release_date,
                 Film.poster_path,
@@ -764,7 +777,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
 
     items = [
         CalendarItem(
-            film_slug=row.slug,
+            film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
             release_year=_release_year(row.film_release_date),
             poster_path=row.poster_path,

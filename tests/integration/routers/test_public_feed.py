@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from tests.fixtures.public import ref
+
 
 async def test_feed_orders_by_created_at_desc(client, make_film, add_event):
     film = await make_film(slug="film-2026", title="A Film")
@@ -51,7 +53,7 @@ async def test_feed_item_shape_includes_film_and_sources(client, make_film, add_
     )
 
     item = (await client.get("/feed")).json()["items"][0]
-    assert item["film_slug"] == "odyssey-2026"
+    assert item["film_ref"] == ref(film)
     assert item["film_title"] == "The Odyssey"
     assert item["event_type"] == "casting"
     assert item["confidence"] == "confirmed"
@@ -80,7 +82,7 @@ async def test_feed_spans_multiple_films(client, make_film, add_event):
     await add_event(film=b, summary="From B.", created_at=datetime(2026, 6, 2, tzinfo=UTC))
 
     body = (await client.get("/feed")).json()
-    assert [item["film_slug"] for item in body["items"]] == ["b-2026", "a-2026"]
+    assert [item["film_ref"] for item in body["items"]] == [ref(b), ref(a)]
 
 
 async def test_feed_pagination(client, make_film, add_event):

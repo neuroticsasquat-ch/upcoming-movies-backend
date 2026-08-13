@@ -11,7 +11,7 @@ def render_sitemap(base_url: str, films: list[SitemapFilm]) -> str:
         f"  <url><loc>{escape(base)}/</loc></url>",
     ]
     for film in films:
-        loc = f"{base}/film/{film.slug}"
+        loc = f"{base}/film/{film.ref}"
         lastmod = film.lastmod.date().isoformat()
         lines.append(f"  <url><loc>{escape(loc)}</loc><lastmod>{lastmod}</lastmod></url>")
     lines.append("</urlset>")

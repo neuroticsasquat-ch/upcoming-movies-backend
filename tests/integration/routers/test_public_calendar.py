@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tests.fixtures.public import ref
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -57,10 +59,10 @@ async def test_calendar_future_cutoff(client, make_film, add_release_date):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    slugs = [item["film_slug"] for item in body["items"]]
-    assert "film-past" not in slugs
-    assert "film-future" in slugs
-    assert "film-today" in slugs
+    refs = [item["film_ref"] for item in body["items"]]
+    assert ref(film_past) not in refs
+    assert ref(film_future) in refs
+    assert ref(film_today) in refs
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +85,9 @@ async def test_calendar_us_only(client, make_film, add_release_date):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    slugs = [item["film_slug"] for item in body["items"]]
-    assert "film-gb-only" not in slugs
-    assert slugs.count("film-us-gb") == 1
+    refs = [item["film_ref"] for item in body["items"]]
+    assert ref(film_gb_only) not in refs
+    assert refs.count(ref(film_us_and_gb)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -115,15 +117,15 @@ async def test_calendar_type_mapping(client, make_film, add_release_date):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    items_by_slug = {item["film_slug"]: item for item in body["items"]}
+    items_by_ref = {item["film_ref"]: item for item in body["items"]}
 
-    assert items_by_slug["film-type2"]["release_type"] == "limited"
-    assert items_by_slug["film-type3"]["release_type"] == "wide"
-    assert items_by_slug["film-type3"]["release_year"] == 2026  # from Film.release_date default
-    assert "film-type1" not in items_by_slug  # premiere excluded
-    assert "film-type4" not in items_by_slug
-    assert "film-type5" not in items_by_slug
-    assert "film-type6" not in items_by_slug
+    assert items_by_ref[ref(film_type2)]["release_type"] == "limited"
+    assert items_by_ref[ref(film_type3)]["release_type"] == "wide"
+    assert items_by_ref[ref(film_type3)]["release_year"] == 2026  # from Film.release_date default
+    assert ref(film_type1) not in items_by_ref  # premiere excluded
+    assert ref(film_type4) not in items_by_ref
+    assert ref(film_type5) not in items_by_ref
+    assert ref(film_type6) not in items_by_ref
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +145,8 @@ async def test_calendar_excludes_premiere(client, make_film, add_release_date):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    items_by_slug = {item["film_slug"]: item for item in body["items"]}
-    assert "film-cannes" not in items_by_slug
+    items_by_ref = {item["film_ref"]: item for item in body["items"]}
+    assert ref(film) not in items_by_ref
 
 
 # ---------------------------------------------------------------------------
@@ -190,17 +192,17 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    slugs = [item["film_slug"] for item in body["items"]]
+    refs = [item["film_ref"] for item in body["items"]]
 
     # near_future (2090) < same_date (2092) < tie_date (2093) < slug_date (2094) < far_future (2095)
-    idx_near_limited = slugs.index("zzz-near-limited")
-    idx_far_wide = slugs.index("zzz-far-wide")
-    idx_same_limited = slugs.index("zzz-same-limited")
-    idx_same_wide = slugs.index("zzz-same-wide")
-    idx_tie_high = slugs.index("zzz-tie-high")
-    idx_tie_low = slugs.index("zzz-tie-low")
-    idx_slug_a = slugs.index("zzz-slug-a")
-    idx_slug_b = slugs.index("zzz-slug-b")
+    idx_near_limited = refs.index(ref(film_near_limited))
+    idx_far_wide = refs.index(ref(film_far_wide))
+    idx_same_limited = refs.index(ref(film_same_limited))
+    idx_same_wide = refs.index(ref(film_same_wide))
+    idx_tie_high = refs.index(ref(film_tie_high_pop))
+    idx_tie_low = refs.index(ref(film_tie_low_pop))
+    idx_slug_a = refs.index(ref(film_slug_a))
+    idx_slug_b = refs.index(ref(film_slug_b))
 
     # Date ordering
     assert idx_near_limited < idx_same_limited
@@ -250,10 +252,10 @@ async def test_calendar_dedup(client, make_film, add_release_date):
     assert resp.status_code == 200
     body = resp.json()
 
-    dup_rows = [item for item in body["items"] if item["film_slug"] == "film-dup"]
+    dup_rows = [item for item in body["items"] if item["film_ref"] == ref(film_dup)]
     assert len(dup_rows) == 1
 
-    two_rows = [item for item in body["items"] if item["film_slug"] == "film-two-types"]
+    two_rows = [item for item in body["items"] if item["film_ref"] == ref(film_two)]
     assert len(two_rows) == 2
     buckets = {row["release_type"] for row in two_rows}
     assert buckets == {"limited", "wide"}
@@ -280,11 +282,11 @@ async def test_calendar_visibility(client, make_film, add_release_date):
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
-    slugs = [item["film_slug"] for item in body["items"]]
+    refs = [item["film_ref"] for item in body["items"]]
 
-    assert None not in slugs
-    assert "film-adult" not in slugs
-    assert "film-no-events" in slugs
+    assert None not in refs
+    assert ref(film_adult) not in refs
+    assert ref(film_no_events) in refs
 
 
 # ---------------------------------------------------------------------------
@@ -348,12 +350,12 @@ async def test_calendar_paginates_by_date_not_film_rows(client, make_film, add_r
 
     page1 = (await client.get("/calendar", params={"limit": 1, "offset": 0})).json()
     assert page1["total"] == 2  # two distinct dates, not three film rows
-    assert {i["film_slug"] for i in page1["items"]} == {"cal-a1", "cal-a2"}
+    assert {i["film_ref"] for i in page1["items"]} == {ref(a1), ref(a2)}
     assert all(i["release_date"].startswith("2099-01-01") for i in page1["items"])
 
     page2 = (await client.get("/calendar", params={"limit": 1, "offset": 1})).json()
     assert page2["total"] == 2
-    assert [i["film_slug"] for i in page2["items"]] == ["cal-b1"]
+    assert [i["film_ref"] for i in page2["items"]] == [ref(b1)]
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +385,7 @@ async def test_calendar_includes_director_stars_genres(
 
     resp = await client.get("/calendar")
     assert resp.status_code == 200
-    item = next(i for i in resp.json()["items"] if i["film_slug"] == "film-enriched")
+    item = next(i for i in resp.json()["items"] if i["film_ref"] == ref(film))
 
     assert item["director"] == "The Director"  # job=Director only; Producer excluded
     assert item["stars"] == ["First Star", "Second Star", "Third Star"]  # capped at 3, in order
@@ -403,7 +405,7 @@ async def test_calendar_joins_co_directors(client, make_film, add_release_date, 
     )
 
     item = next(
-        i for i in (await client.get("/calendar")).json()["items"] if i["film_slug"] == "film-codir"
+        i for i in (await client.get("/calendar")).json()["items"] if i["film_ref"] == ref(film)
     )
     assert item["director"] == "Ann Director, Bob Director"  # credit_order asc → Ann first
 
@@ -413,7 +415,7 @@ async def test_calendar_defaults_when_no_metadata(client, make_film, add_release
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
 
     item = next(
-        i for i in (await client.get("/calendar")).json()["items"] if i["film_slug"] == "film-bare"
+        i for i in (await client.get("/calendar")).json()["items"] if i["film_ref"] == ref(film)
     )
     assert item["director"] is None
     assert item["stars"] == []
