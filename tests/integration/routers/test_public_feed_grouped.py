@@ -304,3 +304,214 @@ async def test_grouped_arc_stage_covers_wrapped_and_the_unknown_status_fallback(
         ("wrapped-film", "wrapped"),
         ("unknown-film", "announced"),
     ]
+
+
+# NEU-1137 — the news-backed signal. The classifier is EXISTS(event_story) — "did any of this
+# film-day's events pick up a story" — and deliberately NOT `Event.provenance`, which records
+# where an event was *born* and is never mutated when a story attaches later (NEU-1136). A row
+# is one (film, day), so the film is news-backed for that day if *any* of its events that day
+# has a story: one row, one section, never a film listed twice under one date heading.
+
+
+async def test_grouped_day_backed_by_a_story_is_flagged(client, make_film, add_event):
+    film = await make_film(slug="reported-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="Variety reported the casting",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        sources=({"url": "https://variety.com/casting"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["news_backed"] is True
+
+
+async def test_grouped_tmdb_only_day_is_not_news_backed(client, make_film, add_event):
+    film = await make_film(slug="tmdb-only-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="TMDB added cast",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        provenance="catalog",
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["news_backed"] is False
+
+
+async def test_grouped_story_event_without_sources_is_not_news_backed(client, make_film, add_event):
+    # The signal is the linked story, not the provenance column. A `story`-provenance event
+    # whose sources were all dropped (e.g. by the source gate) carries no reporting to point
+    # at, so it must not claim the news-backed section.
+    film = await make_film(slug="sourceless-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="no sources left",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        provenance="story",
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["news_backed"] is False
+
+
+async def test_grouped_promoted_catalog_event_is_news_backed_and_keeps_its_provenance(
+    client, make_film, add_event
+):
+    """The case the whole story rests on: TMDB carded the beat, a trade covered it later and
+    the story attached to that same event. It moves section without becoming a second card,
+    and `provenance` still reads `catalog` on the flat feed."""
+    film = await make_film(slug="promoted-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="TMDB carded it; Variety confirmed it",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        provenance="catalog",
+        sources=({"url": "https://variety.com/scoop"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["news_backed"] is True
+
+    flat = (await client.get("/feed")).json()["items"][0]
+    assert flat["provenance"] == "catalog"
+    assert [s["url"] for s in flat["sources"]] == ["https://variety.com/scoop"]
+
+
+async def test_grouped_one_story_backed_event_flags_the_whole_film_day(
+    client, make_film, add_event
+):
+    """Classified by "any": one Variety story plus four TMDB-only changes is one row in the
+    news-backed section, counting 5. `event_count` and `top_event_type` stay computed over
+    *all* of the film-day's events — they are not scoped to the section the row lands in."""
+    film = await make_film(slug="mixed-2026")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="Variety on the casting",
+        created_at=day,
+        sources=({"url": "https://variety.com/casting"},),
+    )
+    tmdb_types = ("crew_attached", "release_date", "production_start", "trailer")
+    for i, event_type in enumerate(tmdb_types):
+        await add_event(
+            film=film,
+            event_type=event_type,
+            summary=f"tmdb {i}",
+            created_at=day,
+            occurred_at=datetime(2026, 5, 1 + i, tzinfo=UTC),
+            provenance="catalog",
+        )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert len(body["items"]) == 1  # one row, not one per section
+    item = body["items"][0]
+    assert item["news_backed"] is True
+    assert item["event_count"] == 5
+    assert item["top_event_type"] == "trailer"
+
+
+async def test_grouped_news_backed_is_per_day_not_per_film(client, make_film, add_event):
+    # A story on Monday must not flag the same film's TMDB-only Tuesday.
+    film = await make_film(slug="two-days-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="reported",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        sources=({"url": "https://variety.com/monday"},),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="tmdb only",
+        created_at=datetime(2026, 6, 2, tzinfo=UTC),
+        provenance="catalog",
+    )
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [(i["day"], i["news_backed"]) for i in items] == [
+        ("2026-06-02", False),
+        ("2026-06-01", True),
+    ]
+
+
+async def test_grouped_news_backed_is_per_film_not_per_day(client, make_film, add_event):
+    # Two films sharing a day are classified independently; the flag must not spread across
+    # the day's rows. Ordering is unchanged — still popularity, not the signal.
+    reported = await make_film(slug="reported-film", popularity=5.0)
+    tmdb_only = await make_film(slug="tmdb-film", popularity=90.0)
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=reported,
+        summary="reported",
+        created_at=day,
+        sources=({"url": "https://variety.com/one"},),
+    )
+    await add_event(film=tmdb_only, summary="tmdb", created_at=day, provenance="catalog")
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [(i["film_slug"], i["news_backed"]) for i in items] == [
+        ("tmdb-film", False),
+        ("reported-film", True),
+    ]
+
+
+async def test_grouped_hidden_event_story_does_not_flag_the_day(client, make_film, add_event):
+    # `other` never reaches the feed, so a story attached to one must not flag a day whose
+    # only visible activity is TMDB's — the signal has to agree with what the row counts.
+    film = await make_film(slug="hidden-source-2026")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="other",
+        summary="hype",
+        created_at=day,
+        sources=({"url": "https://variety.com/hype"},),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="tmdb trailer",
+        created_at=day,
+        provenance="catalog",
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["event_count"] == 1
+    assert item["news_backed"] is False
+
+
+async def test_grouped_promoted_event_stays_under_its_original_date_heading(
+    client, make_film, add_event
+):
+    """ADR-0016's day axis, read through the promotion. TMDB carded the beat on the 1st; the
+    trade that promoted it published on the 3rd. The row must stay under the 1st — the story's
+    own date must not pull it forward, or a promoted card would jump date headings the day it
+    gained a source.
+
+    Asserted on the rendered feed rather than on `Event.created_at`, which the attach never
+    writes to and so could not have failed here."""
+    film = await make_film(slug="promoted-day-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="carded Monday, reported Wednesday",
+        created_at=datetime(2026, 6, 1, 9, tzinfo=UTC),
+        occurred_at=datetime(2026, 6, 1, 9, tzinfo=UTC),
+        provenance="catalog",
+        sources=(
+            {
+                "url": "https://variety.com/wednesday-scoop",
+                "published_at": datetime(2026, 6, 3, 17, tzinfo=UTC),
+            },
+        ),
+    )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert [(i["day"], i["news_backed"]) for i in body["items"]] == [("2026-06-01", True)]

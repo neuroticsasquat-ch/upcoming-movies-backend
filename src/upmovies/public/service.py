@@ -106,6 +106,23 @@ def _region_visible() -> ColumnElement[bool]:
     )
 
 
+def _has_story() -> ColumnElement[bool]:
+    """SQL predicate: this event has picked up at least one story. The news-backed classifier
+    (NEU-1137) — deliberately not `Event.provenance == "story"`, which records where the event
+    was *born* and is never mutated when a story attaches to it later.
+
+    A correlated EXISTS rather than a join to `event_story`, because the grouped feed already
+    aggregates per (film, day): joining would multiply a multi-source event's row and inflate
+    `event_count`.
+
+    `correlate(Event)` is explicit rather than left to SQLAlchemy's auto-correlation: embedded
+    somewhere `Event` is not already in the enclosing FROM, this would silently widen into
+    "does *any* event anywhere have a story" — true for every row, and a wrong answer rather
+    than an error.
+    """
+    return exists(select(1).where(EventStory.event_id == Event.id).correlate(Event))
+
+
 def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
 
@@ -568,6 +585,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 day.label("day"),
                 func.count().label("event_count"),
                 func.array_agg(distinct(Event.event_type)).label("event_types"),
+                func.bool_or(_has_story()).label("news_backed"),
             )
             .select_from(Event)
             .join(EventSummary, EventSummary.event_id == Event.id)
@@ -588,6 +606,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             day=row.day,
             top_event_type=most_significant_event_type(row.event_types),
             event_count=row.event_count,
+            news_backed=row.news_backed,
         )
         for row in rows
     ]

@@ -121,6 +121,15 @@ class FeedDayItem(BaseModel):
     day: date
     top_event_type: str
     event_count: int
+    # True when *any* of this film-day's visible events has a linked story — i.e. a news
+    # outlet reported some part of the day's activity (NEU-1137). Derived from
+    # EXISTS(event_story), NOT from `provenance`: provenance records where an event was born
+    # and is never mutated when a story attaches later, so a TMDB-carded beat a trade covers
+    # afterwards would otherwise stay filed under TMDB forever. Classified by "any" because
+    # the row is one (film, day): a film is never listed twice under one date heading, and
+    # `event_count`/`top_event_type` stay computed over all of the day's events rather than
+    # over the section this row lands in.
+    news_backed: bool
 
 
 class FeedDayResponse(BaseModel):
