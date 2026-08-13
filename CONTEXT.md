@@ -433,6 +433,19 @@ restatement of it. A story about a director attaching comes back classified `cas
 the LLM has no `crew_attached` in its vocabulary, so the story side searches both credit types.
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
+**News-backed** (of a film-day):
+The property the daily feed sections on: at least one of a film's visible events on that day has
+a linked story, i.e. an outlet reported some part of the day's activity. Derived from
+`EXISTS(event_story)` and pointedly **not** from `Event.provenance` — provenance is where an
+event was *born* and is never mutated when a story attaches, so reading it would leave a
+TMDB-carded beat that Variety later covered filed under TMDB forever, which is the promotion
+this exists to expose. Classified by **any**, because the grouped feed's row is one (film, day):
+a film-day with one Variety story and four TMDB changes is one row in the news-backed section
+counting five, never the same film listed twice under one date heading. So `event_count` and
+`top_event_type` stay computed over *all* of the film-day's events — the section answers "is
+there reporting behind this film's activity today", not "is every item here reported".
+_Avoid_: story-sourced (that is one event's provenance, not a day's rollup), sourced, reported.
+
 **First observation**:
 The first time the sweep reads a newly admitted film's credits. It is recorded as a **baseline
 and emits no events** — a hard rule of the credit-history contract rather than something left to

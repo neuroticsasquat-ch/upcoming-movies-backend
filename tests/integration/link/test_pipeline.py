@@ -651,3 +651,116 @@ async def test_cluster_parse_failure_surfaces_as_failed(session):
         )
     ).scalar_one()
     assert run.items_failed == 1
+
+
+# NEU-1137 — the promotion path, driven end to end. The unit-level attach rules are pinned in
+# `test_cluster.py` against `apply_cluster_decisions` directly; what was never exercised is the
+# whole `run_link_ingest` pass reaching them. A probe on 2026-08-13 found 39 catalog-provenance
+# events in production and not one with a linked story, so "it already works" was a hypothesis
+# about the pipeline, not about the rule. This is the test that settles it.
+
+
+class _CastingClient(FakeClient):
+    """Clusters every new story into one `casting` group naming `cast` — the shape the model
+    returns for a trade breaking a casting. `existing: None`, so the group takes the *create*
+    path and reaches `_catalog_dedup_target`: attaching to the catalog card has to be the
+    pipeline's own decision, not one the stub made for it."""
+
+    def __init__(self, cast: list[str]):
+        super().__init__()
+        self._cast = cast
+
+    def _decide(self, prompt) -> str:
+        if "entity-linking classifier" in prompt.stable_prefix:
+            return super()._decide(prompt)
+        new_ns = [s["n"] for s in json.loads(prompt.user)["new_stories"]]
+        return json.dumps(
+            {
+                "events": [
+                    {
+                        "existing": None,
+                        "type": "casting",
+                        "confidence": "confirmed",
+                        "cast": self._cast,
+                        "stories": new_ns,
+                    }
+                ]
+            }
+        )
+
+
+async def test_link_run_promotes_a_catalog_casting_card_instead_of_carding_it_twice(session):
+    """A TMDB credit change carded the casting; days later a trade covers it. One
+    `run_link_ingest` pass must land that story on the *existing* card — no second event —
+    and must leave `provenance` alone, since that is what the grouped feed's news-backed
+    signal deliberately does not read (NEU-1136)."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=datetime.now(UTC) - timedelta(days=3),
+        subject_key=["zendaya"],
+    )
+    session.add(carded)
+    await session.flush()
+    carded_id = carded.id
+    session.add(await _story("https://e/casting-scoop", published_offset_days=1))
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    result = await _run(session, run_id, client=_CastingClient(["Zendaya"]))
+
+    assert result.linked == 1
+    events = (
+        (
+            await session.execute(
+                select(Event).where(Event.film_id == film.id),
+                execution_options={"populate_existing": True},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [e.id for e in events] == [carded_id]  # promoted, not duplicated
+    assert events[0].provenance == "catalog"  # origin, untouched by the attach
+    link = (await session.execute(select(EventStory))).scalar_one()
+    assert link.event_id == carded_id
+
+
+async def test_link_run_promotion_keeps_the_card_on_its_original_day(session):
+    """ADR-0016 fixes the feed's day axis on `created_at`, and the attach must not move it:
+    the Monday card stays on Monday when Wednesday's story joins it."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded_created = datetime.now(UTC) - timedelta(days=3)
+    carded = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=carded_created,
+        subject_key=["zendaya"],
+    )
+    carded.created_at = carded_created
+    session.add(carded)
+    await session.flush()
+    session.add(await _story("https://e/casting-scoop", published_offset_days=1))
+    await session.commit()
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+
+    await _run(session, run_id, client=_CastingClient(["Zendaya"]))
+
+    event = (
+        await session.execute(
+            select(Event).where(Event.film_id == film.id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert event.created_at == carded_created
