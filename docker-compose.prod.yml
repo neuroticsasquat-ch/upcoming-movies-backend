@@ -67,7 +67,13 @@ services:
       # `LINK_RETRIEVAL_MODE` was retired with the roster path (NEU-1004) — retrieval
       # is now the only link path, and rollback is a revert and redeploy (spec §5.5).
       LINK_RETRIEVAL_THRESHOLD: "${LINK_RETRIEVAL_THRESHOLD:-0.5}"
-      LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-35}"
+      # K moved 35 -> 47 at NEU-1135. This line is a **seed, not a runtime default**: Coolify
+      # already holds a UI entry for this variable, and the UI entry is what reaches the
+      # container, so editing here ships nothing on its own. The deploy is not done until the
+      # value is changed in the Coolify UI and confirmed with `printenv` on the running
+      # container — see the checklist in `.claude/CLAUDE.md` and §5 of the v0.3.0 runbook.
+      # NEU-1088 skipped that step and prod ran the old K for another hour.
+      LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-47}"
       # The retrieval-health hard breach (NEU-1002): above this zero-candidate rate the link
       # run finalizes `failed`, aborting the daily chain and pinging the deadman. Here for the
       # same reason as T and K — an incident is answered from Coolify env, not a redeploy.
@@ -76,8 +82,9 @@ services:
       LINK_RETRIEVAL_HEALTH_MIN_STORIES: "${LINK_RETRIEVAL_HEALTH_MIN_STORIES:-50}"
       # The retrieval-health *soft* breach (NEU-1088): above this cap-saturation rate the run
       # is flagged and says so on its detail line, but still succeeds — saturation is drift,
-      # and the daily chain is fail-fast. Provisional by construction, so expect to turn it
-      # from Coolify rather than by a redeploy.
+      # and the daily chain is fail-fast. Reaffirmed at 0.05 by NEU-1135's grid, and still
+      # provisional by construction, so expect to turn it from Coolify rather than by a
+      # redeploy.
       LINK_RETRIEVAL_SATURATION_WARN_RATE: "${LINK_RETRIEVAL_SATURATION_WARN_RATE:-0.05}"
       # How long an undated film may stay quiescent before it goes dormant (ADR-0015). Here
       # for the same reason as T and K — the M4 tuning ticket sets it from the discovery

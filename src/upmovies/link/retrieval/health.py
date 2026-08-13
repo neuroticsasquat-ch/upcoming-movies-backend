@@ -50,12 +50,17 @@ SessionFactory = Callable[[], AsyncSession]
 #
 # **Retuned 0.25 → 0.10 at NEU-1088** (spec §5.13), because the second half of that pair had
 # gone slack. Zero-candidate *falls* as the catalog grows, so a mis-set T's rate falls with
-# it: T=0.6 produced 32.6% when 0.25 was set and produces 25.6% now, leaving the old ceiling
-# clearing it by 0.6pp — inside ordinary run-to-run movement. At T=0.5 the observed rate is
-# 0.5%, so 0.10 is ~17x the observed rate and ~2.6x below the rate it must catch, where 0.25
-# had an enormous margin on the half that does not matter and almost none on the half that
-# does. Still deliberately loose: `run_daily` is fail-fast, so a false breach publishes no
-# summaries at all that day.
+# it: T=0.6 produced 32.6% when 0.25 was set and 25.6% at that retune, leaving the old ceiling
+# clearing it by 0.6pp — inside ordinary run-to-run movement.
+#
+# **Left at 0.10 at NEU-1135, and the decay has not stopped.** T=0.6 now measures **18.4%**,
+# so the ceiling clears the rate it must catch by 8.4pp where NEU-1088 left it 15.6pp. On the
+# other half the margin has widened: the observed rate at T=0.5 is 0.2%, making 0.10 ~50x it,
+# against 20x before. That asymmetry is the same one that forced the last retune, running in
+# the same direction. **Not retuned here** — NEU-1135's scope is T, K and the warn rate, and
+# 8.4pp is still a real margin — but it is the constant most likely to want the fourth pass's
+# attention, so re-measure it there rather than inherit it. Still deliberately loose for now:
+# `run_daily` is fail-fast, so a false breach publishes no summaries at all that day.
 MAX_ZERO_CANDIDATE_RATE = 0.10
 
 # The soft tier's constant (NEU-1088 §3.6, ADR-0010). Mirrored in `config.Settings` and pinned
@@ -65,34 +70,58 @@ MAX_ZERO_CANDIDATE_RATE = 0.10
 # *retune*, not *outage* — and `run_daily` is fail-fast, so a hard tier here would publish no
 # summaries at all on a day when nothing was actually broken.
 #
-# Calibrated at K=35 against the 21-day grid (NEU-1088), where saturation measures **1.8%**,
+# Calibrated at K=35 against the 21-day grid (NEU-1088), where saturation measured **1.8%**,
 # and 5% was set as roughly 2.8x that — high enough to absorb ordinary run-to-run movement,
 # low enough that the next expansion does not pass under it.
 #
-# **The first production run at K=35 came in at 2.79%** (2026-08-12 01:48 UTC, n=215, over
-# the directors-tranche catalog and before the writers tranche admitted anything). So the
-# margin is really about **1.8x**, not 2.8x: the grid runs optimistic on saturation, by half
-# again on the one comparison available. It is not optimistic everywhere — mean candidates
-# came in at 12.89 against the 12.77 it predicted, and at K=25 it read 7.6% against the 7.89%
-# the 2026-08-11 run recorded, both close. Saturation is the figure to distrust it on, which
-# makes sense: it is the tail of the distribution, and a 16-hour story slice samples that tail
-# differently than 21 days of traffic.
+# **Reaffirmed, not re-derived, at NEU-1135.** The soft tier fired as designed on 2026-08-13
+# (7.61%, n=184) and scheduled that third pass, which moved K from 35 to 47. The question the
+# ticket put to this constant was whether the retune moved the achievable floor out from under
+# it, and it did not: on the post-writers catalog the floor is **1.89% at the new K=47**,
+# against 6.83% at the old K=35 over that same corpus. So 5% still sits ~2.6x above the floor
+# — the margin it was designed to have — and the value is left alone deliberately rather than
+# by omission.
 #
-# The cast tranche (NEU-1090) roughly doubles the catalog again and is expected to breach
-# this, which is the intent: breaching it is what schedules the third tuning pass rather than
-# leaving it to be rediscovered by hand.
+# It happens to sit near NEU-1088's 1.8% as well, but **do not read those two against each
+# other**: that figure was a different catalog *and* a different K. The floor landing twice in
+# the same place is a coincidence of the recall rule, not a stable property, and treating it
+# as one is how a threshold quietly stops meaning anything.
 #
-# **Do not extrapolate that breach linearly.** Scaling the observed 2.79% by a doubled catalog
-# gives ~5.6%, and that figure is a **floor, not an estimate**. Saturation is the fraction of
+# **Still provisional, and still labelled so.** Reaffirming is not promotion to settled. The
+# basis is three production runs and two offline grids, and the constant has never yet been
+# tested by an expansion it was calibrated *before* — the cast tranche is that test.
+#
+# **The one real update is that the grid is more trustworthy than this note used to say.**
+# NEU-1088 warned it ran optimistic on saturation by half again, on a single comparison: the
+# first production run at K=35 came in at 2.79% (2026-08-12, n=215) against a predicted 1.8%.
+# A cleaner comparison now exists — same catalog era, same K, a full day's backlog rather than
+# a 16-hour slice — and at K=35 the grid reads 6.83% where production recorded 7.61%. That is
+# ~11% optimistic, not ~55%. The earlier gap was the slice sampling the tail, not a standing
+# bias, so the floor above can be read as an estimate rather than only as a lower bound.
+# Expect production near **2.1%** at K=47.
+#
+# The cast tranche (NEU-1090) roughly doubles the catalog again and is still expected to
+# breach this, which remains the intent: breaching is what schedules the fourth tuning pass
+# rather than leaving it to be rediscovered by hand.
+#
+# **Do not extrapolate that breach linearly.** Scaling the observed rate by a doubled catalog
+# treats saturation as proportional to catalog size, and it is not: it is the fraction of
 # stories whose candidate set exceeds a fixed K — a tail quantity against a fixed threshold,
 # so it climbs faster than the catalog does once the bulk of the distribution approaches K.
-# The one expansion actually observed bears that out: ADR-0010's amendment records saturation
+# The expansions actually observed bear that out: ADR-0010's amendment records saturation
 # going 0% -> 7.9% across the directors tranche, a +39.4% catalog step at fixed K=25 (spec
-# §4.3). A 100% step could land far past 5.6%, and planning for a near-miss would be planning
-# on the one shape this metric has already been seen not to have.
+# §4.3), and the writers tranche took the grid from 1.8% -> 6.83% at fixed K=35 on a smaller
+# step still. That second figure is deliberately grid-to-grid. The production pair for the
+# same step reads 2.79% -> 7.61%, which tells the same story, but 2.79% came off a 16-hour
+# slice this note has already discounted for sampling the tail — it cannot be discarded above
+# and leaned on here.
 #
-# **Provisional, and labelled so deliberately.** Two production runs and one offline grid,
-# only one of those runs at the live K. Expect the third pass to move it.
+# **On present evidence the lever is K alone.** T has no usable value above 0.5 — see
+# `select.py`, where both windows put the next step up past the hard ceiling — so a fourth
+# pass answers a breach here by moving K or by accepting the saturation, and not by trading
+# the two off. Recorded here because it is worth knowing before the cast tranche rather than
+# after; it is a measurement result, not a decision anyone has ratified, and if it survives
+# that tranche it belongs in an ADR rather than in a comment.
 SATURATION_WARN_RATE = 0.05
 
 # The minimum denominator, mirroring `total_failure_error`'s refusal to let a thin backlog
