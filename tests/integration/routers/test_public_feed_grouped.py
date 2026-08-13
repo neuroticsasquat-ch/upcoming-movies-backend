@@ -515,3 +515,59 @@ async def test_grouped_promoted_event_stays_under_its_original_date_heading(
 
     body = (await client.get("/feed/grouped")).json()
     assert [(i["day"], i["news_backed"]) for i in body["items"]] == [("2026-06-01", True)]
+
+
+async def test_grouped_lists_every_beat_the_film_day_carries(client, make_film, add_event):
+    """The row carries all of the day's distinct beats, not just the top one — the feed
+    labels each of them under the title. Ordered most-significant first, so
+    `event_types[0]` is `top_event_type`."""
+    film = await make_film(slug="film-2026")
+    for event_type in ("casting", "announced", "trailer"):
+        await add_event(
+            film=film,
+            event_type=event_type,
+            summary=event_type,
+            created_at=datetime(2026, 6, 3, 8, tzinfo=UTC),
+        )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["event_types"] == ["trailer", "casting", "announced"]
+    assert item["top_event_type"] == item["event_types"][0]
+
+
+async def test_grouped_event_types_dedupes_repeats_of_one_beat(client, make_film, add_event):
+    film = await make_film(slug="film-2026")
+    for index in range(3):
+        await add_event(
+            film=film,
+            event_type="casting",
+            summary=f"cast {index}",
+            created_at=datetime(2026, 6, 3, 8 + index, tzinfo=UTC),
+        )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["event_types"] == ["casting"]
+    assert item["event_count"] == 3
+
+
+async def test_grouped_event_types_are_scoped_to_the_film_day(client, make_film, add_event):
+    """Same film, two days: each row lists only its own day's beats."""
+    film = await make_film(slug="film-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="day1",
+        created_at=datetime(2026, 6, 1, 10, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="day2",
+        created_at=datetime(2026, 6, 2, 10, tzinfo=UTC),
+    )
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [(i["day"], i["event_types"]) for i in items] == [
+        ("2026-06-02", ["trailer"]),
+        ("2026-06-01", ["casting"]),
+    ]

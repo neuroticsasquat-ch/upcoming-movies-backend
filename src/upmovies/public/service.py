@@ -38,7 +38,11 @@ from upmovies.catalog.release_grade import (
 )
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import visible_events
-from upmovies.public.arc import derive_arc_stage, most_significant_event_type
+from upmovies.public.arc import (
+    derive_arc_stage,
+    most_significant_event_type,
+    ordered_event_types,
+)
 from upmovies.public.dto import (
     CalendarItem,
     CalendarResponse,
@@ -605,6 +609,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             arc_stage=derive_arc_stage(row.status),
             day=row.day,
             top_event_type=most_significant_event_type(row.event_types),
+            event_types=ordered_event_types(row.event_types),
             event_count=row.event_count,
             news_backed=row.news_backed,
         )
