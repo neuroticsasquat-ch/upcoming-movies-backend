@@ -1,95 +1,80 @@
-# git-cliff configuration — https://git-cliff.org/docs/configuration
-# Conventional-Commits changelog, Keep a Changelog style.
+# git-cliff configuration.
+#
+# HOW TO RUN IT: `task release-notes -- v0.4.1`. Do not call git-cliff directly.
+# The task fetches tags first (a missing tag silently produces an "## Unreleased"
+# heading, which then sticks) and prepends only the new section. RELEASE_NOTES.md
+# is an accumulation of per-release chunks, not a file you rebuild wholesale.
+#
+# Two deliberate choices vs. the built-in default:
+#   1. NOISE REDUCTION — only user-facing types (feat/fix/perf/revert) reach the
+#      notes; chore/ci/test/build/style/refactor/docs and anything unconventional
+#      are dropped. Your git history keeps every commit; this only shapes the notes.
+#   2. GROUPING BY COMPONENT — entries are grouped by the conventional-commit
+#      *scope* (email, recommendations, observability, …) rather than by type.
+#      Commits with no scope fall under "General".
+#
+# NOTE: scope == component, not Linear project. Grouping by Linear *project* would
+# require project labels on the GitHub PRs (you don't set those today) plus the
+# git-cliff GitHub integration ([remote.github] + a token). See the commented
+# block at the bottom for that upgrade path.
 
 [changelog]
-# Rendered once at the top of the file.
 header = """
-# Changelog
+# Release notes
 
-All notable changes to this project are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 """
-
-# Rendered once per release. Tera template.
+# Group commits by scope (component); print clean bullets under each heading.
 body = """
-{% if version %}\
-    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
-{% else %}\
-    ## [Unreleased]
-{% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
-    ### {{ group | striptags | trim | upper_first }}
-    {% for commit in commits %}
-        - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
-          {% if commit.breaking %}[**breaking**] {% endif %}\
-          {{ commit.message | upper_first }}\
-    {% endfor %}
-{% endfor %}\n
+{% if version %}## {{ version | trim_start_matches(pat="v") }} — {{ timestamp | date(format="%Y-%m-%d") }}{% else %}## Unreleased{% endif %}
+{% for scope, scoped in commits | group_by(attribute="scope") %}
+### {{ scope | upper_first }}
+{% for commit in scoped %}
+- {{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}
+
 """
-
-# Rendered once at the very bottom.
 footer = ""
-
-# Remove leading/trailing whitespace from the body.
 trim = true
-
-# Postprocessors run over the final rendered changelog.
+# Drop the redundant "type(scope): " prefix from each bullet — the scope is already
+# the section heading, so bullets read as plain prose.
 postprocessors = [
-    # Collapse 3+ blank lines down to a single blank line.
-    { pattern = '\n{3,}', replace = "\n\n" },
+  { pattern = '(?m)^- (feat|fix|perf|revert)(\([^)]*\))?(!)?: ', replace = "- " },
 ]
 
 [git]
-# Parse commits as Conventional Commits.
 conventional_commits = true
-# Keep non-conventional commits too (they fall through to the "Other" group below)
-# so a real change is never silently dropped from the changelog.
-filter_unconventional = false
-# Don't split a commit body into multiple changelog entries.
+filter_unconventional = true
 split_commits = false
-
-# Run over each commit message before parsing.
-commit_preprocessors = [
-    # Turn "(#123)" PR references into GitHub links.
-    { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/${1}))" },
-    # Trim trailing whitespace.
-    { pattern = ' +$', replace = "" },
-]
-
-# Group commits into sections. First match wins; order matters.
-commit_parsers = [
-    { message = "^Merge ", skip = true },
-    { message = "^chore\\(release\\)", skip = true },
-    { message = "^chore\\(deps\\)", skip = true },
-    { message = "^chore\\(deps-dev\\)", skip = true },
-
-    # The `<!-- N -->` prefixes only control section ordering; the template's
-    # `striptags` filter removes them so the rendered headings stay clean.
-    { message = "^feat", group = "<!-- 00 -->Features" },
-    { message = "^fix", group = "<!-- 01 -->Bug Fixes" },
-    { message = "^perf", group = "<!-- 02 -->Performance" },
-    { message = "^refactor", group = "<!-- 03 -->Refactor" },
-    { message = "^docs", group = "<!-- 04 -->Documentation" },
-    { message = "^style", group = "<!-- 05 -->Styling" },
-    { message = "^test", group = "<!-- 06 -->Testing" },
-    { message = "^build", group = "<!-- 07 -->Build System" },
-    { message = "^ci", group = "<!-- 08 -->CI" },
-    { message = "^revert", group = "<!-- 09 -->Reverts" },
-    { message = "^chore", group = "<!-- 10 -->Miscellaneous" },
-
-    # Anything else (incl. non-conventional history) lands here.
-    { message = ".*", group = "<!-- 11 -->Other" },
-]
-
-# Don't require commits to be tagged to appear.
-protect_breaking_commits = false
+# Keep breaking changes even if their type would otherwise be skipped.
+protect_breaking_commits = true
 filter_commits = false
-
-# Only consider tags shaped like v1.2.3.
-tag_pattern = "v[0-9]*"
-
-# Process commits newest-tag-first but list commits oldest→newest within a release.
-topo_order = false
+# Turn Linear IDs and PR numbers into links before rendering.
+commit_preprocessors = [
+  { pattern = '\(NEU-(\d+)\)', replace = "([NEU-${1}](https://linear.app/neuroticsasquatch/issue/NEU-${1}))" },
+  { pattern = '\(#(\d+)\)', replace = "([#${1}](https://github.com/neuroticsasquat-ch/music-discovery-engine/pull/${1}))" },
+]
+# First match wins. Kept types carry a default_scope so scopeless commits still
+# group cleanly under "General"; everything else is skipped.
+commit_parsers = [
+  { message = "^feat", group = "Features", default_scope = "general" },
+  { message = "^fix", group = "Bug Fixes", default_scope = "general" },
+  { message = "^perf", group = "Performance", default_scope = "general" },
+  { message = "^revert", group = "Reverts", default_scope = "general" },
+  { message = "^(chore|ci|test|build|style|refactor|docs)", skip = true },
+  { message = ".*", skip = true },
+]
+tag_pattern = "v[0-9].*"
 sort_commits = "oldest"
+
+# --- Upgrade path: group by Linear PROJECT instead of component ------------------
+# 1. Add a GitHub label per Linear project to each PR (e.g. "band-3", "web-app").
+# 2. Uncomment and set:
+# [remote.github]
+# owner = "neuroticsasquat-ch"
+# repo  = "music-discovery-engine"
+# 3. Run with a token: `git cliff --github-token $GH_TOKEN` (or GITHUB_TOKEN env).
+# 4. In `body`, group on the PR label instead of scope, e.g. iterate
+#    `commit.github.pr_labels` and bucket by the project label. This needs custom
+#    Tera and network access at generation time, which is why component grouping
+#    (above) is the zero-setup default.

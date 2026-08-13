@@ -1,3 +1,32 @@
+# Release notes
+
+## 0.3.1 — 2026-08-13
+
+### General
+
+- Persist the enumerate phase's attachment histogram ([NEU-1116](https://linear.app/neuroticsasquatch/issue/NEU-1116))
+- Retune retrieval K and add a saturation soft tier ([NEU-1088](https://linear.app/neuroticsasquatch/issue/NEU-1088))
+- Bring prod compose retrieval fallbacks up to the retuned defaults ([NEU-1088](https://linear.app/neuroticsasquatch/issue/NEU-1088))
+
+### Ingest
+
+- Expire stale runs on a heartbeat, not on started_at
+
+### Sweep
+
+- Card release-date events from displayable dates, not the primary
+- Wire the shared region set into the page and bound the prune
+- Treat a TMDB 404 as terminal, not as an outage
+
+### Synthesize
+
+- Phrase status events around shooting, not TMDB's stage names
+- Tighten the status bodies to "Shooting has started/wrapped"
+
+### Tests
+
+- Pin created_at in the prune fixture so the cutoff still bites
+
 # Changelog
 
 All notable changes to this project are documented in this file.
