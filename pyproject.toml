@@ -15,7 +15,7 @@ dependencies = [
     "feedparser>=6.0.14",
     "argon2-cffi>=25.1.0",
     "email-validator>=2.3.0",
-    "sentry-sdk[fastapi]>=2.66.1",
+    "sentry-sdk[fastapi]>=2.67.1",
     "opentelemetry-distro",
     "opentelemetry-exporter-otlp-proto-http",
     "opentelemetry-instrumentation-fastapi",
