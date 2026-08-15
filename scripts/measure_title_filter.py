@@ -23,7 +23,7 @@ RATIOS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 async def main() -> None:
     items = [
         it
-        for it in load_validation_set(VALIDATION_PATH)
+        for it in load_validation_set(VALIDATION_PATH).items
         if it.relation == "about" and it.expected_film_tmdb_id is not None
     ]
     ids = {it.expected_film_tmdb_id for it in items}

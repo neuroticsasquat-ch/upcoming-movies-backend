@@ -1,5 +1,5 @@
+from upmovies.catalog.release_grade import RELEASE_TYPE_BUCKETS
 from upmovies.public.release import (
-    _TMDB_TYPE_TO_BUCKET,
     RELEASE_BUCKET_LABELS,
     RELEASE_BUCKETS,
     bucket_for_tmdb_type,
@@ -55,4 +55,4 @@ def test_release_bucket_labels():
 
 
 def test_tmdb_type_to_bucket_keys():
-    assert tuple(_TMDB_TYPE_TO_BUCKET) == (2, 3)
+    assert tuple(RELEASE_TYPE_BUCKETS) == (2, 3)

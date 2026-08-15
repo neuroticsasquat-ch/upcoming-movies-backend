@@ -23,6 +23,10 @@ _STATUS_BASELINE: dict[str, str] = {
 _EVENT_STAGE: dict[str, str] = {
     "announced": "announced",
     "casting": "cast",
+    # A director or writer attaching is the "this is real now" beat, which is what `announced`
+    # means here. Unmapped it would fall to `most_significant_event_type`'s -1 and rank beneath
+    # every other type — a director attachment would lose to anything it shared a day with.
+    "crew_attached": "announced",
     "production_start": "shooting",
     "production_wrap": "wrapped",
     "release_date": "dated",
@@ -46,4 +50,19 @@ def most_significant_event_type(event_types: Iterable[str]) -> str:
     return max(
         event_types,
         key=lambda t: _RANK[_EVENT_STAGE[t]] if t in _EVENT_STAGE else -1,
+    )
+
+
+def ordered_event_types(event_types: Iterable[str]) -> list[str]:
+    """Return the distinct event_types of a group, most-significant first.
+
+    Same ordering as `most_significant_event_type` — whose result is this list's head — so a
+    caller can render the whole set of a day's beats without the lead one moving. Types
+    sharing a rank (`first_look` and `other` both fall to -1) are ordered alphabetically:
+    rank alone would leave them in whatever order `array_agg` returned, which is not stable
+    between requests.
+    """
+    return sorted(
+        set(event_types),
+        key=lambda t: (-(_RANK[_EVENT_STAGE[t]] if t in _EVENT_STAGE else -1), t),
     )

@@ -18,11 +18,15 @@ class EventOut(BaseModel):
     created_at: datetime
     summary: str
     summary_edited: bool
+    # "story" | "catalog". A `catalog` event was created by a TMDB field or credit change with
+    # no story behind it, so `sources` may legitimately be empty and the card attributes to
+    # TMDB in place of outlets (ADR-0014).
+    provenance: str
     sources: list[SourceOut]
 
 
 class FilmIndexItem(BaseModel):
-    slug: str
+    ref: str
     title: str
     release_year: int | None
     poster_path: str | None
@@ -62,7 +66,7 @@ class CrewMemberOut(BaseModel):
 
 
 class FilmDetailResponse(BaseModel):
-    slug: str
+    ref: str
     title: str
     tmdb_id: int
     imdb_id: str | None = None
@@ -88,13 +92,14 @@ class FilmDetailResponse(BaseModel):
 
 
 class FeedItem(BaseModel):
-    film_slug: str
+    film_ref: str
     film_title: str
     event_type: str
     confidence: str
     occurred_at: datetime
     created_at: datetime
     summary: str
+    provenance: str  # see EventOut.provenance
     sources: list[SourceOut]
 
 
@@ -106,13 +111,30 @@ class FeedResponse(BaseModel):
 
 
 class FeedDayItem(BaseModel):
-    film_slug: str
+    film_ref: str
     film_title: str
     release_year: int | None
     poster_path: str | None
+    # Rendered in the release year's slot for an undated film (NEU-1085), so it has to
+    # ride along on the row — it is not derivable client-side from release_year.
+    arc_stage: str
     day: date
     top_event_type: str
+    # Every distinct beat this film-day carries, most-significant first — so `event_types[0]`
+    # is always `top_event_type`. The feed labels the whole set beneath the title, which the
+    # lead type alone can't express: a day that pairs a trailer with a casting beat reads as
+    # trailer-only otherwise.
+    event_types: list[str]
     event_count: int
+    # True when *any* of this film-day's visible events has a linked story — i.e. a news
+    # outlet reported some part of the day's activity (NEU-1137). Derived from
+    # EXISTS(event_story), NOT from `provenance`: provenance records where an event was born
+    # and is never mutated when a story attaches later, so a TMDB-carded beat a trade covers
+    # afterwards would otherwise stay filed under TMDB forever. Classified by "any" because
+    # the row is one (film, day): a film is never listed twice under one date heading, and
+    # `event_count`/`top_event_type` stay computed over all of the day's events rather than
+    # over the section this row lands in.
+    news_backed: bool
 
 
 class FeedDayResponse(BaseModel):
@@ -123,7 +145,7 @@ class FeedDayResponse(BaseModel):
 
 
 class CalendarItem(BaseModel):
-    film_slug: str
+    film_ref: str
     film_title: str
     release_year: int | None
     poster_path: str | None

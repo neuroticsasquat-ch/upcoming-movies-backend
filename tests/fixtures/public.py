@@ -16,6 +16,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
+from upmovies.catalog.ref import film_ref
 from upmovies.main import app
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 
@@ -24,6 +25,17 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 async def client(test_engine: AsyncEngine) -> AsyncIterator[AsyncClient]:  # noqa: ARG001
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as c:
         yield c
+
+
+def ref(film: Film) -> str:
+    """The canonical URL ref the public API reports for a film — `<tmdb_id>-<title-slug>`.
+
+    Tests assert against this rather than the slug they passed to `make_film`: a ref is derived
+    from tmdb_id and the *current* title, and `make_film` assigns tmdb_ids by creation order, so
+    it cannot be written as a literal. `test_ref.py` covers the derivation itself; here the
+    question is only which film a row points at.
+    """
+    return film_ref(film.tmdb_id, film.title)
 
 
 @pytest.fixture
@@ -132,6 +144,8 @@ def add_event(session: AsyncSession):
         sources: tuple[dict, ...] = (),
         region: str | None = None,
         edited_at: datetime | None = None,
+        provenance: str = "story",
+        summary_model: str = "claude-haiku-4-5",
     ) -> Event:
         event = Event(
             film_id=film.id,
@@ -139,6 +153,7 @@ def add_event(session: AsyncSession):
             confidence=confidence,
             occurred_at=occurred_at,
             region=region,
+            provenance=provenance,
         )
         if created_at is not None:
             event.created_at = created_at
@@ -149,7 +164,7 @@ def add_event(session: AsyncSession):
                 EventSummary(
                     event_id=event.id,
                     summary=summary,
-                    model="claude-haiku-4-5",
+                    model=summary_model,
                     prompt_version="1",
                     source_updated_at=occurred_at,
                     edited_at=edited_at,

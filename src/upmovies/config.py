@@ -1,7 +1,18 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The host a stage's model is served by — the gateway's second axis, alongside the per-stage
+# model settings that were already here (design §8). A `Literal` rather than a bare `str` so a
+# misspelled provider fails the container at boot rather than the stage at its first call: the
+# same discipline `rates_for` applies to an unknown `(provider, model)`.
+#
+# The names are duplicated from `llm.registry.PROVIDERS` rather than imported. `llm.gateway`
+# reads `Settings`, so importing the `llm` package here would be a cycle — the same bind the
+# retrieval constants below are in, and a test pins the two together the same way.
+Provider = Literal["anthropic", "deepinfra", "deepseek"]
 
 
 class Settings(BaseSettings):
@@ -28,25 +39,210 @@ class Settings(BaseSettings):
         default="Released,Canceled", alias="TMDB_EXCLUDED_STATUSES"
     )
 
+    # How long an undated film may stay quiescent — no `catalog.film_field_change` row and
+    # no linked story — before `active_film_clause` drops it from the working set (ADR-0015).
+    # Placeholder: deliberately long, so almost nothing goes dormant until the M4 tuning
+    # ticket sets it from the discovery probe. Erring long costs per-film queries; erring
+    # short silently stops following live films.
+    sweep_dormancy_days: int = Field(default=365, ge=1, alias="SWEEP_DORMANCY_DAYS")
+    # How often the sweep's refresh phase still re-fetches a dormant film. Dormancy is not
+    # an exemption from refreshing — detecting the change that revives a film requires
+    # reading it, so a dormancy that stopped the refresh would be a one-way door (§4.5) —
+    # it is a *reduced cadence*. Placeholder until the M4 tuning ticket sets it: erring
+    # short only costs requests, erring long delays every revival by that much.
+    sweep_dormant_refresh_days: int = Field(default=30, ge=1, alias="SWEEP_DORMANT_REFRESH_DAYS")
+    # How far back the sweep's field-change phase reads `catalog.film_field_change` for events
+    # to card (ADR-0014). A fixed rolling window, not a watermark: re-reading a carded change
+    # is a no-op, so the overlap costs a couple of indexed queries and means a failed sweep
+    # loses nothing. It is also the day-one guard — the table holds months of history, and
+    # without a floor the first pass after deploy would card every date move ever recorded.
+    sweep_event_lookback_days: int = Field(default=7, ge=1, alias="SWEEP_EVENT_LOOKBACK_DAYS")
+
+    # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
+    # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the
+    # three tranche flags below so a rollback is one move and does not disturb the ramp.
+    sweep_enabled: bool = Field(default=False, alias="SWEEP_ENABLED")
+    # Admission ramps one seed grade at a time — directors, then writers, then top-5 cast
+    # (§7.4) — so the retrieval-health guard reacts to a 1,446-person expansion before a
+    # 7,519-person one, and a precision drop names the grade that caused it. Every flag
+    # ships false whatever the ramp has reached: which tranches are *open* is env, so
+    # opening one is a Coolify change rather than a deploy, and closing it is the same move
+    # in reverse. Directors went live 2026-08-11 (NEU-1086); **writers went live
+    # 2026-08-12**, and the first sweep with it open admitted 407 films, 138 of them reached
+    # through a writer credit with no director attached — against the +270 the pre-flip probe
+    # predicted as a lower bound. Cast is still closed.
+    #
+    # **Writers is a supported path as of NEU-1089**, and a deliberately small step. Measured
+    # on the pre-expansion probe, counting only films no director reached (spec §7.4, §4.3):
+    # **+270 films**, about 12% catalog growth on top of the directors tranche's 639, at a
+    # status profile close to directors' — `Rumored` is 18% against 19%, and the rest sits
+    # within four points. Read it as a lower bound: the probe predates the directors flip,
+    # whose admissions have since contributed 486 seed people that reach films it could not
+    # see. What it buys is the earliest signal the product can get — a script with no
+    # director attached to it yet.
+    #
+    # It costs **no additional enumerate requests**, which corrects the ticket: the seed query
+    # is not tranche-scoped, so every seed person at all three grades — 7,666 of them after
+    # the directors flip (§4.3) — is already enumerated on every sweep, and the writers
+    # grade's 1,745 are among them. Enumerating regardless of the flags is deliberate: it is
+    # what makes `withheld` and the attachment histogram an honest answer to "what would
+    # opening this tranche admit". Flipping the flag adds the refresh cost of 270 more films
+    # and whatever seeds they contribute back (§3.3), not a fresh grade's worth of requests.
+    #
+    # **No tuning constant moves with it.** The corroboration threshold was measured against
+    # the *director-reached* distribution (below), and +270 films at a near-identical status
+    # profile is not evidence to reopen it; T and K were re-derived at NEU-1088 over a
+    # catalog this grows by ~12%, and `link/retrieval/select.py` already prices that as
+    # likely moving nothing. The cast tranche is where both are expected to move.
+    #
+    # **Cast is a supported path as of NEU-1090**, and it is the one that stresses the system:
+    # **+2,341 films**, which against a post-writers catalog of roughly 2,500 is about a 93%
+    # increase — near enough to say it doubles the catalog, and note the ticket's "104%" takes
+    # the *pre*-writers baseline. The same correction as above applies to its seed-count claim
+    # too: cast does not add 5,299 seed people or take the set "to its full 7,519", because
+    # the query is not tranche-scoped and they are all enumerated today. What doubles is the
+    # refresh phase, and the rate at which admitted films contribute their own cast back.
+    #
+    # It is also, against the premise the ramp was designed on, the **cleanest** grade by
+    # status: 7% `Rumored` against directors' 19%, and 62% already `In Production` or `Post
+    # Production`. Top-billed cast attach late, so by the time casting is announced the film
+    # is usually real. The §7.4 ramp order still stands, but on **retrieval-precision**
+    # grounds — collision risk scales with catalog size however real the films are — not on
+    # the vaporware grounds originally argued. Do not plan it expecting to raise the
+    # corroboration threshold; the data points the other way. Nor to tighten the billing cut
+    # (see `catalog/seed_grade.py`, where that was measured and rejected).
+    #
+    # **Expect it to breach the retrieval soft tier, by design** — breaching is what schedules
+    # the third T/K pass rather than leaving it to be rediscovered by hand. How far past the
+    # threshold is deliberately not projected here; `link/retrieval/health.py` owns that
+    # reasoning, including why the obvious linear extrapolation is a floor rather than an
+    # estimate. The *hard* tier is the one to actually fear, and zero-candidate falls as the
+    # catalog grows.
+    #
+    # **Flip each one only once retrieval health is green on the tranche before it** —
+    # directors before writers, writers before cast. That sequencing is the only thing that
+    # ever says which seed grade cost precision; two grades degrading at once are
+    # indistinguishable, which is the whole reason the ramp is three moves and not one.
+    #
+    # **Flip in the window after a reading, not the evening before.** The daily order is the
+    # sweep at 07:00 UTC and the link run that measures at 09:05, so a flag set overnight
+    # admits its grade two hours *before* the next reading is taken — and that reading then
+    # covers both grades at once, which is the one thing the ramp exists to prevent. The
+    # grade below it never gets a clean measurement, and no later run can recover one.
+    sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
+    sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
+    sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
+    # How many distinct seed people must reach an undated film before it may be admitted
+    # (§4.1). One director attachment is the earliest and most valuable signal the product
+    # sells; it is also exactly what a speculative TMDB entry looks like, and §4.2 left that
+    # tension open for measurement rather than taste.
+    #
+    # **Measured 2026-08-11 (NEU-1087); 1 is no longer a placeholder.** The probe ran against
+    # a snapshot taken minutes before the directors tranche opened — the pre-expansion
+    # distribution, which cannot be retaken — and found 639 director-reached candidates of
+    # 3,250. Raising the bar to 2 cuts that by 60% while the `Rumored` share, the only
+    # available signature of a speculative entry, does not move: 19.4% -> 19.6%. Of the 384
+    # films it would drop, 19.3% are `Rumored`, indistinguishable from the base rate — so 2
+    # does not select against vaporware, it selects against being early, which is the signal
+    # the product sells. It would also discard 113 films already `In Production` or `Post
+    # Production` to remove 74 `Rumored` ones. Only at 3 does the `Rumored` share fall, on a
+    # tranche of 87. Full table in spec §4.3.
+    #
+    # **The cast tranche does not reopen this either (NEU-1090).** The ramp was scoped
+    # expecting cast to be the grade that forced the bar up, being the loosest signal; by
+    # status it is the tightest of the three, so the tranche that was going to demand a
+    # higher threshold is instead the argument for leaving it alone.
+    #
+    # Ground truth is still owed: "was it real" properly means what fraction later went
+    # dormant, and nothing can go dormant until 2027 at the current N (NEU-1118). Status is
+    # a proxy. If that figure ever contradicts this, it wins.
+    sweep_corroboration_threshold: int = Field(
+        default=1, ge=1, alias="SWEEP_CORROBORATION_THRESHOLD"
+    )
+
     anthropic_api_key: str = Field(..., alias="ANTHROPIC_API_KEY")
+    # Optional, deliberately unlike ANTHROPIC_API_KEY above: every deploy today is Anthropic
+    # for all four stages, and requiring these would break every one of them for a capability
+    # none of them uses (design §8). Boot-time validation (NEU-981) is what makes optional
+    # safe — it asserts a credential exists for each *configured* provider, at startup.
+    deepinfra_api_key: str | None = Field(default=None, alias="DEEPINFRA_API_KEY")
+    deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
     link_model: str = Field(default="claude-haiku-4-5", alias="LINK_MODEL")
+    link_provider: Provider = Field(default="anthropic", alias="LINK_PROVIDER")
     cluster_model: str = Field(default="claude-sonnet-4-6", alias="CLUSTER_MODEL")
+    cluster_provider: Provider = Field(default="anthropic", alias="CLUSTER_PROVIDER")
     link_confidence_floor: float = Field(default=0.7, alias="LINK_CONFIDENCE_FLOOR")
     link_recency_days: int = Field(default=4, alias="LINK_RECENCY_DAYS")
-    link_batch_size: int = Field(default=15, alias="LINK_BATCH_SIZE")
-    link_use_batches: bool = Field(default=True, alias="LINK_USE_BATCHES")
-    cluster_use_batches: bool = Field(default=True, alias="CLUSTER_USE_BATCHES")
+    # Re-derived at NEU-1001. The old 15 was chosen when a ~46k-token roster prefix was
+    # cached and amortized across the batch; the retrieval path sends no prefix, so what
+    # bounds the batch now is the **reply**: `_MAX_TOKENS` caps it at 2048, and a batch
+    # whose reply is truncated fails to parse and takes every story in it down. At 20 the
+    # worst-case reply measures 1,183 tok (58% of the ceiling) while the instruction block
+    # falls to 11.4% of the request, against 14.7% at 15. A batch of 40 overruns the reply
+    # ceiling outright.
+    link_batch_size: int = Field(default=20, alias="LINK_BATCH_SIZE")
     link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
     link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
     link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
     link_release_change_window_days: int = Field(
         default=14, alias="LINK_RELEASE_CHANGE_WINDOW_DAYS"
     )
+    # T and K for `link.retrieval.select`, re-derived at NEU-1135 over the post-writers-
+    # tranche catalog (2,695 active films) — see that module's docstring, and the
+    # candidate-retrieval design spec §5.14 for the tuning record (§5.13 is NEU-1088's). The
+    # *project* spec §7.2 is a different document; it is what made this a ticket rather than
+    # a follow-on. They stay settings so the next catalog expansion is answered by config
+    # than by a deploy, which is expected: the cast tranche (NEU-1090) roughly doubles the
+    # catalog again. They mirror the selector's own module defaults; `config` cannot import
+    # those (retrieval/index.py reads settings, so it would be a cycle), so a test pins the
+    # two together instead.
+    #
+    # **Only K is really settable.** T looks like the other half of the pair and is not: the
+    # grid finds no usable value above 0.5 at all — the next step up, whatever its spelling,
+    # takes zero-candidate from 0.2% to 18.4% and breaches the hard ceiling below. Raising
+    # this one from env is an incident action, not a tuning action.
+    link_retrieval_threshold: float = Field(
+        default=0.5, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_THRESHOLD"
+    )
+    link_retrieval_max_candidates: int = Field(
+        default=47, ge=1, alias="LINK_RETRIEVAL_MAX_CANDIDATES"
+    )
+    # The hard-breach guard (NEU-1002, ADR-0010): a zero-candidate rate above the ceiling
+    # finalizes the run `failed`, which aborts the daily chain and pings the deadman. Mirrors
+    # `link.retrieval.health`'s own constants — same duplication, same pinning test, same
+    # reason — and both stay settings so an incident is answered from env: 1.0 disarms the
+    # guard, and the minimum denominator is what stops a quiet news day tripping it.
+    #
+    # Tightened 0.25 → 0.10 at NEU-1088. The ceiling has to stay *below* what a mis-set T
+    # would produce or it cannot catch the failure ADR-0010 names, and the gap had gone
+    # slack: zero-candidate falls as the catalog grows, so T=0.6's rate fell from 32.6% to
+    # 25.6% and left 0.25 clearing it by 0.6pp (spec §5.13). **Left at 0.10 at NEU-1135**,
+    # where T=0.6 measures 18.4% — still caught, but the margin is down to 8.4pp from 15.6pp.
+    # The decay has not stopped; the next pass re-checks it rather than assuming it holds.
+    link_retrieval_max_zero_candidate_rate: float = Field(
+        default=0.10, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE"
+    )
+    link_retrieval_health_min_stories: int = Field(
+        default=50, ge=0, alias="LINK_RETRIEVAL_HEALTH_MIN_STORIES"
+    )
+    # The soft tier (NEU-1088 §3.6): a cap-saturation rate above this flags the health row
+    # and names itself in the run's detail line. It does **not** fail the run — saturation is
+    # drift, and `run_daily` is fail-fast. **Reaffirmed rather than re-derived at NEU-1135**:
+    # on the post-writers catalog the floor is 1.89% at the new K=47, against 6.83% at the old
+    # K=35 over the same corpus, so 5% keeps the ~2.6x margin it was designed with. Still
+    # provisional — reaffirming is not promotion to settled, and the cast tranche is the first
+    # expansion this value will meet that it was calibrated before.
+    link_retrieval_saturation_warn_rate: float = Field(
+        default=0.05, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_SATURATION_WARN_RATE"
+    )
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
+    source_judge_provider: Provider = Field(default="anthropic", alias="SOURCE_JUDGE_PROVIDER")
     source_unresolved_tier: str = Field(default="acceptable", alias="SOURCE_UNRESOLVED_TIER")
     summary_model: str = Field(default="claude-haiku-4-5", alias="SUMMARY_MODEL")
-    summary_use_batches: bool = Field(default=True, alias="SUMMARY_USE_BATCHES")
+    # Named for the setting beside it, not for the stage: the stage is `summarize`, and
+    # `Gateway` owns that one-line mapping rather than renaming a live env var.
+    summary_provider: Provider = Field(default="anthropic", alias="SUMMARY_PROVIDER")
     summary_prompt_version: str = Field(default="9", alias="SUMMARY_PROMPT_VERSION")
     url_resolve_per_run: int = Field(default=500, alias="URL_RESOLVE_PER_RUN")
     url_resolve_max_attempts: int = Field(default=3, alias="URL_RESOLVE_MAX_ATTEMPTS")
@@ -67,14 +263,22 @@ class Settings(BaseSettings):
     ingest_consecutive_failure_threshold: int = Field(
         default=10, alias="INGEST_CONSECUTIVE_FAILURE_THRESHOLD"
     )
-    ingest_stale_run_minutes: int = Field(default=15, alias="INGEST_STALE_RUN_MINUTES")
+    # How long a `running` run may go without a heartbeat before startup/scheduled-task
+    # cleanup cancels it. Read against `last_progress_at`, not `started_at` (NEU-1117), so
+    # this bounds *silence*, not total runtime: ~5x the longest legitimate gap anywhere
+    # (one retrying LLM batch) and 30x the sweep's heartbeat interval. It was 15 when it
+    # meant runtime, which cancelled live multi-hour sweeps on any restart.
+    ingest_stale_run_minutes: int = Field(default=30, alias="INGEST_STALE_RUN_MINUTES")
 
     # healthchecks.io deadman ping URLs for the Coolify scheduled tasks (see
     # upmovies.pipeline_run). Optional: unset → the ping is a no-op, so local/dev runs of
     # `python -m upmovies.pipeline_run` don't need them. `daily` runs the full chain
-    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass.
+    # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass; `sweep`
+    # runs the undated-film pass on its own slot ~2h ahead of daily, with its own deadman
+    # because a sweep that stops running is invisible in the daily chain's ping (§6.1).
     healthcheck_daily_url: str | None = Field(default=None, alias="HEALTHCHECK_DAILY_URL")
     healthcheck_hourly_url: str | None = Field(default=None, alias="HEALTHCHECK_HOURLY_URL")
+    healthcheck_sweep_url: str | None = Field(default=None, alias="HEALTHCHECK_SWEEP_URL")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

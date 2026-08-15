@@ -3,11 +3,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from upmovies.llm.client import BatchResult
+from upmovies.llm import CallLog
 from upmovies.synthesize.summarizer import (
     EventInput,
     StoryInput,
-    build_summary_batch_request,
     build_summary_request,
     parse_summary,
     summarize_event,
@@ -26,46 +25,30 @@ def _event(*, stories=None, event_type="casting", film_title="Runner"):
 class FakeCompleter:
     def __init__(self, response: str):
         self._response = response
-        self.calls: list[dict] = []
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        from upmovies.llm.client import Usage
+    async def complete_call(self, *, model, prompt, calls):
+        from upmovies.llm import CallResult
 
-        self.calls.append(
-            {"model": model, "system": system, "messages": messages, "max_tokens": max_tokens}
-        )
-        return self._response, Usage()
+        self.requests.append({"model": model, "prompt": prompt})
+        return calls.record(CallResult(text=self._response))
 
 
-class FakeBatchCompleter:
-    def __init__(self, response: str):
-        self._response = response
-        self.requests: list | None = None
-
-    async def complete_batch(self, requests, *, poll_interval=15.0, timeout=3600.0) -> dict:
-        self.requests = list(requests)
-        return {
-            r.custom_id: BatchResult(custom_id=r.custom_id, ok=True, text=self._response)
-            for r in requests
-        }
-
-
-def test_build_summary_request_plain_block_and_payload():
+def test_build_summary_request_stable_prefix_and_payload():
     event = _event(
         stories=[
             StoryInput(title="Casting news", dek="Star joins the film.", source="Variety"),
             StoryInput(title="More", dek="Another report.", source="THR"),
         ]
     )
-    system, messages = build_summary_request(event, date(2026, 6, 25))
-    # plain block — NO caching (short prompt, sub-minimum cacheable size)
-    assert "cache_control" not in system[0]
-    assert "paraphrase" in system[0]["text"].lower()
-    assert "as_of_date" in system[0]["text"]  # instructions point at the field
+    prompt = build_summary_request(event, date(2026, 6, 25))
+    assert prompt.max_tokens == 256  # == summarizer._MAX_TOKENS
+    assert "paraphrase" in prompt.stable_prefix.lower()
+    assert "as_of_date" in prompt.stable_prefix  # instructions point at the field
     # NEU-453: the beat is dated by its own date, not another date in the sources.
     # (verbatim substring of the new rule — case-sensitive)
-    assert "OWN date" in system[0]["text"]
-    payload = json.loads(messages[0]["content"])
+    assert "OWN date" in prompt.stable_prefix
+    payload = json.loads(prompt.user)
     assert payload["as_of_date"] == "2026-06-25"
     assert payload["film"] == "Runner"
     assert payload["event_type"] == "casting"
@@ -74,22 +57,18 @@ def test_build_summary_request_plain_block_and_payload():
     assert payload["stories"][0]["dek"] == "Star joins the film."
 
 
-def test_build_summary_batch_request_carries_as_of_date():
-    system, messages = build_summary_request(_event(), date(2026, 6, 25))
-    assert json.loads(messages[0]["content"])["as_of_date"] == "2026-06-25"
-    req = build_summary_batch_request(
-        custom_id="e1", model="m", event=_event(), run_date=date(2026, 6, 25)
-    )
-    assert json.loads(req.messages[0]["content"])["as_of_date"] == "2026-06-25"
+def test_build_summary_request_carries_as_of_date():
+    prompt = build_summary_request(_event(), date(2026, 6, 25))
+    assert json.loads(prompt.user)["as_of_date"] == "2026-06-25"
 
 
 def test_build_summary_request_truncates_dek():
     long_dek = "x" * 1000
-    _system, messages = build_summary_request(
+    prompt = build_summary_request(
         _event(stories=[StoryInput(title="t", dek=long_dek, source="Deadline")]),
         date(2026, 6, 25),
     )
-    payload = json.loads(messages[0]["content"])
+    payload = json.loads(prompt.user)
     assert len(payload["stories"][0]["dek"]) == 500
 
 
@@ -118,9 +97,23 @@ def test_parse_summary_raises_on_malformed():
 
 
 def test_build_summary_request_seeds_assistant_prefill():
-    # The assistant turn is prefilled so the model continues a JSON envelope (no preamble).
-    _system, messages = build_summary_request(_event(), date(2026, 6, 25))
-    assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}
+    # The prefill is a request property now; the adapter is what turns it into an assistant
+    # turn (see test_client.test_a_prefill_becomes_a_trailing_assistant_turn).
+    prompt = build_summary_request(_event(), date(2026, 6, 25))
+    assert prompt.prefill == '{"summary": "'
+
+
+def test_build_summary_request_marks_the_prefill_optional():
+    """What lets this stage run on an OpenAI-compatible provider at all. The claim is about
+    *this builder's parser*, not about any vendor: `parse_summary` reads a full envelope on its
+    primary path, so a provider that cannot seed the assistant turn is still serving the request
+    that was asked for."""
+    assert build_summary_request(_event(), date(2026, 6, 25)).prefill_required is False
+
+
+def test_parse_summary_reads_an_unprefilled_envelope():
+    # The primary path, and the one an OpenAI-compatible provider's reply lands on.
+    assert parse_summary('{"summary": "A neutral update."}') == "A neutral update."
 
 
 def test_parse_summary_handles_prefilled_continuation():
@@ -143,19 +136,20 @@ def test_parse_summary_rejects_code_fence_leak():
 async def test_summarize_event_returns_result_with_provenance():
     client = FakeCompleter('{"summary": "The studio confirmed a 2027 release."}')
     event = _event()
-    result, _usage = await summarize_event(
+    result = await summarize_event(
         client=client,
         model="claude-haiku-4-5",
         prompt_version="1",
         event=event,
         run_date=date(2026, 6, 25),
+        calls=CallLog(),
     )
     assert result.summary == "The studio confirmed a 2027 release."
     assert result.model == "claude-haiku-4-5"
     assert result.prompt_version == "1"
     assert result.source_updated_at == event.source_updated_at
-    # the sequential path pins max_tokens for parity with the batched path
-    assert client.calls[0]["max_tokens"] == 256
+    # max_tokens is pinned to the summarizer's own ceiling, not the client default
+    assert client.requests[0]["prompt"].max_tokens == 256
 
 
 async def test_summarize_event_prompt_includes_every_member_story():
@@ -168,37 +162,16 @@ async def test_summarize_event_prompt_includes_every_member_story():
         ]
     )
     await summarize_event(
-        client=client, model="m", prompt_version="1", event=event, run_date=date(2026, 6, 25)
+        client=client,
+        model="m",
+        prompt_version="1",
+        event=event,
+        run_date=date(2026, 6, 25),
+        calls=CallLog(),
     )
-    payload = json.loads(client.calls[0]["messages"][0]["content"])
+    payload = json.loads(client.requests[0]["prompt"].user)
     assert [s["title"] for s in payload["stories"]] == ["A", "B", "C"]
     assert [s["source"] for s in payload["stories"]] == ["Deadline", "Variety", "THR"]
-
-
-async def test_batched_path_round_trips_to_same_summary():
-    event = _event()
-    envelope = '{"summary": "Principal photography has begun."}'
-    client = FakeBatchCompleter(envelope)
-
-    req = build_summary_batch_request(
-        custom_id="evt-9", model="m", event=event, run_date=date(2026, 6, 25)
-    )
-    assert req.custom_id == "evt-9"
-    assert req.model == "m"
-    assert req.max_tokens == 256
-    # parity: same system + messages the sequential builder produces
-    system, messages = build_summary_request(event, date(2026, 6, 25))
-    assert req.system == system
-    assert req.messages == messages
-    assert "cache_control" not in req.system[0]
-
-    results = await client.complete_batch([req])
-    assert client.requests is not None
-    assert client.requests[0].custom_id == "evt-9"
-    result = results["evt-9"]
-    assert result.ok
-    # batched path yields the identical parsed summary as the sequential path
-    assert parse_summary(result.text) == "Principal photography has begun."
 
 
 def test_parse_summary_recovers_unescaped_inner_quote(caplog):

@@ -31,9 +31,19 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
+from upmovies.catalog.ref import film_ref, parse_film_ref
+from upmovies.catalog.release_grade import (
+    PRIMARY_REGION,
+    RELEASE_TYPE_BUCKETS,
+    displayable_regions,
+)
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import visible_events
-from upmovies.public.arc import derive_arc_stage, most_significant_event_type
+from upmovies.public.arc import (
+    derive_arc_stage,
+    most_significant_event_type,
+    ordered_event_types,
+)
 from upmovies.public.dto import (
     CalendarItem,
     CalendarResponse,
@@ -51,7 +61,7 @@ from upmovies.public.dto import (
     ReleaseDateOut,
     SourceOut,
 )
-from upmovies.public.release import _TMDB_TYPE_TO_BUCKET, release_label_for_tmdb_type
+from upmovies.public.release import release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 MIN_QUERY_LEN = 2
@@ -96,9 +106,26 @@ def _region_visible() -> ColumnElement[bool]:
     return or_(
         Event.event_type != "release_date",
         Event.region.is_(None),
-        Event.region == "US",
+        Event.region == PRIMARY_REGION,
         Event.region == any_(Film.origin_country),
     )
+
+
+def _has_story() -> ColumnElement[bool]:
+    """SQL predicate: this event has picked up at least one story. The news-backed classifier
+    (NEU-1137) — deliberately not `Event.provenance == "story"`, which records where the event
+    was *born* and is never mutated when a story attaches to it later.
+
+    A correlated EXISTS rather than a join to `event_story`, because the grouped feed already
+    aggregates per (film, day): joining would multiply a multi-source event's row and inflate
+    `event_count`.
+
+    `correlate(Event)` is explicit rather than left to SQLAlchemy's auto-correlation: embedded
+    somewhere `Event` is not already in the enclosing FROM, this would silently widen into
+    "does *any* event anywhere have a story" — true for every row, and a wrong answer rather
+    than an error.
+    """
+    return exists(select(1).where(EventStory.event_id == Event.id).correlate(Event))
 
 
 def _release_year(release_date: date | None) -> int | None:
@@ -109,10 +136,9 @@ def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
     """Build FilmIndexItem list for a page of Film rows."""
     items: list[FilmIndexItem] = []
     for film in films:
-        assert film.slug is not None
         items.append(
             FilmIndexItem(
-                slug=film.slug,
+                ref=film_ref(film.tmdb_id, film.title),
                 title=film.title,
                 release_year=_release_year(film.release_date),
                 poster_path=film.poster_path,
@@ -215,7 +241,8 @@ async def get_film_search(
     # Search spans the whole catalog: any slugged film whose title matches, regardless of
     # whether it has news events yet or is upcoming. This is deliberately broader than the
     # /films index and /feed, which gate on a visible, summarized event. The slug guard stays
-    # because FilmIndexItem requires a non-null slug for its detail link.
+    # as the "is this film public at all" marker: a film without one was never published, and
+    # its URL ref is now built from tmdb_id + title rather than read from the column.
     where = (Film.slug.is_not(None), _title_match(nq))
     total = await session.scalar(select(func.count()).select_from(Film).where(*where))
     films = (
@@ -240,11 +267,21 @@ async def get_film_search(
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailResponse | None:
-    film = (await session.execute(select(Film).where(Film.slug == slug))).scalar_one_or_none()
+async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse | None:
+    """Resolve a film by URL ref (`<tmdb_id>-<title-slug>`), falling back to the legacy immutable
+    `film.slug` for URLs minted before NEU-1143.
+
+    Both candidates go in one query, and an exact slug match wins. They can genuinely collide: a
+    numeric title slugs to something that reads as a ref — the film "1917" is slugged `1917-2019`
+    and parses as id 1917, a different real film. Preferring the slug points the ambiguous string
+    at the URL that was actually minted for it, which is the one search engines already hold.
+    """
+    tmdb_id = parse_film_ref(ref)
+    where = Film.slug == ref if tmdb_id is None else or_(Film.slug == ref, Film.tmdb_id == tmdb_id)
+    candidates = (await session.execute(select(Film).where(where))).scalars().all()
+    film = next((c for c in candidates if c.slug == ref), None) or next(iter(candidates), None)
     if film is None:
         return None
-    assert film.slug is not None
 
     arc_stage = derive_arc_stage(film.status)
 
@@ -280,6 +317,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
             created_at=event.created_at,
             summary=summary,
             summary_edited=edited_at is not None,
+            provenance=event.provenance,
             sources=[
                 SourceOut(
                     url=source_url(story),
@@ -293,9 +331,11 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
         for event, summary, edited_at in summarized
     ]
 
-    regions: set[str] = {"US"}
-    if film.origin_country:
-        regions.add(film.origin_country[0])
+    # The one definition, shared with the event writer and with `_region_visible` above
+    # (`catalog.release_grade`). This used to take `origin_country[0]` while the visibility
+    # predicate took all of them, so a co-production could surface an event about a date the
+    # page declined to list — the drift NEU-1121 closes.
+    regions = displayable_regions(film.origin_country)
 
     release_date_rows = (
         (
@@ -419,7 +459,7 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
     ]
 
     return FilmDetailResponse(
-        slug=film.slug,
+        ref=film_ref(film.tmdb_id, film.title),
         title=film.title,
         tmdb_id=film.tmdb_id,
         imdb_id=film.imdb_id,
@@ -447,22 +487,25 @@ async def get_film_detail(session: AsyncSession, slug: str) -> FilmDetailRespons
 
 @dataclass
 class SitemapFilm:
-    slug: str
+    ref: str
     lastmod: datetime
 
 
 async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
     rows = (
         await session.execute(
-            select(Film.slug, func.max(Event.created_at))
+            select(Film.tmdb_id, Film.title, func.max(Event.created_at))
             .join(Event, Event.film_id == Film.id)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .where(visible_events(), _region_visible())
-            .group_by(Film.id, Film.slug)
+            .group_by(Film.id, Film.tmdb_id, Film.title)
             .order_by(Film.slug.asc())
         )
     ).all()
-    return [SitemapFilm(slug=slug, lastmod=last_event_created) for slug, last_event_created in rows]
+    return [
+        SitemapFilm(ref=film_ref(tmdb_id, title), lastmod=lastmod)
+        for tmdb_id, title, lastmod in rows
+    ]
 
 
 async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedResponse:
@@ -475,7 +518,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
     )
     rows = (
         await session.execute(
-            select(Event, EventSummary.summary, Film.slug, Film.title)
+            select(Event, EventSummary.summary, Film.tmdb_id, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(Film.slug.is_not(None), visible_events(), _region_visible())
@@ -485,7 +528,7 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _slug, _title in rows]
+    event_ids = [event.id for event, _summary, _tmdb_id, _title in rows]
     sources_by_event: dict[UUID, list[Story]] = {}
     if event_ids:
         source_rows = (
@@ -500,17 +543,17 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
             sources_by_event.setdefault(event_id, []).append(story)
 
     items: list[FeedItem] = []
-    for event, summary, slug, title in rows:
-        assert slug is not None
+    for event, summary, tmdb_id, title in rows:
         items.append(
             FeedItem(
-                film_slug=slug,
+                film_ref=film_ref(tmdb_id, title),
                 film_title=title,
                 event_type=event.event_type,
                 confidence=event.confidence,
                 occurred_at=event.occurred_at,
                 created_at=event.created_at,
                 summary=summary,
+                provenance=event.provenance,
                 sources=[
                     SourceOut(
                         url=source_url(story),
@@ -529,6 +572,10 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
     # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
     # number of distinct days, so the client knows when no more days remain.
+    #
+    # The day is `created_at`, NOT `occurred_at`, on purpose: the feed is a publication log
+    # (ADR-0016). A backfill or a new catalog tranche therefore lands as one tall day — that is
+    # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
     visible = (Film.slug.is_not(None), visible_events(), _region_visible())
 
@@ -547,34 +594,39 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     rows = (
         await session.execute(
             select(
-                Film.slug.label("slug"),
+                Film.tmdb_id.label("tmdb_id"),
                 Film.title.label("title"),
                 Film.release_date.label("release_date"),
                 Film.poster_path.label("poster_path"),
+                Film.status.label("status"),
                 day.label("day"),
                 func.count().label("event_count"),
                 func.array_agg(distinct(Event.event_type)).label("event_types"),
+                func.bool_or(_has_story()).label("news_backed"),
             )
             .select_from(Event)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(*visible, day.in_(select(window.c.day)))
-            .group_by(Film.id, Film.slug, Film.title, Film.release_date, Film.poster_path, day)
+            .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
             .order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
         )
     ).all()
 
     items = [
         FeedDayItem(
-            film_slug=slug,
-            film_title=title,
-            release_year=_release_year(release_date),
-            poster_path=poster_path,
-            day=day_value,
-            top_event_type=most_significant_event_type(event_types),
-            event_count=event_count,
+            film_ref=film_ref(row.tmdb_id, row.title),
+            film_title=row.title,
+            release_year=_release_year(row.release_date),
+            poster_path=row.poster_path,
+            arc_stage=derive_arc_stage(row.status),
+            day=row.day,
+            top_event_type=most_significant_event_type(row.event_types),
+            event_types=ordered_event_types(row.event_types),
+            event_count=row.event_count,
+            news_backed=row.news_backed,
         )
-        for slug, title, release_date, poster_path, day_value, event_count, event_types in rows
+        for row in rows
     ]
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
@@ -659,7 +711,7 @@ async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[U
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
-    surfaced_types = tuple(_TMDB_TYPE_TO_BUCKET)  # (1, 2, 3) — derived, never drifts
+    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (2, 3) — derived, never drifts
 
     # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
     # film rows — so the UI shows "N dates at a time" with a deterministic "view more".
@@ -689,7 +741,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         await session.execute(
             select(
                 Film.id.label("film_id"),
-                Film.slug.label("slug"),
+                Film.tmdb_id.label("tmdb_id"),
                 Film.title.label("title"),
                 Film.release_date.label("film_release_date"),
                 Film.poster_path.label("poster_path"),
@@ -701,7 +753,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
             .where(*visible, rel_day.in_(select(window.c.d)))
             .group_by(
                 Film.id,
-                Film.slug,
+                Film.tmdb_id,
                 Film.title,
                 Film.release_date,
                 Film.poster_path,
@@ -725,12 +777,12 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
 
     items = [
         CalendarItem(
-            film_slug=row.slug,
+            film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
             release_year=_release_year(row.film_release_date),
             poster_path=row.poster_path,
             release_date=row.release_date,
-            release_type=_TMDB_TYPE_TO_BUCKET[row.release_type],
+            release_type=RELEASE_TYPE_BUCKETS[row.release_type],
             director=directors_by_film.get(row.film_id),
             stars=stars_by_film.get(row.film_id, []),
             genres=genres_by_film.get(row.film_id, []),

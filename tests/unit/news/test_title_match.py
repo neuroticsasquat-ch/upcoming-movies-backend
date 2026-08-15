@@ -47,6 +47,17 @@ def test_no_significant_tokens_is_kept():
     assert title_matches("A", "totally unrelated headline", min_ratio=0.5) is True
 
 
+def test_a_dotted_initialism_title_filters_instead_of_keeping_everything():
+    # NEU-1009: `F.A.S.T.` used to tokenize to nothing and land in the keep-everything
+    # branch above. The initialism collapse gives it a token, so it now filters — the
+    # behaviour change this module's docstring warns is inherited from `significant_tokens`.
+    assert (
+        title_matches("F.A.S.T.", "Warner Bros’ ‘F.A.S.T.’ Dashes Into Summer 2027", min_ratio=0.5)
+        is True
+    )
+    assert title_matches("F.A.S.T.", "Stock futures rise on Wall Street", min_ratio=0.5) is False
+
+
 def test_non_ascii_title_matches_non_ascii_headline():
     assert title_matches("Касса невест", "Касса невест выходит в прокат", min_ratio=0.5) is True
     assert (

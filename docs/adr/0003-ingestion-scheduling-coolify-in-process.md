@@ -62,8 +62,11 @@ Move both schedules off GitHub Actions to **Coolify scheduled tasks** that run t
 
 Because there is no external poll window, slow Anthropic batches no longer fail the
 pipeline; the deadman's grace period (daily ~2–3h, hourly ~30m) absorbs batch latency, so
-batch mode (`LINK_USE_BATCHES` etc.) stays on for its ~50% cost saving. The startup
-stale-run canceller (`main.py` lifespan) still bounds any run orphaned by a mid-run deploy.
+batch mode (`LINK_USE_BATCHES` etc.) stays on for its ~50% cost saving. The stale-run
+canceller still bounds any orphaned run, but no longer only on deploy and no longer on
+`started_at`: it runs from the scheduled-task entrypoint as well as the app's lifespan, and
+expires a run on `COALESCE(last_progress_at, started_at)` — a **heartbeat**, so a live
+multi-hour sweep is never mistaken for one orphaned by a crash (NEU-1117).
 
 ## Considered alternatives
 
@@ -81,10 +84,16 @@ stale-run canceller (`main.py` lifespan) still bounds any run orphaned by a mid-
 
 ## Consequences
 
-- Ingestion scheduling now lives in Coolify (two scheduled tasks on the `upmovies-backend`
+- Ingestion scheduling now lives in Coolify (scheduled tasks on the `upmovies-backend`
   resource) + healthchecks.io, not in the repo. The manual setup is recorded in NEU-741:
-  cron `0 9 * * *` → `daily`, `0 * * * *` → `hourly`; two deadman checks whose URLs feed the
+  cron `0 9 * * *` → `daily`, `0 * * * *` → `hourly`; deadman checks whose URLs feed the
   `HEALTHCHECK_*` env vars.
+- **A third slot, `0 7 * * *` → `sweep`** (NEU-1079), with its own `HEALTHCHECK_SWEEP_URL`
+  check. Two hours ahead of `daily` so films it admits are in the retrieval index for that
+  day's link pass, and outside the chain on purpose: `run_daily` is fail-fast, so a TMDB
+  hiccup partway through a ~45-minute sweep would take feeds, link and synthesize down with
+  it (ADR-0013, project spec §6.1). Its own deadman for the same reason — the daily check
+  says nothing about a sweep that stopped running.
 - A scheduled task runs in the same container as `uvicorn`; a deploy mid-run restarts the
   container and the lifespan canceller marks the interrupted run `cancelled`. Accepted —
   same exposure the background-task model already had.

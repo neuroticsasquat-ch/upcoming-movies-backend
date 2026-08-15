@@ -13,7 +13,7 @@ _ANGRY_BIRDS_URLS = {
 
 def test_angry_birds_first_look_is_gold_trailer_event():
     """NEU-445: the three first-look stories form one gold event labeled 'trailer'."""
-    items = load_validation_set(_FIXTURE)
+    items = load_validation_set(_FIXTURE).items
     rows = [it for it in items if it.url in _ANGRY_BIRDS_URLS]
 
     assert len(rows) == 3, "all three Angry Birds first-look stories must be present"

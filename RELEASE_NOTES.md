@@ -1,9 +1,237 @@
+# Release notes
+
+## 0.3.2 — 2026-08-13
+
+### General
+
+- Retune retrieval K to 47 for the post-writers catalog ([NEU-1135](https://linear.app/neuroticsasquatch/issue/NEU-1135))
+- Expose the news-backed signal on the grouped feed ([NEU-1137](https://linear.app/neuroticsasquatch/issue/NEU-1137))
+- List every beat a film-day carries on the grouped feed ([NEU-1139](https://linear.app/neuroticsasquatch/issue/NEU-1139))
+- Resolve film URLs on a leading TMDB id with a regenerated slug ([NEU-1143](https://linear.app/neuroticsasquatch/issue/NEU-1143))
+
+## 0.3.1 — 2026-08-13
+
+### General
+
+- Persist the enumerate phase's attachment histogram ([NEU-1116](https://linear.app/neuroticsasquatch/issue/NEU-1116))
+- Retune retrieval K and add a saturation soft tier ([NEU-1088](https://linear.app/neuroticsasquatch/issue/NEU-1088))
+- Bring prod compose retrieval fallbacks up to the retuned defaults ([NEU-1088](https://linear.app/neuroticsasquatch/issue/NEU-1088))
+
+### Ingest
+
+- Expire stale runs on a heartbeat, not on started_at
+
+### Sweep
+
+- Card release-date events from displayable dates, not the primary
+- Wire the shared region set into the page and bound the prune
+- Treat a TMDB 404 as terminal, not as an outage
+
+### Synthesize
+
+- Phrase status events around shooting, not TMDB's stage names
+- Tighten the status bodies to "Shooting has started/wrapped"
+
+### Tests
+
+- Pin created_at in the prune fixture so the cutoff still bites
+
 # Changelog
 
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.3.0] - 2026-08-11
+
+### Features
+
+- Add the read-only undated-candidate probe ([#225](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/225))
+- **ingest:** Add the sweep ingest run kind ([#226](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/226))
+- **catalog:** Make quiescent undated films go dormant ([#228](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/228))
+- **sweep:** Add the enumerate phase behind closed admission tranches ([#229](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/229))
+- **sweep:** Add the reachability-scoped refresh phase (NEU-1078) ([#230](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/230))
+- **sweep:** Add the sweep entrypoint and its own schedule slot ([#231](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/231))
+- Add Event.provenance and the deterministic EventSummary writer (NEU-1080) ([#232](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/232))
+- **sweep:** Catalog events from film_field_change — release date and status (NEU-1081) ([#233](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/233))
+- **catalog:** Record seed-grade credit history, baselining first observation ([#234](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/234))
+- **sweep:** Catalog events from credit changes (casting, crew_attached) ([#235](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/235))
+- **public:** Carry arc_stage on the grouped feed row ([#236](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/236))
+- **sweep:** Wire the admission bar to config with a corroboration threshold ([#237](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/237))
+
+### Bug Fixes
+
+- Identify the prod database by content unique to this app ([#223](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/223))
+
+### Documentation
+
+- Record the undated-film discovery design of record (NEU-285) ([#222](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/222))
+
+### Testing
+
+- **tmdb:** Cover the remaining person_movie_credits cases ([#227](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/227))
+
+### Miscellaneous
+
+- Log cluster-stage attach decisions ([#224](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/224))
+
+## [0.2.0] - 2026-08-08
+
+### Features
+
+- Add TMDB_MIN_RUNTIME setting for shorts filter
+- Add classify_skip ingest filter for shorts
+- Skip shorts during TMDB ingest
+- Add director, stars, and genres to calendar API
+- Add admin delink + delete-event endpoints
+- Guard linker against franchise-generic casting traps
+- Resolve Google News story URLs to publisher URLs
+- **link:** Guard linker against aspirational/wishlist casting (NEU-443)
+- Add nullable region column to news.event
+- Extract per-event region from cluster classifier
+- Persist region on new release_date events
+- Quiet non-primary-country release_date events on public surfaces
+- **events:** Add first_look event type (NEU-447)
+- **synthesize:** Url-resolution covers all displayed events (NEU-455)
+- **link:** Source-quality gate with domain judge and confidence downgrade (NEU-454)
+- **link,synthesize:** Thread run_date into prompts for temporal reasoning (NEU-457)
+- Add retroactive cleanup for admin-blocked source domains
+- **catalog:** Skip processing released and canceled films (NEU-286)
+- **catalog:** Track film column value changes via film_field_change trigger (NEU-493)
+- **link:** Guard release-date restatements in cluster stage (NEU-494)
+- **link:** Deterministic per-performer casting dedup (NEU-492)
+- Admin edit + reset-to-AI for event summaries
+- **calendar:** Require minimum popularity score for release calendar
+- **calendar:** Require minimum runtime for release calendar
+- Pause Google News, rely on curated trade feeds on a trial basis
+- Gate release-date events on TMDB release_date changes
+- Run ingestion as in-process Coolify scheduled tasks
+- Make film search cover the whole catalog
+- **observability:** Auto-instrument the API with OpenTelemetry → SigNoz
+- Add the ingest.llm_call per-call telemetry table (NEU-974)
+- Record per-call LLM telemetry on the Anthropic path ([#180](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/180))
+- Add title normalization and the squash-fold for candidate retrieval ([#183](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/183))
+- Build the in-memory token→film candidate index (NEU-991) ([#184](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/184))
+- Score and select retrieval candidates with a threshold and cap ([#185](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/185))
+- Add the ingest.link_retrieval_probe and run_retrieval_health tables ([#187](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/187))
+- Add the three-state LINK_RETRIEVAL_MODE setting ([#188](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/188))
+- Run candidate retrieval in shadow beside the roster path ([#189](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/189))
+- Surface retrieval health and its trend on /admin/runs ([#190](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/190))
+- Build the per-story candidate link request ([#191](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/191))
+- Apply retrieval decisions and keep zero-candidate rejects out of processed ([#192](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/192))
+- Port the offline eval harness to the retrieval path (NEU-1000) ([#193](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/193))
+- Tune the retrieval threshold, cap and batch size ([#194](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/194))
+- Guard retrieval health with a hard-breach run failure (NEU-1002) ([#196](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/196))
+- Restate cutover gate #3 in whole items and record the cutover evidence ([#199](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/199))
+- Enlarge the link validation fixture and re-score gate #3 (NEU-1012) ([#200](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/200))
+- **llm:** Add the OpenAI-compatible adapter and a shared retry policy ([#211](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/211))
+- **llm:** Verify provider capabilities empirically and pin fixtures to real bodies ([#212](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/212))
+- **llm:** Resolve a provider per stage through a Gateway (NEU-980) ([#213](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/213))
+- **llm:** Validate every stage's provider routing at startup ([#214](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/214))
+- **llm:** Move production to DeepInfra, with truncation telemetry first (NEU-1015) ([#216](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/216))
+- **llm:** Make the offline harnesses declare which provider they scored
+
+### Bug Fixes
+
+- **link:** Treat fresh production_wrap on wrapped films as stale-stage (NEU-444)
+- Classify events by dominant beat, not incidental cast mentions
+- **link:** Distinguish animated character-design reveals from live-action costume stills in cluster prompt (NEU-445)
+- **arc:** Derive film arc stage from TMDB status only (NEU-452)
+- **link,cluster,synthesize:** Reject cross-film stories and fix beat-date attribution (NEU-453)
+- **sources_admin:** Stop CSRF-guarding the GET list endpoint
+- **link:** Drop stale-stage events for films past their release date (NEU-449)
+- **link:** Drop restatement and roundup release-date events (NEU-451)
+- **link:** Add windowed dedup guardrail for trailer and first-look events (NEU-448)
+- **link:** Reject sibling-franchise release dates as off-topic (NEU-450)
+- Chunk source-domain judge calls and add backfill helper (NEU-460)
+- **link:** Prevent parent/original film misattribution in linker and clusterer (NEU-461)
+- **news:** Tighten LINK/SYNTHESIZE prompts for casting, release-date, and summary quality (NEU-483)
+- Allow PATCH in CORS allowed methods
+- **calendar:** Correct broken runtime filter and popularity test gap
+- Register all models on db import so standalone scripts resolve cross-schema FKs
+- Set release date text fixtures as relative to today rather than hardcoded
+- Fail ingest runs when a whole Anthropic batch fails
+- Recompute event occurred_at when repair removes member stories
+- Fail ingest runs when a stage produces nothing at all ([#176](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/176))
+- Require a denominator before failing self-healing ingest stages ([#177](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/177))
+- Repair three mislabeled rows in the link validation fixture ([#182](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/182))
+- Collapse dotted and slashed initialisms before tokenizing ([#195](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/195))
+- Pin the link validation fixture to a catalog date ([#197](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/197))
+- Stop scoring unlabelable picks and tell the linker its candidates are a prefilter ([#198](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/198))
+- **llm:** Let summarize run on an OpenAI-compatible provider
+
+### Refactor
+
+- Make event summaries write-once, drop auto-regeneration
+- Remove the Anthropic Message Batches path ([#175](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/175))
+- Name both halves of the total-failure rule with StageKind ([#178](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/178))
+- Delete the roster link path and port its dependent scripts (NEU-1004) ([#201](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/201))
+- Replace Anthropic content blocks with a neutral Prompt DTO ([#208](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/208))
+- **llm:** Key pricing on (provider, model) with per-entry cache rates ([#210](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/210))
+
+### Documentation
+
+- Record ADR 0004 and name attach/split-beat/over-merge
+- Record ADR-0005 removing the Message Batches path
+- Define "Stage" in the domain glossary
+- Record the entity-linking candidate-retrieval decisions ([#181](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/181))
+- Add ADR-0006 on the stable-prefix-first caching contract ([#209](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/209))
+- Record why the gateway is a first-party adapter, not LiteLLM ([#215](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/215))
+
+### Testing
+
+- Add Angry Birds first-look gold event for clustering validation
+- Cover origin_country=NULL edge case in region surfacing
+- Gate retrieval recall with a zero-cost oracle test ([#186](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/186))
+
+### Build System
+
+- **deps:** Update sentry-sdk[fastapi] requirement ([#113](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/113))
+- **deps:** Update fastapi requirement from >=0.136.1 to >=0.139.0 ([#114](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/114))
+- **deps:** Update alembic requirement from >=1.18.4 to >=1.18.5 ([#115](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/115))
+- **deps:** Update uvicorn[standard] requirement ([#116](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/116))
+- **deps:** Update httpx requirement from >=0.28 to >=0.28.1 ([#117](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/117))
+- **deps:** Update sqlalchemy[asyncio] requirement ([#132](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/132))
+- **deps:** Update ruff requirement from >=0.9 to >=0.15.21 ([#133](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/133))
+- **deps:** Update email-validator requirement from >=2.0.0 to >=2.3.0 ([#134](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/134))
+- **deps:** Update tldextract requirement from >=5.1 to >=5.3.1 ([#135](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/135))
+- **deps:** Update asyncpg requirement from >=0.30 to >=0.31.0 ([#136](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/136))
+- **deps:** Update fastapi requirement from >=0.139.0 to >=0.139.2
+- **deps:** Update python-slugify requirement from >=8.0 to >=8.0.4
+- **deps:** Update types-python-slugify requirement ([#143](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/143))
+- **deps:** Update sentry-sdk[fastapi] requirement ([#144](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/144))
+- **deps:** Update uvicorn[standard] requirement ([#145](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/145))
+- **deps:** Update fastapi requirement from >=0.139.2 to >=0.140.0
+- **deps:** Update pytest-cov requirement from >=6.0 to >=7.1.0
+- **deps:** Update ruff requirement from >=0.15.21 to >=0.16.0
+- **deps:** Update feedparser requirement from >=6.0.11 to >=6.0.12
+- **deps:** Update pydantic requirement from >=2.10 to >=2.13.4
+- **deps:** Update uvicorn[standard] requirement ([#164](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/164))
+- **deps:** Update sentry-sdk[fastapi] requirement ([#165](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/165))
+- **deps:** Update anthropic requirement from >=0.49 to >=0.120.2 ([#166](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/166))
+- **deps:** Update feedparser requirement from >=6.0.12 to >=6.0.13 ([#167](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/167))
+- **deps:** Update fastapi requirement from >=0.140.0 to >=0.141.1 ([#168](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/168))
+- **deps:** Update uvicorn[standard] requirement ([#203](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/203))
+- **deps:** Update alembic requirement from >=1.18.5 to >=1.19.0 ([#204](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/204))
+- **deps:** Update feedparser requirement from >=6.0.13 to >=6.0.14 ([#205](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/205))
+- **deps:** Update ruff requirement from >=0.16.0 to >=0.16.1 ([#206](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/206))
+
+### CI
+
+- **deps:** Bump actions/checkout from 6 to 7 ([#131](https://github.com/neuroticsasquat-ch/upcoming-movies-frontend/pull/131))
+- **deps:** Bump actions/setup-python from 6 to 7
+
+### Miscellaneous
+
+- Scaffold agent-skills config (Linear tracker, triage labels, domain docs)
+- Ruff format
+- **lint:** Exclude Markdown from ruff format
+- Skip hidden event types in synthesis
+
+### Other
+
+- Ruff format fix
+
 ## [0.1.1] - 2026-06-27
 
 ### Features

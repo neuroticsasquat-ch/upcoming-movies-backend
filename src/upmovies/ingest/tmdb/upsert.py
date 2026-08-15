@@ -2,9 +2,10 @@
 spine (keyed by `tmdb_id`) plus its normalized genre/company/country/language/collection
 relations. Pure DB I/O — the caller owns the transaction (commit/rollback)."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +26,49 @@ from upmovies.catalog.models import (
     SpokenLanguage,
 )
 from upmovies.catalog.slug import assign_slug
+from upmovies.ingest.tmdb.credit_history import (
+    diff_seed_credits,
+    load_seed_credits,
+    mark_credits_observed,
+    record_credit_changes,
+    seed_credits_from_details,
+)
+from upmovies.ingest.tmdb.release_date_history import (
+    diff_release_dates,
+    displayable_from_details,
+    load_displayable_releases,
+    mark_release_dates_observed,
+    record_release_date_changes,
+)
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
+
+
+async def mark_film_missing(session: AsyncSession, tmdb_id: int) -> None:
+    """Record that TMDB has no entry at this film's id, as of now. Caller commits.
+
+    Re-stamps a film that is already tombstoned, deliberately: the column drives the re-check
+    cadence in `refresh_set_clause`, so a confirmed-still-missing film has to move forward or
+    it comes back due on every subsequent pass (NEU-1124).
+
+    Writes nothing else. The film keeps its page, its events and its stories; the spec is
+    explicit that films are never deleted (§4.4).
+    """
+    await session.execute(
+        update(Film).where(Film.tmdb_id == tmdb_id).values(tmdb_missing_at=datetime.now(UTC))
+    )
+
+
+async def mark_person_missing(session: AsyncSession, person_id: int) -> None:
+    """Record that TMDB has no entry at this person's id, as of now. Caller commits.
+
+    Takes them out of the seed set until a film ingest names them again — which is what clears
+    the tombstone, so no cadence is needed on this side (NEU-1124). A person we hold no row for
+    is a no-op: the seed set is built from `film_credit`, and a credit can outlive the person
+    record we never wrote.
+    """
+    await session.execute(
+        update(Person).where(Person.id == person_id).values(tmdb_missing_at=datetime.now(UTC))
+    )
 
 
 async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
@@ -93,6 +136,10 @@ async def _upsert_film_row(
     }
     update_set = {k: v for k, v in values.items() if k not in ("tmdb_id", "slug")}
     update_set["updated_at"] = func.now()
+    # A successful read is proof the id is live, so it clears any tombstone
+    # `mark_film_missing` left. TMDB restores and re-merges deleted entries, and without this
+    # the refresh set's exclusion would be permanent on our side alone (NEU-1124).
+    update_set["tmdb_missing_at"] = None
     stmt = (
         insert(Film)
         .values(**values)
@@ -211,6 +258,26 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
 async def _rebuild_release_dates(
     session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
 ) -> None:
+    """Rebuild `catalog.film_release_date`, capturing the displayable diff on the way through.
+
+    The rebuild is the only place both sides of that diff exist: the stored rows are about to
+    be deleted and the incoming ones are in the payload. `catalog.film_release_date_change` is
+    written from them first, so a US wide date moving survives as history rather than being
+    overwritten into silence. First observation is a baseline, never a change — see
+    `ingest.tmdb.release_date_history`.
+    """
+    origin_country = (
+        await session.execute(select(Film.origin_country).where(Film.id == film_id))
+    ).scalar_one_or_none()
+    # Read the stored side before the delete below wipes it.
+    previous = await load_displayable_releases(session, film_id, origin_country=origin_country)
+    changes = diff_release_dates(
+        previous=previous,
+        current=displayable_from_details(details, origin_country=origin_country),
+    )
+    await record_release_date_changes(session, film_id, changes)
+    await mark_release_dates_observed(session, film_id)
+
     # Delete-then-reinsert, mirroring `_rebuild_joins`: a film that drops its release_dates
     # between runs (empty or absent payload) must have its stale rows cleared, so the delete
     # is unconditional and only the insert is guarded.
@@ -270,9 +337,17 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     in multiple films only grows the catalog — never raises a duplicate-key error.
     Film credits are rebuilt (delete-and-reinsert) each run so that a person dropped
     from the cast/crew between runs is correctly removed.
+
+    The rebuild is also where seed-grade credit *history* is captured: both sides of the
+    diff are in hand here and nowhere else, so `catalog.film_credit_change` is written from
+    them before the old side is destroyed. First observation is a baseline, never a change —
+    see `ingest.tmdb.credit_history`.
     """
     if not details.credits:
         return
+
+    # Read the stored side before the delete below wipes it.
+    previous_seed_credits = await load_seed_credits(session, film_id)
 
     # Step 1 — People: union of cast + crew, deduped by TMDB person id.
     people_by_id: dict[int, dict] = {}
@@ -310,6 +385,9 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
                 "known_for_department": stmt.excluded.known_for_department,
                 "gender": stmt.excluded.gender,
                 "popularity": stmt.excluded.popularity,
+                # TMDB naming this person in a film's credits is proof the id is live again,
+                # which is the whole revival path for a tombstoned seed person (NEU-1124).
+                "tmdb_missing_at": None,
             },
         )
         await session.execute(stmt)
@@ -345,3 +423,14 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
 
     if credit_rows:
         await session.execute(insert(FilmCredit).values(list(credit_rows.values())))
+
+    # Step 3 — History: what the rebuild would otherwise have thrown away. The marker is set
+    # last and only here, so the very first pass writes a baseline and every later one a diff.
+    await record_credit_changes(
+        session,
+        film_id,
+        diff_seed_credits(
+            previous=previous_seed_credits, current=seed_credits_from_details(details)
+        ),
+    )
+    await mark_credits_observed(session, film_id)

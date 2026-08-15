@@ -12,7 +12,8 @@ import asyncio
 import sys
 
 from upmovies.config import get_settings
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient
+from upmovies.llm.offline import require_anthropic_stage
 from upmovies.synthesize.summarizer import build_summary_request, parse_summary
 from upmovies.synthesize.summary_eval import (
     build_judge_request,
@@ -22,22 +23,20 @@ from upmovies.synthesize.summary_eval import (
 )
 
 DEFAULT_FIXTURE = "tests/fixtures/synthesize/summary_cases.json"
-_MAX_TOKENS = 256
 
 
 async def main(path: str) -> None:
     settings = get_settings()
+    require_anthropic_stage(settings, 'summarize')
+    require_anthropic_stage(settings, 'cluster')
     cases = load_summary_cases(path)
     passed = 0
 
     async with AnthropicClient(api_key=settings.anthropic_api_key) as client:
         for case in cases:
-            system, messages = build_summary_request(event_for_case(case), case.as_of_date)
             raw = await client.complete(
                 model=settings.summary_model,
-                system=system,
-                messages=messages,
-                max_tokens=_MAX_TOKENS,
+                prompt=build_summary_request(event_for_case(case), case.as_of_date),
             )
             try:
                 blurb = parse_summary(raw)
@@ -45,12 +44,8 @@ async def main(path: str) -> None:
                 print(f"FAIL  {case.name}: summary unparseable ({exc})")
                 continue
 
-            j_system, j_messages = build_judge_request(case, blurb)
             j_raw = await client.complete(
-                model=settings.cluster_model,
-                system=j_system,
-                messages=j_messages,
-                max_tokens=_MAX_TOKENS,
+                model=settings.cluster_model, prompt=build_judge_request(case, blurb)
             )
             verdict = parse_judge_verdict(j_raw)
             passed += verdict.passed

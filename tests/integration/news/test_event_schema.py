@@ -85,3 +85,51 @@ async def test_event_accepts_first_look_type(session):
         )
     )
     await session.commit()  # must not raise IntegrityError
+
+
+async def test_event_provenance_defaults_to_story(session):
+    """Existing rows and every story-triggered event carry `story` without the writer saying
+    so — the ADR-0014 column is additive, and the migration backfills through this default."""
+    film, _ = await _film_and_story(session)
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="confirmed",
+        occurred_at=datetime.now(UTC),
+    )
+    session.add(event)
+    await session.commit()
+    await session.refresh(event)
+    assert event.provenance == "story"
+
+
+async def test_event_rejects_bad_provenance(session):
+    film, _ = await _film_and_story(session)
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="casting",
+            confidence="confirmed",
+            occurred_at=datetime.now(UTC),
+            provenance="tmdb",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+async def test_event_accepts_crew_attached(session):
+    """`ck_event_type` enumerates the vocabulary, so the new type has to be registered there
+    too or the credit phase cannot write a row at all (NEU-1083)."""
+    film, _ = await _film_and_story(session)
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="crew_attached",
+            confidence="rumored",
+            provenance="catalog",
+            occurred_at=datetime.now(UTC),
+            subject_key=["denis villeneuve"],
+        )
+    )
+    await session.commit()

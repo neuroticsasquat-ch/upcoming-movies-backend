@@ -74,3 +74,11 @@ attach decisions as plain log lines so a future re-opening has a real baseline.
   image stays free of an ML runtime.
 - If the defect rate rises on the post-expansion corpus, this is worth re-opening — with the
   attach logs as a baseline. The design above is recorded here so it need not be re-derived.
+- Those attach logs now exist (NEU-970). `apply_cluster_decisions` emits one `cluster
+  decision:` line per group the model returned, carrying `film`, `llm` (what the model asked
+  for — attach or create), `outcome` (what the code did — `attach`, `create`, `dedup_attach`,
+  `reject`, `hold`, `invalid`, `superseded`), `type`, `event`, `stories`, and `note`. `llm`
+  and `outcome` are separate so a deterministic dedup merge is never credited to the model.
+  A log line and not a table, deliberately: a schema here means the project has been
+  re-opened. Reading them back, discard any `film=` that also appears in a `clustering failed
+  for film` line — those decisions were rolled back with the film's session.

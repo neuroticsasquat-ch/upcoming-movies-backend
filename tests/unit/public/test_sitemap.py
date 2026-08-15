@@ -30,23 +30,23 @@ def test_render_sitemap_backlotter_root_loc():
 
 
 def test_render_sitemap_backlotter_film_loc():
-    """Per-film <loc> must be https://backlotter.com/film/{slug}."""
-    films = [SitemapFilm(slug="alien-romulus-2024", lastmod=_LASTMOD)]
+    """Per-film <loc> must be https://backlotter.com/film/{ref}."""
+    films = [SitemapFilm(ref="945961-alien-romulus", lastmod=_LASTMOD)]
     result = render_sitemap("https://backlotter.com", films)
     locs = _locs(result)
-    assert "https://backlotter.com/film/alien-romulus-2024" in locs
+    assert "https://backlotter.com/film/945961-alien-romulus" in locs
 
 
 def test_render_sitemap_backlotter_multiple_films():
     """All film <loc>s appear on backlotter.com."""
     films = [
-        SitemapFilm(slug="film-one-2025", lastmod=_LASTMOD),
-        SitemapFilm(slug="film-two-2025", lastmod=_LASTMOD),
+        SitemapFilm(ref="1-film-one", lastmod=_LASTMOD),
+        SitemapFilm(ref="2-film-two", lastmod=_LASTMOD),
     ]
     result = render_sitemap("https://backlotter.com", films)
     locs = _locs(result)
-    assert "https://backlotter.com/film/film-one-2025" in locs
-    assert "https://backlotter.com/film/film-two-2025" in locs
+    assert "https://backlotter.com/film/1-film-one" in locs
+    assert "https://backlotter.com/film/2-film-two" in locs
 
 
 @pytest.mark.parametrize(
@@ -58,9 +58,9 @@ def test_render_sitemap_backlotter_multiple_films():
 )
 def test_render_sitemap_trailing_slash_base_no_double_slash(base_url: str):
     """rstrip('/') must prevent // in any <loc> regardless of trailing slash on base."""
-    films = [SitemapFilm(slug="some-film-2025", lastmod=_LASTMOD)]
+    films = [SitemapFilm(ref="3-some-film", lastmod=_LASTMOD)]
     result = render_sitemap(base_url, films)
     assert "//" not in result.replace("https://", "").replace("http://", "")
     locs = _locs(result)
     assert "https://backlotter.com/" in locs
-    assert "https://backlotter.com/film/some-film-2025" in locs
+    assert "https://backlotter.com/film/3-some-film" in locs

@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import UTC, date, datetime
 
@@ -11,23 +12,23 @@ from upmovies.link.cluster import (
     ClusterParseError,
     ClusterPlan,
     apply_cluster_decisions,
-    build_cluster_batch_request,
     build_cluster_request,
     cluster_film_events,
 )
+from upmovies.llm import CallLog
 from upmovies.news.models import Event, EventStory, Story
 
 
 class FakeClient:
     def __init__(self, response: dict):
         self._response = response
-        self.calls: list[dict] = []
+        self.requests: list[dict] = []
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
-        from upmovies.llm.client import Usage
+    async def complete_call(self, *, model, prompt, calls):
+        from upmovies.llm import CallResult
 
-        self.calls.append({"system": system, "messages": messages})
-        return json.dumps(self._response), Usage()
+        self.requests.append({"model": model, "prompt": prompt})
+        return calls.record(CallResult(text=json.dumps(self._response)))
 
 
 async def _linked_story(session, film, url, *, title="Runner news"):
@@ -64,13 +65,14 @@ async def test_creates_new_event_for_unclustered_stories(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -99,13 +101,14 @@ async def test_attaches_to_existing_event(session):
     await session.commit()
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -131,16 +134,17 @@ async def test_noop_when_nothing_unclustered(session):
     await session.commit()
 
     client = FakeClient({"events": []})
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     assert result == result.__class__(0, 0)
-    assert client.calls == []  # short-circuits before calling the model
+    assert client.requests == []  # short-circuits before calling the model
 
 
 # ---------------------------------------------------------------------------
@@ -182,14 +186,10 @@ async def test_build_cluster_request_builds_payload_and_plan(session):
         session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    system, messages, plan = built
+    prompt, plan = built
 
-    # NEU-377: cluster instructions are below Sonnet's 2048-tok cache floor and the
-    # per-call payload is per-film (no shared prefix), so the block is intentionally
-    # un-cached — a plain {"type": "text", "text": ...} block with no cache_control.
-    assert "cache_control" not in system[0]
-    assert "distinct EVENTS" in system[0]["text"]
-    payload = json.loads(messages[0]["content"])
+    assert "distinct EVENTS" in prompt.stable_prefix
+    payload = json.loads(prompt.user)
     assert payload["film"]["title"] == "Runner"
     assert payload["existing_events"] == []
     assert {s["n"] for s in payload["new_stories"]} == {1, 2}
@@ -324,7 +324,7 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
         session, film_id=film.id, attach_limit=3650, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, _messages, plan = built
+    _prompt, plan = built
     assert plan.existing_event_ids == [e1.id, e2.id]  # ordered by occurred_at at build time
 
     # Flip occurred_at so a re-derived query would now order [e2, e1]; the plan must not change.
@@ -367,76 +367,6 @@ async def test_apply_uses_build_time_event_order_across_sessions(session, test_e
         )
     assert s1.id in e1_members  # plan index 1 → e1 despite the occurred_at flip
     assert s1.id not in e2_members
-
-
-# ---------------------------------------------------------------------------
-# Task 4 — build_cluster_batch_request
-# ---------------------------------------------------------------------------
-
-
-async def test_build_cluster_batch_request_wraps_into_batch_request(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    s1 = await _linked_story(session, film, "https://e/1")
-    await session.commit()
-
-    built = await build_cluster_batch_request(
-        session,
-        custom_id=str(film.id),
-        model="cluster-m",
-        film_id=film.id,
-        attach_limit=45,
-        run_date=date(2026, 1, 1),
-    )
-    assert built is not None
-    req, plan = built
-    assert req.custom_id == str(film.id)
-    assert req.model == "cluster-m"
-    assert req.max_tokens == 4096
-    assert "cache_control" not in req.system[0]
-    assert "distinct EVENTS" in req.system[0]["text"]
-    assert plan.film_id == film.id
-    assert set(plan.unclustered_story_ids) == {s1.id}
-
-
-async def test_build_cluster_batch_request_honours_max_tokens(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    await _linked_story(session, film, "https://e/1")
-    await session.commit()
-
-    built = await build_cluster_batch_request(
-        session,
-        custom_id=str(film.id),
-        model="cluster-m",
-        film_id=film.id,
-        attach_limit=45,
-        max_tokens=9999,
-        run_date=date(2026, 1, 1),
-    )
-    assert built is not None
-    req, _plan = built
-    assert req.max_tokens == 9999
-
-
-async def test_build_cluster_batch_request_none_when_nothing_to_cluster(session):
-    film = Film(tmdb_id=1, title="Runner")
-    session.add(film)
-    await session.flush()
-    await session.commit()
-    assert (
-        await build_cluster_batch_request(
-            session,
-            custom_id=str(film.id),
-            model="cluster-m",
-            film_id=film.id,
-            attach_limit=45,
-            run_date=date(2026, 1, 1),
-        )
-        is None
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +432,7 @@ async def test_build_cluster_request_captures_film_status(session):
         session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, _messages, plan = built
+    _prompt, plan = built
     assert plan.film_status == "Post Production"
 
 
@@ -736,8 +666,8 @@ async def test_build_cluster_request_includes_event_older_than_recency_window(se
         session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, messages, plan = built
-    payload = json.loads(messages[0]["content"])
+    prompt, plan = built
+    payload = json.loads(prompt.user)
     assert [e["type"] for e in payload["existing_events"]] == ["casting"]
     assert plan.existing_event_ids == [event.id]
 
@@ -768,8 +698,8 @@ async def test_build_cluster_request_caps_existing_events_to_attach_limit(sessio
         session, film_id=film.id, attach_limit=2, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, messages, plan = built
-    payload = json.loads(messages[0]["content"])
+    prompt, plan = built
+    payload = json.loads(prompt.user)
     titles = [h for e in payload["existing_events"] for h in e["headlines"]]
     assert titles == ["beat day 2", "beat day 3"]  # 2 most recent, oldest->newest
     assert plan.existing_event_ids == [events[1].id, events[2].id]
@@ -808,8 +738,8 @@ async def test_build_cluster_request_caps_headlines_per_event(session):
         session, film_id=film.id, attach_limit=25, run_date=date(2026, 1, 1)
     )
     assert built is not None
-    _system, messages, _plan = built
-    payload = json.loads(messages[0]["content"])
+    prompt, _plan = built
+    payload = json.loads(prompt.user)
     assert len(payload["existing_events"]) == 1
     assert payload["existing_events"][0]["headlines"] == ["headline 5", "headline 4", "headline 3"]
 
@@ -836,13 +766,14 @@ async def test_cluster_film_events_attaches_across_day_window_without_moving_occ
     await session.commit()
 
     client = FakeClient({"events": [{"existing": 1, "stories": [1]}]})
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=25,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -900,6 +831,7 @@ async def test_release_date_event_persists_region(session):
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1022,6 +954,7 @@ async def test_non_release_date_event_ignores_region(session):
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1081,7 +1014,7 @@ async def test_new_trailer_merges_into_recent_existing_trailer(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1089,6 +1022,7 @@ async def test_new_trailer_merges_into_recent_existing_trailer(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1125,7 +1059,7 @@ async def test_new_trailer_outside_window_stays_separate(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1133,6 +1067,7 @@ async def test_new_trailer_outside_window_stays_separate(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1162,7 +1097,7 @@ async def test_new_first_look_merges_into_recent_existing_first_look(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1170,6 +1105,7 @@ async def test_new_first_look_merges_into_recent_existing_first_look(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1204,7 +1140,7 @@ async def test_duplicate_casting_within_window_not_merged(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1212,6 +1148,7 @@ async def test_duplicate_casting_within_window_not_merged(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1236,7 +1173,7 @@ async def test_two_new_trailer_groups_collapse_in_one_pass(session):
             ]
         }
     )
-    result, _usage = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
@@ -1244,6 +1181,7 @@ async def test_two_new_trailer_groups_collapse_in_one_pass(session):
         attach_limit=45,
         dedup_days=14,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1607,13 +1545,14 @@ async def test_casting_new_performer_creates_scoped_event(session):
             ]
         }
     )
-    result, _ = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1652,13 +1591,14 @@ async def test_casting_no_new_performer_drops(session):
             ]
         }
     )
-    result, _ = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
@@ -1697,15 +1637,665 @@ async def test_casting_in_pass_dedup(session):
             ]
         }
     )
-    result, _ = await cluster_film_events(
+    result = await cluster_film_events(
         session,
         client=client,
         model="m",
         film_id=film.id,
         attach_limit=45,
         run_date=date(2026, 1, 1),
+        calls=CallLog(),
     )
     await session.commit()
 
     assert result.events_created == 1  # second John group is a same-pass duplicate → dropped
     assert result.stories_rejected == 1
+
+
+# ---------------------------------------------------------------------------
+# NEU-970 — cluster-decision logging (post-expansion clustering baseline)
+# ---------------------------------------------------------------------------
+
+
+def _decisions(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("cluster decision:")
+    ]
+
+
+def _fields(line: str) -> dict[str, str]:
+    """Parse one decision line back into its key=value pairs. The re-measurement (NEU-1091)
+    reads these logs, so the field set is asserted exactly, not by substring."""
+    return dict(part.split("=", 1) for part in line.split(": ", 1)[1].split(" "))
+
+
+async def test_decision_log_records_a_created_event(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    s2 = await _linked_story(session, film, "https://e/2")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id, s2.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "trailer",
+                    "confidence": "confirmed",
+                    "stories": [1, 2],
+                }
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalar_one()
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "create",
+        "type": "trailer",
+        "event": str(event.id),
+        "stories": "2",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_an_attach(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    first = await _linked_story(session, film, "https://e/1")
+    event = Event(
+        film_id=film.id, event_type="casting", confidence="confirmed", occurred_at=datetime.now(UTC)
+    )
+    session.add(event)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=first.id))
+    second = await _linked_story(session, film, "https://e/2")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id, existing_event_ids=[event.id], unclustered_story_ids=[second.id]
+    )
+    raw = json.dumps({"events": [{"existing": 1, "stories": [1]}]})
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "attach",
+        "outcome": "attach",
+        "type": "casting",
+        "event": str(event.id),
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_separates_deterministic_dedup_from_an_llm_attach(session, caplog):
+    """The singular-beat dedup turns a model 'create' into an attach. Left as plain
+    'attach' the logs would credit the model with a merge the code made."""
+    film = Film(tmdb_id=201, title="FF")
+    session.add(film)
+    await session.flush()
+    ev = await _existing_event(
+        session,
+        film,
+        event_type="trailer",
+        occurred_at=datetime(2025, 12, 30, tzinfo=UTC),
+        url="https://e/seed",
+    )
+    story = await _linked_story(session, film, "https://e/new", title="trailer released")
+    await session.commit()
+
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[ev.id],
+        unclustered_story_ids=[story.id],
+        run_date=date(2026, 1, 1),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]}
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw, dedup_days=14)
+    await session.commit()
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "dedup_attach",
+        "type": "trailer",
+        "event": str(ev.id),
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_a_reject_with_its_note(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {"events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}]}
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    # A rejected story has its film_id nulled, so the log line is the only record of which
+    # film the drop was decided against.
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "reject",
+        "type": "off_topic",
+        "event": "-",
+        "stories": "1",
+        "note": "off-topic",
+    }
+
+
+async def test_decision_log_records_a_held_release_date(session, caplog):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 8, 12))
+    session.add(film)
+    await session.flush()
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await _apply_release_date(
+            session, film=film, claimed="2026-11-20", run_date=date(2026, 7, 4)
+        )
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "hold",
+        "type": "release_date",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_an_invalid_group(session, caplog):
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "not-a-type",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    # Every group the model returned produces exactly one line, so the decision counts
+    # reconcile against the group count rather than silently under-reporting.
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "invalid",
+        "type": "not-a-type",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_records_a_superseded_group(session, caplog):
+    """A group whose stories an earlier group already claimed still gets a line: the
+    counts must reconcile against the group count, and over-grouping is itself the
+    behaviour the baseline exists to watch."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {"existing": None, "type": "trailer", "confidence": "confirmed", "stories": [1]},
+                {"existing": None, "type": "casting", "confidence": "confirmed", "stories": [1]},
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1
+    first, second = _decisions(caplog)
+    assert _fields(first)["outcome"] == "create"
+    assert _fields(second) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "superseded",
+        "type": "casting",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+async def test_decision_log_keeps_a_model_supplied_type_parseable(session, caplog):
+    """`type` on the invalid path is whatever the model put in the JSON. Since the fields
+    are read back by splitting on spaces, an embedded space must not split the line."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    s1 = await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    plan = ClusterPlan(film_id=film.id, existing_event_ids=[], unclustered_story_ids=[s1.id])
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "release date changed",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="upmovies.link.cluster"):
+        await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    (line,) = _decisions(caplog)
+    assert _fields(line) == {
+        "film": str(film.id),
+        "llm": "create",
+        "outcome": "invalid",
+        "type": "release_date_changed",
+        "event": "-",
+        "stories": "1",
+        "note": "-",
+    }
+
+
+# ADR-0014 — the catalog path and the story path must not both card one change.
+#
+# The two paths are independent by design: a story-triggered release-date event still needs
+# TMDB corroboration, a catalog-triggered one fires from the change alone. But they read the
+# *same* `film_field_change` row, and the sweep runs ~2h ahead of the daily chain, so the
+# normal ordering is catalog-first. A held story that is finally corroborated must therefore
+# attach to the event that change already produced, not form a second one beside it.
+
+
+async def _catalog_event(session, film, *, event_type, occurred_at):
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="confirmed",
+        provenance="catalog",
+        occurred_at=occurred_at,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def test_corroborated_story_attaches_to_the_catalog_event_for_that_change(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    changed_at = datetime(2026, 6, 29, tzinfo=UTC)
+    _seed_release_date_change(
+        session, film, old="2026-08-12", new="2026-09-01", changed_at=changed_at
+    )
+    carded = await _catalog_event(session, film, event_type="release_date", occurred_at=changed_at)
+    await session.flush()
+
+    # The LLM is not offered the existing event and asks to create — the deterministic path
+    # has to catch this on its own.
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_story_corroborated_by_a_later_move_joins_the_card_the_earlier_one_raised(
+    session,
+):
+    """The date moved twice inside the corroboration window. `field_changed_at` returns only
+    the *latest* change, so an exact `occurred_at == changed_at` match would find nothing and
+    open a second release-date card beside the one the sweep already wrote for this film."""
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    first_move = datetime(2026, 6, 25, tzinfo=UTC)
+    _seed_release_date_change(session, film, old=None, new="2026-08-12", changed_at=first_move)
+    _seed_release_date_change(
+        session,
+        film,
+        old="2026-08-12",
+        new="2026-09-01",
+        changed_at=datetime(2026, 6, 29, tzinfo=UTC),
+    )
+    carded = await _catalog_event(session, film, event_type="release_date", occurred_at=first_move)
+    await session.flush()
+
+    result, story = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_catalog_event_for_a_different_move_does_not_swallow_the_story(session):
+    film = Film(tmdb_id=1, title="OK Madam 2", release_date=date(2026, 9, 1))
+    session.add(film)
+    await session.flush()
+    changed_at = datetime(2026, 6, 29, tzinfo=UTC)
+    _seed_release_date_change(
+        session, film, old="2026-08-12", new="2026-09-01", changed_at=changed_at
+    )
+    # An older date move, already carded and long outside the corroboration window.
+    await _catalog_event(
+        session, film, event_type="release_date", occurred_at=datetime(2026, 1, 5, tzinfo=UTC)
+    )
+    await session.flush()
+
+    result, _ = await _apply_release_date(
+        session, film=film, claimed="2026-09-01", run_date=date(2026, 7, 4)
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+
+
+async def test_story_reporting_a_milestone_attaches_to_the_catalog_event(session):
+    """A production milestone happens once per film, so the catalog event for it is the
+    only one there should ever be — a trade story reporting the same start upgrades that
+    card in place rather than opening a second one, however far behind TMDB it runs."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_event(
+        session,
+        film,
+        event_type="production_start",
+        occurred_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    story = await _linked_story(session, film, "https://e/start", title="begins production")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=date(2026, 7, 4),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_start",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+
+
+async def test_story_provenance_event_is_not_a_catalog_dedup_target(session):
+    """The rule is scoped to the ADR-0014 path. Two story-triggered milestone events on one
+    film is pre-existing behaviour and not this change's to alter."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="production_start",
+            confidence="confirmed",
+            occurred_at=datetime(2026, 3, 1, tzinfo=UTC),
+        )
+    )
+    story = await _linked_story(session, film, "https://e/start2", title="begins production")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=date(2026, 7, 4),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "production_start",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+
+    result = await apply_cluster_decisions(session, plan=plan, raw=raw)
+    await session.commit()
+
+    assert result.events_created == 1
+
+
+# ADR-0014, the credit half — a story about an attachment TMDB recorded first joins that card.
+#
+# The sweep runs ~2h ahead of the daily chain, so a credit event is normally already on the
+# film when the trade story lands. Without this the story either opens a second card for the
+# same attachment or, worse, is dropped as `casting-recorded` — the beat would read as
+# already-covered while the card carrying it still had no sources and a templated body.
+
+
+async def _catalog_credit_event(session, film, *, event_type, names, occurred_at=None):
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=occurred_at or datetime(2026, 6, 29, tzinfo=UTC),
+        subject_key=names,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def _apply_casting(session, *, film, cast, url="https://e/cast-news"):
+    story = await _linked_story(session, film, url, title="casting news")
+    await session.flush()
+    plan = ClusterPlan(
+        film_id=film.id,
+        existing_event_ids=[],
+        unclustered_story_ids=[story.id],
+        film_status=film.status,
+        film_release_date=film.release_date,
+        run_date=date(2026, 7, 4),
+    )
+    raw = json.dumps(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": cast,
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    return await apply_cluster_decisions(session, plan=plan, raw=raw), story
+
+
+async def test_story_about_a_carded_casting_joins_the_catalog_event(session):
+    """Left to the `casting-recorded` rule alone this story would be *dropped*: the performer
+    is already named by a card. But that card is the deterministic one TMDB's credit change
+    raised, and the story is what upgrades it — real sources, and a real summary."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_credit_event(session, film, event_type="casting", names=["zendaya"])
+
+    result, story = await _apply_casting(session, film=film, cast=["Zendaya"])
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_clustered == 1
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_story_about_a_carded_crew_attachment_joins_that_card(session):
+    """The LLM has no `crew_attached` in its vocabulary, so a story about a director
+    attaching comes back classified `casting`. The card it belongs on is still the one the
+    credit change raised — otherwise the film shows "attached to direct" twice."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_credit_event(
+        session, film, event_type="crew_attached", names=["denis villeneuve"]
+    )
+
+    result, story = await _apply_casting(session, film=film, cast=["Denis Villeneuve"])
+    await session.commit()
+
+    assert result.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id
+
+
+async def test_story_about_someone_else_still_opens_its_own_card(session):
+    """The match is on *who*. A catalog casting card for one performer must not swallow the
+    trade breaking a different one."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    await _catalog_credit_event(session, film, event_type="casting", names=["zendaya"])
+
+    result, _ = await _apply_casting(session, film=film, cast=["Josh Brolin"])
+    await session.commit()
+
+    assert result.events_created == 1
+
+
+async def test_a_story_casting_event_is_not_a_credit_dedup_target(session):
+    """Scoped to `provenance='catalog'`, like the field half: two story-triggered casting
+    events on one film is governed by the `casting-recorded` rule, unchanged here."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    await _casting_event(session, film, ["zendaya"], url="https://e/prior")
+    await session.commit()
+
+    result, story = await _apply_casting(session, film=film, cast=["Zendaya"])
+    await session.commit()
+
+    assert result.events_created == 0
+    assert result.stories_rejected == 1
+    assert story.link_note == "casting-recorded"
+
+
+async def test_attaching_records_the_performers_the_card_now_names(session):
+    """The story brought a performer the catalog card did not name. Unless the attach records
+    them, the *next* story about that performer finds no overlap and opens a second card for
+    a beat this one already covers."""
+    film = Film(tmdb_id=1, title="Runner", status="In Production")
+    session.add(film)
+    await session.flush()
+    carded = await _catalog_credit_event(session, film, event_type="casting", names=["zendaya"])
+
+    first, _ = await _apply_casting(
+        session, film=film, cast=["Zendaya", "Josh Brolin"], url="https://e/cast-1"
+    )
+    await session.commit()
+    await session.refresh(carded)
+
+    assert first.events_created == 0
+    assert carded.subject_key == ["zendaya", "josh brolin"]
+
+    second, story = await _apply_casting(
+        session, film=film, cast=["Josh Brolin"], url="https://e/cast-2"
+    )
+    await session.commit()
+
+    assert second.events_created == 0
+    events = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    assert [e.id for e in events] == [carded.id]
+    link = (
+        await session.execute(select(EventStory).where(EventStory.story_id == story.id))
+    ).scalar_one()
+    assert link.event_id == carded.id

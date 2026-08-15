@@ -7,7 +7,34 @@ services:
       DATABASE_URL: "${DATABASE_URL}"
       ADMIN_TOKEN: "${ADMIN_TOKEN}"
       TMDB_API_KEY: "${TMDB_API_KEY}"
+      # Kept populated even though no stage routes here today: rollback off DeepInfra is then
+      # eight Coolify env vars and a restart, with no redeploy and no key to go and find.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      DEEPINFRA_API_KEY: "${DEEPINFRA_API_KEY}"
+      # All four stages run on DeepInfra (ADR-0012). The fallbacks below are the production
+      # values, not the code defaults — the code still defaults to Anthropic, because that is
+      # what a test or a script with no environment should get. Overriding any of these in
+      # Coolify is the rollback path, and boot-time validation (NEU-981) refuses an unknown
+      # `(provider, model)` pair or a missing credential rather than failing mid-publish.
+      #
+      # `cluster` is the one stage on the Pro tier. It carries the highest quality bar —
+      # ADR-0004, seven jobs in one call — and its failure mode is asymmetric: an over-merge
+      # swallows a beat out of the timeline entirely rather than showing something wrong.
+      LINK_PROVIDER: "${LINK_PROVIDER:-deepinfra}"
+      LINK_MODEL: "${LINK_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      CLUSTER_PROVIDER: "${CLUSTER_PROVIDER:-deepinfra}"
+      CLUSTER_MODEL: "${CLUSTER_MODEL:-deepseek-ai/DeepSeek-V4-Pro}"
+      SOURCE_JUDGE_PROVIDER: "${SOURCE_JUDGE_PROVIDER:-deepinfra}"
+      SOURCE_JUDGE_MODEL: "${SOURCE_JUDGE_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      SUMMARY_PROVIDER: "${SUMMARY_PROVIDER:-deepinfra}"
+      SUMMARY_MODEL: "${SUMMARY_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      # Both providers in scope are reasoning models, and reasoning tokens count against the
+      # reply ceiling while staying invisible in the returned text. The batch size of 20 was
+      # derived from a worst-case *Haiku* reply (config.py), so it is the number most likely to
+      # be wrong here: a truncated reply fails to parse and takes every story in the batch with
+      # it. Here as a knob so the answer is an env change, and `ingest.llm_call.truncated`
+      # (NEU-1014) is what says whether it needs turning.
+      LINK_BATCH_SIZE: "${LINK_BATCH_SIZE:-10}"
       LOG_LEVEL: "INFO"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
       # BE PUBLIC_BASE_URL must equal the FE public origin (VITE_PUBLIC_SITE_URL / Cloudflare
@@ -21,20 +48,54 @@ services:
       ENVIRONMENT: "production"
       SENTRY_DSN: "${SENTRY_DSN:-}"
       # healthchecks.io deadman ping URLs for the Coolify scheduled tasks that run
-      # `python -m upmovies.pipeline_run daily|hourly` in this container. Optional — unset
-      # makes the ping a no-op (the pipeline still runs).
+      # `python -m upmovies.pipeline_run daily|hourly|sweep` in this container. Optional —
+      # unset makes the ping a no-op (the pipeline still runs). The sweep gets its own check
+      # rather than riding the daily one: it runs on its own slot ~2h ahead of daily and is
+      # not a stage in that chain, so a sweep that stopped running would leave the daily
+      # deadman perfectly green while the catalog quietly stopped moving (ADR-0013, spec §6.1).
       HEALTHCHECK_DAILY_URL: "${HEALTHCHECK_DAILY_URL:-}"
       HEALTHCHECK_HOURLY_URL: "${HEALTHCHECK_HOURLY_URL:-}"
-      # Anthropic Message Batch toggles. Defaulted OFF in prod as of 2026-07-21: batch queue
-      # latency became erratic and uncorrelated with batch size (a 14-request batch took
-      # 12h42m on 07-17; a 21-request one took 4h50m on 07-21), so complete_batch's 3600s
-      # poll deadline started expiring and failing the daily link stage. Unlinked stories
-      # age out of the LINK_RECENCY_DAYS (4) window permanently, so a run that keeps missing
-      # loses data. The sequential path costs ~2x per token but completes in minutes.
-      # Flip back to "true" once batch submit/collect is decoupled — see NEU-742.
-      LINK_USE_BATCHES: "${LINK_USE_BATCHES:-false}"
-      CLUSTER_USE_BATCHES: "${CLUSTER_USE_BATCHES:-false}"
-      SUMMARY_USE_BATCHES: "${SUMMARY_USE_BATCHES:-false}"
+      HEALTHCHECK_SWEEP_URL: "${HEALTHCHECK_SWEEP_URL:-}"
+      # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
+      # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
+      # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
+      # to boot. **They are pinned to the code defaults by test**, which keeps a fresh
+      # environment seeded correctly — but note what that does *not* cover: Coolify reads
+      # each `${NAME:-default}` once, stores a UI entry, and thereafter that entry is what
+      # reaches the container. Editing a fallback here does not change a running deployment.
+      # NEU-1088's K=35 landed in the code and in this file and prod kept running 25.
+      # `LINK_RETRIEVAL_MODE` was retired with the roster path (NEU-1004) — retrieval
+      # is now the only link path, and rollback is a revert and redeploy (spec §5.5).
+      LINK_RETRIEVAL_THRESHOLD: "${LINK_RETRIEVAL_THRESHOLD:-0.5}"
+      # K moved 35 -> 47 at NEU-1135. This line is a **seed, not a runtime default**: Coolify
+      # already holds a UI entry for this variable, and the UI entry is what reaches the
+      # container, so editing here ships nothing on its own. The deploy is not done until the
+      # value is changed in the Coolify UI and confirmed with `printenv` on the running
+      # container — see the checklist in `.claude/CLAUDE.md` and §5 of the v0.3.0 runbook.
+      # NEU-1088 skipped that step and prod ran the old K for another hour.
+      LINK_RETRIEVAL_MAX_CANDIDATES: "${LINK_RETRIEVAL_MAX_CANDIDATES:-47}"
+      # The retrieval-health hard breach (NEU-1002): above this zero-candidate rate the link
+      # run finalizes `failed`, aborting the daily chain and pinging the deadman. Here for the
+      # same reason as T and K — an incident is answered from Coolify env, not a redeploy.
+      # 1.0 disarms it; the minimum denominator is what keeps a quiet day from tripping it.
+      LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE: "${LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE:-0.10}"
+      LINK_RETRIEVAL_HEALTH_MIN_STORIES: "${LINK_RETRIEVAL_HEALTH_MIN_STORIES:-50}"
+      # The retrieval-health *soft* breach (NEU-1088): above this cap-saturation rate the run
+      # is flagged and says so on its detail line, but still succeeds — saturation is drift,
+      # and the daily chain is fail-fast. Reaffirmed at 0.05 by NEU-1135's grid, and still
+      # provisional by construction, so expect to turn it from Coolify rather than by a
+      # redeploy.
+      LINK_RETRIEVAL_SATURATION_WARN_RATE: "${LINK_RETRIEVAL_SATURATION_WARN_RATE:-0.05}"
+      # How long an undated film may stay quiescent before it goes dormant (ADR-0015). Here
+      # for the same reason as T and K — the M4 tuning ticket sets it from the discovery
+      # probe, and that should be a Coolify env change rather than a redeploy. The fallback
+      # repeats the code default deliberately: unset would pass an empty string and fail to boot.
+      SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
+      # How often the sweep still re-fetches a dormant film. Dormancy is not a one-way door —
+      # the change that revives a project can only be seen by reading it — so this is the
+      # cadence, not an exemption (ADR-0015, §4.5). Same reasoning as above for being here:
+      # M4 tunes it from the probe, and that should be an env change rather than a redeploy.
+      SWEEP_DORMANT_REFRESH_DAYS: "${SWEEP_DORMANT_REFRESH_DAYS:-30}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

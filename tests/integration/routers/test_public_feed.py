@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from tests.fixtures.public import ref
+
 
 async def test_feed_orders_by_created_at_desc(client, make_film, add_event):
     film = await make_film(slug="film-2026", title="A Film")
@@ -51,7 +53,7 @@ async def test_feed_item_shape_includes_film_and_sources(client, make_film, add_
     )
 
     item = (await client.get("/feed")).json()["items"][0]
-    assert item["film_slug"] == "odyssey-2026"
+    assert item["film_ref"] == ref(film)
     assert item["film_title"] == "The Odyssey"
     assert item["event_type"] == "casting"
     assert item["confidence"] == "confirmed"
@@ -80,7 +82,7 @@ async def test_feed_spans_multiple_films(client, make_film, add_event):
     await add_event(film=b, summary="From B.", created_at=datetime(2026, 6, 2, tzinfo=UTC))
 
     body = (await client.get("/feed")).json()
-    assert [item["film_slug"] for item in body["items"]] == ["b-2026", "a-2026"]
+    assert [item["film_ref"] for item in body["items"]] == [ref(b), ref(a)]
 
 
 async def test_feed_pagination(client, make_film, add_event):
@@ -214,3 +216,56 @@ async def test_feed_quiets_non_primary_country_release_date(client, make_film, a
     summaries = {i["summary"] for i in r.json()["items"]}
     assert "US date set." in summaries
     assert "Dated in India." not in summaries
+
+
+async def test_feed_renders_a_catalog_sourced_event_with_no_outlets(client, make_film, add_event):
+    """ADR-0014: a catalog event has a deterministic summary and no stories. It must still card
+    on the feed — an empty `sources` array is a designed state the frontend attributes to TMDB,
+    not a degenerate one, and `provenance` is what tells it apart from a story-triggered event."""
+    film = await make_film(slug="undated-film", title="An Undated Film")
+    await add_event(
+        film=film,
+        event_type="release_date",
+        confidence="rumored",
+        summary="Release date set to 14 August 2026.",
+        provenance="catalog",
+        summary_model="deterministic",
+    )
+
+    r = await client.get("/feed")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert items[0]["summary"] == "Release date set to 14 August 2026."
+    assert items[0]["provenance"] == "catalog"
+    assert items[0]["sources"] == []
+
+
+async def test_feed_marks_story_triggered_events_as_story_provenance(client, make_film, add_event):
+    film = await make_film(slug="reported-film", title="A Reported Film")
+    await add_event(film=film, event_type="casting", summary="Someone joined the cast.")
+
+    r = await client.get("/feed")
+    assert r.json()["items"][0]["provenance"] == "story"
+
+
+async def test_feed_cards_a_crew_attachment(client, make_film, add_event):
+    """`crew_attached` is deliberately not in `HIDDEN_EVENT_TYPES` (ADR-0014): the director
+    attaching to an undated nobody has written about is the beat the expansion exists for, so
+    it has to reach the feed the day it is carded."""
+    film = await make_film(slug="undated-film", title="An Undated Film")
+    await add_event(
+        film=film,
+        event_type="crew_attached",
+        confidence="rumored",
+        summary="Denis Villeneuve attached to direct.",
+        provenance="catalog",
+        summary_model="deterministic",
+    )
+
+    r = await client.get("/feed")
+    assert r.status_code == 200
+    (item,) = r.json()["items"]
+    assert item["event_type"] == "crew_attached"
+    assert item["summary"] == "Denis Villeneuve attached to direct."
+    assert item["sources"] == []

@@ -2,20 +2,31 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from tests.fixtures.gateway import StubGateway
 from upmovies.catalog.models import Film
+from upmovies.ingest.runs import create_run
 from upmovies.link.source_stage import run_source_quality_stage
-from upmovies.llm.client import Usage
+from upmovies.llm import CallResult, Usage
 from upmovies.news.models import SourceDomain, Story
 
 
 class _FakeClient:
     def __init__(self, text):
         self._text = text
-        self.calls = 0
+        self.n_calls = 0
 
-    async def complete_with_usage(self, *, model, system, messages, max_tokens: int = 1024):
-        self.calls += 1
-        return self._text, Usage(input_tokens=1, output_tokens=1)
+    async def complete_call(self, *, model, prompt, calls):
+        self.n_calls += 1
+        return calls.record(
+            CallResult(text=self._text, usage=Usage(input_tokens=1, output_tokens=1))
+        )
+
+
+async def _run_id(session):
+    """A run to attribute this stage's `llm_call` rows to (NEU-975)."""
+    run_id = await create_run(session, kind="link")
+    await session.commit()
+    return run_id
 
 
 async def _film(session, slug):
@@ -58,7 +69,11 @@ async def test_judges_unknown_domains_and_blocks(session_factory, session):
         return None  # no Google URLs here
 
     result, usage = await run_source_quality_stage(
-        session_factory=session_factory, client=client, judge_model="m", resolver=_resolver
+        session_factory=session_factory,
+        gateway=StubGateway(client),
+        run_id=await _run_id(session),
+        judge_model="claude-haiku-4-5",
+        resolver=_resolver,
     )
 
     assert result.judged == 1  # only mshale.com was unknown (variety.com pre-existed)
@@ -94,7 +109,11 @@ async def test_resolves_google_urls_before_judging(session_factory, session):
         return "https://deadline.com/real-story"
 
     result, usage = await run_source_quality_stage(
-        session_factory=session_factory, client=client, judge_model="m", resolver=_resolver
+        session_factory=session_factory,
+        gateway=StubGateway(client),
+        run_id=await _run_id(session),
+        judge_model="claude-haiku-4-5",
+        resolver=_resolver,
     )
     assert result.resolved == 1
     row = (
@@ -111,17 +130,21 @@ async def test_resolves_google_urls_before_judging(session_factory, session):
     assert judged.llm_tier == "trusted"
 
 
-async def test_empty_when_nothing_linked(session_factory):
+async def test_empty_when_nothing_linked(session_factory, session):
     client = _FakeClient("[]")
 
     async def _resolver(c, url):
         return None
 
     result, usage = await run_source_quality_stage(
-        session_factory=session_factory, client=client, judge_model="m", resolver=_resolver
+        session_factory=session_factory,
+        gateway=StubGateway(client),
+        run_id=await _run_id(session),
+        judge_model="claude-haiku-4-5",
+        resolver=_resolver,
     )
     assert result == type(result)(resolved=0, judged=0, blocked=0)
-    assert client.calls == 0
+    assert client.n_calls == 0
 
 
 async def test_backfill_judges_all_resolved_domains(session_factory, session):
@@ -172,14 +195,14 @@ async def test_backfill_judges_all_resolved_domains(session_factory, session):
     await session.commit()
 
     class _Client:
-        async def complete_with_usage(self, *, model, system, messages, max_tokens=4096):
+        async def complete_call(self, *, model, prompt, calls):
             import json
 
-            from upmovies.llm.client import Usage
+            from upmovies.llm import CallResult, Usage
 
-            items = json.loads(messages[0]["content"])
+            items = json.loads(prompt.user)
             arr = [{"domain": it["domain"], "tier": "acceptable", "reason": "ok"} for it in items]
-            return json.dumps(arr), Usage(output_tokens=3)
+            return calls.record(CallResult(text=json.dumps(arr), usage=Usage(output_tokens=3)))
 
     judged = await backfill_source_domains(
         session_factory=session_factory, client=_Client(), judge_model="claude-haiku-4-5"

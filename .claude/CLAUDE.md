@@ -4,8 +4,16 @@ FastAPI service backing the Upcoming Movies Tracker. Python 3.13, SQLAlchemy 2 (
 
 ## Linear
 
-- `linear_initiative`: Upcoming Movies Tracker
+- `linear_initiative`: backlotter
 - `linear_team`: Neuroticsasquatch
+- `loop_base`: main — v0.3.0 shipped 2026-08-11 and `release/v0.3.0` is fully merged, so work
+  branches from `main` again. **Repoint this when the next release branch is cut**, and back to
+  `main` when it merges; a stale value here silently forks new work off a dead branch.
+
+## Docs
+
+- `specs_dir`: `../docs` — the umbrella `~/projects/upcoming-movies/docs`, shared with the
+  frontend repo. Specs in `specs/`, plans in `plans/`.
 
 ## Golden rule: everything runs in the container via `task`
 
@@ -20,6 +28,10 @@ Do **not** run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. 
 | `task migrate` | `alembic upgrade head` |
 | `task makemigration -- "msg"` | autogenerate a migration |
 | `task shell` / `task logs` | bash in container / stream logs |
+| `task db:refresh` | pull prod `catalog`/`news`/`ingest` into the local DB — **local `app`/user data untouched** |
+| `task db:refresh:app` / `db:refresh:all` | same, including `app` — drops local users, prompts first |
+
+`db:refresh` needs `PROD_SSH` in `.env` (see `.env.example`); it reads prod only, and every write goes through the local Postgres container. Use it before any measurement script — the dev catalog is a fraction of prod's, so accuracy numbers taken against it don't mean much.
 
 Before claiming work done, `task test`, `task lint`, `task typecheck` must all be green (ruff also reformats — run `task format`).
 
@@ -54,13 +66,22 @@ DB is split into Postgres **schemas**: `app`, `catalog`, `news`, `ingest`. Tests
 
 - **Running a single integration test file in isolation errors** with a pytest-asyncio session-loop warning — this is a known quirk, not your bug. Run the whole suite, or scope to a directory.
 - If the long-running container starts throwing async-fixture errors across the whole suite, it's stale state: `docker compose restart upmovies-backend`.
+- **`task db:refresh` silently reverts migrations while Alembic still reports head.** It restores `catalog`/`news`/`ingest` from prod but leaves `app` alone — and `alembic_version` lives in `app`. So after a refresh the local DB carries prod's (older) content schemas while `alembic current` reads head, and any table or column a recent migration added to those three schemas is simply gone. Re-apply with `alembic stamp <prod's revision> && task migrate`; don't trust `alembic current` after a refresh.
+- **Coolify shadows the compose fallbacks, so changing a tuned constant takes two edits.** A `${NAME:-default}` in `docker-compose.prod.yml` is a **seed, not a runtime default**: Coolify parses it the first time it meets the variable, stores a UI entry with that value, and from then on the UI entry is what reaches the container. Editing the fallback later is a **silent no-op in production**. NEU-1088 moved K from 25 to 35 in the code and in the compose file, CI passed, the deploy succeeded — and prod ran 25 for another hour. A variable that is genuinely *new* does come through at its fallback, which is the tell (and a handy tracer for whether a deploy landed). Coolify also **refuses to delete** a UI entry whose name appears in the compose file, so the fix is to edit the value there, not to remove it — and don't strip the `${...}` line to force a delete, because that is what makes the constant tunable without a redeploy in the first place.
+- **Deploy checklist for any tuned constant** (T, K, the health thresholds, dormancy, batch size): change the code default → change the fallback in `docker-compose.prod.yml` (`test_prod_compose_fallbacks_match_the_code_defaults` pins the retrieval ones) → **edit the value in the Coolify UI and restart** → verify against the running container, not the compose file:
+  ```bash
+  ssh <PROD_SSH> 'docker exec $(docker ps --format "{{.Names}}" | grep -i upmovies-backend | head -1) printenv | grep LINK_RETRIEVAL | sort'
+  ```
+  Check the container's name and created-time too — Coolify replaces the container on deploy, so a reading taken mid-deploy can come from the outgoing one.
+- **The compose-fallback test guards the seed, not production — and it only runs in CI.** `test_prod_compose_fallbacks_match_the_code_defaults` needs `docker-compose.prod.yml`, which is not mounted into the dev container, so it **skips** locally and runs against the checkout in CI. It was briefly mounted; a single-file bind mount tracks the inode, so every `git checkout` replaced the file and left the mount dangling, failing the suite on a path that was present on the host all along. A skip you can see beats a mount that breaks on every branch switch.
+- **A long-running container holds the env it was created with.** Editing `docker-compose.yml` does not change a running container, so `printenv` inside it can disagree with the compose file for hours. `docker compose up -d --force-recreate upmovies-backend` after any env change, and `printenv` to confirm rather than reading the compose file.
 - The TMDB client uses v3 `api_key` query auth. `TMDB_API_KEY` must be set or the app won't boot.
 
 ## Commits / PRs
 
 Use `/commit-msg` for commit messages and `/pr-desc` for PR descriptions, post-processed to Conventional Commits.
 
-- **Commits:** Conventional Commits subject (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, …). **No** Linear ID in the subject (optional `Refs NEU-123.` in the body); **no** `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`.
+- **Commits:** Conventional Commits subject with a trailing Linear ID parenthetical — `feat: add X (NEU-123)`, same format as the PR title. Drop the parenthetical when no ticket maps to the change (don't invent one). **No** `🤖 Generated with Claude Code` footer; **no** `Co-Authored-By`. Commits before 2026-08-11 keep the ID out of the subject and carry `Refs NEU-123.` in the body instead — that was the old rule; don't copy it from history.
 - **PR title:** Conventional Commits + trailing Linear ID parenthetical: `feat: add X (NEU-123)`. The `🤖 Generated with Claude Code` footer is fine in the PR **body** only.
 - The GitHub↔Linear connector moves ticket status automatically — don't touch it. Branch per ticket (Linear gives the branch name).
 

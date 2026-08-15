@@ -1,0 +1,31 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "content": "OK.",
+        "name": null,
+        "reasoning_content": null,
+        "role": "assistant",
+        "tool_calls": []
+      }
+    }
+  ],
+  "created": 1786210991,
+  "id": "chatcmpl-R5R1oU3GNaKFIoLtVAveuK4o",
+  "model": "deepseek-ai/DeepSeek-V4-Flash",
+  "object": "chat.completion",
+  "service_tier": "default",
+  "usage": {
+    "completion_tokens": 3,
+    "estimated_cost": 0.00010551600000000001,
+    "prompt_tokens": 4648,
+    "prompt_tokens_details": {
+      "cache_write_tokens": null,
+      "cached_tokens": 4352
+    },
+    "total_tokens": 4651
+  }
+}

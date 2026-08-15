@@ -4,20 +4,19 @@ before they reach the link stage. Pure — no I/O.
 A per-film Google search (`<title> when:Nd`, deliberately unquoted) returns a large,
 roughly title-independent junk floor. This drops headlines that clearly aren't about the
 film while keeping anything with enough title-token overlap; the LLM linker remains the
-precision authority on whatever survives."""
+precision authority on whatever survives.
 
-import re
+Tokenization is shared with candidate retrieval rather than duplicated here, so a change to
+`link/retrieval/normalize.significant_tokens` moves this filter's behaviour too — check
+`scripts/measure_title_filter.py` before retuning it.
 
-# Common words that carry no disambiguating signal in a film title.
-_STOPWORDS: frozenset[str] = frozenset(
-    {"the", "a", "an", "of", "and", "or", "to", "in", "on", "at", "for", "part"}
-)
+**Unmeasured since NEU-1009.** The initialism collapse gave a dotted title like `F.A.S.T.`
+its first token, which moves it out of the no-tokens branch below and starts it filtering —
+directionally an improvement, but not measured, because this whole module is dormant:
+`news_google_enabled` defaults to `False` (ADR-0001) and hard-gates the only caller,
+`news/fetcher.py`. Re-run `scripts/measure_title_filter.py` if that flag is ever flipped."""
 
-_WORD_RE = re.compile(r"\w+", re.UNICODE)
-
-
-def _significant_tokens(text: str) -> list[str]:
-    return [t for t in _WORD_RE.findall(text.lower()) if len(t) > 1 and t not in _STOPWORDS]
+from upmovies.link.retrieval.normalize import significant_tokens
 
 
 def title_matches(film_title: str, headline: str, *, min_ratio: float) -> bool:
@@ -27,9 +26,9 @@ def title_matches(film_title: str, headline: str, *, min_ratio: float) -> bool:
     / non-Latin that tokenizes to nothing) is always kept — we don't filter what we can't
     assess. Otherwise keep when the fraction of significant title tokens present as whole
     words in the headline is >= min_ratio (single-token titles thus require that token)."""
-    title_tokens = _significant_tokens(film_title)
+    title_tokens = significant_tokens(film_title)
     if not title_tokens:
         return True
-    headline_tokens = set(_significant_tokens(headline))
+    headline_tokens = set(significant_tokens(headline))
     hits = sum(1 for t in title_tokens if t in headline_tokens)
     return hits / len(title_tokens) >= min_ratio

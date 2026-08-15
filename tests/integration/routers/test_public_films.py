@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from tests.fixtures.public import ref
+
 
 async def test_detail_returns_chronological_summarized_events_with_sources(
     client, make_film, add_event
@@ -47,7 +49,7 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     r = await client.get("/films/odyssey-2026")
     assert r.status_code == 200
     body = r.json()
-    assert body["slug"] == "odyssey-2026"
+    assert body["ref"] == ref(film)
     assert body["title"] == "The Odyssey"
     assert body["release_date"] == "2026-07-17"
     assert body["release_year"] == 2026
@@ -341,6 +343,32 @@ async def test_detail_includes_origin_country_dates(
     assert len(rds) == 2
 
 
+async def test_detail_includes_every_origin_country_not_just_the_first(
+    client, make_film, add_event, add_release_date, session
+):
+    """A co-production carries several origins and a date in any of them is as much the
+    film's own market as one in the first-listed. The page used to read `origin_country[0]`
+    while `_region_visible` read all of them, so it could hide a date whose event it
+    surfaced; both now read `catalog.release_grade.displayable_regions` (NEU-1121)."""
+    film = await make_film(slug="rd-coprod-2026", title="Co-production")
+    film.origin_country = ["GB", "FR"]
+    session.add(film)
+    await session.commit()
+    await session.refresh(film)
+
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="FR",
+        release_type=3,
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+    r = await client.get("/films/rd-coprod-2026")
+    assert r.status_code == 200
+    assert [rd["country"] for rd in r.json()["release_dates"]] == ["FR"]
+
+
 # ── film metadata (genres, companies, collection, scalars) ────────────────────
 
 
@@ -598,9 +626,9 @@ async def test_search_title_match_case_insensitive_and_substring(client, make_fi
     for q in ["odyssey", "ODYSSEY", "dyss"]:
         r = await client.get("/films/search", params={"q": q})
         assert r.status_code == 200, f"q={q!r} → {r.status_code}"
-        slugs = [i["slug"] for i in r.json()["items"]]
-        assert "odyssey-2026" in slugs, f"q={q!r}: expected odyssey-2026 in {slugs}"
-        assert "other-2026" not in slugs, f"q={q!r}: other-2026 should be excluded"
+        refs = [i["ref"] for i in r.json()["items"]]
+        assert ref(film) in refs, f"q={q!r}: expected odyssey-2026 in {refs}"
+        assert ref(other) not in refs, f"q={q!r}: other-2026 should be excluded"
 
 
 async def test_search_original_title_match(client, make_film, add_event, session):
@@ -618,9 +646,9 @@ async def test_search_original_title_match(client, make_film, add_event, session
 
     r = await client.get("/films/search", params={"q": "기생충"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "parasite-2019" in slugs
-    assert "no-match-2026" not in slugs
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert ref(film) in refs
+    assert ref(no_match) not in refs
 
 
 async def test_search_covers_films_without_news(client, make_film, add_event):
@@ -636,14 +664,14 @@ async def test_search_covers_films_without_news(client, make_film, add_event):
     unsummarized = await make_film(slug="unsummarized-odyssey-2026", title="The Odyssey Unsum")
     await add_event(film=unsummarized, summary=None)
     # no events at all
-    _ = await make_film(slug="bare-odyssey-2026", title="The Odyssey Bare")
+    bare = await make_film(slug="bare-odyssey-2026", title="The Odyssey Bare")
 
     r = await client.get("/films/search", params={"q": "Odyssey"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "shown-2026" in slugs
-    assert "unsummarized-odyssey-2026" in slugs
-    assert "bare-odyssey-2026" in slugs
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert ref(shown) in refs
+    assert ref(unsummarized) in refs
+    assert ref(bare) in refs
 
 
 async def test_search_covers_films_with_only_other_events(client, make_film, add_event):
@@ -655,9 +683,9 @@ async def test_search_covers_films_with_only_other_events(client, make_film, add
 
     r = await client.get("/films/search", params={"q": "Odyssey"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "real-search-2026" in slugs
-    assert "otheronly-search-2026" in slugs
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert ref(shown) in refs
+    assert ref(other_only) in refs
 
 
 async def test_search_envelope_and_pagination(client, make_film, add_event):
@@ -724,7 +752,7 @@ async def test_search_item_shape(client, make_film, add_event):
     assert len(items) == 1
     item = items[0]
 
-    assert item["slug"] == "shape-2026"
+    assert item["ref"] == ref(film)
     assert item["title"] == "Shape Film"
     assert item["release_year"] == 2026
     assert item["poster_path"] == "/shape.jpg"
@@ -756,9 +784,9 @@ async def test_search_ignores_separators(client, make_film, add_event):
     for q in ("spiderman", "spider man", "Spider-Man", "spider  man"):
         r = await client.get("/films/search", params={"q": q})
         assert r.status_code == 200, f"q={q!r} → {r.status_code}"
-        slugs = [i["slug"] for i in r.json()["items"]]
-        assert "spider-man-2026" in slugs, f"q={q!r}: {slugs}"
-        assert "unrelated-2026" not in slugs, f"q={q!r}: {slugs}"
+        refs = [i["ref"] for i in r.json()["items"]]
+        assert ref(film) in refs, f"q={q!r}: {refs}"
+        assert ref(other) not in refs, f"q={q!r}: {refs}"
 
 
 async def test_search_ignores_diacritics(client, make_film, add_event):
@@ -769,15 +797,15 @@ async def test_search_ignores_diacritics(client, make_film, add_event):
     await add_event(film=resume, summary="s")
 
     shogun_slugs = [
-        i["slug"]
+        i["ref"]
         for i in (await client.get("/films/search", params={"q": "shogun"})).json()["items"]
     ]
-    assert "shogun-2026" in shogun_slugs, shogun_slugs
+    assert ref(shogun) in shogun_slugs, shogun_slugs
     resume_slugs = [
-        i["slug"]
+        i["ref"]
         for i in (await client.get("/films/search", params={"q": "resume"})).json()["items"]
     ]
-    assert "resume-2026" in resume_slugs, resume_slugs
+    assert ref(resume) in resume_slugs, resume_slugs
 
 
 # ── NEU-406: alt-title search extension ──────────────────────────────────────
@@ -792,8 +820,8 @@ async def test_search_found_by_aka(client, make_film, add_event, attach_alt_titl
 
     r = await client.get("/films/search", params={"q": "Known AKA"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "aka-match-2026" in slugs
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert ref(film) in refs
 
 
 async def test_search_aka_no_dedup(client, make_film, add_event, attach_alt_titles):
@@ -804,8 +832,8 @@ async def test_search_aka_no_dedup(client, make_film, add_event, attach_alt_titl
 
     r = await client.get("/films/search", params={"q": "Odyssey"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert slugs.count("dual-match-2026") == 1
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert refs.count(ref(film)) == 1
 
 
 async def test_search_aka_covers_films_without_news(
@@ -828,10 +856,10 @@ async def test_search_aka_covers_films_without_news(
 
     r = await client.get("/films/search", params={"q": "Searchable AKA"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "aka-visible-2026" in slugs
-    assert "aka-unsummarized-2026" in slugs
-    assert "aka-bare-2026" in slugs
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert ref(with_news) in refs
+    assert ref(unsummarized) in refs
+    assert ref(bare) in refs
 
 
 # ── credits: cast and crew exposure ──────────────────────────────────────────
@@ -1011,11 +1039,11 @@ async def test_search_primary_title_ranks_before_aka(
 
     r = await client.get("/films/search", params={"q": "Fantastic Journey"})
     assert r.status_code == 200
-    slugs = [i["slug"] for i in r.json()["items"]]
-    assert "primary-title-hit-2026" in slugs
-    assert "aka-only-hit-2026" in slugs
+    refs = [i["ref"] for i in r.json()["items"]]
+    assert ref(primary_hit) in refs
+    assert ref(aka_only) in refs
     # Primary-title match must appear before the AKA-only match.
-    assert slugs.index("primary-title-hit-2026") < slugs.index("aka-only-hit-2026")
+    assert refs.index(ref(primary_hit)) < refs.index(ref(aka_only))
 
 
 # ── external IDs (imdb_id / tmdb_id) ─────────────────────────────────────────
@@ -1116,3 +1144,103 @@ async def test_arc_stage_ignores_events_and_tracks_tmdb_status(client, make_film
     r = await client.get("/films/mshale-2027")
     assert r.status_code == 200
     assert r.json()["arc_stage"] == "shooting"
+
+
+async def test_detail_renders_a_catalog_sourced_event_with_no_outlets(client, make_film, add_event):
+    """The film page is the other read path that inner-joins EventSummary, so a catalog event
+    with a deterministic body has to appear here too (spec §5.4)."""
+    film = await make_film(slug="undated-detail", title="An Undated Film")
+    await add_event(
+        film=film,
+        event_type="release_date",
+        confidence="rumored",
+        summary="Release date set to 14 August 2026.",
+        provenance="catalog",
+        summary_model="deterministic",
+    )
+    await add_event(film=film, event_type="casting", summary="Someone joined the cast.")
+
+    r = await client.get("/films/undated-detail")
+    assert r.status_code == 200
+    events = {e["event_type"]: e for e in r.json()["events"]}
+    assert events["release_date"]["provenance"] == "catalog"
+    assert events["release_date"]["summary"] == "Release date set to 14 August 2026."
+    assert events["release_date"]["sources"] == []
+    assert events["casting"]["provenance"] == "story"
+
+
+# NEU-1143 — film URLs are `<tmdb_id>-<title-slug>`, resolved on the leading id. `film.slug` stays
+# immutable and now exists only so URLs minted before this scheme keep resolving.
+
+
+async def test_film_resolves_by_ref(client, make_film, add_event):
+    film = await make_film(slug="odyssey-2026", title="The Odyssey")
+    await add_event(film=film, summary="s")
+
+    r = await client.get(f"/films/{ref(film)}")
+    assert r.status_code == 200
+    assert r.json()["ref"] == ref(film)
+
+
+async def test_film_resolves_by_bare_id_and_reports_the_canonical_ref(client, make_film, add_event):
+    film = await make_film(slug="odyssey-2026", title="The Odyssey")
+    await add_event(film=film, summary="s")
+
+    body = (await client.get(f"/films/{film.tmdb_id}")).json()
+    assert body["ref"] == f"{film.tmdb_id}-the-odyssey"
+
+
+async def test_film_ignores_the_decorative_half_of_a_ref(client, make_film, add_event):
+    """The trailing slug is cosmetic — a stale or wrong one still reaches the film, and the
+    response reports the canonical ref so the caller can redirect."""
+    film = await make_film(slug="odyssey-2026", title="The Odyssey")
+    await add_event(film=film, summary="s")
+
+    body = (await client.get(f"/films/{film.tmdb_id}-utterly-wrong-title")).json()
+    assert body["ref"] == f"{film.tmdb_id}-the-odyssey"
+
+
+async def test_legacy_slug_url_still_resolves(client, make_film, add_event):
+    """URLs minted before NEU-1143 are indexed by search engines — they must not 404."""
+    film = await make_film(slug="odyssey-2026", title="The Odyssey")
+    await add_event(film=film, summary="s")
+
+    body = (await client.get("/films/odyssey-2026")).json()
+    assert body["ref"] == f"{film.tmdb_id}-the-odyssey"
+
+
+async def test_ref_follows_a_retitled_film_while_its_legacy_slug_keeps_resolving(
+    client, make_film, add_event, session
+):
+    """The whole point: the slug was frozen at announcement, the ref tracks the real title."""
+    film = await make_film(slug="untitled-shang-chi-sequel", title="Untitled Shang-Chi Sequel")
+    await add_event(film=film, summary="s")
+
+    film.title = "Shang-Chi 2"
+    session.add(film)
+    await session.commit()
+
+    body = (await client.get("/films/untitled-shang-chi-sequel")).json()
+    assert body["ref"] == f"{film.tmdb_id}-shang-chi-2"
+    assert (await client.get(f"/films/{film.tmdb_id}-shang-chi-2")).status_code == 200
+
+
+async def test_a_numeric_title_slug_prefers_the_legacy_slug_over_the_id_it_looks_like(
+    client, make_film, add_event, session
+):
+    """`1917-2019` is a legacy slug AND parses as id 1917. The slug match wins, because that is
+    the URL actually minted for that film — the one already indexed."""
+    war = await make_film(slug="1917-2019", title="1917")
+    await add_event(film=war, summary="s")
+    decoy = await make_film(slug="decoy-2026", title="Decoy")
+    decoy.tmdb_id = 1917
+    session.add(decoy)
+    await add_event(film=decoy, summary="s")
+    await session.commit()
+
+    body = (await client.get("/films/1917-2019")).json()
+    assert body["title"] == "1917"
+
+
+async def test_unknown_ref_is_404(client):
+    assert (await client.get("/films/99999999-nothing-here")).status_code == 404

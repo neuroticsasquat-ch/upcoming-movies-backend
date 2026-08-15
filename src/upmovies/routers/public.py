@@ -36,12 +36,15 @@ async def search_films(
     return await service.get_film_search(session, q=q, limit=limit, offset=offset)
 
 
-@router.get("/films/{slug}", response_model=FilmDetailResponse)
+@router.get("/films/{ref}", response_model=FilmDetailResponse)
 async def get_film(
-    slug: str,
+    ref: str,
     session: AsyncSession = Depends(get_session),
 ) -> FilmDetailResponse:
-    film = await service.get_film_detail(session, slug)
+    """`ref` is `<tmdb_id>-<title-slug>`, resolved on the leading id; a legacy `film.slug` still
+    resolves. The response's own `ref` is the canonical one — callers redirect when it differs
+    from what was requested."""
+    film = await service.get_film_detail(session, ref)
     if film is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="film not found")
     return film

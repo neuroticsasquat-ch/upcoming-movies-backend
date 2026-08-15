@@ -28,7 +28,8 @@ from upmovies.db import SessionLocal
 from upmovies.link.cluster import assemble_cluster_payload, parse_cluster_groups
 from upmovies.link.metrics import compute_cluster_metrics
 from upmovies.link.validation import load_validation_set
-from upmovies.llm.client import AnthropicClient
+from upmovies.llm import AnthropicClient
+from upmovies.llm.offline import require_anthropic_stage
 
 FIX = "tests/fixtures/link/validation_set.json"
 _SUMMARY_MAX = 500
@@ -40,7 +41,8 @@ def _gold_key(it) -> str:
 
 async def main(only_tmdb: int | None) -> None:
     settings = get_settings()
-    items = load_validation_set(FIX)
+    require_anthropic_stage(settings, 'cluster')
+    items = load_validation_set(FIX).items
     by_film: dict[int, list] = defaultdict(list)
     for it in items:
         if it.relation == "about" and it.expected_film_tmdb_id is not None:
@@ -69,20 +71,16 @@ async def main(only_tmdb: int | None) -> None:
                 {"n": i, "title": it.title, "summary": (it.summary or "")[:_SUMMARY_MAX]}
                 for i, it in enumerate(fitems, start=1)
             ]
-            system, messages = assemble_cluster_payload(
+            prompt = assemble_cluster_payload(
                 film_title=film.title,
                 film_year=film.release_date.year if film.release_date else None,
                 film_release_date=film.release_date,
                 existing_payload=[],
                 new_payload=new_payload,
                 run_date=datetime.now(UTC).date(),
-            )
-            raw = await client.complete(
-                model=settings.cluster_model,
-                system=system,
-                messages=messages,
                 max_tokens=settings.link_cluster_max_tokens,
             )
+            raw = await client.complete(model=settings.cluster_model, prompt=prompt)
             groups = parse_cluster_groups(raw, n_stories=len(fitems))
             if groups is None:
                 print(f"WARNING: unparseable cluster response for {film.title}")
