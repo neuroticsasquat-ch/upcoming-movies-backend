@@ -99,6 +99,14 @@ def _crew_sort_key(row: Any) -> tuple:
     )
 
 
+def _natural_title_col() -> ColumnElement[str]:
+    """SQL expression for natural English title sort: strip leading 'A ', 'An ', 'The ' (case-
+    insensitive) before comparing. Non-matching titles sort unchanged, so 'Batman' sorts
+    before 'The Batman' as 'Batman' vs 'Batman' — the second word decides."""
+    title = func.lower(Film.title)
+    return func.regexp_replace(title, r"^(a|an|the)\s+", "", "i")
+
+
 def _region_visible() -> ColumnElement[bool]:
     """SQL predicate: a release_date event reaches the public surface only when its region is
     global (NULL) or in the film's primary set — US plus the film's origin countries. Other
@@ -337,6 +345,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     # page declined to list — the drift NEU-1121 closes.
     regions = displayable_regions(film.origin_country)
 
+    # Check if the film has any FilmReleaseDate rows at all, regardless of region
+    # filtering — used below to decide whether to fall back to film.release_date.
+    has_any_release_dates = await session.scalar(
+        select(func.count()).select_from(FilmReleaseDate).where(FilmReleaseDate.film_id == film.id)
+    )
+
     release_date_rows = (
         (
             await session.execute(
@@ -368,6 +382,19 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         for row in release_date_rows
         if (label := release_label_for_tmdb_type(row.release_type)) is not None
     ]
+
+    # If there are no FilmReleaseDate rows at all but the film has a primary release_date,
+    # fall back to that date without a country code.
+    if not release_dates and not has_any_release_dates and film.release_date is not None:
+        release_dates.append(
+            ReleaseDateOut(
+                country="",
+                release_type=0,
+                type_label="",
+                date=datetime.combine(film.release_date, datetime.min.time(), tzinfo=UTC),
+                certification=None,
+            )
+        )
 
     genres = list(
         (
@@ -610,7 +637,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .join(Film, Film.id == Event.film_id)
             .where(*visible, day.in_(select(window.c.day)))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
-            .order_by(day.desc(), func.lower(Film.title).asc(), Film.slug.asc())
+            .order_by(day.desc(), _natural_title_col().asc(), Film.slug.asc())
         )
     ).all()
 
