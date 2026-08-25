@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from anthropic import APIConnectionError, APIStatusError, AsyncAnthropic
+from httpx2 import AsyncClient as AsyncHttpxClient
 
 from upmovies.llm.retry import (
     DEFAULT_RETRY_POLICY,
@@ -84,13 +85,24 @@ class AnthropicClient:
     """Async context manager over `AsyncAnthropic`. Call surfaces: `complete`,
     `complete_with_usage`, and `complete_call` (the telemetry-bearing one)."""
 
-    def __init__(self, api_key: str, *, policy: RetryPolicy = DEFAULT_RETRY_POLICY):
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+        http_client: AsyncHttpxClient | None = None,
+    ):
         self._policy = policy
         # `max_retries=0` disables the SDK's own retry loop deliberately. It is a perfectly
         # good loop — it was this path's retry policy until now — but leaving it in place would
         # mean the two adapters retried under separately-configured policies that merely looked
         # alike, and a provider comparison would then be partly measuring the loops (spec §9).
-        self._client = AsyncAnthropic(api_key=api_key, max_retries=0, timeout=policy.timeout)
+        self._client = AsyncAnthropic(
+            api_key=api_key,
+            max_retries=0,
+            timeout=policy.timeout,
+            http_client=http_client,
+        )
 
     async def __aenter__(self) -> "AnthropicClient":
         return self

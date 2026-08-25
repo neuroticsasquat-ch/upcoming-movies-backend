@@ -135,6 +135,10 @@ class FeedDayItem(BaseModel):
     # `event_count`/`top_event_type` stay computed over all of the day's events rather than
     # over the section this row lands in.
     news_backed: bool
+    # The actual events on this (film, day), with their summaries and sources, matching the
+    # EventOut shape used on the film detail page. Empty only if the day has no events (the
+    # feed item itself wouldn't exist in that case).
+    events: list[EventOut] = []
 
 
 class FeedDayResponse(BaseModel):
