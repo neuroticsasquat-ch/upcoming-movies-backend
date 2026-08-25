@@ -3,11 +3,9 @@ Replaces `@respx.mock` with `httpx2.MockTransport` since anthropic 1.0.0
 migrated from httpx to httpx2 (2026-08-25), and respx only intercepts httpx.
 """
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
 
-import httpx2
 from httpx2 import AsyncClient, MockTransport, Request, Response
 
 
@@ -58,6 +56,8 @@ def mock_client(
     """
     route = MockRoute()
     responses = [return_value] if return_value is not None else None
-    transport = MockTransport(handler=_make_handler(route, responses=responses, side_effect=side_effect))
+    transport = MockTransport(
+        handler=_make_handler(route, responses=responses, side_effect=side_effect)
+    )
     client = AsyncClient(transport=transport, base_url=base_url)
     return client, route

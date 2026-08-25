@@ -16,8 +16,6 @@ from .conftest import mock_client
 # nothing. Attempt *counts* are the real thing under test, so they stay explicit per test.
 _NO_WAIT = RetryPolicy(initial_backoff=0.0, jitter=0.0)
 
-MESSAGES_URL = "https://api.anthropic.com/v1/messages"
-
 
 def _message_response(
     blocks: list[dict[str, str]],
@@ -266,7 +264,10 @@ async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts
         ]
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=1), http_client=http_client) as c:
+    policy = replace(_NO_WAIT, max_retries=1)
+    async with AnthropicClient(
+        api_key="test-key", policy=policy, http_client=http_client
+    ) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="S", user="hi"),
@@ -284,7 +285,10 @@ async def test_complete_call_records_a_failed_call_then_re_raises():
         return_value=httpx2.Response(500, json={"error": {"type": "api_error"}})
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=1), http_client=http_client) as c:
+    policy = replace(_NO_WAIT, max_retries=1)
+    async with AnthropicClient(
+        api_key="test-key", policy=policy, http_client=http_client
+    ) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -306,7 +310,10 @@ async def test_complete_call_records_a_200_whose_body_does_not_validate():
         return_value=httpx2.Response(200, json={"not": "a message"})
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=0), http_client=http_client) as c:
+    policy = replace(_NO_WAIT, max_retries=0)
+    async with AnthropicClient(
+        api_key="test-key", policy=policy, http_client=http_client
+    ) as c:
         with pytest.raises(Exception):  # noqa: B017 — SDK's own validation error type
             await c.complete_call(
                 model="claude-haiku-4-5",
