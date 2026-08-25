@@ -610,7 +610,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .join(Film, Film.id == Event.film_id)
             .where(*visible, day.in_(select(window.c.day)))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
-            .order_by(day.desc(), Film.title.asc())
+            .order_by(day.desc(), func.lower(Film.title).asc(), Film.slug.asc())
         )
     ).all()
 
