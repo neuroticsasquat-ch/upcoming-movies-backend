@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from tests.fixtures.public import ref
 
@@ -296,12 +296,29 @@ async def test_detail_excludes_non_home_region_dates(
 
 
 async def test_detail_release_dates_empty_when_none(client, make_film, add_event):
-    film = await make_film(slug="rd-none-2026", title="No Dates Film")
+    film = await make_film(slug="rd-none-2026", title="No Dates Film", release_date=None)
     await add_event(film=film, summary="Event.")
 
     r = await client.get("/films/rd-none-2026")
     assert r.status_code == 200
-    assert r.json()["release_dates"] == []
+    # No FilmReleaseDate rows and no primary release_date → empty (unlike the fallback
+    # below, which fires when only the primary date exists).
+    rds = r.json()["release_dates"]
+    assert rds == []
+
+
+async def test_detail_falls_back_to_primary_release_date(client, make_film, add_event):
+    film = await make_film(slug="rd-fallback-2026", title="Fallback Film")
+    film.release_date = date(2026, 8, 1)
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/rd-fallback-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    assert len(rds) == 1
+    assert rds[0]["country"] == ""
+    assert rds[0]["date"].startswith("2026-08-01")
+    assert rds[0]["certification"] is None
 
 
 async def test_detail_includes_origin_country_dates(
