@@ -135,9 +135,10 @@ class FeedDayItem(BaseModel):
     # `event_count`/`top_event_type` stay computed over all of the day's events rather than
     # over the section this row lands in.
     news_backed: bool
-    # Story sources for the events on this (film, day), deduplicated by outlet, newest first,
-    # capped per event. Empty for a day that has no linked stories (identical to `news_backed`).
-    event_story_sources: list[SourceOut] = []
+    # The actual events on this (film, day), with their summaries and sources, matching the
+    # EventOut shape used on the film detail page. Empty only if the day has no events (the
+    # feed item itself wouldn't exist in that case).
+    events: list[EventOut] = []
 
 
 class FeedDayResponse(BaseModel):
