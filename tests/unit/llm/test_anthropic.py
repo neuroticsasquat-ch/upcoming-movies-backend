@@ -59,7 +59,7 @@ async def test_the_stable_prefix_becomes_the_leading_cached_system_block():
             prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
         )
     assert out == "hello"
-    body = json.loads(route.calls.last.request.content)
+    body = json.loads(route.calls[-1].content)
     assert body["model"] == "claude-haiku-4-5"
     assert body["max_tokens"] == 16
     assert body["system"] == [
@@ -77,7 +77,7 @@ async def test_a_prefill_becomes_a_trailing_assistant_turn():
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="I", user="hi", prefill='{"summary": "'),
         )
-    body = json.loads(route.calls.last.request.content)
+    body = json.loads(route.calls[-1].content)
     assert body["messages"] == [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": '{"summary": "'},
@@ -95,7 +95,7 @@ async def test_json_object_is_ignored_rather_than_approximated():
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="I", user="hi", json_object=True),
         )
-    assert "response_format" not in json.loads(route.calls.last.request.content)
+    assert "response_format" not in json.loads(route.calls[-1].content)
 
 
 async def test_a_429_with_retry_after_is_retried_and_the_header_is_read():
@@ -265,9 +265,7 @@ async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts
     )
     calls = CallLog()
     policy = replace(_NO_WAIT, max_retries=1)
-    async with AnthropicClient(
-        api_key="test-key", policy=policy, http_client=http_client
-    ) as c:
+    async with AnthropicClient(api_key="test-key", policy=policy, http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="S", user="hi"),
@@ -286,9 +284,7 @@ async def test_complete_call_records_a_failed_call_then_re_raises():
     )
     calls = CallLog()
     policy = replace(_NO_WAIT, max_retries=1)
-    async with AnthropicClient(
-        api_key="test-key", policy=policy, http_client=http_client
-    ) as c:
+    async with AnthropicClient(api_key="test-key", policy=policy, http_client=http_client) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -306,14 +302,10 @@ async def test_complete_call_records_a_failed_call_then_re_raises():
 async def test_complete_call_records_a_200_whose_body_does_not_validate():
     """A response that arrives but doesn't deserialize is still a call that was made and paid
     for — it must not vanish from the telemetry just because the SDK raised late."""
-    http_client, _route = mock_client(
-        return_value=httpx2.Response(200, json={"not": "a message"})
-    )
+    http_client, _route = mock_client(return_value=httpx2.Response(200, json={"not": "a message"}))
     calls = CallLog()
     policy = replace(_NO_WAIT, max_retries=0)
-    async with AnthropicClient(
-        api_key="test-key", policy=policy, http_client=http_client
-    ) as c:
+    async with AnthropicClient(api_key="test-key", policy=policy, http_client=http_client) as c:
         with pytest.raises(Exception):  # noqa: B017 — SDK's own validation error type
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -440,9 +432,7 @@ async def test_a_reply_that_stopped_on_its_own_is_not_truncated():
 
 async def test_a_call_that_never_returned_reports_truncated_as_unknown():
     """None rather than False: no reply arrived, so "was it cut off" has no answer."""
-    http_client, _route = mock_client(
-        return_value=httpx2.Response(400, json={"error": "bad"})
-    )
+    http_client, _route = mock_client(return_value=httpx2.Response(400, json={"error": "bad"}))
     calls = CallLog()
     async with AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=http_client) as c:
         with pytest.raises(APIStatusError):
@@ -470,5 +460,5 @@ async def test_an_optional_prefill_is_still_sent_to_a_provider_that_supports_it(
             ),
         )
 
-    messages = json.loads(route.calls.last.request.content)["messages"]
+    messages = json.loads(route.calls[-1].content)["messages"]
     assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}
