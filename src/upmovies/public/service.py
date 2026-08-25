@@ -345,12 +345,6 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     # page declined to list — the drift NEU-1121 closes.
     regions = displayable_regions(film.origin_country)
 
-    # Check if the film has any FilmReleaseDate rows at all, regardless of region
-    # filtering — used below to decide whether to fall back to film.release_date.
-    has_any_release_dates = await session.scalar(
-        select(func.count()).select_from(FilmReleaseDate).where(FilmReleaseDate.film_id == film.id)
-    )
-
     release_date_rows = (
         (
             await session.execute(
@@ -383,9 +377,9 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         if (label := release_label_for_tmdb_type(row.release_type)) is not None
     ]
 
-    # If there are no FilmReleaseDate rows at all but the film has a primary release_date,
-    # fall back to that date without a country code.
-    if not release_dates and not has_any_release_dates and film.release_date is not None:
+    # If no displayable release dates remain after filtering but the film has a primary
+    # release_date, fall back to that date without a country code.
+    if not release_dates and film.release_date is not None:
         release_dates.append(
             ReleaseDateOut(
                 country="",

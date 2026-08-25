@@ -292,7 +292,12 @@ async def test_detail_excludes_non_home_region_dates(
 
     r = await client.get("/films/rd-excl-2026")
     assert r.status_code == 200
-    assert r.json()["release_dates"] == []
+    # FR theatrical release is excluded (not US, no origin country), so no displayable
+    # regional dates — falls back to the primary release_date.
+    rds = r.json()["release_dates"]
+    assert len(rds) == 1
+    assert rds[0]["country"] == ""
+    assert rds[0]["date"].startswith("2026-07-17")
 
 
 async def test_detail_release_dates_empty_when_none(client, make_film, add_event):
