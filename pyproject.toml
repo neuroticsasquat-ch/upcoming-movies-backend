@@ -23,7 +23,7 @@ dependencies = [
     "opentelemetry-instrumentation-asyncpg",
     "opentelemetry-instrumentation-httpx",
     "opentelemetry-instrumentation-logging",
-    "anthropic>=0.121.0",
+    "anthropic>=0.121.0,<1.0.0",
     "python-slugify>=8.0.4",
     "tldextract>=5.3.1",
 ]
