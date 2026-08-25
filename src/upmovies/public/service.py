@@ -594,6 +594,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     rows = (
         await session.execute(
             select(
+                Film.id.label("film_id"),
                 Film.tmdb_id.label("tmdb_id"),
                 Film.title.label("title"),
                 Film.release_date.label("release_date"),
@@ -609,9 +610,44 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .join(Film, Film.id == Event.film_id)
             .where(*visible, day.in_(select(window.c.day)))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
-            .order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
+            .order_by(day.desc(), Film.title.asc())
         )
     ).all()
+
+    if not rows:
+        return FeedDayResponse(items=[], total=total_days or 0, limit=limit, offset=offset)
+
+    # Gather story sources for each (film_id, day) group. We need distinct event IDs per
+    # group to find their stories via EventStory. We re-query just the IDs since the main
+    # query already has them aggregated.
+    film_day_pairs = [(r.film_id, r.day) for r in rows]
+    events_for_days = (
+        await session.execute(
+            select(Event.id, Event.film_id, cast(func.timezone("UTC", Event.created_at), Date).label("day"))
+            .where(
+                Event.film_id.in_({r.film_id for r in rows}),
+                cast(func.timezone("UTC", Event.created_at), Date).in_({r.day for r in rows}),
+                visible_events(),
+            )
+        )
+    ).all()
+    event_ids = [e.id for e in events_for_days]
+    film_day_event_ids: dict[tuple[UUID, date], list[UUID]] = {}
+    for e in events_for_days:
+        film_day_event_ids.setdefault((e.film_id, e.day), []).append(e.id)
+
+    sources_by_event: dict[UUID, list[Story]] = {}
+    if event_ids:
+        source_rows = (
+            await session.execute(
+                select(EventStory.event_id, Story)
+                .join(Story, Story.id == EventStory.story_id)
+                .where(EventStory.event_id.in_(event_ids))
+                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
+            )
+        ).all()
+        for event_id, story in source_rows:
+            sources_by_event.setdefault(event_id, []).append(story)
 
     items = [
         FeedDayItem(
@@ -625,6 +661,16 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             event_types=ordered_event_types(row.event_types),
             event_count=row.event_count,
             news_backed=row.news_backed,
+            event_story_sources=[
+                SourceOut(
+                    url=source_url(story),
+                    source=outlet_label(story),
+                    title=story.title,
+                    published_at=story.published_at,
+                )
+                for event_id in film_day_event_ids.get((row.film_id, row.day), [])
+                for story in cap_sources(sources_by_event.get(event_id, []))
+            ],
         )
         for row in rows
     ]
