@@ -75,6 +75,10 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 - **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`.
 
 
+## Sibling repo
+
+The frontend lives at `../upcoming-movies-frontend`. Read its `AGENTS.md` before working on frontend code.
+
 ## Conventions
 
 - Type hints: `X | None`, `X | Y` (no `Optional`/`Union`). No `from __future__ import annotations`.
