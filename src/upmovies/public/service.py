@@ -651,6 +651,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 cast(func.timezone("UTC", Event.created_at), Date).label("event_day"),
                 EventSummary.summary,
                 EventSummary.edited_at,
+                _has_story().label("has_story"),
             )
             .join(EventSummary, EventSummary.event_id == Event.id)
             .where(
@@ -676,10 +677,14 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
         for event_id, story in source_rows:
             sources_by_event.setdefault(event_id, []).append(story)
 
-    events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
+    # Build per-film-day event lookups split by category so that a film-day with events
+    # from both categories appears in both sections (NEU-1199).
+    news_events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
+    catalog_events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
     for e in event_rows:
         key = (e.film_id, e.event_day)
-        events_by_film_day.setdefault(key, []).append(
+        target = news_events_by_film_day if e.has_story else catalog_events_by_film_day
+        target.setdefault(key, []).append(
             EventOut(
                 event_id=e.id,
                 event_type=e.event_type,
@@ -700,22 +705,30 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             )
         )
 
-    items = [
-        FeedDayItem(
+    def _make_item(row: Any, events: list[EventOut], news_backed: bool) -> FeedDayItem:
+        return FeedDayItem(
             film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
             release_year=_release_year(row.release_date),
             poster_path=row.poster_path,
             arc_stage=derive_arc_stage(row.status),
             day=row.day,
-            top_event_type=most_significant_event_type(row.event_types),
-            event_types=ordered_event_types(row.event_types),
-            event_count=row.event_count,
-            news_backed=row.news_backed,
-            events=events_by_film_day.get((row.film_id, row.day), []),
+            top_event_type=most_significant_event_type([e.event_type for e in events]),
+            event_types=ordered_event_types([e.event_type for e in events]),
+            event_count=len(events),
+            news_backed=news_backed,
+            events=events,
         )
-        for row in rows
-    ]
+
+    items: list[FeedDayItem] = []
+    for row in rows:
+        news_events = news_events_by_film_day.get((row.film_id, row.day), [])
+        catalog_events = catalog_events_by_film_day.get((row.film_id, row.day), [])
+
+        if news_events:
+            items.append(_make_item(row, news_events, True))
+        if catalog_events:
+            items.append(_make_item(row, catalog_events, False))
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 

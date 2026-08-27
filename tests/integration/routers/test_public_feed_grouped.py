@@ -386,9 +386,8 @@ async def test_grouped_promoted_catalog_event_is_news_backed_and_keeps_its_prove
 async def test_grouped_one_story_backed_event_flags_the_whole_film_day(
     client, make_film, add_event
 ):
-    """Classified by "any": one Variety story plus four TMDB-only changes is one row in the
-    news-backed section, counting 5. `event_count` and `top_event_type` stay computed over
-    *all* of the film-day's events — they are not scoped to the section the row lands in."""
+    """Classified by "any": one Variety story plus four TMDB-only changes → two items:
+    news-backed (1 event) and catalog (4 events), each with scoped metrics."""
     film = await make_film(slug="mixed-2026")
     day = datetime(2026, 6, 1, tzinfo=UTC)
     await add_event(
@@ -410,11 +409,13 @@ async def test_grouped_one_story_backed_event_flags_the_whole_film_day(
         )
 
     body = (await client.get("/feed/grouped")).json()
-    assert len(body["items"]) == 1  # one row, not one per section
-    item = body["items"][0]
-    assert item["news_backed"] is True
-    assert item["event_count"] == 5
-    assert item["top_event_type"] == "trailer"
+    assert len(body["items"]) == 2
+    news_item = next(i for i in body["items"] if i["news_backed"] is True)
+    catalog_item = next(i for i in body["items"] if i["news_backed"] is False)
+    assert news_item["event_count"] == 1
+    assert news_item["top_event_type"] == "casting"
+    assert catalog_item["event_count"] == 4
+    assert catalog_item["top_event_type"] == "trailer"
 
 
 async def test_grouped_news_backed_is_per_day_not_per_film(client, make_film, add_event):
@@ -572,3 +573,122 @@ async def test_grouped_event_types_are_scoped_to_the_film_day(client, make_film,
         ("2026-06-02", ["trailer"]),
         ("2026-06-01", ["casting"]),
     ]
+
+
+# NEU-1199 — split feed sections by source category
+
+
+async def test_grouped_same_film_day_in_both_sections(client, make_film, add_event):
+    """1 story event + 1 catalog event → 2 items, same film_ref and day, different news_backed."""
+    film = await make_film(slug="both-2026", title="Both Sides")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="reported",
+        created_at=day,
+        sources=({"url": "https://variety.com/casting"},),
+    )
+    await add_event(
+        film=film,
+        event_type="release_date",
+        summary="tmdb date change",
+        created_at=day,
+        provenance="catalog",
+    )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert len(body["items"]) == 2
+    for item in body["items"]:
+        assert item["film_ref"] == ref(film)
+        assert item["day"] == "2026-06-01"
+    news_item = next(i for i in body["items"] if i["news_backed"] is True)
+    catalog_item = next(i for i in body["items"] if i["news_backed"] is False)
+    assert news_item["event_count"] == 1
+    assert news_item["top_event_type"] == "casting"
+    assert [e["event_type"] for e in news_item["events"]] == ["casting"]
+    assert catalog_item["event_count"] == 1
+    assert catalog_item["top_event_type"] == "release_date"
+    assert [e["event_type"] for e in catalog_item["events"]] == ["release_date"]
+
+
+async def test_grouped_split_event_count_and_types_are_scoped(client, make_film, add_event):
+    """Multiple events per category: verify event_count and top_event_type are category-scoped."""
+    film = await make_film(slug="scoped-2026", title="Scoped")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="casting report",
+        created_at=day,
+        sources=({"url": "https://variety.com/casting"},),
+    )
+    await add_event(
+        film=film,
+        event_type="announced",
+        summary="announcement story",
+        created_at=day,
+        sources=({"url": "https://deadline.com/announced"},),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="tmdb trailer",
+        created_at=day,
+        provenance="catalog",
+    )
+    await add_event(
+        film=film,
+        event_type="release_date",
+        summary="tmdb date",
+        created_at=day,
+        provenance="catalog",
+    )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert len(body["items"]) == 2
+    news_item = next(i for i in body["items"] if i["news_backed"] is True)
+    catalog_item = next(i for i in body["items"] if i["news_backed"] is False)
+    assert news_item["event_count"] == 2
+    assert news_item["top_event_type"] == "casting"
+    assert sorted(news_item["event_types"]) == ["announced", "casting"]
+    assert sorted([e["event_type"] for e in news_item["events"]]) == ["announced", "casting"]
+    assert catalog_item["event_count"] == 2
+    assert catalog_item["top_event_type"] == "trailer"
+    assert sorted(catalog_item["event_types"]) == ["release_date", "trailer"]
+    assert sorted([e["event_type"] for e in catalog_item["events"]]) == ["release_date", "trailer"]
+
+
+async def test_grouped_promoted_then_split(client, make_film, add_event):
+    """Catalog event that gains a story stays in news-backed; remaining catalog-only events
+    stay in catalog section."""
+    film = await make_film(slug="promoted-split-2026", title="Promoted Split")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="TMDB carded it, then Variety confirmed",
+        created_at=day,
+        provenance="catalog",
+        sources=({"url": "https://variety.com/scoop"},),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="tmdb trailer only",
+        created_at=day,
+        provenance="catalog",
+    )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert len(body["items"]) == 2
+    news_item = next(i for i in body["items"] if i["news_backed"] is True)
+    catalog_item = next(i for i in body["items"] if i["news_backed"] is False)
+    # The promoted (news-backed) casting event
+    assert news_item["event_count"] == 1
+    assert news_item["top_event_type"] == "casting"
+    assert [e["event_type"] for e in news_item["events"]] == ["casting"]
+    # The catalog-only trailer
+    assert catalog_item["event_count"] == 1
+    assert catalog_item["top_event_type"] == "trailer"
+    assert [e["event_type"] for e in catalog_item["events"]] == ["trailer"]
