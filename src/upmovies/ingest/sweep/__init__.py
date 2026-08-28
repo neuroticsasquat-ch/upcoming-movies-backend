@@ -3,12 +3,18 @@ dated `/discover/movie` roster cannot reach (spec §3, §6)."""
 
 from upmovies.ingest.sweep.admission import AdmissionTranches as AdmissionTranches
 from upmovies.ingest.sweep.credit_events import AttachedCredit as AttachedCredit
+from upmovies.ingest.sweep.credit_events import (
+    CreditDetachmentResult as CreditDetachmentResult,
+)
 from upmovies.ingest.sweep.credit_events import CreditEventResult as CreditEventResult
 from upmovies.ingest.sweep.credit_events import CreditGroup as CreditGroup
 from upmovies.ingest.sweep.credit_events import credit_role as credit_role
 from upmovies.ingest.sweep.credit_events import group_attachments as group_attachments
 from upmovies.ingest.sweep.credit_events import (
     run_credit_attachment_events as run_credit_attachment_events,
+)
+from upmovies.ingest.sweep.credit_events import (
+    run_credit_detachment_events as run_credit_detachment_events,
 )
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult as EnumerateResult
 from upmovies.ingest.sweep.enumerate_phase import run_sweep_enumerate as run_sweep_enumerate

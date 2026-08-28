@@ -406,14 +406,37 @@ The catalog-sourced card raised when a seed-grade credit crosses into a film's c
 `crew_attached` for a director or writer, the existing `casting` for top-5 billed cast, both at
 `rumored`. Keyed on the **observation**, not the person: every attachment sharing one
 `changed_at` cards once, so a whole top-billed cast arriving between two ingests is one card
-naming all of them rather than five. Detachments are recorded as history but never carded —
-"no longer attached" is mostly TMDB reverting its own vandalism. `crew_attached` is a new type
-and has to be registered wherever the vocabulary is enumerated (`ck_event_type`, the arc's
-`_EVENT_STAGE`, the cluster's `_STALE_EVENT_TYPES`) or it silently ranks below everything; it is
-deliberately *not* hidden, because a director attaching to a film no trade has written about is
-the beat the whole expansion exists for.
+naming all of them rather than five. `crew_attached` is a new type and has to be registered
+wherever the vocabulary is enumerated (`ck_event_type`, the arc's `_EVENT_STAGE`, the cluster's
+`_STALE_EVENT_TYPES`) or it silently ranks below everything; it is deliberately *not* hidden,
+because a director attaching to a film no trade has written about is the beat the whole expansion
+exists for. A re-attachment after a **credit detachment event** is carded rather than suppressed
+— the suppression check is removal-aware, so a person whose latest card is a removal re-enters
+the timeline on the next attachment.
 _Avoid_: casting event (that is one of the two types, not the pair), crew change, credit diff
 (that is the history row it reads).
+
+**Credit detachment event**:
+The catalog-sourced card raised when a seed-grade credit leaves a film's credit set — a single
+new type `credit_removed` covering director, writer and cast alike, at `rumored`. It is the
+correction half of the credit-attachment beat: a brief attachment that TMDB later retracts would
+otherwise live uncorrected forever, and a future notification system needs a removal event to
+tell a user the attachment they were told about is gone. It is gated on a **prior visible
+attachment card** (`crew_attached` or `casting`, any provenance, `occurred_at` before the
+detachment): a first-observation baseline credit that was never carded has no published beat to
+correct, so its departure emits no card. Like attachments it is keyed on the observation — one
+`credit_removed` card per `(film, changed_at)`, all roles in one body — and it sits beside the
+attachment card (which stays visible) in the collapsed "via TMDB" section, so the later "no longer
+attached" card *is* the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE`
+(a removal is not forward progress and should not headline a day) and excluded from the LLM and
+story-dedup vocabularies: the model cannot emit it, and a trade "X exits" story does not yet
+attach to it. Reverses the original ADR-0014 decision that detachments were "recorded as history
+but never carded" — NEU-1201's collapsed "via TMDB" section (which did not exist when that
+decision was made) made the clutter concern moot.
+_Avoid_: crew detached, cast departed (those imply the old split that only existed because
+`casting` pre-existed), credit removal (too generic — a release date disappearing is also a
+removal, and is out of scope), retraction, cancellation (those are about the *film*, not a
+person).
 
 **Double-carding**:
 The failure mode where the story path and the catalog path both raise an event for one TMDB
