@@ -50,6 +50,7 @@ from upmovies.public.dto import (
     CastMemberOut,
     CollectionOut,
     CrewMemberOut,
+    DayGroup,
     EventOut,
     FeedDayItem,
     FeedDayResponse,
@@ -136,8 +137,19 @@ def _has_story() -> ColumnElement[bool]:
     return exists(select(1).where(EventStory.event_id == Event.id).correlate(Event))
 
 
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
 def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
+
+
+def _day_heading(d: date) -> str:
+    return f"{_WEEKDAYS[d.weekday()]}, {_MONTHS[d.month - 1]} {d.day}, {d.year}"
 
 
 def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
@@ -295,7 +307,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
 
     summarized = (
         await session.execute(
-            select(Event, EventSummary.summary, EventSummary.edited_at)
+            select(
+                Event,
+                EventSummary.summary,
+                EventSummary.edited_at,
+                _has_story().label("has_story"),
+            )
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(Event.film_id == film.id, visible_events(), _region_visible())
@@ -303,7 +320,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _edited_at in summarized]
+    event_ids = [event.id for event, _summary, _edited_at, _has_story in summarized]
     sources_by_event: dict[UUID, list[Story]] = {}
     if event_ids:
         source_rows = (
@@ -317,13 +334,13 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         for event_id, story in source_rows:
             sources_by_event.setdefault(event_id, []).append(story)
 
-    events = [
-        EventOut(
+    def _to_event_out(event: Any, summary: str | None, edited_at: datetime | None) -> EventOut:
+        return EventOut(
             event_id=event.id,
             event_type=event.event_type,
             confidence=event.confidence,
             created_at=event.created_at,
-            summary=summary,
+            summary=summary,  # type: ignore  — guaranteed non-null by visible_events() filter
             summary_edited=edited_at is not None,
             provenance=event.provenance,
             sources=[
@@ -336,8 +353,26 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
                 for story in cap_sources(sources_by_event.get(event.id, []))
             ],
         )
-        for event, summary, edited_at in summarized
-    ]
+
+    # Group events by UTC day key, split by has_story (NEU-1201).
+    day_groups: list[DayGroup] = []
+    day_events: dict[date, tuple[list[EventOut], list[EventOut]]] = {}
+    for event, summary, edited_at, has_story in summarized:
+        utc = event.created_at.astimezone(UTC)
+        day_key = date(utc.year, utc.month, utc.day)
+        eout = _to_event_out(event, summary, edited_at)
+        news_list, tmdb_list = day_events.setdefault(day_key, ([], []))
+        (news_list if has_story else tmdb_list).append(eout)
+    for day_key in sorted(day_events, reverse=True):
+        news, tmdb = day_events[day_key]
+        day_groups.append(
+            DayGroup(
+                day=day_key,
+                heading=_day_heading(day_key),
+                news_events=news,
+                tmdb_events=tmdb,
+            )
+        )
 
     # The one definition, shared with the event writer and with `_region_visible` above
     # (`catalog.release_grade`). This used to take `origin_country[0]` while the visibility
@@ -488,7 +523,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         release_year=_release_year(film.release_date),
         poster_path=film.poster_path,
         arc_stage=arc_stage,
-        events=events,
+        day_groups=day_groups,
         release_dates=release_dates,
         overview=film.overview,
         tagline=film.tagline,
