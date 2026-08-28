@@ -433,6 +433,10 @@ restatement of it. A story about a director attaching comes back classified `cas
 the LLM has no `crew_attached` in its vocabulary, so the story side searches both credit types.
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
+**Day-grouped events** (of a film page):
+The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is collapsed by default on the film page the same way it is on the feed.
+_Avoid_: in-the-news section (that's `news_events`), TMDB section (that's `tmdb_events`), two-timeline display, split events.
+
 **News-backed** (of a film-day):
 The property the daily feed sections on: at least one of a film's visible events on that day has
 a linked story, i.e. an outlet reported some part of the day's activity. Derived from
