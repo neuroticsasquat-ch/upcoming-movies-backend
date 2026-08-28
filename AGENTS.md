@@ -1,5 +1,9 @@
 # Upcoming Movies Backend — Agent Guide
 
+## Spec and plan directory
+
+`specs_dir: docs`
+
 ## How to work in this repo
 
 **Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dep changes (`pyproject.toml`) need `task build`.
