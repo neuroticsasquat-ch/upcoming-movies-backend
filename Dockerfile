@@ -20,6 +20,7 @@ FROM base AS dev
 RUN uv pip install --system --no-cache ".[dev]"
 
 COPY src/ src/
+COPY scripts/ scripts/
 COPY alembic.ini alembic.ini
 COPY migrations/ migrations/
 
@@ -33,6 +34,7 @@ FROM base AS prod
 RUN uv pip install --system --no-cache .
 
 COPY src/ src/
+COPY scripts/ scripts/
 COPY alembic.ini alembic.ini
 COPY migrations/ migrations/
 
