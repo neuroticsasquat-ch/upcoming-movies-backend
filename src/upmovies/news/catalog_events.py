@@ -41,6 +41,9 @@ CREDIT_ROLE_EVENT_TYPES: dict[str, str] = {
 # is always "is this person already carded", never "is this film already carded".
 CREDIT_EVENT_TYPES = frozenset(CREDIT_ROLE_EVENT_TYPES.values())
 
+# The shared vocabulary home for the detachment carding phase.
+CREDIT_REMOVED_EVENT_TYPE = "credit_removed"
+
 # Every event type a catalog change can raise. `release_date` is the odd one out among the
 # field-change types: a film's date may move repeatedly, so it is the only one of those
 # matched on *when* rather than on existence.

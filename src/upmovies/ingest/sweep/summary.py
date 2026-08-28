@@ -29,7 +29,7 @@ directors flip, for what opening the writers tranche would admit (NEU-1089, NEU-
 from collections import Counter
 
 from upmovies.ingest.runs import format_skip_detail
-from upmovies.ingest.sweep.credit_events import CreditEventResult
+from upmovies.ingest.sweep.credit_events import CreditDetachmentResult, CreditEventResult
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
 from upmovies.ingest.sweep.field_events import FieldEventResult
 from upmovies.ingest.sweep.refresh_phase import RefreshResult
@@ -73,9 +73,10 @@ def sweep_detail(
     refreshed: RefreshResult,
     carded: FieldEventResult,
     attached: CreditEventResult,
+    detached: CreditDetachmentResult,
     released: ReleaseEventResult,
 ) -> str:
-    """One line reporting all five phases distinctly, for `finalize_run(detail=...)`."""
+    """One line reporting all phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
         f"enumerate: {enumerated.seed_people} seeds "
         f"({enumerated.person_missing} missing), "
@@ -91,6 +92,9 @@ def sweep_detail(
         f"credits: {attached.events_created} carded from "
         f"{attached.attachments_read} attachments, "
         f"{attached.skipped} already carded, {attached.failures} failed",
+        f"credit removals: {detached.events_created} carded from "
+        f"{detached.detachments_read} detachments, "
+        f"{detached.skipped} already carded, {detached.failures} failed",
         f"release dates: {released.events_created} carded from "
         f"{released.changes_read} changes, "
         f"{released.skipped} already carded, {released.failures} failed",
@@ -107,6 +111,8 @@ def sweep_detail(
         parts.append(f"events aborted: {carded.abort_error}")
     if attached.aborted:
         parts.append(f"credits aborted: {attached.abort_error}")
+    if detached.aborted:
+        parts.append(f"credit removals aborted: {detached.abort_error}")
     if released.aborted:
         parts.append(f"release dates aborted: {released.abort_error}")
     return "; ".join(parts)

@@ -6,7 +6,9 @@ from upmovies.synthesize.deterministic import (
     DETERMINISTIC_MODEL,
     TEMPLATE_VERSION,
     CreditAttached,
+    CreditDetached,
     CreditsAttached,
+    CreditsDetached,
     ReleaseDateChanged,
     ReleaseDatesChanged,
     StatusChanged,
@@ -170,3 +172,93 @@ def test_one_credit_renders_exactly_as_the_singular_change():
 def test_unknown_role_is_rejected_in_a_group_too():
     with pytest.raises(ValueError, match="producer"):
         render_summary(CreditsAttached(credits=(CreditAttached(role="producer", name="M P"),)))
+
+
+def test_template_version_bumped():
+    assert TEMPLATE_VERSION == "deterministic-3"
+
+
+# ── Detachment summary tests (NEU-1200) ──────────────────────────────────
+
+
+def test_render_detached_director_singular():
+    assert (
+        render_summary(CreditDetached(role="director", name="Denis Villeneuve"))
+        == "Denis Villeneuve is no longer attached to direct."
+    )
+
+
+def test_render_detached_director_plural():
+    assert (
+        render_summary(
+            CreditsDetached(
+                credits=(
+                    CreditDetached(role="director", name="Phil Lord"),
+                    CreditDetached(role="director", name="Chris Miller"),
+                )
+            )
+        )
+        == "Phil Lord and Chris Miller are no longer attached to direct."
+    )
+
+
+def test_render_detached_writer_singular():
+    assert (
+        render_summary(CreditDetached(role="writer", name="Jon Spaihts"))
+        == "Jon Spaihts is no longer attached to write."
+    )
+
+
+def test_render_detached_writer_plural():
+    assert (
+        render_summary(
+            CreditsDetached(
+                credits=(
+                    CreditDetached(role="writer", name="Jon Spaihts"),
+                    CreditDetached(role="writer", name="Eric Roth"),
+                )
+            )
+        )
+        == "Jon Spaihts and Eric Roth are no longer attached to write."
+    )
+
+
+def test_render_detached_cast_singular():
+    assert (
+        render_summary(CreditDetached(role="cast", name="Zendaya")) == "Zendaya departs the cast."
+    )
+
+
+def test_render_detached_cast_plural():
+    assert (
+        render_summary(
+            CreditsDetached(
+                credits=(
+                    CreditDetached(role="cast", name="Timothée Chalamet"),
+                    CreditDetached(role="cast", name="Zendaya"),
+                )
+            )
+        )
+        == "Timothée Chalamet and Zendaya depart the cast."
+    )
+
+
+def test_render_detached_multi_role_group():
+    assert render_summary(
+        CreditsDetached(
+            credits=(
+                CreditDetached(role="director", name="Denis Villeneuve"),
+                CreditDetached(role="cast", name="Timothée Chalamet"),
+            )
+        )
+    ) == ("Denis Villeneuve is no longer attached to direct. Timothée Chalamet departs the cast.")
+
+
+def test_detached_one_credit_renders_as_singular():
+    change = CreditDetached(role="cast", name="Zendaya")
+    assert render_summary(CreditsDetached(credits=(change,))) == render_summary(change)
+
+
+def test_unknown_role_rejected_in_detachment():
+    with pytest.raises(ValueError, match="producer"):
+        render_summary(CreditsDetached(credits=(CreditDetached(role="producer", name="M P"),)))

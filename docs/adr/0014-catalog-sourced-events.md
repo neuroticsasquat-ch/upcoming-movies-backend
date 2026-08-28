@@ -65,6 +65,22 @@ When a trade story later clusters onto the event, the LLM summary **supersedes**
 one and real sources appear. The card upgrades in place; `EventSummary` is keyed on the event, so
 this needs no special path.
 
+> **Amendment — 2026-08-28 (NEU-1200).** The original decision recorded credit detachments as
+> history but **never carded them** — "no longer attached" was judged mostly TMDB reverting its
+> own vandalism. That left a brief attachment living forever uncorrected in the timeline, and
+> left no event for a future notification system to fire on when an attachment a user was told
+> about disappears. **The credit half is reversed: detachments are now carded** as a new
+> catalog-sourced event type `credit_removed`, sitting beside the attachment card in the
+> collapsed "via TMDB" section (NEU-1201, which did not exist when this decision was made, made
+> the clutter concern moot). The attachment card stays visible — the later dated "no longer
+> attached" card *is* the correction; no per-row hidden/superseded state is introduced. A removal
+> is gated on a prior visible attachment card (`crew_attached`/`casting`, any provenance) so a
+> first-observation baseline credit's departure — never published — emits no card. The attachment
+> suppression check is made removal-aware so a re-attachment after a removal cards again. The
+> release-date half is **not** reversed: a date disappearing is not recorded at all (no history
+> row), so there is nothing to card — that stays a separate ticket. See the spec at
+> `docs/specs/NEU-1200-credit-removal-events.md`.
+
 ## Considered alternatives
 
 - **Keep requiring a story trigger.** Rejected: it is the status quo, and against an expanded
@@ -85,7 +101,9 @@ this needs no special path.
 - ADR-0002's premise is void; its **rule** survives intact, because a null→date transition was
   always recorded as a change and the unified rule already subsumed the null branch.
 - Catalog-sourced events import TMDB's editorial noise into the product. Mitigated by lower
-  confidence and explicit attribution, not eliminated — a vandalised credit can card.
+  confidence and explicit attribution, not eliminated — a vandalised credit can card, and (after
+  NEU-1200) so can its removal. A flapping credit produces a card per flap, all in the collapsed
+  "via TMDB" section at `rumored`; accepted as the cost of correction over silence.
 - The two paths read the same `catalog.film_field_change` row, so each has to check for the
   other's card or one date move raises two events. The catalog reader skips a change already
   covered by a story-borne release-date event inside the corroboration window; the story path

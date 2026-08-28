@@ -36,7 +36,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-2"
+TEMPLATE_VERSION = "deterministic-3"
 
 
 @dataclass(frozen=True)
@@ -110,8 +110,34 @@ class CreditsAttached:
     credits: tuple[CreditAttached, ...]
 
 
+@dataclass(frozen=True)
+class CreditDetached:
+    """A director, writer or cast member no longer credited on the film."""
+
+    role: str  # "director" | "writer" | "cast"
+    name: str
+
+
+@dataclass(frozen=True)
+class CreditsDetached:
+    """Every credit one observation detached, rendered as one body (NEU-1200).
+
+    Mirrors `CreditsAttached`: one removal card per observation, all roles in one body
+    since `credit_removed` is a single type and `uq_event_catalog_change` allows one
+    catalog event per film, type and timestamp.
+    """
+
+    credits: tuple[CreditDetached, ...]
+
+
 CatalogChange = (
-    ReleaseDateChanged | ReleaseDatesChanged | StatusChanged | CreditAttached | CreditsAttached
+    ReleaseDateChanged
+    | ReleaseDatesChanged
+    | StatusChanged
+    | CreditAttached
+    | CreditsAttached
+    | CreditDetached
+    | CreditsDetached
 )
 
 # Keyed on TMDB's `status` values. An unknown status still gets a body (see `_render_status`) —
@@ -202,6 +228,32 @@ def _render_credits(change: CreditsAttached) -> str:
     return " ".join(_render_role(role, by_role[role]) for role in ROLE_ORDER if role in by_role)
 
 
+def _render_detached_role(role: str, people: list[CreditDetached]) -> str:
+    names = _join_names([p.name for p in people])
+    verb = "is" if len(people) == 1 else "are"
+    match role:
+        case "director":
+            return f"{names} {verb} no longer attached to direct."
+        case "writer":
+            return f"{names} {verb} no longer attached to write."
+        case "cast":
+            departs = "departs" if len(people) == 1 else "depart"
+            return f"{names} {departs} the cast."
+    raise ValueError(f"unknown credit role: {role!r}")
+
+
+def _render_detachments(change: CreditsDetached) -> str:
+    by_role: dict[str, list[CreditDetached]] = {}
+    for credit in change.credits:
+        by_role.setdefault(credit.role, []).append(credit)
+    unknown = [role for role in by_role if role not in ROLE_ORDER]
+    if unknown:
+        raise ValueError(f"unknown credit role: {unknown[0]!r}")
+    return " ".join(
+        _render_detached_role(role, by_role[role]) for role in ROLE_ORDER if role in by_role
+    )
+
+
 def render_summary(change: CatalogChange) -> str:
     """The user-facing body for one catalog change. Pure — no DB, no clock."""
     match change:
@@ -215,6 +267,10 @@ def render_summary(change: CatalogChange) -> str:
             return _render_credits(CreditsAttached(credits=(change,)))
         case CreditsAttached():
             return _render_credits(change)
+        case CreditDetached():
+            return _render_detachments(CreditsDetached(credits=(change,)))
+        case CreditsDetached():
+            return _render_detachments(change)
 
 
 async def write_deterministic_summary(
