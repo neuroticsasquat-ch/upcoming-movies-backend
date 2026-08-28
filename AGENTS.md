@@ -8,6 +8,24 @@
 
 **Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dep changes (`pyproject.toml`) need `task build`.
 
+## Production deployments
+
+Production deploys are **not** triggered by `task` commands. The flow is:
+
+1. Open a PR and merge to `main`.
+2. Coolify builds and deploys the new image automatically.
+3. To run a one-off script in production, exec into the running Coolify container and run it there:
+
+   ```bash
+   # example: find the container name first
+   docker ps --filter "label=coolify.managed=true" --filter "ancestor=upmovies-backend"
+   docker exec -it <container> python scripts/backfill_credit_removals.py
+   ```
+
+   (Exact container access may vary by Coolify setup; use the Coolify UI or host SSH as needed.)
+
+Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
+
 ## Commands
 
 | What | Command |
