@@ -65,6 +65,13 @@ class CrewMemberOut(BaseModel):
     department: str | None
 
 
+class DayGroup(BaseModel):
+    day: date
+    heading: str
+    news_events: list[EventOut]
+    tmdb_events: list[EventOut]
+
+
 class FilmDetailResponse(BaseModel):
     ref: str
     title: str
@@ -74,7 +81,7 @@ class FilmDetailResponse(BaseModel):
     release_year: int | None
     poster_path: str | None
     arc_stage: str
-    events: list[EventOut]
+    day_groups: list[DayGroup]
     release_dates: list[ReleaseDateOut] = []
     overview: str | None = None
     tagline: str | None = None
