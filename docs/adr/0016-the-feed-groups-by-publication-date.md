@@ -63,3 +63,34 @@ and that is the designed behaviour: a backfill *is* a publication event.
   events as a routine matter, the fix is to **disclose `occurred_at` on the card** — not to
   regroup the feed. `FeedItem` already carries `occurred_at`; `EventOut` does not, and nothing
   in the frontend renders it. That is the work, if it is ever wanted.
+
+## Amendment — NEU-1204 (2026-08-29): the film page is an event log, not a publication log
+
+The decision above is restated for the **feed** only. A single film's own timeline answers a
+different question — "what happened on this film and when" — not "what's newly published." When a
+reader has already navigated to a film, there is no scroll-past-the-latest problem and no
+publication-batch mental model; a backfilled removal showing up under the day TMDB actually
+removed the credit is more correct, not less. The notification trigger continues to key off
+`created_at` regardless and is unaffected by how the film *page* groups.
+
+Two changes, both scoped to display ordering:
+
+- **Film detail page (`get_film_detail`): day grouping moves to `occurred_at`.** An event with
+  `occurred_at` Aug 25 and `created_at` Aug 28 now appears under the "Aug 25" heading on the film
+  page (it did under "Aug 28" before). Within each day, events order by
+  `occurred_at ASC, created_at ASC, id ASC`.
+- **Grouped feed (`get_feed_grouped`): day grouping stays `created_at` (this ADR, unchanged).
+  Within-day event ordering moves to `occurred_at ASC, created_at ASC, id ASC`, so events within
+  one publication batch read in true chronological order rather than publication order.
+
+**Consequence — cross-surface divergence is deliberate.** The same event may appear under
+different day headings on the two surfaces (e.g. "Aug 28" on the feed, "Aug 25" on the film page).
+This is the direct result of "feed = publication log, film page = event log" and is not a defect.
+
+The flat `/feed` endpoint is unused by the frontend and left on its original `created_at` ordering;
+it is a known inconsistent surface.
+
+The original residual above (disclose `occurred_at` on the card via `EventOut`) stays open for a
+future per-card-display ticket; with the film page grouped on `occurred_at`, the day heading
+already is the occurred date there, so per-card disclosure is redundant on the film page and
+deliberately publication-day on the feed.

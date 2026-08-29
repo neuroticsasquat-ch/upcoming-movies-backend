@@ -692,3 +692,82 @@ async def test_grouped_promoted_then_split(client, make_film, add_event):
     assert catalog_item["event_count"] == 1
     assert catalog_item["top_event_type"] == "trailer"
     assert [e["event_type"] for e in catalog_item["events"]] == ["trailer"]
+
+
+# NEU-1204 — feed day grouping stays created_at; within-day ordering moves to occurred_at.
+
+
+async def test_feed_grouped_day_key_still_created_at(client, make_film, add_event):
+    """The feed remains a publication log: day heading is created_at, not occurred_at."""
+    film = await make_film(slug="feed-day-2026")
+    await add_event(
+        film=film,
+        event_type="credit_removed",
+        summary="Maya Boyd departs the cast.",
+        created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),  # carded June 3
+        occurred_at=datetime(2026, 6, 1, 9, tzinfo=UTC),  # happened June 1
+        provenance="catalog",
+    )
+
+    body = (await client.get("/feed/grouped")).json()
+    assert [i["day"] for i in body["items"]] == ["2026-06-03"]
+
+
+async def test_feed_grouped_within_day_ordered_by_occurred_at(client, make_film, add_event):
+    """Two events on the same created_at day order by occurred_at time in the events list."""
+    film = await make_film(slug="feed-within-day-2026")
+    same_created = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="afternoon casting",
+        created_at=same_created,
+        occurred_at=datetime(2026, 6, 1, 20, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="morning trailer",
+        created_at=same_created,
+        occurred_at=datetime(2026, 6, 1, 8, tzinfo=UTC),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert [e["event_type"] for e in item["events"]] == ["trailer", "casting"]
+
+
+async def test_feed_grouped_within_day_tiebreak_created_at_then_id(client, make_film, add_event):
+    """Same occurred_at in the feed: tiebreak by created_at, then id."""
+    film = await make_film(slug="feed-tiebreak-2026")
+    base = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    first = await add_event(
+        film=film,
+        event_type="casting",
+        summary="first by created_at",
+        created_at=base,
+        occurred_at=base,
+    )
+    second = await add_event(
+        film=film,
+        event_type="trailer",
+        summary="second by created_at",
+        created_at=base.replace(hour=13),
+        occurred_at=base,
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert [e["event_type"] for e in item["events"]] == ["casting", "trailer"]
+    assert item["events"][0]["event_id"] == str(first.id)
+    assert item["events"][1]["event_id"] == str(second.id)
+
+
+async def test_feed_grouped_film_row_order_unchanged(client, make_film, add_event):
+    """(film, day) rows still order by day.desc(), title.asc(), slug.asc()."""
+    z = await make_film(slug="zzz-last", title="Zzz Film")
+    a = await make_film(slug="aaa-first", title="Aaa Film")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(film=z, summary="z", created_at=day, occurred_at=day)
+    await add_event(film=a, summary="a", created_at=day, occurred_at=day)
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(a), ref(z)]
