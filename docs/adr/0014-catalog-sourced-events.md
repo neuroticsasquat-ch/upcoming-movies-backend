@@ -128,6 +128,28 @@ this needs no special path.
 > `film_release_date_change` rows are grandfathered; the `ReleaseDateOut` DTO is unchanged. See
 > the spec at `docs/specs/NEU-1206-earliest-release-date-per-subject.md`.
 
+> **Amendment — 2026-08-29 (NEU-1207).** The collapsed "via TMDB" section this ADR's
+> chain relies on (NEU-1200/1205 both lean on it as the low-harm confinement for removal
+> cards and the transient-invariant hold) is **retired on the film page**. NEU-1201
+> introduced the collapse for two reasons: to hide credit-oscillation noise, and to
+> demote TMDB below trade news for veracity (TMDB is community-edited). NEU-1205
+> dampened the oscillation at the source (forward-dwell gate), removing the first reason;
+> this amendment retires the collapse on the film page, leaving the **veracity gap
+> signalled by the "via TMDB" label alone** rather than by hiding — demotion by
+> attribution, not by visibility. The **feed retains the collapse** (a different surface:
+> a publication log keyed on `created_at` per ADR-0016, aggregating many films per day,
+> not visually empty when TMDB-only). Consequence for the NEU-1205 transient-invariant
+> argument: its "confined to the collapsed `rumored` section" guarantee now holds for the
+> **feed only**. On the film page the ≤N-day hold (`SWEEP_CREDIT_DWELL_DAYS`, default 3)
+> makes the latest *carded* event briefly "attached" while TMDB says "removed" — now
+> **visible by default** rather than hidden behind a toggle. Accepted as the documented
+> cost of uncollapsing: bounded (≤N days), self-correcting (a final departure cards once
+> the hold passes; a flap's removal is suppressed), and confined to the per-film page while
+> the high-traffic feed still hides it. The mismatch is only ever an attachment card
+> staying visible during the hold — a true-at-the-time beat TMDB has since retracted —
+> never a wrong attachment. No backend change; `day_groups` shape unchanged. See the spec
+> at `docs/specs/NEU-1207-uncollapse-via-tmdb-events-on-movie-page.md`.
+
 ## Considered alternatives
 
 - **Keep requiring a story trigger.** Rejected: it is the status quo, and against an expanded
