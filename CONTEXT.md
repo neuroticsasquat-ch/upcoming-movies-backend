@@ -424,19 +424,42 @@ otherwise live uncorrected forever, and a future notification system needs a rem
 tell a user the attachment they were told about is gone. It is gated on a **prior visible
 attachment card** (`crew_attached` or `casting`, any provenance, `occurred_at` before the
 detachment): a first-observation baseline credit that was never carded has no published beat to
-correct, so its departure emits no card. Like attachments it is keyed on the observation — one
-`credit_removed` card per `(film, changed_at)`, all roles in one body — and it sits beside the
-attachment card (which stays visible) in the collapsed "via TMDB" section, so the later "no longer
-attached" card *is* the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE`
-(a removal is not forward progress and should not headline a day) and excluded from the LLM and
-story-dedup vocabularies: the model cannot emit it, and a trade "X exits" story does not yet
-attach to it. Reverses the original ADR-0014 decision that detachments were "recorded as history
-but never carded" — NEU-1201's collapsed "via TMDB" section (which did not exist when that
-decision was made) made the clutter concern moot.
+correct, so its departure emits no card. **Forward-dwell gate (NEU-1205):** a removal also cards
+only if the person does *not* re-attach within `SWEEP_CREDIT_DWELL_DAYS` (default 3, 0 disables)
+*after* it, so a **credit oscillation** flap (removed then rapidly re-added) is suppressed rather
+than carded as a real departure; the removal is held until it is ≥ N days old so the forward
+re-attach window is fully observed. The forward gate reads raw `catalog.film_credit_change` (not
+`news.event`), because the flap's re-attachment is itself suppressed by removal-aware suppression
+and so is never carded; it is scoped to the same seed-grade role so a cast→director move is two
+events, not a flap. Like attachments it is keyed on the observation — one `credit_removed` card
+per `(film, changed_at)`, all roles in one body — and it sits beside the attachment card (which
+stays visible) in the collapsed "via TMDB" section, so the later "no longer attached" card *is*
+the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE` (a removal is not
+forward progress and should not headline a day) and excluded from the LLM and story-dedup
+vocabularies: the model cannot emit it, and a trade "X exits" story does not yet attach to it.
+Reverses the original ADR-0014 decision that detachments were "recorded as history but never
+carded" — NEU-1201's collapsed "via TMDB" section (which did not exist when that decision was
+made) made the clutter concern moot.
 _Avoid_: crew detached, cast departed (those imply the old split that only existed because
 `casting` pre-existed), credit removal (too generic — a release date disappearing is also a
 removal, and is out of scope), retraction, cancellation (those are about the *film*, not a
 person).
+
+**Credit oscillation** (of a TMDB credit):
+A seed-grade credit flapping on and off a film over a few days — added → removed → added →
+removed — typically an anonymous TMDB edit being reverted. Each flap used to card 1:1 under
+NEU-1200, producing a join+depart chain per cycle. It is dampened by the **forward-dwell gate**
+on the credit detachment event: a removal followed by a re-attachment within
+`SWEEP_CREDIT_DWELL_DAYS` is suppressed (a flap), while a removal with no re-attachment cards
+(a real departure). The discriminator is *forward* re-attachment, not *backward* dwell: a flap
+and a real brief departure both have short backward dwell, so a backward gate would suppress
+mostly real departures and re-create the stale-attachment bug. A held flap that ends in `removed`
+still cards a real final departure later; one that ends in `added` self-corrects (the re-attachment
+is suppressed by removal-aware suppression during the hold). The transient ≤N-day hold window is
+the one cost — the latest *carded* event is briefly "attached" while TMDB says "removed" — bounded,
+self-correcting, and confined to the collapsed section.
+_Avoid_: flicker, churn (too vague — a credit changing departments is churn but not a flap),
+vandalism (that is the *cause*, not the observable pattern), bounce.
 
 **Double-carding**:
 The failure mode where the story path and the catalog path both raise an event for one TMDB

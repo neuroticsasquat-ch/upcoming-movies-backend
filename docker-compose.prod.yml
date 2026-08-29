@@ -92,10 +92,15 @@ services:
       # repeats the code default deliberately: unset would pass an empty string and fail to boot.
       SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
       # How often the sweep still re-fetches a dormant film. Dormancy is not a one-way door —
-      # the change that revives a project can only be seen by reading it — so this is the
+      # the change that revives a project can only be seen by reading it, so this is the
       # cadence, not an exemption (ADR-0015, §4.5). Same reasoning as above for being here:
       # M4 tunes it from the probe, and that should be an env change rather than a redeploy.
       SWEEP_DORMANT_REFRESH_DAYS: "${SWEEP_DORMANT_REFRESH_DAYS:-30}"
+      # Forward-dwell gate for credit detachment carding (NEU-1205). 0 disables the gate and
+      # reverts to plain NEU-1200. The fallback repeats the code default deliberately: unset
+      # would pass an empty string and fail to boot. Must be < SWEEP_EVENT_LOOKBACK_DAYS so a
+      # held removal is still in the rolling window when it becomes eligible.
+      SWEEP_CREDIT_DWELL_DAYS: "${SWEEP_CREDIT_DWELL_DAYS:-3}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

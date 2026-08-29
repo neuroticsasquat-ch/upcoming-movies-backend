@@ -14,6 +14,7 @@ from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.sweep import (
     AdmissionTranches,
+    CreditDetachmentResult,
     CreditEventResult,
     EnumerateResult,
     FieldEventResult,
@@ -566,9 +567,16 @@ def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
 
 
 def _stub_phases(
-    monkeypatch, *, enumerated=None, refreshed=None, carded=None, attached=None, released=None
+    monkeypatch,
+    *,
+    enumerated=None,
+    refreshed=None,
+    carded=None,
+    attached=None,
+    detached=None,
+    released=None,
 ):
-    """Replace all five sweep phases with fakes that record their kwargs and return the
+    """Replace all six sweep phases with fakes that record their kwargs and return the
     given results. Returns (calls, captured) — call order and each phase's kwargs."""
     calls: list[str] = []
     captured: dict[str, dict] = {}
@@ -593,6 +601,11 @@ def _stub_phases(
         captured["credits"] = kwargs
         return attached if attached is not None else CreditEventResult(attachments_read=1)
 
+    async def fake_detachments(**kwargs):
+        calls.append("credit removals")
+        captured["credit removals"] = kwargs
+        return detached if detached is not None else CreditDetachmentResult(detachments_read=1)
+
     async def fake_release(**kwargs):
         calls.append("release dates")
         captured["release dates"] = kwargs
@@ -602,6 +615,7 @@ def _stub_phases(
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_refresh", fake_refresh)
     monkeypatch.setattr("upmovies.pipeline_run.run_field_change_events", fake_events)
     monkeypatch.setattr("upmovies.pipeline_run.run_credit_attachment_events", fake_credits)
+    monkeypatch.setattr("upmovies.pipeline_run.run_credit_detachment_events", fake_detachments)
     monkeypatch.setattr("upmovies.pipeline_run.run_release_date_events", fake_release)
     return calls, captured
 
@@ -639,7 +653,14 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
 
     await pipeline_run.run_sweep_stage(run_id, get_settings())
 
-    assert calls == ["enumerate", "refresh", "events", "credits", "release dates"]
+    assert calls == [
+        "enumerate",
+        "refresh",
+        "events",
+        "credits",
+        "credit removals",
+        "release dates",
+    ]
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
     assert row.error is None
@@ -648,6 +669,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
     assert "refresh: 5/5 refreshed" in row.detail
     assert "events: 3 carded from 9 changes" in row.detail
     assert "credits: 2 carded from 4 attachments" in row.detail
+    assert "credit removals: 0 carded from 1 detachments" in row.detail
     assert "release dates: 3 carded from 11 changes" in row.detail
 
 
@@ -692,6 +714,18 @@ async def test_sweep_stage_passes_the_sweep_settings_to_every_phase(session, mon
     assert enumerate_kwargs["today"] == refresh_kwargs["today"]
 
 
+async def test_sweep_threads_dwell_days(session, monkeypatch):
+    """NEU-1205: the credit detachment phase receives the configured dwell-days value."""
+    _, captured = _stub_phases(monkeypatch)
+    settings = get_settings().model_copy(update={"sweep_credit_dwell_days": 3})
+    run_id = await create_run(session, kind="sweep")
+    await session.commit()
+
+    await pipeline_run.run_sweep_stage(run_id, settings)
+
+    assert captured["credit removals"]["dwell_days"] == 3
+
+
 async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkeypatch):
     """The refresh phase is the one the project silently fails without (§6.2), so an
     enumerate that gave up must not take it with it — the cost of trying is bounded by the
@@ -705,7 +739,14 @@ async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkey
 
     await pipeline_run.run_sweep_stage(run_id, get_settings())
 
-    assert calls == ["enumerate", "refresh", "events", "credits", "release dates"]
+    assert calls == [
+        "enumerate",
+        "refresh",
+        "events",
+        "credits",
+        "credit removals",
+        "release dates",
+    ]
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "aborted after 10 failures" in row.error
