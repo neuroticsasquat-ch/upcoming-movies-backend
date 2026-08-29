@@ -409,6 +409,36 @@ async def test_detail_includes_every_origin_country_not_just_the_first(
     assert [rd["country"] for rd in r.json()["release_dates"]] == ["FR"]
 
 
+async def test_detail_collapses_multiple_dates_per_subject_to_earliest(
+    client, make_film, add_event, add_release_date
+):
+    """NEU-1206: only the earliest release date per (country, category) subject displays,
+    and its metadata (certification) comes from that earliest row."""
+    film = await make_film(slug="rd-dup-us-2026", title="Dup US Dates Film")
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=datetime(2026, 7, 17, tzinfo=UTC),
+        certification="PG-13",
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=datetime(2026, 6, 10, tzinfo=UTC),
+        certification=None,
+    )
+
+    r = await client.get("/films/rd-dup-us-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    assert len(rds) == 1
+    assert rds[0]["date"].startswith("2026-06-10")
+    assert rds[0]["certification"] is None
+
+
 # ── film metadata (genres, companies, collection, scalars) ────────────────────
 
 

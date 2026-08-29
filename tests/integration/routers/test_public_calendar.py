@@ -420,3 +420,49 @@ async def test_calendar_defaults_when_no_metadata(client, make_film, add_release
     assert item["director"] is None
     assert item["stars"] == []
     assert item["genres"] == []
+
+
+async def test_calendar_collapses_to_governing_date(client, make_film, add_release_date):
+    """NEU-1206: a category with multiple rows shows only the earliest date."""
+    film = await make_film(slug="cal-governing", title="Governing Film")
+    await add_release_date(film=film, release_type=3, release_date=datetime(2099, 8, 1, tzinfo=UTC))
+    await add_release_date(film=film, release_type=3, release_date=datetime(2099, 6, 1, tzinfo=UTC))
+
+    resp = await client.get("/calendar")
+    assert resp.status_code == 200
+    rows = [i for i in resp.json()["items"] if i["film_ref"] == ref(film)]
+    assert len(rows) == 1
+    assert rows[0]["release_date"].startswith("2099-06-01")
+
+
+async def test_calendar_excludes_category_when_governing_date_is_past(
+    client, make_film, add_release_date
+):
+    """NEU-1206: if the governing date is past, the category is excluded entirely,
+    even if a later upcoming date exists for the same subject.
+    """
+    film = await make_film(slug="cal-past-governing", title="Past Governing Film")
+    await add_release_date(film=film, release_type=3, release_date=_PAST)
+    await add_release_date(film=film, release_type=3, release_date=_FUTURE)
+
+    resp = await client.get("/calendar")
+    assert resp.status_code == 200
+    refs = [i["film_ref"] for i in resp.json()["items"]]
+    assert ref(film) not in refs
+
+
+async def test_calendar_independent_categories_past_limited_upcoming_wide(
+    client, make_film, add_release_date
+):
+    """NEU-1206: different categories are independent; a past limited + upcoming wide
+    still surfaces the wide row.
+    """
+    film = await make_film(slug="cal-mixed-cats", title="Mixed Categories Film")
+    await add_release_date(film=film, release_type=2, release_date=_PAST)
+    await add_release_date(film=film, release_type=3, release_date=_FUTURE)
+
+    resp = await client.get("/calendar")
+    assert resp.status_code == 200
+    rows = [i for i in resp.json()["items"] if i["film_ref"] == ref(film)]
+    assert len(rows) == 1
+    assert rows[0]["release_type"] == "wide"

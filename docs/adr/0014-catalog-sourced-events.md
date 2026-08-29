@@ -108,6 +108,26 @@ this needs no special path.
 > grandfathered, not destructively cleaned. See the spec at
 > `docs/specs/NEU-1205-dampen-credit-oscillation.md`.
 
+> **Amendment — 2026-08-29 (NEU-1206).** The release-date half is refined: a subject
+> `(iso_3166_1, release_type)` can carry **multiple** `catalog.film_release_date` rows (TMDB has
+> no uniqueness constraint there), so the single-date-per-subject assumption the original
+> diff (`ingest.tmdb.release_date_history`) relied on was already collapsing duplicates
+> last-wins — a latent bug. The displayed and carded value is now the **governing release
+> date**: `min(release_date)` over the current rows for the subject. The movie page and the
+> release calendar both collapse to it (one line per subject); the calendar, being
+> upcoming-only, excludes a category whose governing date is past rather than falling through
+> to a later date. The carding rule is restated as: a card fires **iff the governing date for
+> a subject changed and the new governing date was not already present in the previous set**;
+> the card describes the *governing date's* movement (`previous_date = prev_earliest`,
+> `new_date = new_earliest`), not the underlying moved row's own previous value. A card does
+> **not** fire when the governing date moves to an *unchanged* sibling because the prior
+> governing date was withdrawn or delayed past it — those cases are silent, matching this
+> ADR's existing "a date disappearing records no history row, so there is nothing to card" and
+> accepted as the cost of the unified rule (same philosophy as the credit-detachment transient
+> hold, but permanent and by design here). **No backfill, no migration:** existing events and
+> `film_release_date_change` rows are grandfathered; the `ReleaseDateOut` DTO is unchanged. See
+> the spec at `docs/specs/NEU-1206-earliest-release-date-per-subject.md`.
+
 ## Considered alternatives
 
 - **Keep requiring a story trigger.** Rejected: it is the status quo, and against an expanded
