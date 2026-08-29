@@ -457,7 +457,7 @@ the LLM has no `crew_attached` in its vocabulary, so the story side searches bot
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **Day-grouped events** (of a film page):
-The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is collapsed by default on the film page the same way it is on the feed.
+The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is collapsed by default on the film page the same way it is on the feed. The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
 _Avoid_: in-the-news section (that's `news_events`), TMDB section (that's `tmdb_events`), two-timeline display, split events.
 
 **News-backed** (of a film-day):

@@ -326,7 +326,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(Event.film_id == film.id, visible_events(), _region_visible())
-            .order_by(Event.created_at.asc(), Event.id.asc())
+            .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
     ).all()
 
@@ -368,7 +368,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     day_groups: list[DayGroup] = []
     day_events: dict[date, tuple[list[EventOut], list[EventOut]]] = {}
     for event, summary, edited_at, has_story in summarized:
-        utc = event.created_at.astimezone(UTC)
+        utc = event.occurred_at.astimezone(UTC)
         day_key = date(utc.year, utc.month, utc.day)
         eout = _to_event_out(event, summary, edited_at)
         news_list, tmdb_list = day_events.setdefault(day_key, ([], []))
@@ -704,7 +704,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 cast(func.timezone("UTC", Event.created_at), Date).in_({r.day for r in rows}),
                 visible_events(),
             )
-            .order_by(Event.created_at.desc())
+            .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
     ).all()
 
