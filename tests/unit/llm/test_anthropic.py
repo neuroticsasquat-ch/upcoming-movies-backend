@@ -2,16 +2,15 @@ import json
 import types
 from dataclasses import replace
 
-import httpx
+import httpx2
 import pytest
-import respx
 from anthropic import APIStatusError
 
 from upmovies.llm import AnthropicClient
 from upmovies.llm.retry import RetryPolicy
 from upmovies.llm.types import CallLog, CallResult, Prompt, Usage
 
-MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+from .conftest import mock_client
 
 # Backoff is not what these tests are about, and waiting for it would make the suite slow for
 # nothing. Attempt *counts* are the real thing under test, so they stay explicit per test.
@@ -23,8 +22,8 @@ def _message_response(
     usage: dict | None = None,
     *,
     stop_reason: str = "end_turn",
-) -> httpx.Response:
-    return httpx.Response(
+) -> httpx2.Response:
+    return httpx2.Response(
         200,
         json={
             "id": "msg_1",
@@ -39,23 +38,28 @@ def _message_response(
     )
 
 
-@respx.mock
+def _client_with(route, **kwargs):
+    """Return an AnthropicClient wired to a mock httpx2 client."""
+    client, _route = mock_client(**kwargs)
+    return AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=client)
+
+
 async def test_the_stable_prefix_becomes_the_leading_cached_system_block():
     """The adapter — not the builder — is what knows Anthropic caches explicitly. It marks
     the stable prefix unconditionally: deciding *when* caching is worth it would mean
     guessing token counts against a per-model floor, which is the vendor leak the DTO
     removes. Below the floor `cache_control` silently no-ops, so an inert contract costs
     nothing (spec §3)."""
-    route = respx.post(MESSAGES_URL).mock(
+    http_client, route = mock_client(
         return_value=_message_response([{"type": "text", "text": "hello"}])
     )
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         out = await c.complete(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
         )
     assert out == "hello"
-    body = json.loads(route.calls.last.request.content)
+    body = json.loads(route.calls[-1].content)
     assert body["model"] == "claude-haiku-4-5"
     assert body["max_tokens"] == 16
     assert body["system"] == [
@@ -64,55 +68,52 @@ async def test_the_stable_prefix_becomes_the_leading_cached_system_block():
     assert body["messages"] == [{"role": "user", "content": "hi"}]
 
 
-@respx.mock
 async def test_a_prefill_becomes_a_trailing_assistant_turn():
-    route = respx.post(MESSAGES_URL).mock(
+    http_client, route = mock_client(
         return_value=_message_response([{"type": "text", "text": 'ok"}'}])
     )
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         await c.complete(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="I", user="hi", prefill='{"summary": "'),
         )
-    body = json.loads(route.calls.last.request.content)
+    body = json.loads(route.calls[-1].content)
     assert body["messages"] == [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": '{"summary": "'},
     ]
 
 
-@respx.mock
 async def test_json_object_is_ignored_rather_than_approximated():
     """Anthropic has no `response_format`. The field is a request, not a guarantee, and the
     call sites' hand-rolled extractors are what has always got JSON out of this provider."""
-    route = respx.post(MESSAGES_URL).mock(
+    http_client, route = mock_client(
         return_value=_message_response([{"type": "text", "text": "[]"}])
     )
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         await c.complete(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="I", user="hi", json_object=True),
         )
-    assert "response_format" not in json.loads(route.calls.last.request.content)
+    assert "response_format" not in json.loads(route.calls[-1].content)
 
 
-@respx.mock
 async def test_a_429_with_retry_after_is_retried_and_the_header_is_read():
     """The same four retry cases are asserted on both adapters, deliberately. A policy shared
     in `retry.py` but wired up differently at one of the two call sites would still leave a
     provider comparison measuring the wiring (spec §9), and only an end-to-end assertion here
     catches that — this is the one test that exercises `_classify` reading `Retry-After` off an
     SDK exception rather than an httpx one."""
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         side_effect=[
-            httpx.Response(
+            httpx2.Response(
                 429, headers={"Retry-After": "0"}, json={"error": {"type": "rate_limit_error"}}
             ),
             _message_response([{"type": "text", "text": "ok"}]),
         ]
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5", prompt=Prompt(stable_prefix="S", user="hi"), calls=calls
         )
@@ -122,15 +123,14 @@ async def test_a_429_with_retry_after_is_retried_and_the_header_is_read():
     assert len(calls.results) == 1
 
 
-@respx.mock
 async def test_exhausted_retries_record_a_failed_call_then_re_raise():
     """Exhaustion at the *default* retry count, so the number of attempts a failing provider
     costs is pinned on this path too."""
-    route = respx.post(MESSAGES_URL).mock(
-        return_value=httpx.Response(503, json={"error": {"type": "overloaded_error"}})
+    http_client, route = mock_client(
+        return_value=httpx2.Response(503, json={"error": {"type": "overloaded_error"}})
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=http_client) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -145,15 +145,14 @@ async def test_exhausted_retries_record_a_failed_call_then_re_raise():
     assert failed.usage == Usage()
 
 
-@respx.mock
 async def test_a_connection_error_is_retried_by_the_shared_loop():
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         side_effect=[
-            httpx.ConnectError("no route to host"),
+            httpx2.ConnectError("no route to host"),
             _message_response([{"type": "text", "text": "ok"}]),
         ]
     )
-    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5", prompt=Prompt(stable_prefix="S", user="hi"), calls=CallLog()
         )
@@ -161,14 +160,13 @@ async def test_a_connection_error_is_retried_by_the_shared_loop():
     assert result.attempts == 2
 
 
-@respx.mock
 async def test_a_4xx_is_not_retried():
     """The shared status verdict applies on this path too — retrying a bad credential four
     times just spends the same failure four times (`retry.retry_for_status`)."""
-    route = respx.post(MESSAGES_URL).mock(
-        return_value=httpx.Response(401, json={"error": {"type": "authentication_error"}})
+    http_client, route = mock_client(
+        return_value=httpx2.Response(401, json={"error": {"type": "authentication_error"}})
     )
-    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=http_client) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -179,23 +177,21 @@ async def test_a_4xx_is_not_retried():
     assert route.call_count == 1
 
 
-@respx.mock
 async def test_complete_concatenates_text_blocks():
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         return_value=_message_response(
             [{"type": "text", "text": "foo"}, {"type": "text", "text": "bar"}]
         )
     )
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         out = await c.complete(
             model="claude-haiku-4-5", prompt=Prompt(stable_prefix="X", user="hi")
         )
     assert out == "foobar"
 
 
-@respx.mock
 async def test_complete_with_usage_returns_text_and_usage():
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         return_value=_message_response(
             [{"type": "text", "text": "hi there"}],
             usage={
@@ -206,7 +202,7 @@ async def test_complete_with_usage_returns_text_and_usage():
             },
         )
     )
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         text, usage = await c.complete_with_usage(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
@@ -220,9 +216,8 @@ async def test_complete_with_usage_returns_text_and_usage():
     )
 
 
-@respx.mock
 async def test_complete_call_records_the_call_and_returns_it():
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         return_value=_message_response(
             [{"type": "text", "text": "hi there"}],
             usage={
@@ -234,7 +229,7 @@ async def test_complete_call_records_the_call_and_returns_it():
         )
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="INSTRUCTIONS", user="hi", max_tokens=16),
@@ -256,21 +251,21 @@ async def test_complete_call_records_the_call_and_returns_it():
     assert calls.results == (result,)
 
 
-@respx.mock
 async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts():
     """Retries here are the shared loop's, not the SDK's — `max_retries=0` is passed to
     `AsyncAnthropic` on purpose so both adapters retry under one policy rather than two
     separately-configured ones that look alike (spec §9)."""
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         side_effect=[
-            httpx.Response(
+            httpx2.Response(
                 429, headers={"Retry-After": "0"}, json={"error": {"type": "rate_limit_error"}}
             ),
             _message_response([{"type": "text", "text": "ok"}]),
         ]
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=1)) as c:
+    policy = replace(_NO_WAIT, max_retries=1)
+    async with AnthropicClient(api_key="test-key", policy=policy, http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5",
             prompt=Prompt(stable_prefix="S", user="hi"),
@@ -283,13 +278,13 @@ async def test_complete_call_counts_a_retried_call_as_one_call_with_two_attempts
     assert result.ok is True
 
 
-@respx.mock
 async def test_complete_call_records_a_failed_call_then_re_raises():
-    respx.post(MESSAGES_URL).mock(
-        return_value=httpx.Response(500, json={"error": {"type": "api_error"}})
+    http_client, _route = mock_client(
+        return_value=httpx2.Response(500, json={"error": {"type": "api_error"}})
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=1)) as c:
+    policy = replace(_NO_WAIT, max_retries=1)
+    async with AnthropicClient(api_key="test-key", policy=policy, http_client=http_client) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -304,13 +299,13 @@ async def test_complete_call_records_a_failed_call_then_re_raises():
     assert failed.usage == Usage()
 
 
-@respx.mock
 async def test_complete_call_records_a_200_whose_body_does_not_validate():
     """A response that arrives but doesn't deserialize is still a call that was made and paid
     for — it must not vanish from the telemetry just because the SDK raised late."""
-    respx.post(MESSAGES_URL).mock(return_value=httpx.Response(200, json={"not": "a message"}))
+    http_client, _route = mock_client(return_value=httpx2.Response(200, json={"not": "a message"}))
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=replace(_NO_WAIT, max_retries=0)) as c:
+    policy = replace(_NO_WAIT, max_retries=0)
+    async with AnthropicClient(api_key="test-key", policy=policy, http_client=http_client) as c:
         with pytest.raises(Exception):  # noqa: B017 — SDK's own validation error type
             await c.complete_call(
                 model="claude-haiku-4-5",
@@ -402,19 +397,18 @@ def test_usage_sum_with_zero_start():
     assert sum(items, Usage()).input_tokens == 6
 
 
-@respx.mock
 async def test_a_reply_cut_off_at_the_ceiling_is_recorded_as_truncated():
     """Anthropic spells it `stop_reason: "max_tokens"` where the OpenAI-compatible providers
     say `finish_reason: "length"`. Both are the same provider-neutral predicate — the reply hit
     the ceiling — which is why `CallResult` carries the predicate and not either spelling
     (NEU-1014)."""
-    respx.post(MESSAGES_URL).mock(
+    http_client, _route = mock_client(
         return_value=_message_response(
             [{"type": "text", "text": '[{"id": "a", "fi'}], stop_reason="max_tokens"
         )
     )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
         )
@@ -423,11 +417,12 @@ async def test_a_reply_cut_off_at_the_ceiling_is_recorded_as_truncated():
     assert result.ok is True
 
 
-@respx.mock
 async def test_a_reply_that_stopped_on_its_own_is_not_truncated():
-    respx.post(MESSAGES_URL).mock(return_value=_message_response([{"type": "text", "text": "hi"}]))
+    http_client, _route = mock_client(
+        return_value=_message_response([{"type": "text", "text": "hi"}])
+    )
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         result = await c.complete_call(
             model="claude-haiku-4-5", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
         )
@@ -435,12 +430,11 @@ async def test_a_reply_that_stopped_on_its_own_is_not_truncated():
     assert result.truncated is False
 
 
-@respx.mock
 async def test_a_call_that_never_returned_reports_truncated_as_unknown():
     """None rather than False: no reply arrived, so "was it cut off" has no answer."""
-    respx.post(MESSAGES_URL).mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    http_client, _route = mock_client(return_value=httpx2.Response(400, json={"error": "bad"}))
     calls = CallLog()
-    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT) as c:
+    async with AnthropicClient(api_key="test-key", policy=_NO_WAIT, http_client=http_client) as c:
         with pytest.raises(APIStatusError):
             await c.complete_call(
                 model="claude-haiku-4-5", prompt=Prompt(stable_prefix="I", user="hi"), calls=calls
@@ -451,15 +445,14 @@ async def test_a_call_that_never_returned_reports_truncated_as_unknown():
     assert failed.truncated is None
 
 
-@respx.mock
 async def test_an_optional_prefill_is_still_sent_to_a_provider_that_supports_it():
     """`prefill_required=False` says the caller can cope without it — not that it stopped being
     worth having. Anthropic can seed the assistant turn, so it still does: the prefill is what
     stops Haiku narrating its reasoning into a stored summary (`summarizer.py`)."""
-    route = respx.post(MESSAGES_URL).mock(
+    http_client, route = mock_client(
         return_value=_message_response([{"type": "text", "text": 'ok"}'}])
     )
-    async with AnthropicClient(api_key="test-key") as c:
+    async with AnthropicClient(api_key="test-key", http_client=http_client) as c:
         await c.complete(
             model="claude-haiku-4-5",
             prompt=Prompt(
@@ -467,5 +460,5 @@ async def test_an_optional_prefill_is_still_sent_to_a_provider_that_supports_it(
             ),
         )
 
-    messages = json.loads(route.calls.last.request.content)["messages"]
+    messages = json.loads(route.calls[-1].content)["messages"]
     assert messages[-1] == {"role": "assistant", "content": '{"summary": "'}

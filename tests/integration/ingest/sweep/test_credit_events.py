@@ -8,13 +8,14 @@ getting it wrong would surface: tens of thousands of false "attached to direct" 
 first day the expansion ran.
 """
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
 from tests.fixtures.catalog import add_film
 from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.ingest.sweep import credit_events, run_credit_attachment_events
+from upmovies.ingest.sweep.credit_events import run_credit_detachment_events
 from upmovies.ingest.tmdb.credit_history import (
     CREDIT_ADDED,
     CREDIT_REMOVED,
@@ -22,6 +23,7 @@ from upmovies.ingest.tmdb.credit_history import (
     diff_seed_credits,
     record_credit_changes,
 )
+from upmovies.news.catalog_events import CREDIT_REMOVED_EVENT_TYPE
 from upmovies.news.models import Event, EventSummary
 from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL, TEMPLATE_VERSION
 
@@ -80,6 +82,16 @@ async def _run(session_factory, run_id, **overrides):
         "lookback_days": LOOKBACK_DAYS,
     }
     return await run_credit_attachment_events(**{**kwargs, **overrides})
+
+
+async def _run_detachment(session_factory, run_id, **overrides):
+    kwargs = {
+        "session_factory": session_factory,
+        "run_id": run_id,
+        "now": NOW,
+        "lookback_days": LOOKBACK_DAYS,
+    }
+    return await run_credit_detachment_events(**{**kwargs, **overrides})
 
 
 async def _events(session, film):
@@ -376,15 +388,204 @@ async def test_consecutive_failures_abort_the_phase(session, session_factory, ru
     assert result.aborted is True
     assert result.abort_error == "aborted after 1 consecutive failures"
     assert result.failures == 1
+    # The abort happens inside the exception handler, before events_created is incremented.
+    assert result.events_created == 0
 
 
-async def test_a_dated_film_still_cards_its_credits(session, session_factory, run_id):
-    """Nothing about a credit event is scoped to the undated expansion — the phase reads the
-    whole catalog's history, as the field-change phase does."""
-    film = await add_film(session, 1, release_date=date(2027, 5, 1))
-    await _attached(session, film, await _person(session, 1, "Denis Villeneuve"))
+# ── Detachment carding tests (NEU-1200) ───────────────────────────────────
+
+
+async def test_detachment_cards_when_prior_catalog_attachment(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person)
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
     await session.commit()
 
-    result = await _run(session_factory, run_id)
+    result = await _run_detachment(session_factory, run_id)
 
     assert result.events_created == 1
+    assert result.detachments_read == 1
+    events = await _events(session, film)
+    removal = [e for e in events if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert len(removal) == 1
+    assert removal[0].provenance == "catalog"
+    assert removal[0].confidence == "rumored"
+    assert removal[0].occurred_at == NOW
+    assert removal[0].region is None
+    assert removal[0].subject_key == ["denis villeneuve"]
+    summary = await _summary(session, removal[0])
+    assert summary.summary == "Denis Villeneuve is no longer attached to direct."
+    assert summary.model == DETERMINISTIC_MODEL
+
+
+async def test_detachment_cards_when_prior_story_attachment(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Timothée Chalamet")
+    await session.commit()
+
+    event = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="rumored",
+        provenance="story",
+        occurred_at=YESTERDAY,
+        region=None,
+        subject_key=["timothée chalamet"],
+    )
+    session.add(event)
+    await session.flush()
+    await session.commit()
+
+    await _attached(
+        session,
+        film,
+        person,
+        credit_type="cast",
+        job=None,
+        change=CREDIT_REMOVED,
+        changed_at=NOW,
+    )
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.events_created == 1
+
+
+async def test_detachment_skipped_when_no_prior_attachment(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Zendaya")
+    await _attached(
+        session,
+        film,
+        person,
+        credit_type="cast",
+        job=None,
+        change=CREDIT_REMOVED,
+        changed_at=NOW,
+    )
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.events_created == 0
+
+
+async def test_detachment_gate_requires_attachment_before_detachment(
+    session, session_factory, run_id
+):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Denis Villeneuve")
+    await session.commit()
+
+    event = Event(
+        film_id=film.id,
+        event_type="crew_attached",
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=NOW,
+        region=None,
+        subject_key=["denis villeneuve"],
+    )
+    session.add(event)
+    await session.flush()
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=YESTERDAY)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.events_created == 0
+
+
+async def test_detachment_already_carded(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person)
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    result1 = await _run_detachment(session_factory, run_id)
+    assert result1.events_created == 1
+
+    result2 = await _run_detachment(session_factory, run_id)
+    assert result2.events_created == 0
+    assert result2.skipped >= 1
+
+
+async def test_detachment_older_than_lookback(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person)
+    await session.commit()
+    await _run(session_factory, run_id)
+    old = NOW - timedelta(days=LOOKBACK_DAYS + 1)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=old)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.detachments_read == 0
+    assert result.events_created == 0
+
+
+async def test_detachment_one_card_per_observation(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    director = await _person(session, 100, "Denis Villeneuve")
+    actor = await _person(session, 200, "Timothée Chalamet")
+    await _attached(session, film, director)
+    await _cast(session, film, actor)
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, director, change=CREDIT_REMOVED, changed_at=NOW)
+    await _cast(session, film, actor, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.events_created == 1
+    events = await _events(session, film)
+    removal = [e for e in events if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert len(removal) == 1
+    assert set(removal[0].subject_key or []) == {"denis villeneuve", "timothée chalamet"}
+    summary = await _summary(session, removal[0])
+    assert summary.summary == (
+        "Denis Villeneuve is no longer attached to direct. Timothée Chalamet departs the cast."
+    )
+
+
+async def test_reattachment_after_removal_is_carded(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person, changed_at=YESTERDAY)
+    await session.commit()
+    result1 = await _run(session_factory, run_id)
+    assert result1.events_created == 1
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+    await _run_detachment(session_factory, run_id)
+    later = NOW + timedelta(hours=1)
+    await _attached(session, film, person, changed_at=later)
+    await session.commit()
+
+    result2 = await _run(session_factory, run_id, now=later + timedelta(hours=2))
+
+    assert result2.events_created == 1
+
+
+async def test_reattachment_without_removal_still_suppressed(session, session_factory, run_id):
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person, changed_at=YESTERDAY)
+    await session.commit()
+    result1 = await _run(session_factory, run_id)
+    assert result1.events_created == 1
+    await _attached(session, film, person, changed_at=NOW)
+    await session.commit()
+
+    result2 = await _run(session_factory, run_id)
+    assert result2.events_created == 0

@@ -18,6 +18,7 @@ from upmovies.catalog.models import Film, FilmAlternativeTitle, FilmCredit, Pers
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.sweep import (
     AdmissionTranches,
+    CreditDetachmentResult,
     CreditEventResult,
     FieldEventResult,
     RefreshResult,
@@ -439,7 +440,12 @@ async def test_the_attachment_histogram_still_counts_what_the_threshold_excluded
     # Asserted through the detail line too: the histogram is durable only if it survives
     # into `ingest_run.detail`, and that is the surface the tuning pass actually reads.
     assert "seed attachments: 1×1" in sweep_detail(
-        result, RefreshResult(), FieldEventResult(), CreditEventResult(), ReleaseEventResult()
+        result,
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
     )
 
 
@@ -462,7 +468,12 @@ async def test_a_candidate_reached_only_through_a_writer_waits_for_its_tranche(
     # A closed tranche withholds the film but must not hide it from the distribution: this
     # line is the answer to what opening the writers tranche would admit (NEU-1089).
     assert "seed attachments: 1×1" in sweep_detail(
-        result, RefreshResult(), FieldEventResult(), CreditEventResult(), ReleaseEventResult()
+        result,
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
     )
 
 

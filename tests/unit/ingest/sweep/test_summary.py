@@ -3,6 +3,7 @@
 from collections import Counter
 
 from upmovies.ingest.sweep import (
+    CreditDetachmentResult,
     CreditEventResult,
     EnumerateResult,
     FieldEventResult,
@@ -21,6 +22,7 @@ def test_reports_every_phase_distinctly():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -36,6 +38,7 @@ def test_counts_every_failure_the_phases_recorded():
         RefreshResult(selected=10, refreshed=8, dormant_selected=4, failures=2),
         FieldEventResult(changes_read=6, events_created=2, skipped=4),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -51,6 +54,7 @@ def test_names_the_phase_that_aborted():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -63,6 +67,7 @@ def test_a_clean_pass_says_nothing_about_aborting():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -76,6 +81,7 @@ def test_reports_what_the_field_change_phase_carded():
         RefreshResult(refreshed=1200, selected=1200),
         FieldEventResult(changes_read=31, events_created=4, skipped=27, failures=1),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -88,6 +94,7 @@ def test_names_the_field_change_phase_when_it_aborts():
         RefreshResult(),
         FieldEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -102,6 +109,7 @@ def test_reports_what_the_credit_phase_carded():
         RefreshResult(refreshed=1200, selected=1200),
         FieldEventResult(changes_read=31, events_created=4),
         CreditEventResult(attachments_read=12, events_created=3, skipped=9, failures=1),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -114,6 +122,7 @@ def test_names_the_credit_phase_when_it_aborts():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -139,6 +148,7 @@ def test_reports_admissions_against_skips_by_reason():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -155,6 +165,7 @@ def test_a_pass_that_skipped_nothing_still_reports_a_skip_total():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -167,6 +178,7 @@ def test_reports_what_the_release_date_phase_carded():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(changes_read=9, events_created=4, skipped=5),
     )
 
@@ -179,6 +191,7 @@ def test_names_the_release_date_phase_when_it_aborts():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
     )
 
@@ -196,6 +209,7 @@ def test_reports_the_attachment_histogram():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 
@@ -210,6 +224,7 @@ def test_a_pass_that_reached_no_candidates_says_nothing_about_attachments():
         RefreshResult(),
         FieldEventResult(),
         CreditEventResult(),
+        CreditDetachmentResult(),
         ReleaseEventResult(),
     )
 

@@ -1,6 +1,25 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from tests.fixtures.public import ref
+
+
+def _flatten_events(body: dict) -> list[dict]:
+    """Flatten all events from day_groups into a single list, preserving within-group order
+    (news_events first, then tmdb_events), day_groups sorted newest day first."""
+    events: list[dict] = []
+    for g in body["day_groups"]:
+        events.extend(g["news_events"])
+        events.extend(g["tmdb_events"])
+    return events
+
+
+def _first_group(body: dict) -> dict:
+    """Return the first (newest) day group."""
+    return body["day_groups"][0]
+
+
+def _events_for_type(body: dict, event_type: str) -> list[dict]:
+    return [e for e in _flatten_events(body) if e["event_type"] == event_type]
 
 
 async def test_detail_returns_chronological_summarized_events_with_sources(
@@ -54,14 +73,15 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     assert body["release_date"] == "2026-07-17"
     assert body["release_year"] == 2026
     assert body["arc_stage"] == "shooting"  # arc_stage tracks TMDB status only (NEU-452)
-    # created_at ascending: casting (Jan created_at) before trailer (Mar created_at).
-    # A stale occurred_at sort would yield the reverse order and fail this assertion.
-    assert [e["event_type"] for e in body["events"]] == ["casting", "trailer"]
+    # created_at ascending within each group: trailer (Mar) before casting (Jan).
+    # With different days, trailer's day (Mar) comes first (newest first), then casting's (Jan).
+    all_events = _flatten_events(body)
+    assert [e["event_type"] for e in all_events] == ["trailer", "casting"]
     # Each event must expose created_at and must NOT expose occurred_at (the rename).
-    for event in body["events"]:
+    for event in all_events:
         assert "created_at" in event, "event must expose created_at"
         assert "occurred_at" not in event, "event must not expose occurred_at after rename"
-    casting = body["events"][0]
+    casting = _events_for_type(body, "casting")[0]
     assert casting["created_at"] == casting_created_at.isoformat().replace("+00:00", "Z")
     assert casting["confidence"] == "confirmed"
     assert casting["summary"] == "Casting announced."
@@ -76,7 +96,7 @@ async def test_detail_omits_summary_less_events(client, make_film, add_event):
 
     r = await client.get("/films/partial-2026")
     assert r.status_code == 200
-    assert [e["event_type"] for e in r.json()["events"]] == ["casting"]
+    assert [e["event_type"] for e in _flatten_events(r.json())] == ["casting"]
 
 
 async def test_detail_empty_log_film_returns_200_with_derived_arc(client, make_film, add_event):
@@ -86,7 +106,7 @@ async def test_detail_empty_log_film_returns_200_with_derived_arc(client, make_f
     r = await client.get("/films/quiet-2026")
     assert r.status_code == 200
     body = r.json()
-    assert body["events"] == []
+    assert body["day_groups"] == []
     assert body["arc_stage"] == "shooting"  # In Production / production_start
 
 
@@ -101,7 +121,7 @@ async def test_detail_event_summary_edited_flag(client, make_film, add_event):
     )
 
     body = (await client.get("/films/edited-2026")).json()
-    by_type = {e["event_type"]: e for e in body["events"]}
+    by_type = {e["event_type"]: e for e in _flatten_events(body)}
     assert by_type["casting"]["summary_edited"] is False
     assert by_type["trailer"]["summary_edited"] is True
 
@@ -126,7 +146,7 @@ async def test_film_detail_source_label_uses_resolved_outlet(client, make_film, 
     )
 
     body = (await client.get(f"/films/{film.slug}")).json()
-    assert body["events"][0]["sources"][0]["source"] == "Variety"
+    assert _flatten_events(body)[0]["sources"][0]["source"] == "Variety"
 
 
 async def test_film_detail_source_url_uses_resolved_url(client, make_film, add_event):
@@ -148,7 +168,7 @@ async def test_film_detail_source_url_uses_resolved_url(client, make_film, add_e
     )
 
     body = (await client.get(f"/films/{film.slug}")).json()
-    source = body["events"][0]["sources"][0]
+    source = _flatten_events(body)[0]["sources"][0]
     # resolved_url takes precedence over the raw Google URL
     assert source["url"] == "https://variety.com/real-article"
 
@@ -171,7 +191,7 @@ async def test_film_detail_source_url_falls_back_when_resolved_url_null(
     )
 
     body = (await client.get(f"/films/{film.slug}")).json()
-    source = body["events"][0]["sources"][0]
+    source = _flatten_events(body)[0]["sources"][0]
     # no resolved_url → fall back to the original Google URL
     assert source["url"] == "https://news.google.com/rss/articles/abc"
 
@@ -212,7 +232,7 @@ async def test_film_detail_caps_sources_at_three_distinct_outlets_newest_first(
         ),
     )
 
-    sources = (await client.get("/films/cap-detail-2026")).json()["events"][0]["sources"]
+    sources = _flatten_events((await client.get("/films/cap-detail-2026")).json())[0]["sources"]
     assert [s["source"] for s in sources] == ["Deadline", "Variety", "The Hollywood Reporter"]
 
 
@@ -222,7 +242,7 @@ async def test_detail_excludes_other_events(client, make_film, add_event):
     await add_event(film=film, event_type="other", summary="Misc.")
 
     body = (await client.get("/films/mixed-detail-2026")).json()
-    assert [e["event_type"] for e in body["events"]] == ["casting"]
+    assert [e["event_type"] for e in _flatten_events(body)] == ["casting"]
 
 
 # ── release_dates projection tests ───────────────────────────────────────────
@@ -292,16 +312,38 @@ async def test_detail_excludes_non_home_region_dates(
 
     r = await client.get("/films/rd-excl-2026")
     assert r.status_code == 200
-    assert r.json()["release_dates"] == []
+    # FR theatrical release is excluded (not US, no origin country), so no displayable
+    # regional dates — falls back to the primary release_date.
+    rds = r.json()["release_dates"]
+    assert len(rds) == 1
+    assert rds[0]["country"] == ""
+    assert rds[0]["date"].startswith("2026-07-17")
 
 
 async def test_detail_release_dates_empty_when_none(client, make_film, add_event):
-    film = await make_film(slug="rd-none-2026", title="No Dates Film")
+    film = await make_film(slug="rd-none-2026", title="No Dates Film", release_date=None)
     await add_event(film=film, summary="Event.")
 
     r = await client.get("/films/rd-none-2026")
     assert r.status_code == 200
-    assert r.json()["release_dates"] == []
+    # No FilmReleaseDate rows and no primary release_date → empty (unlike the fallback
+    # below, which fires when only the primary date exists).
+    rds = r.json()["release_dates"]
+    assert rds == []
+
+
+async def test_detail_falls_back_to_primary_release_date(client, make_film, add_event):
+    film = await make_film(slug="rd-fallback-2026", title="Fallback Film")
+    film.release_date = date(2026, 8, 1)
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/rd-fallback-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    assert len(rds) == 1
+    assert rds[0]["country"] == ""
+    assert rds[0]["date"].startswith("2026-08-01")
+    assert rds[0]["certification"] is None
 
 
 async def test_detail_includes_origin_country_dates(
@@ -1077,7 +1119,7 @@ async def test_detail_event_exposes_event_id(client, make_film, add_event):
 
     r = await client.get("/films/ids-2026")
     assert r.status_code == 200
-    events = r.json()["events"]
+    events = _flatten_events(r.json())
     assert events[0]["event_id"] == str(event.id)
 
 
@@ -1090,7 +1132,7 @@ async def test_detail_quiets_non_primary_country_release_date(client, make_film,
 
     r = await client.get("/films/moana-2026")
     assert r.status_code == 200
-    summaries = {e["summary"] for e in r.json()["events"]}
+    summaries = {e["summary"] for e in _flatten_events(r.json())}
     assert summaries == {"US date set.", "Pushed worldwide.", "Cast set."}
     assert "Dated in India." not in summaries
 
@@ -1103,7 +1145,7 @@ async def test_detail_surfaces_release_date_for_origin_country(client, make_film
 
     r = await client.get("/films/rrr-2026")
     assert r.status_code == 200
-    assert [e["summary"] for e in r.json()["events"]] == ["India theatrical date."]
+    assert [e["summary"] for e in _flatten_events(r.json())] == ["India theatrical date."]
 
 
 async def test_detail_quiets_foreign_release_date_when_no_origin_country(
@@ -1121,7 +1163,7 @@ async def test_detail_quiets_foreign_release_date_when_no_origin_country(
 
     r = await client.get("/films/world-film-2026")
     assert r.status_code == 200
-    summaries = {e["summary"] for e in r.json()["events"]}
+    summaries = {e["summary"] for e in _flatten_events(r.json())}
     assert summaries == {"US date.", "Global date."}
     assert "India only date." not in summaries
 
@@ -1162,7 +1204,7 @@ async def test_detail_renders_a_catalog_sourced_event_with_no_outlets(client, ma
 
     r = await client.get("/films/undated-detail")
     assert r.status_code == 200
-    events = {e["event_type"]: e for e in r.json()["events"]}
+    events = {e["event_type"]: e for e in _flatten_events(r.json())}
     assert events["release_date"]["provenance"] == "catalog"
     assert events["release_date"]["summary"] == "Release date set to 14 August 2026."
     assert events["release_date"]["sources"] == []

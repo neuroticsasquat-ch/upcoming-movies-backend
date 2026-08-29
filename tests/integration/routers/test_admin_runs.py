@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from upmovies.catalog.models import Film
 from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHealth
 from upmovies.ingest.sweep import (
+    CreditDetachmentResult,
     CreditEventResult,
     EnumerateResult,
     FieldEventResult,
@@ -86,6 +87,7 @@ async def test_admin_lists_the_sweep_with_every_phase_counter(admin_authed_clien
         RefreshResult(selected=300, refreshed=299, dormant_selected=12, failures=1),
         FieldEventResult(changes_read=58, events_created=6, skipped=52),
         CreditEventResult(attachments_read=19, events_created=5, skipped=14),
+        CreditDetachmentResult(),
         ReleaseEventResult(changes_read=11, events_created=3, skipped=8),
     )
     run = IngestRun(

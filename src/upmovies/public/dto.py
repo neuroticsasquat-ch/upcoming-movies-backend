@@ -65,6 +65,13 @@ class CrewMemberOut(BaseModel):
     department: str | None
 
 
+class DayGroup(BaseModel):
+    day: date
+    heading: str
+    news_events: list[EventOut]
+    tmdb_events: list[EventOut]
+
+
 class FilmDetailResponse(BaseModel):
     ref: str
     title: str
@@ -74,7 +81,7 @@ class FilmDetailResponse(BaseModel):
     release_year: int | None
     poster_path: str | None
     arc_stage: str
-    events: list[EventOut]
+    day_groups: list[DayGroup]
     release_dates: list[ReleaseDateOut] = []
     overview: str | None = None
     tagline: str | None = None
@@ -135,6 +142,10 @@ class FeedDayItem(BaseModel):
     # `event_count`/`top_event_type` stay computed over all of the day's events rather than
     # over the section this row lands in.
     news_backed: bool
+    # The actual events on this (film, day), with their summaries and sources, matching the
+    # EventOut shape used on the film detail page. Empty only if the day has no events (the
+    # feed item itself wouldn't exist in that case).
+    events: list[EventOut] = []
 
 
 class FeedDayResponse(BaseModel):

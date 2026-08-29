@@ -50,6 +50,7 @@ from upmovies.public.dto import (
     CastMemberOut,
     CollectionOut,
     CrewMemberOut,
+    DayGroup,
     EventOut,
     FeedDayItem,
     FeedDayResponse,
@@ -99,6 +100,14 @@ def _crew_sort_key(row: Any) -> tuple:
     )
 
 
+def _natural_title_col() -> ColumnElement[str]:
+    """SQL expression for natural English title sort: strip leading 'A ', 'An ', 'The ' (case-
+    insensitive) before comparing. Non-matching titles sort unchanged, so 'Batman' sorts
+    before 'The Batman' as 'Batman' vs 'Batman' — the second word decides."""
+    title = func.lower(Film.title)
+    return func.regexp_replace(title, r"^(a|an|the)\s+", "", "i")
+
+
 def _region_visible() -> ColumnElement[bool]:
     """SQL predicate: a release_date event reaches the public surface only when its region is
     global (NULL) or in the film's primary set — US plus the film's origin countries. Other
@@ -128,8 +137,29 @@ def _has_story() -> ColumnElement[bool]:
     return exists(select(1).where(EventStory.event_id == Event.id).correlate(Event))
 
 
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
 def _release_year(release_date: date | None) -> int | None:
     return release_date.year if release_date is not None else None
+
+
+def _day_heading(d: date) -> str:
+    return f"{_WEEKDAYS[d.weekday()]}, {_MONTHS[d.month - 1]} {d.day}, {d.year}"
 
 
 def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
@@ -287,7 +317,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
 
     summarized = (
         await session.execute(
-            select(Event, EventSummary.summary, EventSummary.edited_at)
+            select(
+                Event,
+                EventSummary.summary,
+                EventSummary.edited_at,
+                _has_story().label("has_story"),
+            )
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
             .where(Event.film_id == film.id, visible_events(), _region_visible())
@@ -295,7 +330,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _edited_at in summarized]
+    event_ids = [event.id for event, _summary, _edited_at, _has_story in summarized]
     sources_by_event: dict[UUID, list[Story]] = {}
     if event_ids:
         source_rows = (
@@ -309,13 +344,13 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         for event_id, story in source_rows:
             sources_by_event.setdefault(event_id, []).append(story)
 
-    events = [
-        EventOut(
+    def _to_event_out(event: Any, summary: str | None, edited_at: datetime | None) -> EventOut:
+        return EventOut(
             event_id=event.id,
             event_type=event.event_type,
             confidence=event.confidence,
             created_at=event.created_at,
-            summary=summary,
+            summary=summary,  # type: ignore  — guaranteed non-null by visible_events() filter
             summary_edited=edited_at is not None,
             provenance=event.provenance,
             sources=[
@@ -328,8 +363,26 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
                 for story in cap_sources(sources_by_event.get(event.id, []))
             ],
         )
-        for event, summary, edited_at in summarized
-    ]
+
+    # Group events by UTC day key, split by has_story (NEU-1201).
+    day_groups: list[DayGroup] = []
+    day_events: dict[date, tuple[list[EventOut], list[EventOut]]] = {}
+    for event, summary, edited_at, has_story in summarized:
+        utc = event.created_at.astimezone(UTC)
+        day_key = date(utc.year, utc.month, utc.day)
+        eout = _to_event_out(event, summary, edited_at)
+        news_list, tmdb_list = day_events.setdefault(day_key, ([], []))
+        (news_list if has_story else tmdb_list).append(eout)
+    for day_key in sorted(day_events, reverse=True):
+        news, tmdb = day_events[day_key]
+        day_groups.append(
+            DayGroup(
+                day=day_key,
+                heading=_day_heading(day_key),
+                news_events=news,
+                tmdb_events=tmdb,
+            )
+        )
 
     # The one definition, shared with the event writer and with `_region_visible` above
     # (`catalog.release_grade`). This used to take `origin_country[0]` while the visibility
@@ -368,6 +421,19 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         for row in release_date_rows
         if (label := release_label_for_tmdb_type(row.release_type)) is not None
     ]
+
+    # If no displayable release dates remain after filtering but the film has a primary
+    # release_date, fall back to that date without a country code.
+    if not release_dates and film.release_date is not None:
+        release_dates.append(
+            ReleaseDateOut(
+                country="",
+                release_type=0,
+                type_label="",
+                date=datetime.combine(film.release_date, datetime.min.time(), tzinfo=UTC),
+                certification=None,
+            )
+        )
 
     genres = list(
         (
@@ -467,7 +533,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         release_year=_release_year(film.release_date),
         poster_path=film.poster_path,
         arc_stage=arc_stage,
-        events=events,
+        day_groups=day_groups,
         release_dates=release_dates,
         overview=film.overview,
         tagline=film.tagline,
@@ -594,6 +660,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     rows = (
         await session.execute(
             select(
+                Film.id.label("film_id"),
                 Film.tmdb_id.label("tmdb_id"),
                 Film.title.label("title"),
                 Film.release_date.label("release_date"),
@@ -609,25 +676,104 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .join(Film, Film.id == Event.film_id)
             .where(*visible, day.in_(select(window.c.day)))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
-            .order_by(day.desc(), nulls_last(Film.popularity.desc()), Film.slug.asc())
+            .order_by(day.desc(), _natural_title_col().asc(), Film.slug.asc())
         )
     ).all()
 
-    items = [
-        FeedDayItem(
+    if not rows:
+        return FeedDayResponse(items=[], total=total_days or 0, limit=limit, offset=offset)
+
+    # Fetch full events (with summaries and sources) for each (film_id, day) group.
+    event_rows = (
+        await session.execute(
+            select(
+                Event.id,
+                Event.film_id,
+                Event.event_type,
+                Event.confidence,
+                Event.provenance,
+                Event.created_at,
+                cast(func.timezone("UTC", Event.created_at), Date).label("event_day"),
+                EventSummary.summary,
+                EventSummary.edited_at,
+                _has_story().label("has_story"),
+            )
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .where(
+                Event.film_id.in_({r.film_id for r in rows}),
+                cast(func.timezone("UTC", Event.created_at), Date).in_({r.day for r in rows}),
+                visible_events(),
+            )
+            .order_by(Event.created_at.desc())
+        )
+    ).all()
+
+    event_ids = [e.id for e in event_rows]
+    sources_by_event: dict[UUID, list[Story]] = {}
+    if event_ids:
+        source_rows = (
+            await session.execute(
+                select(EventStory.event_id, Story)
+                .join(Story, Story.id == EventStory.story_id)
+                .where(EventStory.event_id.in_(event_ids))
+                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
+            )
+        ).all()
+        for event_id, story in source_rows:
+            sources_by_event.setdefault(event_id, []).append(story)
+
+    # Build per-film-day event lookups split by category so that a film-day with events
+    # from both categories appears in both sections (NEU-1199).
+    news_events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
+    catalog_events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
+    for e in event_rows:
+        key = (e.film_id, e.event_day)
+        target = news_events_by_film_day if e.has_story else catalog_events_by_film_day
+        target.setdefault(key, []).append(
+            EventOut(
+                event_id=e.id,
+                event_type=e.event_type,
+                confidence=e.confidence,
+                created_at=e.created_at,
+                summary=e.summary,
+                summary_edited=e.edited_at is not None,
+                provenance=e.provenance,
+                sources=[
+                    SourceOut(
+                        url=source_url(story),
+                        source=outlet_label(story),
+                        title=story.title,
+                        published_at=story.published_at,
+                    )
+                    for story in cap_sources(sources_by_event.get(e.id, []))
+                ],
+            )
+        )
+
+    def _make_item(row: Any, events: list[EventOut], news_backed: bool) -> FeedDayItem:
+        return FeedDayItem(
             film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
             release_year=_release_year(row.release_date),
             poster_path=row.poster_path,
             arc_stage=derive_arc_stage(row.status),
             day=row.day,
-            top_event_type=most_significant_event_type(row.event_types),
-            event_types=ordered_event_types(row.event_types),
-            event_count=row.event_count,
-            news_backed=row.news_backed,
+            top_event_type=most_significant_event_type([e.event_type for e in events]),
+            event_types=ordered_event_types([e.event_type for e in events]),
+            event_count=len(events),
+            news_backed=news_backed,
+            events=events,
         )
-        for row in rows
-    ]
+
+    items: list[FeedDayItem] = []
+    for row in rows:
+        news_events = news_events_by_film_day.get((row.film_id, row.day), [])
+        catalog_events = catalog_events_by_film_day.get((row.film_id, row.day), [])
+
+        if news_events:
+            items.append(_make_item(row, news_events, True))
+        if catalog_events:
+            items.append(_make_item(row, catalog_events, False))
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 
