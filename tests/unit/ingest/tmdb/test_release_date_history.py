@@ -118,3 +118,67 @@ class TestFromRows:
             ("US", 4, datetime(2027, 6, 1, tzinfo=UTC)),
         ]
         assert displayable_from_rows(rows, origin_country=["US"]) == []
+
+
+class TestGoverningReleaseDate:
+    """NEU-1206: a subject can carry multiple rows; the card tracks the earliest."""
+
+    def test_moved_later_is_a_move(self):
+        changes = diff_release_dates(previous=[rel(day=1)], current=[rel(day=15)])
+        assert len(changes) == 1
+        assert changes[0].change == RELEASE_DATE_MOVED
+        assert changes[0].previous_date == date(2027, 6, 1)
+        assert changes[0].release.release_date == date(2027, 6, 15)
+
+    def test_moved_earlier_is_a_move(self):
+        changes = diff_release_dates(previous=[rel(day=15)], current=[rel(day=1)])
+        assert len(changes) == 1
+        assert changes[0].change == RELEASE_DATE_MOVED
+        assert changes[0].previous_date == date(2027, 6, 15)
+        assert changes[0].release.release_date == date(2027, 6, 1)
+
+    def test_earlier_date_added_moves_governing_date(self):
+        changes = diff_release_dates(previous=[rel(day=15)], current=[rel(day=1), rel(day=15)])
+        assert len(changes) == 1
+        assert changes[0].change == RELEASE_DATE_MOVED
+        assert changes[0].previous_date == date(2027, 6, 15)
+        assert changes[0].release.release_date == date(2027, 6, 1)
+
+    def test_later_date_added_is_silent(self):
+        assert diff_release_dates(previous=[rel(day=1)], current=[rel(day=1), rel(day=15)]) == []
+
+    def test_delayed_past_sibling_is_silent(self):
+        """15 Dec → 20 Dec when 1 Dec is still present: governing date unchanged."""
+        assert (
+            diff_release_dates(
+                previous=[rel(day=1), rel(day=15)], current=[rel(day=1), rel(day=20)]
+            )
+            == []
+        )
+
+    def test_withdrawal_to_unchanged_sibling_is_silent(self):
+        """Governing date withdrawn, leaving an already-present sibling: no card."""
+        assert diff_release_dates(previous=[rel(day=1), rel(day=15)], current=[rel(day=15)]) == []
+
+    def test_non_governing_row_crossing_below_governing_cites_governing_movement(self):
+        """A 15 Dec row moves to 5 Dec, crossing below the 10 Dec governing date.
+        The card reports the governing date's movement (10 Dec → 5 Dec), not the
+        moved row's own previous value (15 Dec).
+        """
+        changes = diff_release_dates(
+            previous=[rel(day=10), rel(day=15)], current=[rel(day=5), rel(day=15)]
+        )
+        assert len(changes) == 1
+        assert changes[0].change == RELEASE_DATE_MOVED
+        assert changes[0].previous_date == date(2027, 6, 10)
+        assert changes[0].release.release_date == date(2027, 6, 5)
+
+    def test_observed_empty_to_dates_is_a_set(self):
+        changes = diff_release_dates(previous=[], current=[rel(day=1), rel(day=15)])
+        assert len(changes) == 1
+        assert changes[0].change == RELEASE_DATE_SET
+        assert changes[0].previous_date is None
+        assert changes[0].release.release_date == date(2027, 6, 1)
+
+    def test_first_observation_is_still_a_baseline(self):
+        assert diff_release_dates(previous=None, current=[rel(day=1), rel(day=15)]) == []

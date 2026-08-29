@@ -390,18 +390,22 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     # page declined to list — the drift NEU-1121 closes.
     regions = displayable_regions(film.origin_country)
 
+    # Governing release date: one row per (country, category) subject, the earliest
+    # displayable date (NEU-1206). Ties break by FilmReleaseDate.id for stability.
     release_date_rows = (
         (
             await session.execute(
                 select(FilmReleaseDate)
+                .distinct(FilmReleaseDate.iso_3166_1, FilmReleaseDate.release_type)
                 .where(
                     FilmReleaseDate.film_id == film.id,
                     FilmReleaseDate.iso_3166_1.in_(regions),
                 )
                 .order_by(
-                    FilmReleaseDate.release_date.asc(),
-                    FilmReleaseDate.release_type.asc(),
                     FilmReleaseDate.iso_3166_1.asc(),
+                    FilmReleaseDate.release_type.asc(),
+                    FilmReleaseDate.release_date.asc(),
+                    FilmReleaseDate.id.asc(),
                 )
             )
         )
@@ -856,16 +860,31 @@ async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[U
 
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    rel_day = cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)
     surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (2, 3) — derived, never drifts
+
+    # Governing release date per (film, category): collapse to the earliest date for the
+    # subject before applying the upcoming filter (NEU-1206).
+    governing = (
+        select(
+            FilmReleaseDate.film_id.label("film_id"),
+            FilmReleaseDate.release_type.label("release_type"),
+            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
+                "governing_date"
+            ),
+        )
+        .where(
+            FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
+            FilmReleaseDate.release_type.in_(surfaced_types),
+        )
+        .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
+        .cte("governing")
+    )
 
     # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
     # film rows — so the UI shows "N dates at a time" with a deterministic "view more".
     # `total` is the number of distinct upcoming dates.
     visible = (
-        FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
-        FilmReleaseDate.release_type.in_(surfaced_types),
-        FilmReleaseDate.release_date >= datetime(today.year, today.month, today.day, tzinfo=UTC),
+        governing.c.governing_date >= today,
         Film.slug.is_not(None),
         func.coalesce(Film.adult, False).is_(False),
         or_(Film.runtime.is_(None), Film.runtime == 0, Film.runtime >= 75),
@@ -873,15 +892,20 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
     )
 
     distinct_dates = (
-        select(rel_day.label("d"))
-        .select_from(FilmReleaseDate)
-        .join(Film, Film.id == FilmReleaseDate.film_id)
+        select(governing.c.governing_date.label("d"))
+        .select_from(governing)
+        .join(Film, Film.id == governing.c.film_id)
         .where(*visible)
-        .group_by(rel_day)
+        .group_by(governing.c.governing_date)
     )
     total = await session.scalar(select(func.count()).select_from(distinct_dates.subquery()))
 
-    window = distinct_dates.order_by(rel_day.asc()).limit(limit).offset(offset).subquery()
+    window = (
+        distinct_dates.order_by(governing.c.governing_date.asc())
+        .limit(limit)
+        .offset(offset)
+        .subquery()
+    )
 
     rows = (
         await session.execute(
@@ -891,25 +915,16 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
                 Film.title.label("title"),
                 Film.release_date.label("film_release_date"),
                 Film.poster_path.label("poster_path"),
-                rel_day.label("release_date"),
-                FilmReleaseDate.release_type.label("release_type"),
+                governing.c.governing_date.label("release_date"),
+                governing.c.release_type.label("release_type"),
             )
-            .select_from(FilmReleaseDate)
-            .join(Film, Film.id == FilmReleaseDate.film_id)
-            .where(*visible, rel_day.in_(select(window.c.d)))
-            .group_by(
-                Film.id,
-                Film.tmdb_id,
-                Film.title,
-                Film.release_date,
-                Film.poster_path,
-                rel_day,
-                FilmReleaseDate.release_type,
-            )
+            .select_from(governing)
+            .join(Film, Film.id == governing.c.film_id)
+            .where(*visible, governing.c.governing_date.in_(select(window.c.d)))
             # Within a date, wide (3) before limited (2) → release_type DESC.
             .order_by(
-                rel_day.asc(),
-                FilmReleaseDate.release_type.desc(),
+                governing.c.governing_date.asc(),
+                governing.c.release_type.desc(),
                 nulls_last(Film.popularity.desc()),
                 Film.slug.asc(),
             )

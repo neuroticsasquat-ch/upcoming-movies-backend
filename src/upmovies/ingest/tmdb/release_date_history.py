@@ -69,6 +69,14 @@ def _subject(r: DisplayableRelease) -> tuple[str, int]:
     return (r.iso_3166_1, r.release_type)
 
 
+def _governing_release(subject: tuple[str, int], release_date: date) -> DisplayableRelease:
+    return DisplayableRelease(
+        iso_3166_1=subject[0],
+        release_type=subject[1],
+        release_date=release_date,
+    )
+
+
 def _as_date(value: datetime | date) -> date:
     return value.date() if isinstance(value, datetime) else value
 
@@ -142,27 +150,55 @@ def diff_release_dates(
     `previous is None` means this is the film's first observed slate, which is a **baseline,
     never a change** — the rule this module exists to guarantee.
 
-    A subject present on both sides with a different date is `moved`; one present only now is
-    `set`. A subject that *disappeared* yields nothing: the page simply stops listing it, and
-    "the US release date was withdrawn" is not a beat this site cards — matching what
-    `classify_field_change` already did for the primary date, where there would be no date to
-    render either.
+    A subject `(iso_3166_1, release_type)` can carry multiple `film_release_date` rows, so
+    the displayed and carded value is the **governing release date**: the earliest date for
+    that subject. A card fires iff the governing date changed and the new governing date was
+    not already present in the previous set (NEU-1206).
+
+    A subject present on both sides with a changed governing date is `moved`; one whose
+    governing date is new is `set`. A subject that *disappeared* yields nothing: the page
+    simply stops listing it, and "the US release date was withdrawn" is not a beat this
+    site cards — matching what `classify_field_change` already did for the primary date, where
+    there would be no date to render either.
 
     Sorted by subject so a run's rows land in a stable order.
     """
     if previous is None:
         return []
-    before = {_subject(r): r.release_date for r in previous}
+
+    current_by_subject: dict[tuple[str, int], list[DisplayableRelease]] = {}
+    for release in current:
+        current_by_subject.setdefault(_subject(release), []).append(release)
+
+    previous_by_subject: dict[tuple[str, int], list[DisplayableRelease]] = {}
+    for release in previous:
+        previous_by_subject.setdefault(_subject(release), []).append(release)
+
     changes: list[ReleaseDateChange] = []
-    for release in sorted(current, key=_subject):
-        was = before.get(_subject(release))
-        if was is None:
+    for subject in sorted(current_by_subject):
+        current_releases = current_by_subject[subject]
+        new_earliest = min(r.release_date for r in current_releases)
+
+        previous_releases = previous_by_subject.get(subject, [])
+        if not previous_releases:
             changes.append(
-                ReleaseDateChange(release=release, change=RELEASE_DATE_SET, previous_date=None)
+                ReleaseDateChange(
+                    release=_governing_release(subject, new_earliest),
+                    change=RELEASE_DATE_SET,
+                    previous_date=None,
+                )
             )
-        elif was != release.release_date:
+            continue
+
+        previous_dates = {r.release_date for r in previous_releases}
+        prev_earliest = min(previous_dates)
+        if new_earliest != prev_earliest and new_earliest not in previous_dates:
             changes.append(
-                ReleaseDateChange(release=release, change=RELEASE_DATE_MOVED, previous_date=was)
+                ReleaseDateChange(
+                    release=_governing_release(subject, new_earliest),
+                    change=RELEASE_DATE_MOVED,
+                    previous_date=prev_earliest,
+                )
             )
     return changes
 

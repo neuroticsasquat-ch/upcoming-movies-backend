@@ -187,3 +187,39 @@ async def test_the_marker_is_not_recorded_as_a_field_change(session):
         .where(Film.tmdb_id == 1)
     )
     assert "release_dates_observed_at" not in set((await session.execute(stmt)).scalars().all())
+
+
+async def test_governing_date_move_records_governing_movement_not_moved_row(session):
+    """NEU-1206: when a non-governing row moves earlier and becomes the governing date,
+    the stored change cites the governing date's movement, not the moved row's previous value.
+    """
+    # Baseline: governing date is 15 Dec, with a later sibling at 20 Dec.
+    await upsert_film(
+        session,
+        _details(
+            1,
+            releases=[
+                _release("US", 3, "2027-12-15"),
+                _release("US", 3, "2027-12-20"),
+            ],
+        ),
+    )
+    await session.commit()
+
+    # The 20 Dec row moves to 10 Dec, becoming the new governing date.
+    await upsert_film(
+        session,
+        _details(
+            1,
+            releases=[
+                _release("US", 3, "2027-12-15"),
+                _release("US", 3, "2027-12-10"),
+            ],
+        ),
+    )
+    await session.commit()
+
+    (change,) = await _changes(session, 1)
+    assert change.change == "moved"
+    assert change.previous_date == date(2027, 12, 15)
+    assert change.new_date == date(2027, 12, 10)

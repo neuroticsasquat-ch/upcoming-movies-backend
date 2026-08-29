@@ -314,6 +314,17 @@ TMDB's single scalar `release_date` for a film — the only date this model gate
 move that leaves the primary date untouched does not form a release-date event.
 _Avoid_: regional date, theatrical date (those are the out-of-scope per-country values).
 
+**Governing release date**:
+Per subject `(iso_3166_1, release_type)`, the earliest displayable `catalog.film_release_date`
+row — `min(release_date)` over the current rows for that subject. It is the single value both
+the movie page and the release calendar list (collapsed to one line per subject), and the value
+a release-date event tracks: a card fires only when a changed date becomes the governing date
+and that new governing date was not already present in the previous set (NEU-1206). The calendar,
+being upcoming-only, excludes a category whose governing date is past rather than falling
+through to a later date. It is the per-subject analogue of the **primary release date**, which
+is country- and type-agnostic; the two must not be conflated.
+_Avoid_: primary release date (TMDB's scalar, country-agnostic), earliest release (too vague).
+
 ### Undated film discovery
 
 **Sweep**:
