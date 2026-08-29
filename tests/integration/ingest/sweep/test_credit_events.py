@@ -15,7 +15,10 @@ from sqlalchemy import select
 from tests.fixtures.catalog import add_film
 from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.ingest.sweep import credit_events, run_credit_attachment_events
-from upmovies.ingest.sweep.credit_events import run_credit_detachment_events
+from upmovies.ingest.sweep.credit_events import (
+    _card_detachment_group,
+    run_credit_detachment_events,
+)
 from upmovies.ingest.tmdb.credit_history import (
     CREDIT_ADDED,
     CREDIT_REMOVED,
@@ -84,12 +87,13 @@ async def _run(session_factory, run_id, **overrides):
     return await run_credit_attachment_events(**{**kwargs, **overrides})
 
 
-async def _run_detachment(session_factory, run_id, **overrides):
+async def _run_detachment(session_factory, run_id, *, dwell_days=0, **overrides):
     kwargs = {
         "session_factory": session_factory,
         "run_id": run_id,
         "now": NOW,
         "lookback_days": LOOKBACK_DAYS,
+        "dwell_days": dwell_days,
     }
     return await run_credit_detachment_events(**{**kwargs, **overrides})
 
@@ -589,3 +593,352 @@ async def test_reattachment_without_removal_still_suppressed(session, session_fa
 
     result2 = await _run(session_factory, run_id)
     assert result2.events_created == 0
+
+
+# ── Forward-dwell gate tests (NEU-1205) ───────────────────────────────────────
+
+DWELL_DAYS = 3
+
+
+async def test_flap_suppressed_when_reattach_within_window(session, session_factory, run_id):
+    """A removal followed by a re-attachment within N days is a flap and is suppressed."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, person, changed_at=removed_at + timedelta(days=DWELL_DAYS - 1))
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 0
+    assert len(await _events(session, film)) == 1  # only the original attachment
+
+
+async def test_final_departure_carded_when_no_reattach(session, session_factory, run_id):
+    """A removal with no re-attachment within N days cards normally."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 1
+    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert len(removal) == 1
+
+
+async def test_held_removal_not_carded_within_window(session, session_factory, run_id):
+    """A removal younger than N days is held, not carded, and not counted as a failure."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=DWELL_DAYS - 1)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 0
+    assert result.failures == 0
+
+
+async def test_held_removal_cards_after_window_passes(session, session_factory, run_id):
+    """A held removal cards once the hold passes and no re-attachment is observed."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=1)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await session.commit()
+
+    held = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+    assert held.events_created == 0
+
+    later = NOW + timedelta(days=DWELL_DAYS)
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS, now=later)
+
+    assert result.events_created == 1
+    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert len(removal) == 1
+    assert removal[0].occurred_at == removed_at
+
+
+async def test_flap_then_final_departure_cards_only_final(session, session_factory, run_id):
+    """Maya Boyd sequence: add/remove/add/remove collapses to attach + final remove."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    # Timeline: added 8/24, removed 8/25, added 8/27, removed 8/28; now is 8/29.
+    base = datetime(2026, 8, 24, tzinfo=UTC)
+    await _cast(session, film, person, changed_at=base)
+    await _cast(session, film, person, change=CREDIT_REMOVED, changed_at=base + timedelta(days=1))
+    await _cast(session, film, person, changed_at=base + timedelta(days=3))
+    await _cast(session, film, person, change=CREDIT_REMOVED, changed_at=base + timedelta(days=4))
+    await session.commit()
+
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    await _run(session_factory, run_id, now=now)
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS, now=now)
+
+    # The 8/25 removal is held; the 8/27 re-attachment is suppressed by removal-aware
+    # suppression (the 8/25 removal is held and invisible). The 8/28 removal is held.
+    assert result.events_created == 0
+    events = await _events(session, film)
+    assert [e.event_type for e in events] == ["casting"]
+
+    # Advance past the 8/28 removal's hold: both the 8/25 flap and 8/27 re-attachment are
+    # now fully observed, so only the 8/28 final removal cards.
+    later = now + timedelta(days=DWELL_DAYS)
+    result2 = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS, now=later)
+
+    assert result2.events_created == 1
+    events = await _events(session, film)
+    removal = [e for e in events if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert len(removal) == 1
+    assert removal[0].occurred_at == base + timedelta(days=4)
+
+
+async def test_per_person_gate_in_group(session, session_factory, run_id):
+    """A mixed group cards only the final departures, dropping the flap person."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    final = await _person(session, 100, "Final Departer")
+    flap = await _person(session, 200, "Flap Person")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(session, film, final, changed_at=removed_at - timedelta(days=1))
+    await _attached(session, film, flap, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, final, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, flap, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, flap, changed_at=removed_at + timedelta(days=1))
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 1
+    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert removal[0].subject_key == ["final departer"]
+
+
+async def test_forward_gate_reads_raw_history_not_events(session, session_factory, run_id):
+    """The flap's re-attachment is suppressed (never carded), but the gate still sees it."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, person, changed_at=removed_at + timedelta(days=DWELL_DAYS - 1))
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 0
+    # The re-attachment never carded, proving the gate read raw history.
+    assert [e.event_type for e in await _events(session, film)] == ["crew_attached"]
+
+
+async def test_forward_gate_role_scoped(session, session_factory, run_id):
+    """A cast removal followed by a director arrival within N days is not a flap."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Greta Gerwig")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _cast(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _cast(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(
+        session,
+        film,
+        person,
+        credit_type="crew",
+        job="Director",
+        changed_at=removed_at + timedelta(days=1),
+    )
+    await session.commit()
+    await _run(session_factory, run_id)
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    # Cast removal cards because the director arrival is a different role.
+    assert result.events_created == 1
+    events = await _events(session, film)
+    assert {e.event_type for e in events} == {"casting", "crew_attached", CREDIT_REMOVED_EVENT_TYPE}
+
+
+async def test_dwell_zero_disables_gate(session, session_factory, run_id):
+    """dwell_days=0 reverts to plain NEU-1200: a flap cards its removal."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=1)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, person, changed_at=removed_at + timedelta(hours=1))
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=0)
+
+    assert result.events_created == 1
+
+
+async def test_determinism_reread_stable(session, session_factory, run_id):
+    """A carded final removal is skipped on re-read; a held removal stays held."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await session.commit()
+
+    first = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+    assert first.events_created == 1
+
+    second = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+    assert second.events_created == 0
+    assert second.skipped >= 1
+
+    held_at = NOW - timedelta(days=1)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=held_at)
+    await session.commit()
+
+    third = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+    assert third.events_created == 0
+
+
+async def test_prior_attachment_gate_still_applies(session, session_factory, run_id):
+    """A baseline credit (never carded) removed and aged past N days still emits no card."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Zendaya")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(
+        session,
+        film,
+        person,
+        credit_type="cast",
+        job=None,
+        change=CREDIT_REMOVED,
+        changed_at=removed_at,
+    )
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 0
+
+
+async def test_forward_window_half_open(session, session_factory, run_id):
+    """A re-attachment exactly at changed_at + N is outside the window."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = NOW - timedelta(days=DWELL_DAYS)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, person, changed_at=removed_at + timedelta(days=DWELL_DAYS))
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
+
+    assert result.events_created == 1
+
+
+# ── Backfill behaviour (NEU-1205) ──────────────────────────────────────────
+
+
+async def test_backfill_applies_forward_gate(session):
+    """Backlog removals: the hold trivially passes, only the forward gate applies."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    final = await _person(session, 100, "Final Departer")
+    flap = await _person(session, 200, "Flap Person")
+    removed_at = datetime(2020, 1, 1, tzinfo=UTC)
+    await _attached(session, film, final, changed_at=removed_at - timedelta(days=1))
+    await _attached(session, film, flap, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    # Card the original attachments so the prior-attachment gate passes.
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="casting",
+            confidence="rumored",
+            provenance="catalog",
+            occurred_at=removed_at - timedelta(days=1),
+            region=None,
+            subject_key=["final departer", "flap person"],
+        )
+    )
+    await session.flush()
+    await _attached(session, film, final, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, flap, change=CREDIT_REMOVED, changed_at=removed_at)
+    await _attached(session, film, flap, changed_at=removed_at + timedelta(days=1))
+    await session.commit()
+
+    from upmovies.ingest.sweep.credit_events import group_detachments, load_detachment_backlog
+
+    detachments = await load_detachment_backlog(session)
+    (group,) = group_detachments(detachments)
+    carded = await _card_detachment_group(
+        session,
+        group=group,
+        now=datetime(2025, 1, 1, tzinfo=UTC),
+        dwell_days=DWELL_DAYS,
+    )
+    await session.commit()
+
+    assert carded is True
+    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    assert len(removal) == 1
+    assert removal[0].subject_key == ["final departer"]
+
+
+async def test_backfill_skips_already_carded(session):
+    """Forward-only: an already-carded removal is left in place, not destructively cleaned."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Maya Boyd")
+    removed_at = datetime(2020, 1, 1, tzinfo=UTC)
+    await _attached(session, film, person, changed_at=removed_at - timedelta(days=1))
+    await session.commit()
+    async with session.begin_nested():
+        session.add(
+            Event(
+                film_id=film.id,
+                event_type=CREDIT_REMOVED_EVENT_TYPE,
+                confidence="rumored",
+                provenance="catalog",
+                occurred_at=removed_at,
+                region=None,
+                subject_key=["maya boyd"],
+            )
+        )
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=removed_at)
+    await session.commit()
+
+    from upmovies.ingest.sweep.credit_events import group_detachments, load_detachment_backlog
+
+    detachments = await load_detachment_backlog(session)
+    (group,) = group_detachments(detachments)
+    carded = await _card_detachment_group(
+        session,
+        group=group,
+        now=datetime(2025, 1, 1, tzinfo=UTC),
+        dwell_days=DWELL_DAYS,
+    )
+
+    assert carded is False

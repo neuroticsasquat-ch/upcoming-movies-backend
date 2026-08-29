@@ -248,6 +248,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             run_id=run_id,
             now=now,
             lookback_days=settings.sweep_event_lookback_days,
+            dwell_days=settings.sweep_credit_dwell_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
         # The release-date half (NEU-1121), reading `film_release_date_change` — which the

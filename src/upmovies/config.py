@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     # loses nothing. It is also the day-one guard — the table holds months of history, and
     # without a floor the first pass after deploy would card every date move ever recorded.
     sweep_event_lookback_days: int = Field(default=7, ge=1, alias="SWEEP_EVENT_LOOKBACK_DAYS")
+    # How long a credit detachment must age before it is eligible to card, so a rapid TMDB
+    # re-attachment (a flap) is observed and suppressed rather than carded as a real departure
+    # (NEU-1205). Forward-dwell: a removal cards only if the person does NOT re-attach within N
+    # days after it. 0 disables the gate (reverts to plain NEU-1200). Must be <
+    # SWEEP_EVENT_LOOKBACK_DAYS so a held removal is still in the rolling window when it becomes
+    # eligible; the backfill backstops a mis-tuned N above the lookback. Re-verify against prod.
+    sweep_credit_dwell_days: int = Field(default=3, ge=0, alias="SWEEP_CREDIT_DWELL_DAYS")
 
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the

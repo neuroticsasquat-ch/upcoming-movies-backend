@@ -111,7 +111,7 @@ class DetachmentGroup:
 
     film_id: UUID
     changed_at: datetime
-    credits: tuple[CreditDetached, ...]
+    credits: tuple[DetachedCredit, ...]
 
 
 @dataclass
@@ -422,11 +422,9 @@ def group_detachments(detachments: list[DetachedCredit]) -> list[DetachmentGroup
     All roles share one group because `credit_removed` is a single event type and
     `uq_event_catalog_change` allows one catalog event per film, type and timestamp.
     """
-    groups: dict[tuple[UUID, datetime], list[CreditDetached]] = {}
+    groups: dict[tuple[UUID, datetime], list[DetachedCredit]] = {}
     for detached in detachments:
-        groups.setdefault((detached.film_id, detached.changed_at), []).append(
-            CreditDetached(role=detached.role, name=detached.name)
-        )
+        groups.setdefault((detached.film_id, detached.changed_at), []).append(detached)
     return [
         DetachmentGroup(film_id=film_id, changed_at=changed_at, credits=tuple(credits))
         for (film_id, changed_at), credits in groups.items()
@@ -447,7 +445,42 @@ async def _has_prior_attachment_card(
     return bool((await session.execute(select(carded))).scalar())
 
 
-async def _card_detachment_group(session: AsyncSession, *, group: DetachmentGroup) -> bool:
+async def _has_forward_reattachment(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    person_id: int,
+    role: str,
+    after: datetime,
+    until: datetime,
+) -> bool:
+    """Whether the person re-attached to the same seed-grade role in `[after, until)`.
+
+    Reads raw `catalog.film_credit_change` (not `news.event`), because a flap's
+    re-attachment is suppressed by removal-aware suppression and is never carded.
+    Role-scoped: a cast departure followed by a director arrival is two real events.
+    """
+    stmt = select(FilmCreditChange.credit_type, FilmCreditChange.job).where(
+        FilmCreditChange.film_id == film_id,
+        FilmCreditChange.person_id == person_id,
+        FilmCreditChange.change == CREDIT_ADDED,
+        FilmCreditChange.changed_at >= after,
+        FilmCreditChange.changed_at < until,
+    )
+    rows = await session.execute(stmt)
+    for row in rows:
+        if credit_role(row.credit_type, row.job) == role:
+            return True
+    return False
+
+
+async def _card_detachment_group(
+    session: AsyncSession,
+    *,
+    group: DetachmentGroup,
+    now: datetime,
+    dwell_days: int,
+) -> bool:
     """Create the event and its deterministic summary for one detachment group, or report that
     it was already carded. One transaction covers both writes. Caller owns the commit."""
     if await _already_carded(
@@ -458,14 +491,36 @@ async def _card_detachment_group(session: AsyncSession, *, group: DetachmentGrou
     ):
         return False
 
-    # Gate: keep only people with a prior visible attachment card before this detachment.
-    gated: list[CreditDetached] = []
+    # Hold: a removal is not eligible to card until the forward window is fully observed.
+    eligible_at = group.changed_at + timedelta(days=dwell_days)
+    if dwell_days > 0 and eligible_at > now:
+        return False
+
+    # Gate 1: keep only people with a prior visible attachment card before this detachment.
+    prior_attached: list[DetachedCredit] = []
     for c in group.credits:
         if await _has_prior_attachment_card(
             session, film_id=group.film_id, person_name=c.name, before=group.changed_at
         ):
-            gated.append(c)
-    if not gated:
+            prior_attached.append(c)
+
+    # Gate 2: drop flaps — people who re-attached in the same role within the forward window.
+    if dwell_days > 0 and prior_attached:
+        final_departures: list[DetachedCredit] = []
+        for c in prior_attached:
+            reattached = await _has_forward_reattachment(
+                session,
+                film_id=group.film_id,
+                person_id=c.person_id,
+                role=c.role,
+                after=group.changed_at,
+                until=eligible_at,
+            )
+            if not reattached:
+                final_departures.append(c)
+        prior_attached = final_departures
+
+    if not prior_attached:
         return False
 
     event = Event(
@@ -475,14 +530,16 @@ async def _card_detachment_group(session: AsyncSession, *, group: DetachmentGrou
         provenance="catalog",
         occurred_at=group.changed_at,
         region=None,
-        subject_key=[normalize_name(c.name) for c in gated],
+        subject_key=[normalize_name(c.name) for c in prior_attached],
     )
     session.add(event)
     await session.flush()
     await write_deterministic_summary(
         session,
         event_id=event.id,
-        change=CreditsDetached(credits=tuple(gated)),
+        change=CreditsDetached(
+            credits=tuple(CreditDetached(role=c.role, name=c.name) for c in prior_attached)
+        ),
         source_updated_at=event.updated_at,
     )
     return True
@@ -494,6 +551,7 @@ async def run_credit_detachment_events(
     run_id: UUID,
     now: datetime,
     lookback_days: int,
+    dwell_days: int = 0,
     failure_threshold: int = 10,
 ) -> CreditDetachmentResult:
     """Card every seed-grade credit detachment TMDB recorded in the window."""
@@ -517,7 +575,9 @@ async def run_credit_detachment_events(
         await heartbeat.tick()
         try:
             async with owned_session(session_factory) as s:
-                created = await _card_detachment_group(s, group=group)
+                created = await _card_detachment_group(
+                    s, group=group, now=now, dwell_days=dwell_days
+                )
                 if created:
                     await record_progress(s, run_id, processed_delta=1)
                 await s.commit()

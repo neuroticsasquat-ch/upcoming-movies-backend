@@ -81,6 +81,33 @@ this needs no special path.
 > row), so there is nothing to card — that stays a separate ticket. See the spec at
 > `docs/specs/NEU-1200-credit-removal-events.md`.
 
+> **Amendment — 2026-08-29 (NEU-1205).** NEU-1200's carding rule has no dwell filter, so a
+> TMDB credit that oscillates (added → removed → added → removed over a few days) produces a
+> four-card chain — the exact noise this ADR originally declined to card for. The fix is a
+> **forward-dwell gate with an N-day hold**, *not* the backward-dwell gate the ticket first
+> proposed. **Backward dwell** (card a removal only if the prior attachment is ≥ N days old) was
+> rejected on the data: it cannot tell a flap (removed then re-attached) from a real brief
+> departure (removed, never re-attached) — both have short dwell — so at any N it suppresses
+> mostly *final* departures, re-creating the stale-attachment bug NEU-1200 was built to fix (at
+> N=7: ~12 flaps dampened, ~27 stale tails created). **Forward dwell** cards a removal only if
+> the person does *not* re-attach within N days *after* it: a flap is suppressed, a real
+> departure always cards. It is surgical (gates the flaps, cards the finals, no stale tail) at
+> the cost of an N-day publication hold — low-harm, since removal cards are collapsed-section
+> `rumored` and the film page groups by `occurred_at` (NEU-1204) so the card still appears under
+> the correct day. The forward gate reads raw `catalog.film_credit_change` (not `news.event`),
+> because a flap's re-attachment is itself suppressed by the removal-aware suppression and so is
+> never carded; it is scoped to the same seed-grade role so a cast→director move is two real
+> events, not a flap. **N = 3** (`SWEEP_CREDIT_DWELL_DAYS`, 0 disables, reverts to plain
+> NEU-1200): the max forward re-attach gap among dwell-eligible flaps in the data is 2.001 days,
+> so N=3 catches 100%; N must be < `SWEEP_EVENT_LOOKBACK_DAYS` so a held removal stays in the
+> rolling window when it becomes eligible (the backfill backstops a mis-tuned N). **Transient
+> invariant violation, accepted:** during the ≤N-day hold the removal is not yet carded, so the
+> latest *carded* event is still the attachment while TMDB says removed — bounded, self-correcting,
+> confined to the collapsed section, and strictly better than the alternatives. Backfill is
+> **forward-only**: already-carded removals (including the reported Maya Boyd 4-card chain) are
+> grandfathered, not destructively cleaned. See the spec at
+> `docs/specs/NEU-1205-dampen-credit-oscillation.md`.
+
 ## Considered alternatives
 
 - **Keep requiring a story trigger.** Rejected: it is the status quo, and against an expanded
