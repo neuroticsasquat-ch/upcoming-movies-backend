@@ -143,8 +143,8 @@ class FeedDayItem(BaseModel):
     # over the section this row lands in.
     news_backed: bool
     # The actual events on this (film, day), with their summaries and sources, matching the
-    # EventOut shape used on the film detail page. Empty only if the day has no events (the
-    # feed item itself wouldn't exist in that case).
+    # EventOut shape used on the film detail page. Empty for catalog-sourced rows on the
+    # grouped feed, which render as title-only links (NEU-1208).
     events: list[EventOut] = []
 
 
