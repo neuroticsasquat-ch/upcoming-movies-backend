@@ -754,7 +754,9 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             )
         )
 
-    def _make_item(row: Any, events: list[EventOut], news_backed: bool) -> FeedDayItem:
+    def _make_item(
+        row: Any, events: list[EventOut], news_backed: bool, ship_events: bool = True
+    ) -> FeedDayItem:
         return FeedDayItem(
             film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
@@ -766,7 +768,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             event_types=ordered_event_types([e.event_type for e in events]),
             event_count=len(events),
             news_backed=news_backed,
-            events=events,
+            events=events if ship_events else [],
         )
 
     items: list[FeedDayItem] = []
@@ -777,7 +779,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
         if news_events:
             items.append(_make_item(row, news_events, True))
         if catalog_events:
-            items.append(_make_item(row, catalog_events, False))
+            items.append(_make_item(row, catalog_events, False, ship_events=False))
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 

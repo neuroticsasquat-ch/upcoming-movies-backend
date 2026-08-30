@@ -402,14 +402,16 @@ _Avoid_: role tier, credit weight, billing.
 **Catalog-sourced event**:
 An event created by a change in TMDB's own data — a release date assigned or moved, a status
 transition, a credit attached — with **no story behind it**. It carries a deterministic
-`EventSummary` (a template, never a model call: `model` is the sentinel `"deterministic"`) and
-attributes to **"via TMDB"** where a story-sourced event lists outlets. Confidence follows the
-field: a release-date or status change is `confirmed`, because ADR-0002 already makes TMDB the
-system of record for its own scalar fields, while a credit — which any editor can add — sits
-below a trade-sourced beat. When a trade story later clusters onto it, the LLM summary
-supersedes the deterministic one and real sources appear — the card upgrades in place. It exists
-because story supply is fixed at 8 trade feeds while the catalog is about to multiply: without
-it, most admitted films would be permanently blank pages.
+`EventSummary` (a template, never a model call: `model` is the sentinel `"deterministic"`).
+On the grouped feed and film page it is filed under the **"unconfirmed updates"** heading
+(formerly "via TMDB"); the per-card "via TMDB" attribution line has been removed, so the
+section heading is the sole veracity signal. Confidence follows the field: a release-date or
+status change is `confirmed`, because ADR-0002 already makes TMDB the system of record for its
+own scalar fields, while a credit — which any editor can add — sits below a trade-sourced beat.
+When a trade story later clusters onto it, the LLM summary supersedes the deterministic one and
+real sources appear — the card upgrades in place. It exists because story supply is fixed at 8
+trade feeds while the catalog is about to multiply: without it, most admitted films would be
+permanently blank pages.
 _Avoid_: synthetic event, system event, auto event, TMDB event (that's the source, not the kind).
 
 **Credit attachment event**:
@@ -449,8 +451,8 @@ the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE` (a r
 forward progress and should not headline a day) and excluded from the LLM and story-dedup
 vocabularies: the model cannot emit it, and a trade "X exits" story does not yet attach to it.
 Reverses the original ADR-0014 decision that detachments were "recorded as history but never
-carded" — NEU-1201's collapsed "via TMDB" section (which did not exist when that decision was
-made) made the clutter concern moot.
+carded" — NEU-1201's collapsed "unconfirmed updates" section (which did not exist when that
+decision was made) made the clutter concern moot.
 _Avoid_: crew detached, cast departed (those imply the old split that only existed because
 `casting` pre-existed), credit removal (too generic — a release date disappearing is also a
 removal, and is out of scope), retraction, cancellation (those are about the *film*, not a
@@ -467,8 +469,10 @@ and a real brief departure both have short backward dwell, so a backward gate wo
 mostly real departures and re-create the stale-attachment bug. A held flap that ends in `removed`
 still cards a real final departure later; one that ends in `added` self-corrects (the re-attachment
 is suppressed by removal-aware suppression during the hold). The transient ≤N-day hold window is
-the one cost — the latest *carded* event is briefly "attached" while TMDB says "removed" — bounded,
-self-correcting, and confined to the collapsed section.
+the one cost — the latest *carded* event is briefly "attached" while TMDB says "removed" — bounded
+and self-correcting. On the feed it is confined to the collapsed **"unconfirmed updates"**
+section, which now renders title-only links (NEU-1208); on the film page it is visible inline
+per NEU-1207.
 _Avoid_: flicker, churn (too vague — a credit changing departments is churn but not a flap),
 vandalism (that is the *cause*, not the observable pattern), bounce.
 
@@ -491,7 +495,7 @@ the LLM has no `crew_attached` in its vocabulary, so the story side searches bot
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **Day-grouped events** (of a film page):
-The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is **collapsed by default on the feed** (a publication log, where a TMDB-only day aggregates many films and shows "via TMDB (N movies)", so it is not visually empty) **but rendered inline on the film page** (NEU-1207): the film-page collapse introduced by NEU-1201 is retired because NEU-1205 dampened the credit-oscillation it was hiding at the source, so a TMDB-only film-day no longer renders as a visually-empty date heading plus a collapsed toggle. The "via TMDB" **label** remains the source-attribution (veracity) signal on both surfaces — the demotion on the film page is now by label, not by hiding. The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
+The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is **collapsed by default on the feed** (a publication log, where a TMDB-only day aggregates many films and shows "unconfirmed updates (N movies)", so it is not visually empty) and is further demoted to **title-only links** under NEU-1208: the backend no longer ships `events` for `news_backed=false` feed items, so a reader sees only the film title and must click through to view the updates. It is **rendered inline on the film page** (NEU-1207): the film-page collapse introduced by NEU-1201 is retired because NEU-1205 dampened the credit-oscillation it was hiding at the source, so a TMDB-only film-day no longer renders as a visually-empty date heading plus a collapsed toggle. The **"unconfirmed updates"** label (formerly "via TMDB") is the veracity signal on both surfaces — the demotion on the film page is now by label, not by hiding. The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
 _Avoid_: in-the-news section (that's `news_events`), TMDB section (that's `tmdb_events`), two-timeline display, split events.
 
 **News-backed** (of a film-day):

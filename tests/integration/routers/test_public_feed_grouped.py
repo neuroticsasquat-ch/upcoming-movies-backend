@@ -609,7 +609,7 @@ async def test_grouped_same_film_day_in_both_sections(client, make_film, add_eve
     assert [e["event_type"] for e in news_item["events"]] == ["casting"]
     assert catalog_item["event_count"] == 1
     assert catalog_item["top_event_type"] == "release_date"
-    assert [e["event_type"] for e in catalog_item["events"]] == ["release_date"]
+    assert catalog_item["events"] == []
 
 
 async def test_grouped_split_event_count_and_types_are_scoped(client, make_film, add_event):
@@ -656,7 +656,7 @@ async def test_grouped_split_event_count_and_types_are_scoped(client, make_film,
     assert catalog_item["event_count"] == 2
     assert catalog_item["top_event_type"] == "trailer"
     assert sorted(catalog_item["event_types"]) == ["release_date", "trailer"]
-    assert sorted([e["event_type"] for e in catalog_item["events"]]) == ["release_date", "trailer"]
+    assert catalog_item["events"] == []
 
 
 async def test_grouped_promoted_then_split(client, make_film, add_event):
@@ -691,7 +691,51 @@ async def test_grouped_promoted_then_split(client, make_film, add_event):
     # The catalog-only trailer
     assert catalog_item["event_count"] == 1
     assert catalog_item["top_event_type"] == "trailer"
-    assert [e["event_type"] for e in catalog_item["events"]] == ["trailer"]
+    assert catalog_item["events"] == []
+
+
+# NEU-1208 — catalog-sourced feed rows ship empty events but keep accurate counts.
+
+
+async def test_grouped_catalog_item_ships_empty_events(client, make_film, add_event):
+    """A news_backed=False item has events=[] while event_count reflects the real catalog events."""
+    film = await make_film(slug="tmdb-only-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="TMDB added cast",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        provenance="catalog",
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="TMDB trailer",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        provenance="catalog",
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["news_backed"] is False
+    assert item["event_count"] == 2
+    assert item["events"] == []
+
+
+async def test_grouped_news_item_still_ships_events(client, make_film, add_event):
+    """A news_backed=True item continues to ship the full events list."""
+    film = await make_film(slug="news-backed-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="Variety reported the casting",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        sources=({"url": "https://variety.com/casting"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["news_backed"] is True
+    assert item["event_count"] == 1
+    assert [e["event_type"] for e in item["events"]] == ["casting"]
 
 
 # NEU-1204 — feed day grouping stays created_at; within-day ordering moves to occurred_at.
@@ -723,6 +767,7 @@ async def test_feed_grouped_within_day_ordered_by_occurred_at(client, make_film,
         summary="afternoon casting",
         created_at=same_created,
         occurred_at=datetime(2026, 6, 1, 20, tzinfo=UTC),
+        sources=({"url": "https://variety.com/casting"},),
     )
     await add_event(
         film=film,
@@ -730,6 +775,7 @@ async def test_feed_grouped_within_day_ordered_by_occurred_at(client, make_film,
         summary="morning trailer",
         created_at=same_created,
         occurred_at=datetime(2026, 6, 1, 8, tzinfo=UTC),
+        sources=({"url": "https://variety.com/trailer"},),
     )
 
     item = (await client.get("/feed/grouped")).json()["items"][0]
@@ -746,6 +792,7 @@ async def test_feed_grouped_within_day_tiebreak_created_at_then_id(client, make_
         summary="first by created_at",
         created_at=base,
         occurred_at=base,
+        sources=({"url": "https://variety.com/first"},),
     )
     second = await add_event(
         film=film,
@@ -753,6 +800,7 @@ async def test_feed_grouped_within_day_tiebreak_created_at_then_id(client, make_
         summary="second by created_at",
         created_at=base.replace(hour=13),
         occurred_at=base,
+        sources=({"url": "https://variety.com/second"},),
     )
 
     item = (await client.get("/feed/grouped")).json()["items"][0]

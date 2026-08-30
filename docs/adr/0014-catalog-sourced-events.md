@@ -149,6 +149,22 @@ this needs no special path.
 > staying visible during the hold — a true-at-the-time beat TMDB has since retracted —
 > never a wrong attachment. No backend change; `day_groups` shape unchanged. See the spec
 > at `docs/specs/NEU-1207-uncollapse-via-tmdb-events-on-movie-page.md`.
+>
+> **Amendment — 2026-08-29 (NEU-1208).** The "via TMDB" label is renamed to
+> **"unconfirmed updates"** on both the grouped feed and the film page, so the heading
+> signals the *uncertainty* of the updates rather than naming their source. The
+> per-card "via TMDB" attribution line is **removed** from every event card; the section
+> heading is now the sole veracity signal, and a catalog-sourced event with no outlets
+> renders no attribution line at all. On the **grouped feed**, the catalog section is
+> further demoted to **title-only links**: the backend stops shipping `events` for
+> `news_backed=false` items, so a reader sees only the film title linked to the film page
+> and must click through to view the TMDB updates inline. `event_count`, `top_event_type`,
+> and `event_types` stay computed from the real catalog events and remain accurate in the
+> payload. The film-page label-only demotion from NEU-1207 is unchanged in kind; only the
+> label text moves. The NEU-1205 transient-invariant "confined to the collapsed section"
+> argument now holds for the feed's **titles-only collapsed** "unconfirmed updates"
+> section and the film page's inline section per NEU-1207. See the spec at
+> `docs/specs/NEU-1208-feed-tmdb-section-titles-only.md`.
 
 ## Considered alternatives
 
