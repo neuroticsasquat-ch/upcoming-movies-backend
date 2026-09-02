@@ -91,6 +91,9 @@ class FilmDetailResponse(BaseModel):
     original_language: str | None = None
     backdrop_path: str | None = None
     genres: list[str] = []
+    # Display forms (already abbreviated), sorted by display name. The film page lists these in
+    # its spec sheet; it reads directors from `crew` instead, so no `directors` field here.
+    production_countries: list[str] = []
     production_companies: list[str] = []
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
@@ -122,9 +125,15 @@ class FeedDayItem(BaseModel):
     film_title: str
     release_year: int | None
     poster_path: str | None
-    # Rendered in the release year's slot for an undated film (NEU-1085), so it has to
-    # ride along on the row — it is not derivable client-side from release_year.
+    # Rendered only when the film has no country, director, or year — the last resort that
+    # keeps a bare title from reading as a rendering bug (NEU-1085, narrowed by NEU-1215). It
+    # has to ride along on the row: it is not derivable client-side from release_year.
     arc_stage: str
+    # The other two elements of the title parenthetical, both display-ready and never None.
+    # Countries hold display forms sorted by display name; directors hold person names ordered
+    # by billing. Neither is capped here — capping is presentation and differs per surface.
+    production_countries: list[str] = []
+    directors: list[str] = []
     day: date
     top_event_type: str
     # Every distinct beat this film-day carries, most-significant first — so `event_types[0]`

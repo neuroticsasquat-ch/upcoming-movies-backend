@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
 
+from sqlalchemy import event
+
 from tests.fixtures.public import ref
+from upmovies.db import engine as app_engine
 
 
 async def test_grouped_one_row_per_film_day_with_count_and_top_type(client, make_film, add_event):
@@ -819,3 +822,119 @@ async def test_feed_grouped_film_row_order_unchanged(client, make_film, add_even
 
     items = (await client.get("/feed/grouped")).json()["items"]
     assert [i["film_ref"] for i in items] == [ref(a), ref(z)]
+
+
+# ---------------------------------------------------------------------------
+# Title parenthetical parts — production_countries and directors (NEU-1215)
+# ---------------------------------------------------------------------------
+
+
+async def test_grouped_ships_countries_and_directors(
+    client, make_film, add_event, attach_countries, attach_credits
+):
+    film = await make_film(slug="the-favourite", title="The Favourite")
+    await add_event(film=film, created_at=datetime(2026, 6, 3, 8, tzinfo=UTC))
+    await attach_countries(
+        film,
+        [("IE", "Ireland"), ("GB", "United Kingdom"), ("US", "United States of America")],
+    )
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 1, "name": "Yorgos Lanthimos", "job": "Director", "credit_order": 0},
+            {"id": 2, "name": "A Producer", "job": "Producer", "department": "Production"},
+        ],
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    # Sorted by display name, and GB/US carry their curated abbreviations.
+    assert item["production_countries"] == ["Ireland", "UK", "USA"]
+    assert item["directors"] == ["Yorgos Lanthimos"]  # job=Director only
+
+
+async def test_grouped_directors_ordered_by_billing(client, make_film, add_event, attach_credits):
+    film = await make_film(slug="no-country", title="No Country for Old Men")
+    await add_event(film=film, created_at=datetime(2026, 6, 3, 8, tzinfo=UTC))
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 10, "name": "Joel Coen", "job": "Director", "credit_order": 1},
+            {"id": 11, "name": "Ethan Coen", "job": "Director", "credit_order": 0},
+        ],
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["directors"] == ["Ethan Coen", "Joel Coen"]  # credit_order asc
+
+
+async def test_grouped_directors_with_no_credit_order_sort_last_by_name(
+    client, make_film, add_event, attach_credits
+):
+    """nulls_last on credit_order, then name — the order `_calendar_directors` always used."""
+    film = await make_film(slug="unbilled", title="Unbilled Directors")
+    await add_event(film=film, created_at=datetime(2026, 6, 3, 8, tzinfo=UTC))
+    await attach_credits(
+        film,
+        crew=[
+            {"id": 20, "name": "Zoe Billed", "job": "Director", "credit_order": 0},
+            {"id": 21, "name": "Bob Unbilled", "job": "Director", "credit_order": None},
+            {"id": 22, "name": "Ann Unbilled", "job": "Director", "credit_order": None},
+        ],
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["directors"] == ["Zoe Billed", "Ann Unbilled", "Bob Unbilled"]
+
+
+async def test_grouped_unmapped_country_keeps_its_catalog_name(
+    client, make_film, add_event, attach_countries
+):
+    film = await make_film(slug="parasite", title="Parasite")
+    await add_event(film=film, created_at=datetime(2026, 6, 3, 8, tzinfo=UTC))
+    await attach_countries(film, [("KR", "South Korea")])
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["production_countries"] == ["South Korea"]
+
+
+async def test_grouped_defaults_both_lists_to_empty(client, make_film, add_event):
+    film = await make_film(slug="bare-film", title="Bare Film")
+    await add_event(film=film, created_at=datetime(2026, 6, 3, 8, tzinfo=UTC))
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    assert item["production_countries"] == []
+    assert item["directors"] == []
+    assert item["arc_stage"]  # the last-resort element still rides along
+
+
+async def test_grouped_parenthetical_lookups_are_batched_per_page(
+    client, make_film, add_event, attach_countries, attach_credits
+):
+    """One country query and one director query per page, regardless of how many rows it has."""
+    for n in range(3):
+        film = await make_film(slug=f"batched-{n}", title=f"Batched {n}")
+        await add_event(film=film, created_at=datetime(2026, 6, 3, 8, tzinfo=UTC))
+        await attach_countries(film, [("FR", "France")])
+        await attach_credits(
+            film, crew=[{"id": 100 + n, "name": f"Director {n}", "job": "Director"}]
+        )
+
+    counts = {"country": 0, "credit": 0}
+
+    def _count(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001, PLR0913
+        sql = statement.lower()
+        if "film_production_country" in sql:
+            counts["country"] += 1
+        if "film_credit" in sql:
+            counts["credit"] += 1
+
+    # The request runs against the app's own engine, not the fixture's.
+    event.listen(app_engine.sync_engine, "before_cursor_execute", _count)
+    try:
+        body = (await client.get("/feed/grouped")).json()
+    finally:
+        event.remove(app_engine.sync_engine, "before_cursor_execute", _count)
+
+    assert len(body["items"]) == 3
+    assert counts["country"] == 1
+    assert counts["credit"] == 1  # the director lookup, batched over the page's film ids

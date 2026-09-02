@@ -26,10 +26,12 @@ from upmovies.catalog.models import (
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
+    FilmProductionCountry,
     FilmReleaseDate,
     Genre,
     Person,
     ProductionCompany,
+    ProductionCountry,
 )
 from upmovies.catalog.ref import film_ref, parse_film_ref
 from upmovies.catalog.release_grade import (
@@ -44,6 +46,7 @@ from upmovies.public.arc import (
     most_significant_event_type,
     ordered_event_types,
 )
+from upmovies.public.country import country_display_name
 from upmovies.public.dto import (
     CalendarItem,
     CalendarResponse,
@@ -467,6 +470,8 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         .all()
     )
 
+    countries = (await _production_countries_for_films(session, {film.id})).get(film.id, [])
+
     collection: CollectionOut | None = None
     if film.collection_id is not None:
         col_row = (
@@ -547,6 +552,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         original_language=film.original_language,
         backdrop_path=film.backdrop_path,
         genres=genres,
+        production_countries=countries,
         production_companies=companies,
         collection=collection,
         alternative_titles=alternative_titles,
@@ -754,6 +760,12 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             )
         )
 
+    # Two batched lookups per page, not per row — the title parenthetical's country and
+    # director elements (NEU-1215), in the same style as `sources_by_event` above.
+    feed_film_ids = {r.film_id for r in rows}
+    countries_by_film = await _production_countries_for_films(session, feed_film_ids)
+    directors_by_film = await _directors_for_films(session, feed_film_ids)
+
     def _make_item(
         row: Any, events: list[EventOut], news_backed: bool, ship_events: bool = True
     ) -> FeedDayItem:
@@ -763,6 +775,8 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             release_year=_release_year(row.release_date),
             poster_path=row.poster_path,
             arc_stage=derive_arc_stage(row.status),
+            production_countries=countries_by_film.get(row.film_id, []),
+            directors=directors_by_film.get(row.film_id, []),
             day=row.day,
             top_event_type=most_significant_event_type([e.event_type for e in events]),
             event_types=ordered_event_types([e.event_type for e in events]),
@@ -783,8 +797,13 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 
-async def _calendar_directors(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, str]:
-    """Director name(s) per film, ordered by billing, joined with ', '. Films with none omitted."""
+async def _directors_for_films(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
+    """Director names per film, ordered by billing. Films with no director credit are omitted.
+
+    Returns the names as a list rather than a joined string because the two callers punctuate
+    differently — the calendar joins with ", " on its own line, the feed row joins with "/"
+    inside the title parenthetical (NEU-1215).
+    """
     if not film_ids:
         return {}
     rows = (
@@ -806,7 +825,48 @@ async def _calendar_directors(session: AsyncSession, film_ids: set[UUID]) -> dic
     names_by_film: dict[UUID, list[str]] = {}
     for film_id, name in rows:
         names_by_film.setdefault(film_id, []).append(name)
-    return {film_id: ", ".join(names) for film_id, names in names_by_film.items()}
+    return names_by_film
+
+
+async def _production_countries_for_films(
+    session: AsyncSession, film_ids: set[UUID]
+) -> dict[UUID, list[str]]:
+    """Display-form production countries per film, sorted by display name ascending.
+
+    `film_production_country` is keyed (film_id, iso_3166_1) with no ordinal column, so TMDB's
+    own ordering is discarded on write and row order carries no meaning. Sorting by display name
+    is what makes a co-production's list stable across renders and re-ingests. Films with no
+    countries are omitted; callers default to [].
+    """
+    if not film_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                FilmProductionCountry.film_id,
+                FilmProductionCountry.iso_3166_1,
+                ProductionCountry.name,
+            )
+            # Outer, not inner: a code whose `production_country` row is missing falls through
+            # to the raw code rather than vanishing from a co-production's list. The FK on
+            # `film_production_country.iso_3166_1` means that cannot happen today — the join is
+            # defensive, and `country_display_name` owns the fallback (see test_country.py).
+            .outerjoin(
+                ProductionCountry,
+                ProductionCountry.iso_3166_1 == FilmProductionCountry.iso_3166_1,
+            )
+            .where(FilmProductionCountry.film_id.in_(film_ids))
+        )
+    ).all()
+    countries_by_film: dict[UUID, list[str]] = {}
+    for film_id, iso_3166_1, name in rows:
+        countries_by_film.setdefault(film_id, []).append(country_display_name(iso_3166_1, name))
+    return {film_id: sorted(names) for film_id, names in countries_by_film.items()}
+
+
+def _joined_directors(names: list[str] | None) -> str | None:
+    """The calendar row's pre-joined director string — its `director` field is a `str | None`."""
+    return ", ".join(names) if names else None
 
 
 async def _calendar_stars(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
@@ -934,7 +994,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
     ).all()
 
     film_ids = {row.film_id for row in rows}
-    directors_by_film = await _calendar_directors(session, film_ids)
+    directors_by_film = await _directors_for_films(session, film_ids)
     stars_by_film = await _calendar_stars(session, film_ids)
     genres_by_film = await _calendar_genres(session, film_ids)
 
@@ -946,7 +1006,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
             poster_path=row.poster_path,
             release_date=row.release_date,
             release_type=RELEASE_TYPE_BUCKETS[row.release_type],
-            director=directors_by_film.get(row.film_id),
+            director=_joined_directors(directors_by_film.get(row.film_id)),
             stars=stars_by_film.get(row.film_id, []),
             genres=genres_by_film.get(row.film_id, []),
         )
