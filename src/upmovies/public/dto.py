@@ -128,9 +128,9 @@ class FeedDayItem(BaseModel):
     day: date
     top_event_type: str
     # Every distinct beat this film-day carries, most-significant first — so `event_types[0]`
-    # is always `top_event_type`. The feed labels the whole set beneath the title, which the
-    # lead type alone can't express: a day that pairs a trailer with a casting beat reads as
-    # trailer-only otherwise.
+    # is always `top_event_type`. The feed labels the whole set inline after the title
+    # (NEU-1212), on rows that ship no events; the lead type alone can't express it, since a
+    # day that pairs a trailer with a casting beat reads as trailer-only otherwise.
     event_types: list[str]
     event_count: int
     # True when *any* of this film-day's visible events has a linked story — i.e. a news
