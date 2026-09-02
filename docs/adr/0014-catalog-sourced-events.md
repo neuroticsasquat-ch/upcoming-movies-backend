@@ -165,6 +165,27 @@ this needs no special path.
 > argument now holds for the feed's **titles-only collapsed** "unconfirmed updates"
 > section and the film page's inline section per NEU-1207. See the spec at
 > `docs/specs/NEU-1208-feed-tmdb-section-titles-only.md`.
+>
+> **Amendment — 2026-09-02 (NEU-1212).** NEU-1208's demotion overshot at the **row**
+> level. Dropping the event *cards* was right — full summaries plus badges gave early TMDB
+> activity the same weight as trade-sourced news — but dropping *all* per-row signal left a
+> reader facing ~35 bare film titles with no way to tell a release-date move from a credit
+> removal short of a page load per film. The row became untriageable. The grouped feed's
+> catalog rows therefore label **the day's beats**: one badge per entry in `event_types`,
+> most-significant first, rendered inline after the title. The remedy cost nothing, because
+> `event_types` was specified for exactly this rendering and NEU-1208 deliberately kept it
+> accurate for catalog rows.
+>
+> What did **not** change: the backend still does not ship `events` for `news_backed=false`
+> rows; the "unconfirmed updates" section is still **collapsed by default** on the feed; the
+> "unconfirmed updates" rename stands; and the removed per-card "via TMDB" attribution stays
+> removed, with the section heading still the sole veracity signal. So NEU-1205's
+> transient-invariant argument survives intact — the feed's catalog activity remains confined
+> to the collapsed section, now labelled rather than mute. No backend code, DTO schema, or
+> migration change — the only backend edits are this amendment, the CONTEXT.md corrections, and
+> a stale `dto.py` comment that still described the labels as rendering *beneath* the title. The
+> behaviour change is frontend-only, in `FeedDayCard`. See the spec at
+> `docs/specs/NEU-1212-feed-beat-labels-on-unconfirmed-updates.md`.
 
 ## Considered alternatives
 
