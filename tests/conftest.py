@@ -5,6 +5,15 @@ os.environ.pop("COOKIE_DOMAIN", None)
 
 pytest_plugins = ["tests.fixtures.users", "tests.fixtures.public"]
 
+from upmovies.config import Settings  # noqa: E402
+
+# The workspace compose bind-mounts the whole repo at /app, so `.env` -- the local template
+# carrying every optional setting -- now sits exactly where pydantic-settings looks for it.
+# A test that clears a variable to assert a default, or to assert the required-field error,
+# would read the value straight back out of that file. The process environment is the only
+# source a test should see, so Settings reads no env file here.
+Settings.model_config["env_file"] = None
+
 from collections.abc import AsyncIterator  # noqa: E402
 
 import pytest  # noqa: E402

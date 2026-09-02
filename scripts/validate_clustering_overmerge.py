@@ -9,8 +9,8 @@ distinct singletons is then a real over-merge test: the clusterer must keep the 
 PURE and not absorb the distractor pieces. (This also measures robustness to Stage-1 leakage.)
 
 Run in the container (optional first arg = a single tmdb_id for a verbose breakdown):
-    docker compose exec -T upmovies-backend python scripts/validate_clustering_overmerge.py 969681
-    docker compose exec -T upmovies-backend python scripts/validate_clustering_overmerge.py        # all films
+    docker compose -f ../docker-compose.yml exec -T api python scripts/validate_clustering_overmerge.py 969681
+    docker compose -f ../docker-compose.yml exec -T api python scripts/validate_clustering_overmerge.py        # all films
 """
 
 # ruff: noqa: E501  -- long example/print lines in a localdev diagnostic

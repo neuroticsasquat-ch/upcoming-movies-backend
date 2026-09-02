@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(settings.log_level)
     # The same guard the app's lifespan runs, for the process that actually pays for the
     # failure: a scheduled task is a separate `python -m upmovies.pipeline_run` invocation,
-    # so the app having booted proves nothing about the env this one was handed (CLAUDE.md's
+    # so the app having booted proves nothing about the env this one was handed (AGENTS.md's
     # "a long-running container holds the env it was created with"). Checked before the first
     # run row exists, so an unroutable stage costs no half-published run (NEU-981).
     # Except for the sweep, which makes no model calls: failing it on an unrelated LLM
