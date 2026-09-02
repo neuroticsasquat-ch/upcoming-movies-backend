@@ -86,20 +86,20 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 - HTTP mocking via **respx** — never hit the live network.
 - Integration tests use `session` fixture against test DB. Re-read after Core-level upserts with `execution_options={"populate_existing": True}`.
 - Running a single integration test file in isolation errors (pytest-asyncio quirk). Run the whole suite or scope to directory.
-- Stale container → async-fixture errors: `docker compose restart upmovies-backend`.
+- Stale container → async-fixture errors: `docker compose -f ../docker-compose.yml restart api`.
 
 ## Gotchas
 
 - **`db:refresh` silently reverts migrations.** Restores catalog/news/ingest from prod but leaves `app` alone. Alembic version lives in `app`, so `alembic current` still reads head while tables are gone. Re-apply with `alembic stamp <prod's rev> && task migrate`.
 - **Coolify shadows compose fallbacks:** a `${NAME:-default}` in compose is a seed, not a runtime default. After first deploy, Coolify stores the value and edits to the fallback are silent no-ops in prod. Change the value in the Coolify UI and restart.
 - **Deploy checklist for tuned constants** (T, K, dormancy, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
-- **Long-running container holds the env it was created with.** After any env change: `docker compose up -d --force-recreate upmovies-backend` and `printenv` to confirm.
+- **Long-running container holds the env it was created with.** After any env change: `docker compose -f ../docker-compose.yml up -d --force-recreate api` and `printenv` to confirm.
 - **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`.
 
 
 ## Sibling repo
 
-The frontend lives at `../upcoming-movies-frontend`. Read its `AGENTS.md` before working on frontend code.
+The frontend lives at `../frontend`. Read its `AGENTS.md` before working on frontend code.
 
 ## Conventions
 
