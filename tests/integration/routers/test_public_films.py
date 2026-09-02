@@ -501,6 +501,7 @@ async def test_detail_sparse_film_returns_nulls_and_empty_lists(client, make_fil
     assert body["original_language"] is None
     assert body["backdrop_path"] is None
     assert body["genres"] == []
+    assert body["production_countries"] == []
     assert body["production_companies"] == []
     assert body["collection"] is None
 
@@ -1460,3 +1461,35 @@ async def test_film_detail_has_story_split_unchanged(client, make_film, add_even
     group = _first_group(body)
     assert [e["event_type"] for e in group["news_events"]] == ["casting"]
     assert [e["event_type"] for e in group["tmdb_events"]] == ["release_date"]
+
+
+# ---------------------------------------------------------------------------
+# Production countries on the detail response (NEU-1215)
+# ---------------------------------------------------------------------------
+
+
+async def test_detail_production_countries_are_display_forms_sorted_by_name(
+    client, make_film, add_event, attach_countries
+):
+    film = await make_film(slug="countries-2026")
+    await add_event(film=film, summary="Event.")
+    await attach_countries(
+        film,
+        [("US", "United States of America"), ("IE", "Ireland"), ("GB", "United Kingdom")],
+    )
+
+    body = (await client.get("/films/countries-2026")).json()
+    assert body["production_countries"] == ["Ireland", "UK", "USA"]
+
+
+async def test_detail_does_not_ship_directors_and_keeps_crew(
+    client, make_film, add_event, attach_credits
+):
+    """The film page reads its director out of `crew`, as `FilmHeader`'s billing rows do."""
+    film = await make_film(slug="no-directors-field-2026")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(film, crew=[{"id": 42, "name": "The Director", "job": "Director"}])
+
+    body = (await client.get("/films/no-directors-field-2026")).json()
+    assert "directors" not in body
+    assert [c["name"] for c in body["crew"]] == ["The Director"]

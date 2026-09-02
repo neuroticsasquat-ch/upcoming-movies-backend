@@ -335,6 +335,18 @@ through to a later date. It is the per-subject analogue of the **primary release
 is country- and type-agnostic; the two must not be conflated.
 _Avoid_: primary release date (TMDB's scalar, country-agnostic), earliest release (too vague).
 
+**Title parenthetical**:
+The bracketed run after a film's title on a public surface. Composed of up to three elements —
+**production countries**, director (prefixed `Dir: `), and release year — in that order, joined
+with `", "`, with absent elements contributing nothing rather than an empty slot. Multi-value
+elements join with `"/"`, never a comma, so the comma always means "next element" (NEU-1215).
+Its shape is per-surface and deliberately so: the feed row carries all three, while the film page
+carries the year alone because its spec sheet already lists the director in a labelled row. It is
+no longer the *year* parenthetical, though `catalog.release_grade` and `ingest.sweep.field_events`
+still describe the **primary release date** that way — accurately, since the year element is
+that column's whole remaining surface.
+_Avoid_: year parenthetical (only true of the film page), title suffix, byline.
+
 ### Undated film discovery
 
 **Sweep**:
