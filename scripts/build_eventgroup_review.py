@@ -6,7 +6,7 @@ slug (color-grouped, with a per-film autocomplete of existing beats), plus flip
 
 Run in the container:
 
-    docker compose exec -T upmovies-backend python scripts/build_eventgroup_review.py \\
+    docker compose -f ../docker-compose.yml exec -T api python scripts/build_eventgroup_review.py \\
         < tests/fixtures/link/validation_eventgroups.json \\
         > tests/fixtures/link/eventgroup_review.html
 

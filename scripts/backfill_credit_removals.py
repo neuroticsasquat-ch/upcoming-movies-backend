@@ -12,8 +12,9 @@ Safe to re-run; the carding logic skips already-carded groups.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep import run_credit_detachment_events
@@ -25,6 +26,8 @@ from upmovies.ingest.sweep.credit_events import (
 
 
 async def main() -> None:
+    settings = get_settings()
+    now = datetime.now(UTC)
     created = 0
     skipped = 0
     failed = 0
@@ -40,7 +43,12 @@ async def main() -> None:
     for group in groups:
         try:
             async with SessionLocal() as s:
-                carded = await _card_detachment_group(s, group=group)
+                carded = await _card_detachment_group(
+                    s,
+                    group=group,
+                    now=now,
+                    dwell_days=settings.sweep_credit_dwell_days,
+                )
                 if carded:
                     created += 1
                 else:

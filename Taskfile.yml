@@ -1,14 +1,9 @@
 version: '3'
 
-includes:
-  infra:
-    taskfile: ../../tbc-localdev-infra/Taskfile.yml
-    dir: ../../tbc-localdev-infra
-
 vars:
-  COMPOSE: docker compose
-  SVC: upmovies-backend
-  EXEC: "{{.COMPOSE}} exec {{.SVC}}"
+  COMPOSE: "docker compose -f ../docker-compose.yml"
+  SVC: "api"
+  EXEC: "docker compose -f ../docker-compose.yml exec api"
 
 tasks:
   up:
@@ -36,12 +31,12 @@ tasks:
     cmds:
       - "{{.COMPOSE}} ps"
   db:init:
-    desc: Create the upmovies and upmovies_test databases in the shared Postgres (idempotent)
+    desc: Create the app and app_test databases in the workspace Postgres (idempotent)
     cmds:
       - |
-        for db in upmovies upmovies_test; do
-          docker exec tbc_postgresql_db psql -U root -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
-            || docker exec tbc_postgresql_db psql -U root -d postgres -c "CREATE DATABASE $db"
+        for db in app app_test; do
+          {{.COMPOSE}} exec -T db psql -U dev -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
+            || {{.COMPOSE}} exec -T db psql -U dev -d postgres -c "CREATE DATABASE $db"
         done
   db:refresh:
     desc: 'Refresh local catalog/news/ingest from prod (local app + user data preserved)'

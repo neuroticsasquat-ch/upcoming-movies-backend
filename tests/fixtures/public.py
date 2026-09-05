@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from upmovies.catalog.models import (
@@ -12,9 +13,11 @@ from upmovies.catalog.models import (
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
+    FilmProductionCountry,
     Genre,
     Person,
     ProductionCompany,
+    ProductionCountry,
 )
 from upmovies.catalog.ref import film_ref
 from upmovies.main import app
@@ -126,6 +129,25 @@ def attach_companies(session: AsyncSession):
         await session.flush()
         for company_id, _name in companies:
             session.add(FilmProductionCompany(film_id=film.id, company_id=company_id))
+        await session.commit()
+
+    return _attach
+
+
+@pytest.fixture
+def attach_countries(session: AsyncSession):
+    async def _attach(film: Film, countries: list[tuple[str, str]]) -> None:
+        """Attach production countries as (iso_3166_1, catalog name) pairs."""
+        existing = set(
+            (await session.execute(select(ProductionCountry.iso_3166_1))).scalars().all()
+        )
+        for code, name in countries:
+            if code not in existing:
+                existing.add(code)
+                session.add(ProductionCountry(iso_3166_1=code, name=name))
+        await session.flush()
+        for code, _name in countries:
+            session.add(FilmProductionCountry(film_id=film.id, iso_3166_1=code))
         await session.commit()
 
     return _attach

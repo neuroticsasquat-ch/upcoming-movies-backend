@@ -25,16 +25,16 @@ def _events_for_type(body: dict, event_type: str) -> list[dict]:
 async def test_detail_returns_chronological_summarized_events_with_sources(
     client, make_film, add_event
 ):
-    """Events must be ordered by created_at ascending, expose a created_at key, omit occurred_at.
+    """Events are ordered by occurred_at ascending on the film page (NEU-1204).
 
-    The fixture sets occurred_at in the *opposite* order from created_at so that any
-    stale sort on occurred_at would produce the wrong order — proving the switch took effect.
+    The fixture sets created_at in the *opposite* order from occurred_at so that any
+    stale sort on created_at would produce the wrong order — proving the switch took effect.
 
-    - casting: created_at=Jan (earlier), occurred_at=Mar (later)
-    - trailer:  created_at=Mar (later),  occurred_at=Jan (earlier)
+    - casting: occurred_at=Mar (later), created_at=Jan (earlier)
+    - trailer:  occurred_at=Jan (earlier), created_at=Mar (later)
 
-    Expected order by created_at asc: casting first, then trailer.
-    A sort by occurred_at asc would yield the opposite: trailer first.
+    Expected order by occurred_at asc: trailer first, then casting.
+    Day groups are newest-first, so casting's day (Mar) appears before trailer's day (Jan).
     """
     film = await make_film(slug="odyssey-2026", title="The Odyssey", status="In Production")
     casting_created_at = datetime(2025, 1, 1, tzinfo=UTC)
@@ -42,8 +42,8 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
         film=film,
         event_type="casting",
         confidence="confirmed",
-        occurred_at=datetime(2025, 3, 1, tzinfo=UTC),  # later occurred_at (opposite of created_at)
-        created_at=casting_created_at,  # earlier created_at → should appear first
+        occurred_at=datetime(2025, 3, 1, tzinfo=UTC),  # later occurred_at
+        created_at=casting_created_at,  # earlier created_at
         summary="Casting announced.",
         sources=(
             {
@@ -58,10 +58,8 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     await add_event(
         film=film,
         event_type="trailer",
-        occurred_at=datetime(
-            2025, 1, 1, tzinfo=UTC
-        ),  # earlier occurred_at (opposite of created_at)
-        created_at=trailer_created_at,  # later created_at → should appear second
+        occurred_at=datetime(2025, 1, 1, tzinfo=UTC),  # earlier occurred_at
+        created_at=trailer_created_at,  # later created_at
         summary="Trailer dropped.",
     )
 
@@ -73,14 +71,14 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     assert body["release_date"] == "2026-07-17"
     assert body["release_year"] == 2026
     assert body["arc_stage"] == "shooting"  # arc_stage tracks TMDB status only (NEU-452)
-    # created_at ascending within each group: trailer (Mar) before casting (Jan).
-    # With different days, trailer's day (Mar) comes first (newest first), then casting's (Jan).
+    # Day groups are keyed by occurred_at and sorted newest-first:
+    # casting's day (Mar) comes before trailer's day (Jan).
     all_events = _flatten_events(body)
-    assert [e["event_type"] for e in all_events] == ["trailer", "casting"]
-    # Each event must expose created_at and must NOT expose occurred_at (the rename).
+    assert [e["event_type"] for e in all_events] == ["casting", "trailer"]
+    # Each event must expose created_at and must NOT expose occurred_at.
     for event in all_events:
         assert "created_at" in event, "event must expose created_at"
-        assert "occurred_at" not in event, "event must not expose occurred_at after rename"
+        assert "occurred_at" not in event, "event must not expose occurred_at"
     casting = _events_for_type(body, "casting")[0]
     assert casting["created_at"] == casting_created_at.isoformat().replace("+00:00", "Z")
     assert casting["confidence"] == "confirmed"
@@ -411,6 +409,36 @@ async def test_detail_includes_every_origin_country_not_just_the_first(
     assert [rd["country"] for rd in r.json()["release_dates"]] == ["FR"]
 
 
+async def test_detail_collapses_multiple_dates_per_subject_to_earliest(
+    client, make_film, add_event, add_release_date
+):
+    """NEU-1206: only the earliest release date per (country, category) subject displays,
+    and its metadata (certification) comes from that earliest row."""
+    film = await make_film(slug="rd-dup-us-2026", title="Dup US Dates Film")
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=datetime(2026, 7, 17, tzinfo=UTC),
+        certification="PG-13",
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=3,
+        release_date=datetime(2026, 6, 10, tzinfo=UTC),
+        certification=None,
+    )
+
+    r = await client.get("/films/rd-dup-us-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    assert len(rds) == 1
+    assert rds[0]["date"].startswith("2026-06-10")
+    assert rds[0]["certification"] is None
+
+
 # ── film metadata (genres, companies, collection, scalars) ────────────────────
 
 
@@ -473,6 +501,7 @@ async def test_detail_sparse_film_returns_nulls_and_empty_lists(client, make_fil
     assert body["original_language"] is None
     assert body["backdrop_path"] is None
     assert body["genres"] == []
+    assert body["production_countries"] == []
     assert body["production_companies"] == []
     assert body["collection"] is None
 
@@ -1286,3 +1315,181 @@ async def test_a_numeric_title_slug_prefers_the_legacy_slug_over_the_id_it_looks
 
 async def test_unknown_ref_is_404(client):
     assert (await client.get("/films/99999999-nothing-here")).status_code == 404
+
+
+# NEU-1204 — film detail page groups by occurred_at and orders within-day by occurred_at.
+
+
+async def test_film_detail_day_grouped_by_occurred_at(client, make_film, add_event):
+    """Two events with the same created_at but different occurred_at days become two DayGroups."""
+    film = await make_film(slug="occ-day-2026")
+    same_created = datetime(2026, 6, 3, 12, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="occurred June 1",
+        created_at=same_created,
+        occurred_at=datetime(2026, 6, 1, 10, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="occurred June 2",
+        created_at=same_created,
+        occurred_at=datetime(2026, 6, 2, 10, tzinfo=UTC),
+    )
+
+    body = (await client.get("/films/occ-day-2026")).json()
+    assert [g["day"] for g in body["day_groups"]] == ["2026-06-02", "2026-06-01"]
+    first_group = body["day_groups"][0]
+    second_group = body["day_groups"][1]
+    first_events = first_group["news_events"] + first_group["tmdb_events"]
+    second_events = second_group["news_events"] + second_group["tmdb_events"]
+    assert first_events[0]["event_type"] == "trailer"
+    assert second_events[0]["event_type"] == "casting"
+
+
+async def test_film_detail_backfilled_removal_under_occurrence_day(client, make_film, add_event):
+    """A backfilled removal lands under the day it occurred, not the day it was carded."""
+    film = await make_film(slug="backfill-2026")
+    await add_event(
+        film=film,
+        event_type="credit_removed",
+        summary="Maya Boyd departs the cast.",
+        created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),  # carded June 3
+        occurred_at=datetime(2026, 6, 1, 9, tzinfo=UTC),  # happened June 1
+        provenance="catalog",
+    )
+
+    body = (await client.get("/films/backfill-2026")).json()
+    assert [g["day"] for g in body["day_groups"]] == ["2026-06-01"]
+    assert body["day_groups"][0]["tmdb_events"][0]["event_type"] == "credit_removed"
+
+
+async def test_film_detail_within_day_ordered_by_occurred_at(client, make_film, add_event):
+    """Two events on the same occurred_at day order by occurred_at time."""
+    film = await make_film(slug="within-day-2026")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="afternoon casting",
+        created_at=day,
+        occurred_at=datetime(2026, 6, 1, 20, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="morning trailer",
+        created_at=day,
+        occurred_at=datetime(2026, 6, 1, 8, tzinfo=UTC),
+    )
+
+    body = (await client.get("/films/within-day-2026")).json()
+    events = _flatten_events(body)
+    assert [e["event_type"] for e in events] == ["trailer", "casting"]
+
+
+async def test_film_detail_within_day_tiebreak_created_at_then_id(client, make_film, add_event):
+    """Same occurred_at: tiebreak by created_at, then id."""
+    film = await make_film(slug="tiebreak-2026")
+    base = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    first = await add_event(
+        film=film,
+        event_type="casting",
+        summary="first by created_at",
+        created_at=base,
+        occurred_at=base,
+    )
+    second = await add_event(
+        film=film,
+        event_type="trailer",
+        summary="second by created_at",
+        created_at=base.replace(hour=13),
+        occurred_at=base,
+    )
+
+    body = (await client.get("/films/tiebreak-2026")).json()
+    events = _flatten_events(body)
+    assert [e["event_type"] for e in events] == ["casting", "trailer"]
+    assert events[0]["event_id"] == str(first.id)
+    assert events[1]["event_id"] == str(second.id)
+
+
+async def test_film_detail_day_groups_newest_first(client, make_film, add_event):
+    """Day groups are ordered newest occurred_at day first."""
+    film = await make_film(slug="newest-first-2026")
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="old",
+        occurred_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="trailer",
+        summary="new",
+        occurred_at=datetime(2026, 6, 5, tzinfo=UTC),
+    )
+
+    body = (await client.get("/films/newest-first-2026")).json()
+    assert [g["day"] for g in body["day_groups"]] == ["2026-06-05", "2026-06-01"]
+
+
+async def test_film_detail_has_story_split_unchanged(client, make_film, add_event):
+    """The news_events / tmdb_events split still follows _has_story() (NEU-1201)."""
+    film = await make_film(slug="split-2026")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(
+        film=film,
+        event_type="casting",
+        summary="reported",
+        created_at=day,
+        occurred_at=day,
+        sources=({"url": "https://variety.com/casting"},),
+    )
+    await add_event(
+        film=film,
+        event_type="release_date",
+        summary="tmdb date",
+        created_at=day,
+        occurred_at=day,
+        provenance="catalog",
+    )
+
+    body = (await client.get("/films/split-2026")).json()
+    group = _first_group(body)
+    assert [e["event_type"] for e in group["news_events"]] == ["casting"]
+    assert [e["event_type"] for e in group["tmdb_events"]] == ["release_date"]
+
+
+# ---------------------------------------------------------------------------
+# Production countries on the detail response (NEU-1215)
+# ---------------------------------------------------------------------------
+
+
+async def test_detail_production_countries_are_display_forms_sorted_by_name(
+    client, make_film, add_event, attach_countries
+):
+    film = await make_film(slug="countries-2026")
+    await add_event(film=film, summary="Event.")
+    await attach_countries(
+        film,
+        [("US", "United States of America"), ("IE", "Ireland"), ("GB", "United Kingdom")],
+    )
+
+    body = (await client.get("/films/countries-2026")).json()
+    assert body["production_countries"] == ["Ireland", "UK", "USA"]
+
+
+async def test_detail_does_not_ship_directors_and_keeps_crew(
+    client, make_film, add_event, attach_credits
+):
+    """The film page reads its director out of `crew`, as `FilmHeader`'s billing rows do."""
+    film = await make_film(slug="no-directors-field-2026")
+    await add_event(film=film, summary="Event.")
+    await attach_credits(film, crew=[{"id": 42, "name": "The Director", "job": "Director"}])
+
+    body = (await client.get("/films/no-directors-field-2026")).json()
+    assert "directors" not in body
+    assert [c["name"] for c in body["crew"]] == ["The Director"]

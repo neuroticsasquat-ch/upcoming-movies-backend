@@ -81,6 +81,112 @@ this needs no special path.
 > row), so there is nothing to card — that stays a separate ticket. See the spec at
 > `docs/specs/NEU-1200-credit-removal-events.md`.
 
+> **Amendment — 2026-08-29 (NEU-1205).** NEU-1200's carding rule has no dwell filter, so a
+> TMDB credit that oscillates (added → removed → added → removed over a few days) produces a
+> four-card chain — the exact noise this ADR originally declined to card for. The fix is a
+> **forward-dwell gate with an N-day hold**, *not* the backward-dwell gate the ticket first
+> proposed. **Backward dwell** (card a removal only if the prior attachment is ≥ N days old) was
+> rejected on the data: it cannot tell a flap (removed then re-attached) from a real brief
+> departure (removed, never re-attached) — both have short dwell — so at any N it suppresses
+> mostly *final* departures, re-creating the stale-attachment bug NEU-1200 was built to fix (at
+> N=7: ~12 flaps dampened, ~27 stale tails created). **Forward dwell** cards a removal only if
+> the person does *not* re-attach within N days *after* it: a flap is suppressed, a real
+> departure always cards. It is surgical (gates the flaps, cards the finals, no stale tail) at
+> the cost of an N-day publication hold — low-harm, since removal cards are collapsed-section
+> `rumored` and the film page groups by `occurred_at` (NEU-1204) so the card still appears under
+> the correct day. The forward gate reads raw `catalog.film_credit_change` (not `news.event`),
+> because a flap's re-attachment is itself suppressed by the removal-aware suppression and so is
+> never carded; it is scoped to the same seed-grade role so a cast→director move is two real
+> events, not a flap. **N = 3** (`SWEEP_CREDIT_DWELL_DAYS`, 0 disables, reverts to plain
+> NEU-1200): the max forward re-attach gap among dwell-eligible flaps in the data is 2.001 days,
+> so N=3 catches 100%; N must be < `SWEEP_EVENT_LOOKBACK_DAYS` so a held removal stays in the
+> rolling window when it becomes eligible (the backfill backstops a mis-tuned N). **Transient
+> invariant violation, accepted:** during the ≤N-day hold the removal is not yet carded, so the
+> latest *carded* event is still the attachment while TMDB says removed — bounded, self-correcting,
+> confined to the collapsed section, and strictly better than the alternatives. Backfill is
+> **forward-only**: already-carded removals (including the reported Maya Boyd 4-card chain) are
+> grandfathered, not destructively cleaned. See the spec at
+> `docs/specs/NEU-1205-dampen-credit-oscillation.md`.
+
+> **Amendment — 2026-08-29 (NEU-1206).** The release-date half is refined: a subject
+> `(iso_3166_1, release_type)` can carry **multiple** `catalog.film_release_date` rows (TMDB has
+> no uniqueness constraint there), so the single-date-per-subject assumption the original
+> diff (`ingest.tmdb.release_date_history`) relied on was already collapsing duplicates
+> last-wins — a latent bug. The displayed and carded value is now the **governing release
+> date**: `min(release_date)` over the current rows for the subject. The movie page and the
+> release calendar both collapse to it (one line per subject); the calendar, being
+> upcoming-only, excludes a category whose governing date is past rather than falling through
+> to a later date. The carding rule is restated as: a card fires **iff the governing date for
+> a subject changed and the new governing date was not already present in the previous set**;
+> the card describes the *governing date's* movement (`previous_date = prev_earliest`,
+> `new_date = new_earliest`), not the underlying moved row's own previous value. A card does
+> **not** fire when the governing date moves to an *unchanged* sibling because the prior
+> governing date was withdrawn or delayed past it — those cases are silent, matching this
+> ADR's existing "a date disappearing records no history row, so there is nothing to card" and
+> accepted as the cost of the unified rule (same philosophy as the credit-detachment transient
+> hold, but permanent and by design here). **No backfill, no migration:** existing events and
+> `film_release_date_change` rows are grandfathered; the `ReleaseDateOut` DTO is unchanged. See
+> the spec at `docs/specs/NEU-1206-earliest-release-date-per-subject.md`.
+
+> **Amendment — 2026-08-29 (NEU-1207).** The collapsed "via TMDB" section this ADR's
+> chain relies on (NEU-1200/1205 both lean on it as the low-harm confinement for removal
+> cards and the transient-invariant hold) is **retired on the film page**. NEU-1201
+> introduced the collapse for two reasons: to hide credit-oscillation noise, and to
+> demote TMDB below trade news for veracity (TMDB is community-edited). NEU-1205
+> dampened the oscillation at the source (forward-dwell gate), removing the first reason;
+> this amendment retires the collapse on the film page, leaving the **veracity gap
+> signalled by the "via TMDB" label alone** rather than by hiding — demotion by
+> attribution, not by visibility. The **feed retains the collapse** (a different surface:
+> a publication log keyed on `created_at` per ADR-0016, aggregating many films per day,
+> not visually empty when TMDB-only). Consequence for the NEU-1205 transient-invariant
+> argument: its "confined to the collapsed `rumored` section" guarantee now holds for the
+> **feed only**. On the film page the ≤N-day hold (`SWEEP_CREDIT_DWELL_DAYS`, default 3)
+> makes the latest *carded* event briefly "attached" while TMDB says "removed" — now
+> **visible by default** rather than hidden behind a toggle. Accepted as the documented
+> cost of uncollapsing: bounded (≤N days), self-correcting (a final departure cards once
+> the hold passes; a flap's removal is suppressed), and confined to the per-film page while
+> the high-traffic feed still hides it. The mismatch is only ever an attachment card
+> staying visible during the hold — a true-at-the-time beat TMDB has since retracted —
+> never a wrong attachment. No backend change; `day_groups` shape unchanged. See the spec
+> at `docs/specs/NEU-1207-uncollapse-via-tmdb-events-on-movie-page.md`.
+>
+> **Amendment — 2026-08-29 (NEU-1208).** The "via TMDB" label is renamed to
+> **"unconfirmed updates"** on both the grouped feed and the film page, so the heading
+> signals the *uncertainty* of the updates rather than naming their source. The
+> per-card "via TMDB" attribution line is **removed** from every event card; the section
+> heading is now the sole veracity signal, and a catalog-sourced event with no outlets
+> renders no attribution line at all. On the **grouped feed**, the catalog section is
+> further demoted to **title-only links**: the backend stops shipping `events` for
+> `news_backed=false` items, so a reader sees only the film title linked to the film page
+> and must click through to view the TMDB updates inline. `event_count`, `top_event_type`,
+> and `event_types` stay computed from the real catalog events and remain accurate in the
+> payload. The film-page label-only demotion from NEU-1207 is unchanged in kind; only the
+> label text moves. The NEU-1205 transient-invariant "confined to the collapsed section"
+> argument now holds for the feed's **titles-only collapsed** "unconfirmed updates"
+> section and the film page's inline section per NEU-1207. See the spec at
+> `docs/specs/NEU-1208-feed-tmdb-section-titles-only.md`.
+>
+> **Amendment — 2026-09-02 (NEU-1212).** NEU-1208's demotion overshot at the **row**
+> level. Dropping the event *cards* was right — full summaries plus badges gave early TMDB
+> activity the same weight as trade-sourced news — but dropping *all* per-row signal left a
+> reader facing ~35 bare film titles with no way to tell a release-date move from a credit
+> removal short of a page load per film. The row became untriageable. The grouped feed's
+> catalog rows therefore label **the day's beats**: one badge per entry in `event_types`,
+> most-significant first, rendered inline after the title. The remedy cost nothing, because
+> `event_types` was specified for exactly this rendering and NEU-1208 deliberately kept it
+> accurate for catalog rows.
+>
+> What did **not** change: the backend still does not ship `events` for `news_backed=false`
+> rows; the "unconfirmed updates" section is still **collapsed by default** on the feed; the
+> "unconfirmed updates" rename stands; and the removed per-card "via TMDB" attribution stays
+> removed, with the section heading still the sole veracity signal. So NEU-1205's
+> transient-invariant argument survives intact — the feed's catalog activity remains confined
+> to the collapsed section, now labelled rather than mute. No backend code, DTO schema, or
+> migration change — the only backend edits are this amendment, the CONTEXT.md corrections, and
+> a stale `dto.py` comment that still described the labels as rendering *beneath* the title. The
+> behaviour change is frontend-only, in `FeedDayCard`. See the spec at
+> `docs/specs/NEU-1212-feed-beat-labels-on-unconfirmed-updates.md`.
+
 ## Considered alternatives
 
 - **Keep requiring a story trigger.** Rejected: it is the status quo, and against an expanded

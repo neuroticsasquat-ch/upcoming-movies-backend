@@ -91,6 +91,9 @@ class FilmDetailResponse(BaseModel):
     original_language: str | None = None
     backdrop_path: str | None = None
     genres: list[str] = []
+    # Display forms (already abbreviated), sorted by display name. The film page lists these in
+    # its spec sheet; it reads directors from `crew` instead, so no `directors` field here.
+    production_countries: list[str] = []
     production_companies: list[str] = []
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
@@ -122,15 +125,21 @@ class FeedDayItem(BaseModel):
     film_title: str
     release_year: int | None
     poster_path: str | None
-    # Rendered in the release year's slot for an undated film (NEU-1085), so it has to
-    # ride along on the row — it is not derivable client-side from release_year.
+    # Rendered only when the film has no country, director, or year — the last resort that
+    # keeps a bare title from reading as a rendering bug (NEU-1085, narrowed by NEU-1215). It
+    # has to ride along on the row: it is not derivable client-side from release_year.
     arc_stage: str
+    # The other two elements of the title parenthetical, both display-ready and never None.
+    # Countries hold display forms sorted by display name; directors hold person names ordered
+    # by billing. Neither is capped here — capping is presentation and differs per surface.
+    production_countries: list[str] = []
+    directors: list[str] = []
     day: date
     top_event_type: str
     # Every distinct beat this film-day carries, most-significant first — so `event_types[0]`
-    # is always `top_event_type`. The feed labels the whole set beneath the title, which the
-    # lead type alone can't express: a day that pairs a trailer with a casting beat reads as
-    # trailer-only otherwise.
+    # is always `top_event_type`. The feed labels the whole set inline after the title
+    # (NEU-1212), on rows that ship no events; the lead type alone can't express it, since a
+    # day that pairs a trailer with a casting beat reads as trailer-only otherwise.
     event_types: list[str]
     event_count: int
     # True when *any* of this film-day's visible events has a linked story — i.e. a news
@@ -143,8 +152,8 @@ class FeedDayItem(BaseModel):
     # over the section this row lands in.
     news_backed: bool
     # The actual events on this (film, day), with their summaries and sources, matching the
-    # EventOut shape used on the film detail page. Empty only if the day has no events (the
-    # feed item itself wouldn't exist in that case).
+    # EventOut shape used on the film detail page. Empty for catalog-sourced rows on the
+    # grouped feed, which render as title-only links (NEU-1208).
     events: list[EventOut] = []
 
 
