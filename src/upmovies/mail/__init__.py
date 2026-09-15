@@ -9,6 +9,7 @@ from upmovies.mail.registry import NOOP as NOOP
 from upmovies.mail.registry import RESEND as RESEND
 from upmovies.mail.registry import RESEND_BASE_URL as RESEND_BASE_URL
 from upmovies.mail.registry import TRANSMITTING_PROVIDERS as TRANSMITTING_PROVIDERS
+from upmovies.mail.resend import DEFAULT_MAIL_RETRY_POLICY as DEFAULT_MAIL_RETRY_POLICY
 from upmovies.mail.resend import ResendClient as ResendClient
 from upmovies.mail.templates import available_templates as available_templates
 from upmovies.mail.templates import render as render
@@ -17,5 +18,6 @@ from upmovies.mail.types import Envelope as Envelope
 from upmovies.mail.types import Mailer as Mailer
 from upmovies.mail.types import MailError as MailError
 from upmovies.mail.types import MessageId as MessageId
+from upmovies.mail.types import TemplateRenderError as TemplateRenderError
 from upmovies.mail.types import Transport as Transport
 from upmovies.mail.types import UnknownTemplateError as UnknownTemplateError

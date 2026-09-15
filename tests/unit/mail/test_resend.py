@@ -5,7 +5,13 @@ import pytest
 import respx
 
 from upmovies.llm.retry import RetryPolicy
-from upmovies.mail import Envelope, MailError, ResendClient, Transport
+from upmovies.mail import (
+    DEFAULT_MAIL_RETRY_POLICY,
+    Envelope,
+    MailError,
+    ResendClient,
+    Transport,
+)
 from upmovies.mail.registry import RESEND_BASE_URL
 
 EMAILS_URL = f"{RESEND_BASE_URL}/emails"
@@ -119,3 +125,55 @@ async def test_an_accepted_message_with_no_id_is_refused_rather_than_returned_em
     async with ResendClient(api_key="re_x", policy=_NO_WAIT) as client:
         with pytest.raises(MailError, match="no id"):
             await client.send(ENVELOPE)
+
+
+# --- retrying a side-effecting endpoint ----------------------------------------
+
+
+@respx.mock
+async def test_the_retries_of_one_send_carry_one_idempotency_key():
+    """The LLM adapters' retry reasoning does not carry over: on a read timeout or a 5xx the
+    request was already on the wire, so Resend may have accepted and queued the message. One
+    key per *logical* send is what stops four attempts becoming four verification mails; a key
+    per attempt would be no key at all."""
+    route = respx.post(EMAILS_URL).mock(
+        side_effect=[
+            httpx.ReadTimeout("no answer"),
+            httpx.Response(500),
+            httpx.Response(200, json={"id": "accepted-once"}),
+        ]
+    )
+
+    async with ResendClient(api_key="re_x", policy=_NO_WAIT) as client:
+        assert await client.send(ENVELOPE) == "accepted-once"
+
+    keys = {call.request.headers["idempotency-key"] for call in route.calls}
+    assert route.call_count == 3
+    assert len(keys) == 1
+
+
+@respx.mock
+async def test_two_separate_sends_carry_different_idempotency_keys():
+    """The key deduplicates one send's retries, not two deliberate sends of the same mail —
+    a user who asks for a second verification link must get one."""
+    route = respx.post(EMAILS_URL).mock(return_value=httpx.Response(200, json={"id": "re-1"}))
+
+    async with ResendClient(api_key="re_x", policy=_NO_WAIT) as client:
+        await client.send(ENVELOPE)
+        await client.send(ENVELOPE)
+
+    keys = {call.request.headers["idempotency-key"] for call in route.calls}
+    assert len(keys) == 2
+
+
+def test_the_mail_timeout_is_short_enough_to_sit_inside_a_request():
+    """`DEFAULT_RETRY_POLICY`'s 60s reproduces the Anthropic SDK's configuration — sensible
+    for a model generating tokens, and over three minutes of a held signup request once the
+    retries are counted. The retry *semantics* stay shared; only the ceiling moves."""
+    assert DEFAULT_MAIL_RETRY_POLICY.timeout == 10.0
+    worst_case = DEFAULT_MAIL_RETRY_POLICY.timeout * (DEFAULT_MAIL_RETRY_POLICY.max_retries + 1)
+    assert worst_case <= 45.0
+
+
+def test_the_client_defaults_to_the_mail_policy():
+    assert ResendClient(api_key="re_x")._policy is DEFAULT_MAIL_RETRY_POLICY

@@ -4,7 +4,6 @@ boot check that refuses a configuration it cannot send with."""
 import httpx
 import pytest
 import respx
-from jinja2 import UndefinedError
 
 from upmovies.config import get_settings
 from upmovies.mail import (
@@ -14,6 +13,7 @@ from upmovies.mail import (
     MissingCredentialError,
     NoopTransport,
     ResendClient,
+    TemplateRenderError,
     credential_for,
     validate_mail_configuration,
 )
@@ -121,7 +121,7 @@ async def test_a_template_fault_costs_no_provider_call():
     """Rendering happens before the transport is touched, so a bad template cannot half-send."""
     transport = NoopTransport()
     async with MailGateway(settings_with(**NOOP_CONFIG), transport=transport) as mail:
-        with pytest.raises(UndefinedError):
+        with pytest.raises(TemplateRenderError):
             await mail.send(to="ada@example.com", template="verify", context={})
 
     assert transport.sent == []
@@ -215,3 +215,13 @@ def test_a_missing_template_tree_fails_the_boot(monkeypatch, tmp_path):
 
     with pytest.raises(MailConfigurationError, match="does not exist"):
         validate_mail_configuration(settings_with(**NOOP_CONFIG))
+
+
+async def test_an_unimplemented_provider_gets_no_transport_rather_than_a_resend_one():
+    """Unreachable while the `Literal` guards `Settings`, and stated anyway: a third provider
+    added to the registry must not fall through to a Resend client. Sending someone else's
+    mail through Resend is a worse failure than refusing to build."""
+    mail = MailGateway(settings_with(mail_provider="postmark", resend_api_key="re_x"))
+    with pytest.raises(MailConfigurationError, match="postmark"):
+        async with mail:
+            await mail.send(to="a@example.com", template="verify", context=VERIFY_CONTEXT)

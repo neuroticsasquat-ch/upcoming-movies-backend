@@ -2,9 +2,14 @@
 bad mail it is there to prevent."""
 
 import pytest
-from jinja2 import UndefinedError
 
-from upmovies.mail import MailError, UnknownTemplateError, available_templates, render
+from upmovies.mail import (
+    MailError,
+    TemplateRenderError,
+    UnknownTemplateError,
+    available_templates,
+    render,
+)
 from upmovies.mail.templates import validate_templates
 
 VERIFY_CONTEXT: dict[str, object] = {
@@ -56,8 +61,35 @@ def test_a_missing_context_key_raises_rather_than_rendering_a_blank_link():
     """`StrictUndefined`. The whole point of this mail is the link; a context that spells the
     key differently must not produce a mail with nothing in it."""
     context = {k: v for k, v in VERIFY_CONTEXT.items() if k != "verify_url"}
-    with pytest.raises(UndefinedError):
+    with pytest.raises(TemplateRenderError, match="verify_url"):
         render("verify", context, sender="a@b.c", to="ada@example.com")
+
+
+def test_a_render_failure_is_catchable_as_a_mail_error():
+    """`MailError` is what this package documents a caller as catching, so the most likely
+    template fault must not escape it as a raw `jinja2.UndefinedError`."""
+    from jinja2 import UndefinedError
+
+    context = {k: v for k, v in VERIFY_CONTEXT.items() if k != "verify_url"}
+    with pytest.raises(MailError) as exc:
+        render("verify", context, sender="a@b.c", to="ada@example.com")
+
+    assert isinstance(exc.value.__cause__, UndefinedError)
+
+
+def test_display_name_is_genuinely_optional_despite_strict_undefined():
+    """`{% if display_name %}` reads as optional and is not: `StrictUndefined.__bool__`
+    raises. A user with no display name is an ordinary case, not a broken send."""
+    context = {k: v for k, v in VERIFY_CONTEXT.items() if k != "display_name"}
+    envelope = render("verify", context, sender="a@b.c", to="ada@example.com")
+
+    assert envelope.text.startswith("Hi,")
+    assert "https://app.example.com/verify?token=abc123" in envelope.text
+
+
+def test_an_empty_display_name_greets_without_a_dangling_space():
+    envelope = _verify(display_name="")
+    assert envelope.text.startswith("Hi,")
 
 
 def test_the_html_part_escapes_context_and_the_text_part_does_not():

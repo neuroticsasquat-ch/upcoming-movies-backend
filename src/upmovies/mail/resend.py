@@ -12,14 +12,20 @@ of vendor and DB imports, and its own docstring is an argument against adapters 
 behaviour is merely similar rather than shared. It lives under `llm/` because that is where
 the second adapter needing it appeared, not because it is about language models; the day a
 third consumer shows up it is worth hoisting to a package of its own, and until then a move
-would be churn across two packages for no behaviour change."""
+would be churn across two packages for no behaviour change.
 
+Two things about that loop do **not** carry over from the LLM adapters, and both are handled
+below rather than inherited quietly: a retried completion costs money, while a retried *send*
+can put a second copy of a verification mail in somebody's inbox (`_IDEMPOTENCY_HEADER`); and
+a 60-second timeout is reasonable for a model and is not for a call sitting inside a signup
+request (`DEFAULT_MAIL_RETRY_POLICY`)."""
+
+import uuid
 from typing import Any
 
 import httpx
 
 from upmovies.llm.retry import (
-    DEFAULT_RETRY_POLICY,
     Attempts,
     Retry,
     RetryPolicy,
@@ -28,6 +34,19 @@ from upmovies.llm.retry import (
 )
 from upmovies.mail.registry import RESEND_BASE_URL
 from upmovies.mail.types import Envelope, MailError, MessageId
+
+# Resend's own header for "this is the same send you already saw". Scoped to 24 hours at the
+# provider, which is far longer than one logical call's retry budget needs.
+_IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+# The shared retry *semantics*, on a timeout a mail call can actually live with. The 60s in
+# `DEFAULT_RETRY_POLICY` reproduces the Anthropic SDK's configuration, which is a sensible
+# ceiling for a model generating tokens and a terrible one here: this gateway is wired into
+# the app's lifespan precisely so routes can use it, so a stalled provider at 60s x 4 attempts
+# would hold a signup request for over three minutes before raising. What ADR-0007 argues for
+# is one retry loop, not one set of numbers — the classifier, the backoff curve and the
+# `Retry-After` handling are all still the shared ones.
+DEFAULT_MAIL_RETRY_POLICY = RetryPolicy(timeout=10.0)
 
 
 def _to_wire(envelope: Envelope) -> dict[str, Any]:
@@ -77,7 +96,7 @@ class ResendClient:
         self,
         *,
         api_key: str,
-        policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+        policy: RetryPolicy = DEFAULT_MAIL_RETRY_POLICY,
         base_url: str = RESEND_BASE_URL,
     ):
         self._policy = policy
@@ -99,8 +118,10 @@ class ResendClient:
         — it closes it by name instead."""
         await self._client.aclose()
 
-    async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
-        response = await self._client.post("/emails", json=body)
+    async def _post(self, body: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+        response = await self._client.post(
+            "/emails", json=body, headers={_IDEMPOTENCY_HEADER: idempotency_key}
+        )
         response.raise_for_status()
         return response.json()
 
@@ -111,10 +132,20 @@ class ResendClient:
         like a successful send everywhere it is later stored, and the row it would write —
         D-31's notification ledger — is the only record that the mail was ever accepted; a
         falsified one is worse than a failure, because a failure gets retried and a lie does
-        not."""
+        not.
+
+        **The retry loop is made safe here, not in the classifier.** A read timeout and a 5xx
+        are both retried, and on both the request was already on the wire — so for a
+        side-effecting endpoint "no answer arrived" means "it may have gone out anyway", and
+        the LLM adapters' reasoning stops applying: the worst case is four verification mails
+        from one signup. One `Idempotency-Key` is minted per *logical* send and reused across
+        that send's attempts, so a retry after a message Resend had already accepted returns
+        the original id rather than delivering a second copy. Minting it here rather than in
+        `_post` is the whole mechanism — a key per attempt would be no key at all."""
         body = _to_wire(envelope)
+        idempotency_key = str(uuid.uuid4())
         payload = await call_with_retry(
-            lambda: self._post(body),
+            lambda: self._post(body, idempotency_key),
             policy=self._policy,
             classify=_classify,
             attempts=Attempts(),

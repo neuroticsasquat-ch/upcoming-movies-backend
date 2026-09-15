@@ -142,3 +142,16 @@ async def test_lifespan_refuses_to_start_with_an_undeliverable_sender(monkeypatc
     with pytest.raises(MailConfigurationError, match="MAIL_FROM"):
         async with lifespan(app):
             pass
+
+
+async def test_lifespan_clears_the_mailer_on_shutdown(monkeypatch):
+    """`app` is a module-level singleton, so a closed gateway left on its state outlives the
+    lifespan that owned it — and the next caller would get `RuntimeError: ... is closed`
+    instead of the `mail_unavailable` 500 that says what to do about it."""
+    settings = get_settings().model_copy(update={**DEFAULT_ROUTING, **NOOP_MAIL})
+    monkeypatch.setattr("upmovies.main.get_settings", lambda: settings)
+
+    async with lifespan(app):
+        pass
+
+    assert app.state.mailer is None

@@ -23,11 +23,11 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from upmovies.config import Settings
-from upmovies.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
+from upmovies.llm.retry import RetryPolicy
 from upmovies.mail import templates
 from upmovies.mail.noop import NoopTransport
 from upmovies.mail.registry import MAIL_PROVIDERS, NOOP, RESEND, TRANSMITTING_PROVIDERS
-from upmovies.mail.resend import ResendClient
+from upmovies.mail.resend import DEFAULT_MAIL_RETRY_POLICY, ResendClient
 from upmovies.mail.types import MessageId, Transport
 
 
@@ -123,7 +123,7 @@ class MailGateway:
         settings: Settings,
         *,
         transport: Transport | None = None,
-        policy: RetryPolicy = DEFAULT_RETRY_POLICY,
+        policy: RetryPolicy = DEFAULT_MAIL_RETRY_POLICY,
     ):
         self._settings = settings
         self._policy = policy
@@ -170,6 +170,15 @@ class MailGateway:
     def _build(self) -> Transport:
         if self._provider == NOOP:
             return NoopTransport()
+        if self._provider != RESEND:
+            # The same discipline `credential_for` applies one line down, stated rather than
+            # relied on: today an unknown provider raises `KeyError` there, but only because
+            # its map happens to have no entry for it. A third provider added to the registry
+            # and to that map would otherwise fall through to a Resend client — silently
+            # sending someone else's mail through Resend is a worse failure than not booting.
+            raise MailConfigurationError(
+                f"no transport is implemented for MAIL_PROVIDER {self._provider!r}"
+            )
         api_key = credential_for(self._settings, self._provider)
         if api_key is None:
             raise MissingCredentialError(

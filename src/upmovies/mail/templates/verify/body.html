@@ -5,7 +5,7 @@
       <tr>
         <td style="padding:32px;">
           <p style="margin:0 0 16px;font-size:16px;">
-            Hi{% if display_name %} {{ display_name }}{% endif %},
+            Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
           </p>
           <p style="margin:0 0 24px;font-size:16px;line-height:1.5;">
             Confirm this address to finish setting up your {{ product_name }} account.

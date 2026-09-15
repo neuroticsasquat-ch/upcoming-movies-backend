@@ -66,7 +66,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # put its own there — and so that this `async with` is what closes the pool on shutdown.
     async with MailGateway(settings) as mailer:
         app.state.mailer = mailer
-        yield
+        try:
+            yield
+        finally:
+            # Cleared, not just closed. `app` is a module-level singleton, so a closed gateway
+            # left here outlives the lifespan that owned it — and `deps.get_mailer` only
+            # checks for None, so the next caller would get the `RuntimeError` from a closed
+            # gateway instead of the `mail_unavailable` 500 that says what to do about it.
+            app.state.mailer = None
 
 
 def create_app() -> FastAPI:

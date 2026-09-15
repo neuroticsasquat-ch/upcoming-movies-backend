@@ -59,6 +59,17 @@ class UnknownTemplateError(MailError):
     the first is a typo at the call site, the second is a broken template."""
 
 
+class TemplateRenderError(MailError):
+    """A template could not be rendered against the context it was given.
+
+    Almost always a missing key: the environment uses `StrictUndefined`, so a context that
+    spells `verify_url` differently raises instead of sending a mail with a blank link in it.
+    Wrapped into this package's own hierarchy rather than left as `jinja2.UndefinedError`,
+    because `MailError` is documented as what a caller catches, and the most likely template
+    fault escaping that promise would make the promise worthless. The Jinja exception is
+    chained, so the offending name is still one `__cause__` away."""
+
+
 class Mailer(Protocol):
     """What a caller needs in order to send mail: a template name, a recipient, a context.
 

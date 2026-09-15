@@ -23,10 +23,15 @@ Three deliberate strictnesses, each of which turns a silent bad mail into a loud
 import pathlib
 import re
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFound
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError, TemplateNotFound
 from jinja2 import select_autoescape as _select_autoescape
 
-from upmovies.mail.types import Envelope, MailError, UnknownTemplateError
+from upmovies.mail.types import (
+    Envelope,
+    MailError,
+    TemplateRenderError,
+    UnknownTemplateError,
+)
 
 _TEMPLATE_ROOT = pathlib.Path(__file__).parent / "templates"
 
@@ -94,7 +99,15 @@ def _render_part(name: str, part: str, context: dict[str, object]) -> str:
             f"no mail template {name!r} (missing {name}/{part}); "
             f"available: {', '.join(available_templates()) or '<none>'}"
         ) from exc
-    return template.render(context)
+    try:
+        return template.render(context)
+    except TemplateError as exc:
+        # `UndefinedError` is the one that actually happens, but every Jinja render failure is
+        # the same thing to a caller — this template cannot be turned into a message — and
+        # `TemplateError` is their common base.
+        raise TemplateRenderError(
+            f"mail template {name}/{part} could not be rendered: {exc}"
+        ) from exc
 
 
 def render(name: str, context: dict[str, object], *, sender: str, to: str) -> Envelope:
