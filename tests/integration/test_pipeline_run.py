@@ -23,6 +23,7 @@ from upmovies.ingest.sweep import (
 )
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm import StageConfigurationError
+from upmovies.mail import MailConfigurationError
 from upmovies.news.models import Story
 
 
@@ -876,6 +877,36 @@ def test_main_runs_the_sweep_on_an_unroutable_llm_configuration(monkeypatch):
             "summary_model": "deepseek-v4-flash",
             "deepseek_api_key": None,
         }
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+    monkeypatch.setattr("upmovies.pipeline_run.run_sweep", _stub_daily(ok=True))
+
+    assert pipeline_run.main(["sweep"]) == 0
+
+
+def test_main_validates_the_mail_configuration_before_running_anything(monkeypatch):
+    """A scheduled task is its own process and holds the env it was created with, so the app
+    having booted proves nothing about this one. No mode sends mail today; the guard is here
+    for M7's notify and digest passes, which are `pipeline_run` modes."""
+    settings = get_settings().model_copy(
+        update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the daily chain must not start on an unusable mail configuration")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", must_not_run)
+    with pytest.raises(MailConfigurationError, match="RESEND_API_KEY"):
+        pipeline_run.main(["daily"])
+
+
+def test_main_runs_the_sweep_on_an_unusable_mail_configuration(monkeypatch):
+    """The sweep inherits the LLM guard's exemption for the same reason it has one: it is
+    deliberately outside the daily chain's shared failure modes (§6.1), and it sends no mail.
+    """
+    settings = get_settings().model_copy(
+        update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
     )
     monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep", _stub_daily(ok=True))

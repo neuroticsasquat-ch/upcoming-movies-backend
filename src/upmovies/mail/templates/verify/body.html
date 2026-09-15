@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#f6f6f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1a1a1a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:8px;">
+      <tr>
+        <td style="padding:32px;">
+          <p style="margin:0 0 16px;font-size:16px;">
+            Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+          </p>
+          <p style="margin:0 0 24px;font-size:16px;line-height:1.5;">
+            Confirm this address to finish setting up your {{ product_name }} account.
+          </p>
+          <p style="margin:0 0 24px;">
+            <a href="{{ verify_url }}" style="display:inline-block;padding:12px 20px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;">Confirm email address</a>
+          </p>
+          <p style="margin:0 0 24px;font-size:14px;line-height:1.5;color:#555555;">
+            The link is good for {{ expires_in_hours }} hours. If it expires, ask for a new
+            one from the sign-in page. If the button does not work, paste this into your
+            browser:<br>
+            <a href="{{ verify_url }}" style="color:#1a56db;word-break:break-all;">{{ verify_url }}</a>
+          </p>
+          <p style="margin:0;font-size:14px;line-height:1.5;color:#555555;">
+            If you did not create a {{ product_name }} account, you can ignore this email —
+            nothing will happen until the link above is used.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

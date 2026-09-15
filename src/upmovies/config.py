@@ -14,6 +14,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # retrieval constants below are in, and a test pins the two together the same way.
 Provider = Literal["anthropic", "deepinfra", "deepseek"]
 
+# Which provider sends transactional mail (D-30). A `Literal` for the same reason `Provider`
+# is one — a misspelled provider fails the container at boot rather than the signup that
+# needed the mail — and duplicated from `mail.registry.MAIL_PROVIDERS` rather than imported,
+# because `mail.gateway` reads `Settings` and importing the `mail` package here would be a
+# cycle. A test pins the two together, exactly as it does for `Provider`.
+MailProvider = Literal["resend", "noop"]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -303,6 +310,25 @@ class Settings(BaseSettings):
 
     login_lockout_threshold: int = Field(default=5, alias="LOGIN_LOCKOUT_THRESHOLD")
     login_lockout_window_minutes: int = Field(default=15, alias="LOGIN_LOCKOUT_WINDOW_MINUTES")
+
+    # Transactional mail (D-30, M1). `noop` by default, and the default is the interesting
+    # part: every deploy that exists today has no Resend account, so defaulting to `resend`
+    # would fail each of their boots the moment this merges, for a capability none of them
+    # uses yet. The cost of the safe default is a production container that silently sends
+    # nothing if `MAIL_PROVIDER` is forgotten — which is why `mail.noop` logs every send at
+    # INFO naming the recipient and the provider, so "forgotten" is visible in the log stream
+    # instead of only in a support ticket.
+    mail_provider: MailProvider = Field(default="noop", alias="MAIL_PROVIDER")
+    # The envelope sender, in either the bare `a@b.c` or the `Name <a@b.c>` form. Empty by
+    # default rather than carrying an invented address: a plausible-looking default is one
+    # nobody notices is wrong until mail bounces, whereas empty is refused at boot for any
+    # provider that actually transmits (`mail.gateway.validate_mail_configuration`).
+    mail_from: str = Field(default="", alias="MAIL_FROM")
+    # Optional, deliberately unlike ADMIN_TOKEN above and for the same reason the two
+    # non-Anthropic LLM keys are: requiring it would break every deploy that is not sending
+    # mail. Boot-time validation is what makes optional safe — it asserts a credential exists
+    # for the *configured* provider, at startup.
+    resend_api_key: str | None = Field(default=None, alias="RESEND_API_KEY")
 
     @property
     def cors_allowed_origins(self) -> list[str]:
