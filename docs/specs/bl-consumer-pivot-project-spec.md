@@ -46,8 +46,10 @@ In scope (seven milestones, §6):
 
 Out of scope for this project (explicit non-goals, from the source spec §1.4 plus interview):
 
-- Pricing and billing for the consumer tier (*bl: Subscription & Billing* stays its own project;
-  the prior $4/mo figure is not assumed).
+- Pricing, payment and subscription lifecycle for the consumer tier (*bl: Subscription &
+  Billing* stays its own project; the prior $4/mo figure is not assumed). This project decides
+  *where* access is enforced and how it is granted by hand (§5 *Access and entitlement*); it does
+  not decide who pays or how much. Billing later takes over writing `app.user.entitled_until`.
 - Service-to-service availability churn and leaving-service alerts.
 - Industry features: slate tracking, competitive intelligence, deal flow.
 - A native mobile app. v1 is web + email + Web Push + iCal.
@@ -56,7 +58,11 @@ Out of scope for this project (explicit non-goals, from the source spec §1.4 pl
 
 ## 3. Goals and acceptance (project level)
 
-- A new user can go from signup to a populated timeline via one Letterboxd CSV upload.
+- A new user *who has been granted access* can go from signup to a populated timeline via one
+  Letterboxd CSV upload.
+- A registered user who has **not** been granted access can reach nothing a signed-out visitor
+  cannot: no follows, no timeline, no imports, no alerts, no digest, no iCal — and the notify and
+  digest passes never mail them (D-37, D-39).
 - A credit added and reverted inside the quarantine window produces zero events and a correct
   live cast list throughout; added and removed weeks apart produces two events, the first marked
   superseded by the second.
@@ -86,6 +92,7 @@ Facts established against the codebase on 2026-09-15; the tickets assume them.
 | LLM gateway | Closed stage set `link, cluster, source_judge, summarize`; per-stage provider; never falls back | `resolve` is a new stage; extraction extends cluster output. |
 | Cluster output | Emits `subject_key` as normalized names (string, not id) | Extraction tuples extend this schema. |
 | Auth | Cookie sessions, argon2, invite-gated signup, login throttling only; **no email, no user settings, no follows/watchlist/notifications, no rate limiting** | Milestone 1 builds the pipe. |
+| Admin surface | `app.user.is_admin` + `require_current_admin` (`deps.py`), session-authed, distinct from the `ADMIN_TOKEN` `require_admin`; `/admin/invites` router + page is the write-surface precedent | The entitlement grant surface (D-38) mirrors `invites_admin`, session-authed — not the `ADMIN_TOKEN` routers. |
 | Frontend | React 19, react-router v8 framework mode (SSR on Cloudflare Workers), TanStack Query, Tailwind 4, shadcn | Routes: `/`, `/calendar`, `/film/:ref`, `/login`, `/signup`, `/admin/*`. |
 | TMDB client | `/discover/movie`, `/movie/{id}?append_to_response=credits,release_dates,alternative_titles`, `/person/{id}/movie_credits`; 40 req/10 s limiter | New endpoints: `/search/person`, `/search/movie`, `/movie/{id}/watch/providers`, `/movie/{id}/videos`, `/account/*` + auth flow. |
 
@@ -257,6 +264,51 @@ Numbered so tickets can cite them (`D-n`).
 - **D-36 Web Push** ships last: service worker, VAPID keys, `app.push_subscription`, same queue
   as email with `channel=push`. iOS requires home-screen install; documented, not worked around.
 
+### Access and entitlement
+
+The follow graph, the timeline, imports and everything in delivery are **subscriber
+functionality**. This project builds them; it does not give them away. Until
+*bl: Subscription & Billing* ships, the only way in is an admin grant.
+
+Consequence, accepted deliberately: a registered-but-ungranted account confers nothing over a
+signed-out visit. M1's open signup, verification and rate limits still ship — they are
+prerequisites for granting access at all, and for the billing project on top — but the signup
+copy must not promise the follow graph while nobody can buy it. Revisit that copy when billing
+lands.
+
+- **D-37 Entitlement is closed by default.** `app.user.entitled_until` (nullable timestamp,
+  default NULL). A user is *entitled* iff `entitled_until IS NOT NULL AND entitled_until > now()`.
+  NULL is the default for every signup. There is deliberately **no** global "everyone is
+  entitled" setting and **no** automatic trial grant at signup: an unentitled account is the
+  normal state, and access is only ever conferred per user, by hand (D-38), until the billing
+  project takes over writing the column from its payment provider. Public surfaces are
+  unaffected and stay public to signed-out visitors: `/feed`, `/film/:ref`, `/calendar`, search.
+- **D-38 Granting is a session-authed admin action.** `app/entitlements.py` exposes
+  `is_entitled(user) -> bool` and `require_entitled()` (FastAPI dependency; 403
+  `entitlement_required`). Grant and revoke via `GET /admin/users`,
+  `PUT /admin/users/{id}/entitlement` (body: `entitled_until`) and
+  `DELETE /admin/users/{id}/entitlement`, behind the existing `require_current_admin`, with a
+  `/admin/users` page beside `/admin/invites`. Not the `ADMIN_TOKEN` `require_admin` — this is a
+  human action, not a machine one. Grants and revocations are logged with the acting admin.
+  Setting `entitled_until` to a past timestamp is how a grant is ended; rows are never deleted.
+- **D-39 The gate has two kinds of checkpoint, and the batch half is the one that gets missed.**
+  *Request-time:* `Depends(require_entitled())` on `/me/follows`, `/me/watchlist`,
+  `/me/timeline`, `/me/import/*`, `/me/settings`, `/me/push`. `/calendar/{token}.ics` answers
+  404 rather than 403 — the token is unauthenticated and must not confirm that it is valid.
+  *Batch-time:* the `notify` and `digest` passes filter unentitled users in exactly the place
+  they already filter unverified ones (D-31), recording `status = suppressed`; derived-watchlist
+  maintenance (D-13) skips unentitled users on the sweep credits pass. These passes fan out over
+  all users instead of answering a request, so they get no protection from a route dependency.
+- **D-40 Losing entitlement suppresses, never destroys.** Follows, watchlist items, dismissals,
+  settings and the iCal token survive expiry untouched, so a later grant (or a subscription)
+  restores the account exactly as it was. Nothing in this project deletes user graph rows.
+- **D-41 The locked state is honest.** `AuthContext.user.entitled` boolean. For a signed-in,
+  unentitled user `/` renders the global feed with a locked-timeline panel rather than an empty
+  timeline; follow buttons and watchlist toggles render disabled with an explanatory tooltip
+  rather than vanishing, so the product is legible to someone deciding whether to want it. Copy
+  says access is currently limited while the subscription tier is built — not "upgrade now",
+  because there is nothing to buy yet.
+
 ## 6. Milestones and shared contracts
 
 Dependency-ordered. Each milestone's contracts are the cross-cutting agreements sibling tickets
@@ -279,7 +331,12 @@ Absorbs *bl: Transactional Email* and *bl: Open Signup & Abuse Controls*. Nothin
   stay valid as an optional field. `TURNSTILE_SECRET` setting.
 - Rate limiter: `Depends(rate_limit("signup"))`-style dependency, bucket names and limits in
   settings, 429 with `Retry-After`.
-- Frontend: `/verify`, `/reset`, `/forgot` routes; `AuthContext.user.email_verified` boolean.
+- Entitlement seam (D-37, D-38): `app.user.entitled_until` (nullable timestamp, default NULL);
+  `app/entitlements.py` with `is_entitled(user)` and the `require_entitled()` dependency;
+  `/admin/users` list + grant/revoke routes behind `require_current_admin`. The seam must land in
+  M1 because M3 and M7 tickets cite it; it gates nothing until those tickets apply it.
+- Frontend: `/verify`, `/reset`, `/forgot` routes; `AuthContext.user.email_verified` and
+  `AuthContext.user.entitled` booleans; `/admin/users` grant page.
 
 ### M2 — Claim ledger and the event/state split
 
@@ -315,6 +372,10 @@ signup → one CSV upload → populated timeline.
   arrives in M4.
 - Entity follow buttons on film page (title, director, top cast, companies, collection).
 - Onboarding route `/welcome` with the three D-17 steps; `/` swaps to timeline when signed in.
+- Every `/me/*` route above carries `Depends(require_entitled())` (D-39); derived-watchlist
+  maintenance skips unentitled users. `/people/*`, `/companies/*`, `/collections/*` search stays
+  public — it feeds the film page. Unentitled signed-in users get the D-41 locked state, not an
+  empty timeline.
 
 ### M4 — Person resolution
 
@@ -369,7 +430,10 @@ digest; the product lives in the user's calendar.
 - Decision pass entrypoint `python -m upmovies.pipeline_run notify` (Coolify slot after the
   daily chain) + `digest {daily|weekly}`.
 - Email templates: `alert`, `digest`, `slate`.
-- `GET /calendar/{token}.ics`; `GET/PATCH /me/settings`; `POST/DELETE /me/push`.
+- `GET /calendar/{token}.ics` (404 for an unentitled owner, D-39); `GET/PATCH /me/settings`;
+  `POST/DELETE /me/push` — both `require_entitled()`.
+- The notify and digest passes suppress unentitled users beside unverified ones (D-39): one
+  predicate, `status = suppressed`, asserted by a test per pass.
 - `/movie/{id}/videos` polling shares the D-27 scoped set; `trailer` event body carries the
   YouTube key.
 
@@ -389,4 +453,6 @@ digest; the product lives in the user's calendar.
 - Quarantine window value — resolved by the M5 spike; 72h until then.
 - Whether resolution needs a correction UI — revisit once `/admin/resolution` shows volume.
 - Franchise coverage via collections — measure after M3; hand-curated overlay if poor.
-- Consumer pricing — separate project.
+- Consumer pricing — separate project. This project ships the enforcement points and the admin
+  grant (D-37 to D-41); *bl: Subscription & Billing* (NEU-262) replaces the grant with paid
+  writes to `entitled_until` and revisits the signup copy.

@@ -103,3 +103,15 @@ Two decisions (2026-09-15):
 - Importing rated films into the catalog (decided against; see Problem).
 - The onboarding UI (NEU-1358) — it polls `GET /me/import/{id}` and renders the counts and
   unmatched list from the job row.
+
+
+## Amendment 2026-09-15 — access gate (D-39)
+
+`POST /me/import/letterboxd` and `GET /me/import/{id}` both carry `Depends(require_entitled())`
+(`app/entitlements.py`, NEU-1391): importing is subscriber functionality and closed by default
+(D-37).
+
+Place the gate **in front of the job enqueue**, before any zip handling or CSV parsing, so an
+unentitled user cannot spend TMDB quota or upload bandwidth: 403 `entitlement_required` on the
+first touch. The job worker needs no check of its own — an `import_job` row can only exist for a
+user who was entitled when they created it.
