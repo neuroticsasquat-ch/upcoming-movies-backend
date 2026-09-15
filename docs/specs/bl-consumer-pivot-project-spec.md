@@ -114,11 +114,11 @@ Numbered so tickets can cite them (`D-n`).
   worth it. v1 ships a uniform window over seed-grade credits (director, writer, top-5 cast — the
   only credits that card today, so "low-billing cast" already never cards).
 - **D-5 Tier-A short-circuit (INV-4).** Tier-A = a **trade feed** story (all eight curated
-  feeds). When cluster emits a `casting`/`crew_attached` event naming a person whose credit is
-  currently in quarantine on that film, the story-provenance card publishes now and the
-  quarantined attachment is marked carded-by-story (existing `subject_key` suppression handles
-  the later sweep pass). Requires the person to have resolved (M4) for *alerts*; the feed card
-  itself does not require resolution.
+  feeds). `film_credit_change.carded_by_event_id` records which event published a change: cluster
+  stamps in-window pending changes named by a new story card, and the sweep loader stamps a
+  pending change that finds an earlier story card; stamped rows are never carded by the sweep.
+  Requires the person to have resolved (M4) for *alerts*; the feed card itself does not
+  require resolution. Spec: `NEU-1371-tier-a-short-circuit.md`.
 - **D-6 Promotion, not duplication.** Unchanged from ADR-0014: a story clustering onto a
   published catalog card upgrades that card in place (`news_backed` flips). Preserve
   `occurred_at` so "we had it first" is provable.
@@ -128,9 +128,10 @@ Numbered so tickets can cite them (`D-n`).
   still holds because the group has one `occurred_at`. Intra-day ordering by significance reuses
   `public/arc.py::_EVENT_STAGE` ranking (billing order breaks ties within `casting`).
 - **D-8 Sanity checks** run in the sweep's credits phase and *hold* rather than discard: a person
-  attached to ≥20 films in one observation day; a credit inconsistent with birth/death dates; an
-  add→remove→re-add flap inside the window (already suppressed by D-3 + NEU-1205). Held items
-  are logged with a reason and re-evaluated next pass.
+  attached to ≥20 films in one observation day; a credit inconsistent with birth/death dates
+  (fetched lazily from `/person/{id}` only for people about to be carded); an add→remove→re-add
+  flap inside the window (already suppressed by D-3 + NEU-1205). Held items are logged with a
+  reason and re-evaluated next pass. Spec: `NEU-1370-sanity-holds.md`.
 - **D-9 Confidence is visible.** Every card on the feed, timeline and film page renders its
   `confidence` (`confirmed` / `unconfirmed`) as a badge; the "unconfirmed updates" section heading
   stays. Superseded cards render the D-2 marker. Backend `EventOut` exposes `confidence`,
@@ -149,7 +150,9 @@ Numbered so tickets can cite them (`D-n`).
   `film_production_company`; franchise = `film.collection_id`; title = the film.
 - **D-12 Timeline lives at `/`.** Signed-in users see the timeline (the grouped feed filtered by
   their follows, same DTO shape and day grouping); anonymous visitors see the global feed at
-  `/`; the global feed is also served at `/feed` for everyone. Supersedes *bl: Home Page & Feed
+  `/`; the global feed is also served at `/feed` for everyone. `/` always server-renders the
+  global feed; a client island swaps to the timeline once `me` resolves (the SSR-never-resolves-
+  auth invariant stands; spec `NEU-1354-home-timeline-swap.md`). Supersedes *bl: Home Page & Feed
   Split* (cancelled). Empty follow graph renders an onboarding prompt, not an empty page.
 - **D-13 Derived watchlist rule.** A film is auto-added (`source=derived_from_follow`) when it is
   in play and: a followed person is its **director or in its top-3 billing**, or a followed
@@ -168,20 +171,27 @@ Numbered so tickets can cite them (`D-n`).
   rows → title follows + watchlist items (`source=letterboxd_import`). Ratings **≥ 4.0** →
   person follows for the film's **director and top-2 billed cast** (from TMDB credits of the
   matched film; persons upserted into `catalog.person` if absent). De-duplicated; idempotent on
-  re-upload.
+  re-upload. Runs as a **background job** with a pollable `app.import_job` row (202 + `GET
+  /me/import/{id}`); rated films contribute **people only**, watchlist films are upserted in
+  full. Spec: `NEU-1356-letterboxd-import.md`.
 - **D-16 TMDB account import.** Full v3 user-auth flow (request token → user approves on
-  themoviedb.org → session id, stored encrypted per user). Imports account watchlist and
+  themoviedb.org → session id). **One-shot:** the callback schedules the D-15 import job, which
+  deletes the TMDB session when done; nothing is stored. Imports account watchlist and
   favorites: watchlist → title follows + watchlist items; favorites → person follows by the
-  D-15 rule (`source=tmdb_import`). Last ticket of the milestone so it can slip.
+  D-15 rule (`source=tmdb_import`). Last ticket of the milestone so it can slip. Spec:
+  `NEU-1357-tmdb-account-import.md`.
 - **D-17 Onboarding.** After signup: (1) import CTA (Letterboxd / TMDB), skippable; (2) a grid of
   ~30 `catalog.person` rows by popularity with profile photos plus a person search box, tap to
   follow; (3) land on the timeline. Re-enterable from settings.
 - **D-18 Open signup.** Public signup with Cloudflare Turnstile. Email verification is sent at
   signup; an **unverified** user may browse, follow and watchlist, but receives **no** digest or
   alert until verified. Invite codes stay as an admin-only comp path, not required.
-- **D-19 Rate limiting.** One per-IP limiter dependency (token bucket, Postgres-backed so it
-  survives multiple workers) applied to signup, login, password reset, verification, imports,
-  and the public feed/search/film/calendar routes; limits are settings.
+- **D-19 Rate limiting.** One per-IP limiter dependency (in-process token bucket behind a
+  store protocol; the API is one process) applied to signup, login, password reset,
+  verification, imports, and the public feed/search/film/calendar routes; limits are settings.
+  Uvicorn runs with proxy headers on; the SSR Worker signs its fetches with a shared secret and
+  forwards the visitor IP in a dedicated header (NEU-1389); the public bucket ships off and is
+  enabled after the Worker change deploys. Spec: `NEU-1344-rate-limiter.md`.
 
 ### Resolution
 
