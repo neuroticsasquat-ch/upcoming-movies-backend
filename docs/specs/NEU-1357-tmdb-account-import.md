@@ -84,3 +84,14 @@ All through the shared limiter and retry policy; respx tests for each.
 - Persisting the TMDB session for re-sync (rejected; see Problem).
 - TMDB lists, ratings (`/account/{id}/rated/movies`), or v4 access tokens.
 - Writing anything back to the user's TMDB account.
+
+
+## Amendment 2026-09-15 — access gate (D-39)
+
+`GET /me/import/tmdb/start` and `GET /me/import/tmdb/callback` both carry
+`Depends(require_entitled())` (`app/entitlements.py`, NEU-1391).
+
+Gate `start` before the request token is created, so an unentitled user never reaches TMDB's
+approve screen. Gate `callback` too: entitlement can lapse between approval and return, and in
+that case delete the TMDB session rather than leaving a live credential dangling — the one-shot
+design means nothing else will clean it up.

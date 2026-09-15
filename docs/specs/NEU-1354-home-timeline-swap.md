@@ -79,3 +79,21 @@ session cookie server-side and would turn `/` into a per-user, uncacheable rende
 - The `/welcome` onboarding route itself (NEU-1358) and follow buttons (NEU-1353).
 - Any change to the backend feed or timeline endpoints.
 - Caching headers on `/` at the Cloudflare edge (unchanged; the page stays anonymous-safe).
+
+
+## Amendment 2026-09-15 — access gate (D-41)
+
+The signed-in branch of the client island splits again, on `AuthContext.user.entitled`
+(NEU-1392). The follow graph is subscriber functionality and closed by default (D-37).
+
+- **Entitled** — swap to `/me/timeline`, exactly as designed above.
+- **Not entitled** — do *not* swap. Keep the global feed the server already rendered and mount a
+  locked-timeline panel above it: what a timeline is, and that access is currently limited while
+  the subscription tier is being built. Not "upgrade now" — nothing can be bought yet.
+
+This is a third state, not the existing empty state. Keep them distinct: **"no follows yet"**
+(entitled, link to `/welcome`) versus **"no access yet"** (unentitled, explain and stop).
+Sending an unentitled user to `/welcome` only gets them refused there (NEU-1358).
+
+The logged-out-first-paint invariant is untouched — `/` still SSRs the global feed in every
+case, and entitlement, like auth, is only ever resolved on the client.
