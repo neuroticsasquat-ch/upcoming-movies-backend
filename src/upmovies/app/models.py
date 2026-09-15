@@ -28,6 +28,17 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # When this address was confirmed, NULL until it is (M1 contract). A timestamp rather than
+    # a boolean because "when" is the question the later milestones actually ask — D-31's
+    # notify pass suppresses mail to an unverified user, and a support ticket about a mail
+    # that did not arrive is answered by the date, not by `false`.
+    #
+    # Deliberately gates nothing but outbound mail (D-18): an unverified user keeps full app
+    # access, and `app.verification.is_verified` is the single place that reads this column so
+    # the milestones that do gate on it do not each re-derive the rule.
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -87,3 +98,36 @@ class Invite(Base):
     consumed_by_user_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="SET NULL"), nullable=True
     )
+
+
+class EmailToken(Base):
+    """A single-use, expiring token mailed to an address to prove the recipient holds it.
+
+    One table with a `purpose` column rather than one table per flow, because M1 asks for
+    three flows that differ only in what consuming the token *does* — verification here,
+    password reset (NEU-1342) and email change (NEU-1341) — and the row shape (who, what for,
+    issued, expires, consumed) is the same for all three. `purpose` is what stops a token
+    issued for one from being spent on another.
+
+    The token string is the primary key and is stored as issued, the way `app.session.id` and
+    `app.invite.code` already are: a reader of this table holding a live verification token
+    can already read `app.session`, which is the stronger credential of the two. Single use is
+    `consumed_at`, not a delete, so a second click on the same link is distinguishable from a
+    link that never existed."""
+
+    __tablename__ = "email_token"
+    __table_args__ = (
+        Index("ix_email_token_user_id_purpose", "user_id", "purpose"),
+        {"schema": "app"},
+    )
+
+    token: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

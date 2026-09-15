@@ -25,11 +25,28 @@ class AccountDeleteRequest(BaseModel):
     password: str
 
 
+class VerificationRequest(BaseModel):
+    """The address to (re-)send a verification mail to. Unauthenticated: the mail may be opened
+    on a device that was never signed in, and the reset flow that follows in M1 has the same
+    shape."""
+
+    email: EmailStr
+
+
+class VerificationConsumeRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+
+
 class UserOut(BaseModel):
     id: UUID
     email: str
     display_name: str
     is_admin: bool
+    # Derived from `email_verified_at` rather than exposing the timestamp: the frontend's
+    # AuthContext asks a yes/no question (M1 contract), and the date is not the client's
+    # business. Every authed response carries it, not just `GET /me`, so the context is
+    # populated from the signup and login replies too.
+    email_verified: bool
     created_at: datetime
 
 

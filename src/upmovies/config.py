@@ -329,6 +329,16 @@ class Settings(BaseSettings):
     # mail. Boot-time validation is what makes optional safe — it asserts a credential exists
     # for the *configured* provider, at startup.
     resend_api_key: str | None = Field(default=None, alias="RESEND_API_KEY")
+    # What mail templates call the product. A setting rather than a constant in the template
+    # because every template needs it and the name is the one thing in them that is a property
+    # of the deployment: a staging environment sending mail that calls itself the production
+    # product is how a test send gets mistaken for a real one.
+    product_name: str = Field(default="Backlotter", alias="PRODUCT_NAME")
+    # How long an emailed verification link stays good (M1). A day is long enough to survive a
+    # mail that lands overnight and short enough that a forwarded mail is not a standing key to
+    # the account. The value is also mail *copy* — the template tells the reader how long they
+    # have — so the two cannot drift: `verification_service` passes this into the context.
+    verify_token_ttl_hours: int = Field(default=24, ge=1, alias="VERIFY_TOKEN_TTL_HOURS")
 
     @property
     def cors_allowed_origins(self) -> list[str]:

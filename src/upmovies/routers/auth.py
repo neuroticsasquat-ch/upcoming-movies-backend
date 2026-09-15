@@ -6,12 +6,16 @@ from upmovies.app.dto import (
     LoginRequest,
     PasswordChangeRequest,
     SignupRequest,
+    VerificationConsumeRequest,
+    VerificationRequest,
 )
-from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite
+from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite, InvalidToken
 from upmovies.app.models import User
-from upmovies.app.services import account_service
+from upmovies.app.services import account_service, verification_service
+from upmovies.app.verification import is_verified
 from upmovies.config import Settings, get_settings
-from upmovies.deps import get_current_user, get_session, require_csrf
+from upmovies.deps import get_current_user, get_mailer, get_session, require_csrf
+from upmovies.mail import Mailer
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -65,6 +69,7 @@ async def signup(
     response: Response,
     db: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
+    mailer: Mailer = Depends(get_mailer),
 ) -> AuthedUserOut:
     try:
         user, sess_id, csrf = await account_service.signup(
@@ -81,12 +86,18 @@ async def signup(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid_invite") from err
     except EmailInUse as err:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email_in_use") from err
+    # After the account exists, and deliberately not fatal to the signup if the provider is
+    # having a bad minute (`verification_service` module docstring): the user is signed in
+    # either way — verification gates outbound mail, not access (D-18) — and the recovery is
+    # `POST /auth/verify/request` below.
+    await verification_service.issue_and_send(db, user=user, mailer=mailer, settings=settings)
     _set_auth_cookies(response, session_id=sess_id, csrf=csrf, settings=settings)
     return AuthedUserOut(
         id=user.id,
         email=user.email,
         display_name=user.display_name,
         is_admin=user.is_admin,
+        email_verified=is_verified(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
@@ -121,6 +132,7 @@ async def login(
         email=user.email,
         display_name=user.display_name,
         is_admin=user.is_admin,
+        email_verified=is_verified(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
@@ -178,6 +190,52 @@ async def change_password(
         email=user.email,
         display_name=user.display_name,
         is_admin=user.is_admin,
+        email_verified=is_verified(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
+
+
+@router.post("/verify/request", status_code=status.HTTP_202_ACCEPTED)
+async def request_verification(
+    payload: VerificationRequest,
+    db: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    mailer: Mailer = Depends(get_mailer),
+) -> Response:
+    """Send (or re-send) the verification mail for an address.
+
+    Always 202, whether the address is unknown, already verified, or was just mailed: the
+    route takes a bare email address and needs no session, so a response that varied would
+    tell an anonymous caller which addresses have accounts. One address, one route, one
+    outcome — which is also the shape the M1 rate limiter buckets (its own ticket; this route
+    does no throttling of its own yet)."""
+    await verification_service.request(
+        db, email=str(payload.email), mailer=mailer, settings=settings
+    )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/verify", status_code=status.HTTP_204_NO_CONTENT)
+async def verify_email(
+    payload: VerificationConsumeRequest,
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    """Spend a verification token and mark its owner verified.
+
+    No session required and no CSRF: the mail can be opened on a device that has never signed
+    in, and the token in the body *is* the credential — there is no ambient authority for a
+    cross-site post to borrow.
+
+    Answers with no body, deliberately. Returning the user would be convenient for a signed-in
+    frontend and would also hand the account record — address, display name, admin flag — to
+    whoever holds a forwarded or scanner-followed link, which is the disclosure the sibling
+    route above refuses to make. A signed-in client re-reads `GET /me`; a signed-out one has
+    nothing to update."""
+    try:
+        await verification_service.consume(db, token=payload.token)
+    except InvalidToken as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_token"
+        ) from err
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

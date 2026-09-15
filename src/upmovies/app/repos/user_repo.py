@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete as sa_delete
@@ -38,3 +39,8 @@ async def delete_user(db: AsyncSession, user_id: UUID) -> None:
 async def update_password_hash(db: AsyncSession, user: User, new_hash: str) -> None:
     """Set the password_hash attribute on the loaded model. Caller commits."""
     user.password_hash = new_hash
+
+
+async def mark_email_verified(db: AsyncSession, user: User, *, verified_at: datetime) -> None:
+    """Stamp the address as confirmed on the loaded model. Caller commits."""
+    user.email_verified_at = verified_at

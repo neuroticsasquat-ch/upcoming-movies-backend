@@ -112,6 +112,13 @@ services:
       MAIL_PROVIDER: "${MAIL_PROVIDER:-noop}"
       MAIL_FROM: "${MAIL_FROM:-}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      # Email verification (NEU-1339). Both repeat the code default rather than being left
+      # out, for the Coolify reason above: a variable absent from the file at first deploy is
+      # one somebody has to add by hand later, and these are the two a non-production
+      # environment most wants to change — PRODUCT_NAME so its mail does not claim to be the
+      # live product, and the TTL, which is also the number the mail copy quotes.
+      PRODUCT_NAME: "${PRODUCT_NAME:-Backlotter}"
+      VERIFY_TOKEN_TTL_HOURS: "${VERIFY_TOKEN_TTL_HOURS:-24}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

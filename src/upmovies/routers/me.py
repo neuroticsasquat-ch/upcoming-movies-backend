@@ -5,6 +5,7 @@ from upmovies.app.dto import AccountDeleteRequest, AuthedUserOut
 from upmovies.app.errors import InvalidCredentials
 from upmovies.app.models import User
 from upmovies.app.services import account_service
+from upmovies.app.verification import is_verified
 from upmovies.config import Settings, get_settings
 from upmovies.deps import get_current_user, get_session, require_csrf
 
@@ -23,6 +24,7 @@ async def me(
         email=user.email,
         display_name=user.display_name,
         is_admin=user.is_admin,
+        email_verified=is_verified(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
