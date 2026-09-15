@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Linear
+
+`linear_initiative: backlotter`
+`linear_team: Neuroticsasquatch`
+`linear_repos: upcoming-movies-frontend`
+
 ## Companion docs — read before working
 
 - **`AGENTS.md`** — operating rules, production/deploy flow, gotchas. Authoritative on process.

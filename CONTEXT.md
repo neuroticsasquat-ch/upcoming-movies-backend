@@ -580,3 +580,135 @@ watermark that selected it. Pinned to the last *success*, a `tmdb` stage that st
 freezes the watermark, one sweep pass carries the whole catalog over it, and every later pass
 selects nothing at all.
 _Avoid_: cutoff, high-water mark, last sync, refresh cursor.
+
+### Claims and publication
+
+**Quarantine**:
+The hold between a credit change being *observed* in TMDB and the beat being *published* as an
+event. A credit that is added and reverted inside the window was never true, and publishes
+nothing; one that survives the window cards once, at the end of it. It generalises the
+**forward-dwell gate** (which holds removals) to attachments, and it exists to suppress edits
+that were never true — vandalism, misfiles — **not** real-world churn: an actor genuinely joining
+in March and leaving in June is two beats and both publish. It is keyed in time, from the
+observation, and its length is set from the survival curve of real changes, not guessed. The
+live cast list is never held: **state mirrors TMDB immediately**; only *events* wait.
+_Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
+moderation.
+
+**Publication** (of an event):
+The moment an event becomes visible in the app — `created_at`, the axis every feed surface and
+every notification keys on (ADR-0016). Distinct from when the change *occurred*
+(`occurred_at`, the first-detection time), which is stored on every event and shown on detail
+views but never orders a feed: an event released from quarantine and sorted by its occurrence
+would land below a returning reader's watermark and never be seen.
+_Avoid_: detection (that's the other axis), creation (the row may predate visibility).
+
+**Superseded** (of an event):
+A published event whose beat a later published event has corrected — a casting card after the
+credit's removal has carded. It stays exactly where it was published, marked, and linked to its
+correction; it is never hidden and never deleted, because a silent deletion is
+indistinguishable to the reader from nothing having happened. Supersession is a status on the
+*original*; the correction is an ordinary event in its own right.
+_Avoid_: retracted (the world retracted the credit; the event is superseded), hidden, deleted,
+withdrawn, cancelled.
+
+**Tier-A source**:
+A **trade feed** — Deadline, Variety, THR, TheWrap, Screen Daily, studio PR. The only sources
+whose story may cause an alert on its own, and then only when the story's person **resolution**
+cleared threshold. A TMDB-only change never alerts: it may publish to the feed after quarantine,
+as unconfirmed, but it is evidence, not confirmation. A Tier-A story matching a credit in
+quarantine releases it immediately and merges into the news event rather than surfacing later
+as a stale duplicate.
+_Avoid_: trusted (that is the source-quality gate's effective tier for *any* domain), verified
+source, primary source.
+
+### Person resolution
+
+**Resolution**:
+Linking a name as written in a story to a `catalog.person` — or deciding that it cannot be. Three
+stages, and only the first is probabilistic: **extraction** (the model emits names and relations,
+never ids — any id a model emits is a plausible, well-formed, wrong integer), **candidate
+generation** (deterministic: search, the film's current credits, the film's recent change
+stream), and **scoring** (deterministic features, with a closed-set model tiebreak only inside the
+narrow ambiguous band). A resolved person's confidence can never exceed the confidence of the
+story→film link it was derived within.
+_Avoid_: entity linking (that is the story→film **link** stage), matching, disambiguation (that
+is only the tiebreak).
+
+**Unlinked** (of a person mention):
+A resolution outcome: no candidate cleared threshold. An unlinked mention may still appear in
+the general feed, but it **never** produces a personalized alert — the failure mode is pinging
+someone about the wrong Chris Evans. Distinct from **not in TMDB**: a first-time director or
+unknown actor legitimately has no person record, and the resolver may say so rather than being
+forced into a wrong match.
+_Avoid_: unresolved (ambiguous with "not yet run"), unknown, rejected.
+
+**Resolution cache**:
+The remembered answer for `(source domain, name as written)`. Trades recycle phrasing, so most
+lookups after the first month are hits; it is what keeps resolution's model spend flat.
+_Avoid_: alias table, name index.
+
+### Follows, watchlist and delivery
+
+**Follow**:
+A user's standing interest in an entity — a **person**, a **company**, a **franchise**, or a
+**title**. A follow produces **timeline** rows and nothing else: it never produces a push. Its
+point is that the user hears about a film they had never heard of, because they follow the
+people who made it. A person follow covers every published event on any in-play film where that
+person holds a seed-grade credit; **resolution** later adds events that *name* them on films they
+are not yet credited on.
+_Avoid_: subscription (that is billing), watch (that is the watchlist), track, favorite.
+
+**Franchise**:
+A TMDB collection, and nothing more for now. Following a franchise matches films by
+`collection_id`; a sequel TMDB has not yet filed under its collection is missed until it is.
+_Avoid_: series, universe, saga.
+
+**Timeline**:
+The signed-in home surface: the publication log filtered to the user's follows. Same axis as the
+feed (**publication**), same day grouping, same "what's new since I last looked" reading — it is
+the feed with a where-clause, not a different kind of surface. Anonymous readers see the global
+feed in its place.
+_Avoid_: personalized feed, my feed, stream, dashboard.
+
+**Watchlist item**:
+A title the user wants to be *told* about — the only thing in the system that produces a push or
+an immediate email. Reliability and volume are separate problems: a perfectly accurate follow
+feed still bombards, so following a prolific actor must never become a push firehose. Each item
+carries the user's alert preferences over `buy` / `rent` / `stream`.
+_Avoid_: follow (timeline only), favorite, subscription.
+
+**Derived watchlist item**:
+A watchlist item the follow graph added on the user's behalf: a film whose director or top-3
+billed cast the user follows, or whose company, franchise or title they follow, while the film is
+in play. This is the product's differentiator — the watchlist seeded with films the user did not
+know existed. A user's removal of a derived item is a **dismissal** and is remembered, so the
+same follow never re-derives it.
+_Avoid_: auto-follow, suggestion (it is added, not offered), recommendation.
+
+**Push whitelist**:
+The closed set of beats allowed to interrupt a user about a watchlist title: a date assigned, a
+date moved (a **slip** especially), a home-release date, **now available**, a trailer. Everything
+else waits for the **digest**. Civilians tolerate rumour when it is labelled unconfirmed; they do
+not tolerate being woken up by it, so nothing unconfirmed is on the list.
+_Avoid_: alert types, notification settings (those are the user's prefs *over* the list).
+
+**Digest**:
+The batched delivery of a user's timeline — daily or weekly, their choice — for everything the
+push whitelist does not cover. The weekly "your slate" mail is a digest.
+_Avoid_: newsletter, summary email, notification.
+
+**Home-release date**:
+A US digital (TMDB type 4) or physical (type 5) release date. Part of the displayable set beside
+the theatrical arc: listed on the film page and the calendar, and carded as a `release_date`
+event when set or moved. It is the forward-looking half of home-release tracking — the only
+source that says "arrives October 14" *before* it happens.
+_Avoid_: streaming date (streaming is observed, not announced), VOD date.
+
+**Now-available event**:
+The catalog-sourced event raised the first time a title is observed on any provider for a
+monetization type (`flatrate` / `rent` / `buy`), from the watch-providers poll. Insert-only: the
+first observation cards and alerts; the title then goes quiet for that type forever, so a move
+between services produces nothing. That silence is deliberate — service-to-service churn is a
+non-goal, and the upstream data cannot give advance warning of a title *leaving*.
+_Avoid_: availability change, provider change, streaming update.
