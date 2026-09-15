@@ -49,7 +49,9 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
 
 - **`upmovies.main:app`** — the HTTP service. `create_app()` mounts routers; `lifespan` calls
   `validate_stage_configuration(settings)` (a stage routed at an unpriced/uncredentialed
-  `(provider, model)` kills the container at boot, not mid-publish) and cancels runs orphaned by a crash.
+  `(provider, model)` kills the container at boot, not mid-publish) and
+  `validate_mail_configuration(settings)`, cancels runs orphaned by a crash, and opens the one
+  process-wide `MailGateway` that `deps.get_mailer` hands to routes.
 - **`python -m upmovies.pipeline_run {daily|hourly|sweep}`** — the Coolify scheduled tasks, a
   *separate process* that re-runs the same startup validation. `daily` = tmdb → feeds(per-film) →
   link → synthesize, sequential and fail-fast; `hourly` = light feeds pass; `sweep` runs on its own
@@ -61,7 +63,8 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
 `app/` auth & accounts (models/repos/services) · `catalog/` Film/TMDB spine · `news/` stories, feeds,
 events · `ingest/` run tracking + TMDB ingest + `sweep/` · `link/` story→film linking, `retrieval/`,
 clustering, source gate · `synthesize/` event summarization · `llm/` gateway + provider adapters +
-pricing · `public/` read models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
+pricing · `mail/` transactional mail: gateway + Resend adapter + Jinja templates · `public/` read
+models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
 
 ### Cross-cutting patterns
 

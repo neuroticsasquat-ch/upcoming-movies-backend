@@ -5,7 +5,7 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-from upmovies.config import Provider, Settings
+from upmovies.config import MailProvider, Provider, Settings
 from upmovies.link.retrieval import (
     DEFAULT_CANDIDATE_LIMIT,
     DEFAULT_SCORE_THRESHOLD,
@@ -14,6 +14,7 @@ from upmovies.link.retrieval import (
     SATURATION_WARN_RATE,
 )
 from upmovies.llm.registry import PROVIDERS
+from upmovies.mail.registry import MAIL_PROVIDERS
 
 _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
@@ -175,6 +176,42 @@ def test_provider_literal_matches_the_registry():
     package — `llm.gateway` reads `Settings`, so the import would be circular. Same bind as
     the retrieval constants, same pinning test."""
     assert set(get_args(Provider)) == set(PROVIDERS)
+
+
+def test_mail_provider_literal_matches_the_mail_registry():
+    """Same bind, same reason, same pinning test: `mail.gateway` reads `Settings`, so `config`
+    restates the provider names rather than importing the `mail` package."""
+    assert set(get_args(MailProvider)) == set(MAIL_PROVIDERS)
+
+
+def test_mail_defaults_keep_todays_deploys_booting(monkeypatch):
+    """No deploy has a Resend account yet. Defaulting `MAIL_PROVIDER` to `resend` would fail
+    every one of their boots the moment the mail gateway merges."""
+    _set_required(monkeypatch)
+    for key in ("MAIL_PROVIDER", "MAIL_FROM", "RESEND_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mail_provider == "noop"
+    assert s.mail_from == ""
+    assert s.resend_api_key is None
+
+
+def test_settings_reads_the_mail_configuration_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MAIL_PROVIDER", "resend")
+    monkeypatch.setenv("MAIL_FROM", "Backlotter <no-reply@example.com>")
+    monkeypatch.setenv("RESEND_API_KEY", "re_x")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mail_provider == "resend"
+    assert s.mail_from == "Backlotter <no-reply@example.com>"
+    assert s.resend_api_key == "re_x"
+
+
+def test_an_unknown_mail_provider_fails_the_container_at_boot(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MAIL_PROVIDER", "postmark")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
 
 
 def test_settings_provider_credentials_are_optional(monkeypatch):
@@ -467,6 +504,10 @@ _PINNED_PROD_FALLBACKS = (
     ("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", "link_retrieval_max_zero_candidate_rate"),
     ("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "link_retrieval_health_min_stories"),
     ("LINK_RETRIEVAL_SATURATION_WARN_RATE", "link_retrieval_saturation_warn_rate"),
+    # Not a tuning constant, but the same failure: the day the code default moves to `resend`,
+    # a fallback left at `noop` is a production that goes on sending nothing while the deploy
+    # reports success.
+    ("MAIL_PROVIDER", "mail_provider"),
 )
 
 

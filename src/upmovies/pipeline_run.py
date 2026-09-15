@@ -57,6 +57,7 @@ from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm import Gateway, validate_stage_configuration
 from upmovies.logging_config import configure_logging
+from upmovies.mail import validate_mail_configuration
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -434,8 +435,15 @@ def main(argv: list[str] | None = None) -> int:
     # Except for the sweep, which makes no model calls: failing it on an unrelated LLM
     # routing typo would re-introduce exactly the shared failure mode §6.1 keeps it out of
     # the daily chain to avoid, and it would surface only as deadman silence.
+    # The mail configuration rides on the same guard, and inherits its sweep exemption for the
+    # same reason: the sweep is deliberately outside the daily chain's shared failure modes
+    # (§6.1), and failing it on a setting it never reads would put it back inside them. No
+    # mode sends mail *today* — the check is here because M7's notify and digest passes are
+    # `pipeline_run` modes, and they should find the guard already in place rather than
+    # discover a missing RESEND_API_KEY partway through a digest run.
     if mode != "sweep":
         validate_stage_configuration(settings)
+        validate_mail_configuration(settings)
     if mode == "daily":
         ok = asyncio.run(run_daily(settings))
     elif mode == "hourly":

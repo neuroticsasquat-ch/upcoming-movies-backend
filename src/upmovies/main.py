@@ -14,6 +14,7 @@ from upmovies.db import SessionLocal
 from upmovies.ingest.runs import mark_stale_runs_cancelled
 from upmovies.llm import validate_stage_configuration
 from upmovies.logging_config import configure_logging
+from upmovies.mail import MailGateway, validate_mail_configuration
 from upmovies.routers import (
     admin_runs,
     auth,
@@ -51,10 +52,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # their work. `pipeline_run.main` runs the same check for its own sake — the scheduled
     # tasks are a separate process, and this lifespan is not on their path.
     validate_stage_configuration(settings)
+    # And the same guard for the mail configuration (NEU-1338, D-30). It is the stronger case
+    # of the two: an LLM stage discovered unroutable mid-run loses a nightly publish, while a
+    # mail credential discovered mid-signup loses it *after* the user row is committed and
+    # before the verification mail exists — a state the account flow cannot retry out of.
+    validate_mail_configuration(settings)
     async with SessionLocal() as session:
         await run_startup_cleanup(session, stale_after_minutes=settings.ingest_stale_run_minutes)
         await session.commit()
-    yield
+    # One gateway for the process, not one per request: it owns an httpx connection pool, and
+    # the pool is the whole reason not to build one per signup. Hung off `app.state` rather
+    # than a module global so `deps.get_mailer` can reach it from the request and a test can
+    # put its own there — and so that this `async with` is what closes the pool on shutdown.
+    async with MailGateway(settings) as mailer:
+        app.state.mailer = mailer
+        yield
 
 
 def create_app() -> FastAPI:
