@@ -15,6 +15,7 @@ from upmovies.app.dto import (
 )
 from upmovies.app.services import account_service
 from upmovies.config import get_settings
+from upmovies.mail import MailGateway, NoopTransport
 from upmovies.main import app
 from upmovies.routers import auth as auth_router
 
@@ -350,7 +351,16 @@ async def test_signup_route_returns_authed_user_and_sets_cookies(session, make_i
         display_name="Sign",
         invite_code=invite,
     )
-    result = await auth_router.signup(payload, request, response, db=session, settings=settings)
+    # Called directly rather than through the app, so the `get_mailer` dependency is never
+    # resolved and the mailer has to be handed over by name (NEU-1339).
+    result = await auth_router.signup(
+        payload,
+        request,
+        response,
+        db=session,
+        settings=settings,
+        mailer=MailGateway(settings, transport=NoopTransport()),
+    )
     assert result.email == "signup@example.com"
     assert result.csrf_token
     set_cookie_headers = response.headers.getlist("set-cookie")
