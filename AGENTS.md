@@ -94,6 +94,14 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 - **`db:refresh` silently reverts migrations.** Restores catalog/news/ingest from prod but leaves `app` alone. Alembic version lives in `app`, so `alembic current` still reads head while tables are gone. Re-apply with `alembic stamp <prod's rev> && task migrate`.
 - **Coolify shadows compose fallbacks:** a `${NAME:-default}` in compose is a seed, not a runtime default. After first deploy, Coolify stores the value and edits to the fallback are silent no-ops in prod. Change the value in the Coolify UI and restart.
 - **Deploy checklist for tuned constants** (T, K, dormancy, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
+- **Rate limiter rollout is three deploys, in order (NEU-1344, spec §5).** `RATE_LIMIT_PUBLIC_ENABLED`
+  ships `false` and must stay false until the SSR Worker signs its requests: the site is rendered on
+  a Cloudflare Worker, so until then every anonymous visitor reaches the API from a handful of shared
+  egress IPs and one bucket throttles all of them at once. (1) Deploy the backend — auth buckets
+  live, public bucket inert, `--proxy-headers` on. (2) Set `SSR_ORIGIN_SECRET` in the Coolify UI
+  **and** as the Wrangler secret of the same name, then deploy the frontend. (3) Only then set
+  `RATE_LIMIT_PUBLIC_ENABLED=true` in the Coolify UI and restart. Both are Coolify UI changes, not
+  compose edits — the fallbacks in `docker-compose.prod.yml` are seeds, per the gotcha above.
 - **Long-running container holds the env it was created with.** After any env change: `docker compose -f ../docker-compose.yml up -d --force-recreate api` and `printenv` to confirm.
 - **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`.
 

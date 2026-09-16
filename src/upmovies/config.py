@@ -311,6 +311,44 @@ class Settings(BaseSettings):
     login_lockout_threshold: int = Field(default=5, alias="LOGIN_LOCKOUT_THRESHOLD")
     login_lockout_window_minutes: int = Field(default=15, alias="LOGIN_LOCKOUT_WINDOW_MINUTES")
 
+    # Per-IP token buckets for the anonymous surface (D-19, NEU-1344). Each is the raw
+    # `"<capacity>/<refill_per_minute>"` string the bucket is built from; `app.rate_limit`
+    # parses it and a boot-time check refuses a malformed one, in the manner of every other
+    # config fault here. The numbers are *not* duplicated in that module — unlike the
+    # retrieval constants above, which mirror their module's defaults — because a limit with
+    # no configured value is a route with no limit, and there is nothing sensible to fall back
+    # to. `capacity` is the burst a single address may spend at once; `refill_per_minute` is
+    # the sustained rate underneath it, so `"5/0.083"` reads as "five now, five an hour".
+    #
+    # Two buckets are registered ahead of the routes that will use them — `import` is M3 and
+    # `ics` is M7 — because of the Coolify gotcha in `AGENTS.md`: a variable absent from the
+    # deployment at first deploy is one somebody has to add by hand later.
+    rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
+    # The public bucket ships wired but inert, and it is the only one that does. Until the
+    # Worker signs its requests (NEU-1389) every server-rendered page arrives from a handful
+    # of Cloudflare egress IPs, so a live `public` bucket would throttle the whole anonymous
+    # site through them. Rollout order is spec §5: deploy this, deploy the Worker, then flip
+    # this flag in the Coolify UI.
+    rate_limit_public_enabled: bool = Field(default=False, alias="RATE_LIMIT_PUBLIC_ENABLED")
+    rate_limit_signup: str = Field(default="5/0.083", alias="RATE_LIMIT_SIGNUP")
+    # Wider than the rest, and on top of the per-email lockout above rather than instead of
+    # it: the two answer different questions — that one counts failures against one address,
+    # this one counts requests from one host — and a household or an office behind one NAT is
+    # a legitimate source of a good many logins.
+    rate_limit_login: str = Field(default="20/1.33", alias="RATE_LIMIT_LOGIN")
+    # Password reset, verification re-send, email-change request: the three routes that put a
+    # message in somebody else's inbox, so the limit is really a bound on how much mail an
+    # anonymous caller can make this service send.
+    rate_limit_auth_request: str = Field(default="5/0.083", alias="RATE_LIMIT_AUTH_REQUEST")
+    rate_limit_import: str = Field(default="6/0.1", alias="RATE_LIMIT_IMPORT")
+    rate_limit_public: str = Field(default="240/120", alias="RATE_LIMIT_PUBLIC")
+    rate_limit_ics: str = Field(default="30/30", alias="RATE_LIMIT_ICS")
+    # The secret the SSR Worker signs its API calls with (`X-Backlotter-Origin`), which is what
+    # lets it name the visitor it is rendering for instead of being metered as one caller.
+    # `None` by default — and an unset secret means the header is ignored entirely, never that
+    # a signed request is refused, so this deploying before the Worker sibling costs nothing.
+    ssr_origin_secret: str | None = Field(default=None, alias="SSR_ORIGIN_SECRET")
+
     # Cloudflare Turnstile's server-side secret (D-18, M1) — the whole of what stops `POST
     # /auth/signup` being a script's endpoint now that an invite code is no longer required.
     #
