@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#f6f6f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1a1a1a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:8px;">
+      <tr>
+        <td style="padding:32px;">
+          <p style="margin:0 0 16px;font-size:16px;">
+            Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+          </p>
+          <p style="margin:0 0 24px;font-size:16px;line-height:1.5;">
+            Someone asked to move your {{ product_name }} account from this address to
+            <strong>{{ new_email }}</strong>, using your current password. We have sent a
+            confirmation link to that address; the account will not move until the link is
+            used, and the link expires in
+            {{ expires_in_hours }} hour{{ '' if expires_in_hours == 1 else 's' }}.
+          </p>
+          <p style="margin:0 0 24px;font-size:16px;line-height:1.5;">
+            If that was you, there is nothing to do here.
+          </p>
+          <p style="margin:0 0 12px;font-size:14px;line-height:1.5;color:#555555;">
+            If it was not, your password is known to somebody else. Setting a new password
+            cancels the pending change, so do that now:
+          </p>
+          <ul style="margin:0;padding-left:20px;font-size:14px;line-height:1.5;color:#555555;">
+            <li>If you can still sign in, change your password from your account settings.</li>
+            <li>
+              If you cannot, use the “forgot password” link on the sign-in page. Resetting
+              from this address cancels the pending change too, and signs out every other
+              session.
+            </li>
+          </ul>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

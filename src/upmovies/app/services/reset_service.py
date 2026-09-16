@@ -24,6 +24,7 @@ from upmovies.app.errors import InvalidToken
 from upmovies.app.models import User
 from upmovies.app.passwords import hash_password
 from upmovies.app.repos import email_token_repo, login_attempt_repo, session_repo, user_repo
+from upmovies.app.services import email_change_service
 from upmovies.app.tokens import new_email_token
 from upmovies.config import Settings
 from upmovies.mail import (
@@ -140,6 +141,11 @@ async def consume(db: AsyncSession, *, token: str, new_password: str) -> User:
 
     await email_token_repo.consume(db, row=row, consumed_at=now)
     await email_token_repo.retire_live_for_user(db, user_id=user.id, purpose=RESET, now=now)
+    # And any pending address change (NEU-1341), for a reason beyond the one that retires the
+    # sibling reset links: a reset is the flow people reach for when they think the account is
+    # compromised, and a live change link is precisely how an attacker who got in first keeps
+    # it. The notice mailed to the old address promises that a new password stops the move.
+    await email_change_service.retire_pending(db, user_id=user.id, now=now)
     await user_repo.update_password_hash(db, user, hash_password(new_password))
     await session_repo.delete_all_for_user(db, user.id)
     # And clear the brute-force lockout, which `authenticate` checks *before* it checks the

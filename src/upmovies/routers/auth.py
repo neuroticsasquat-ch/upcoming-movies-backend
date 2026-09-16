@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.dto import (
     AuthedUserOut,
+    EmailChangeConfirmRequest,
+    EmailChangeRequest,
     LoginRequest,
     PasswordChangeRequest,
     PasswordResetConsumeRequest,
@@ -13,7 +15,12 @@ from upmovies.app.dto import (
 )
 from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite, InvalidToken
 from upmovies.app.models import User
-from upmovies.app.services import account_service, reset_service, verification_service
+from upmovies.app.services import (
+    account_service,
+    email_change_service,
+    reset_service,
+    verification_service,
+)
 from upmovies.app.verification import is_verified
 from upmovies.config import Settings, get_settings
 from upmovies.deps import get_current_user, get_mailer, get_session, require_csrf
@@ -291,4 +298,74 @@ async def reset_password(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_token"
         ) from err
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/email-change/request",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_csrf)],
+)
+async def request_email_change(
+    payload: EmailChangeRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    mailer: Mailer = Depends(get_mailer),
+) -> Response:
+    """Start moving this account to a new address: mail the new one a confirmation link and
+    the old one a notice that the move was asked for.
+
+    202 rather than 204 because that is what this route honestly is — the change is accepted,
+    not applied, and nothing about the account has moved when it answers.
+
+    Unlike its unauthenticated siblings, this one *does* distinguish its failures: 401 for the
+    wrong password, 409 for an address someone already holds. `email_change_service.request`
+    is where that departure is argued; the short version is that a route costing an account
+    and its password is a far weaker enumeration oracle than one taking a bare address, and
+    silence would strand a user whose typo'd address happens to belong to a stranger."""
+    try:
+        await email_change_service.request(
+            db,
+            user=user,
+            new_email=str(payload.new_email),
+            current_password=payload.current_password,
+            mailer=mailer,
+            settings=settings,
+        )
+    except InvalidCredentials as err:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials"
+        ) from err
+    except EmailInUse as err:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email_in_use") from err
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/email-change/confirm", status_code=status.HTTP_204_NO_CONTENT)
+async def confirm_email_change(
+    payload: EmailChangeConfirmRequest,
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    """Spend an email-change token and move the account to the address it carries.
+
+    No session and no CSRF, for the reason `/auth/verify` and `/auth/reset` need neither: the
+    link lands in an inbox that by definition cannot yet sign in to this account, and the token
+    in the body *is* the credential, so there is no ambient authority to borrow. The
+    authorisation for the change was taken at request time, from a session and a password.
+
+    Answers with no body, as its two siblings do: handing back the account record would give
+    it to whoever opens a forwarded or scanner-followed link. A signed-in client re-reads
+    `GET /me` — and its session is still good, because a change of address is not a reason to
+    sign the owner out of the browser they started it in."""
+    try:
+        await email_change_service.confirm(db, token=payload.token)
+    except InvalidToken as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_token"
+        ) from err
+    except EmailInUse as err:
+        # The one failure worth distinguishing from `invalid_token`: the address was free when
+        # the mail went out and is not now. The user can act on that by picking another one.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email_in_use") from err
     return Response(status_code=status.HTTP_204_NO_CONTENT)

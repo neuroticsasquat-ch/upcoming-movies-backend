@@ -113,6 +113,24 @@ async def test_signup_rejects_invalid_email(client):
 
 
 @pytest.mark.asyncio
+async def test_signup_rejects_a_display_name_carrying_a_newline(client):
+    """A display name is one line of text, and every transactional mail interpolates it into a
+    plain-text body where autoescape is off by design. Since NEU-1341 one of those mails goes
+    to an address the caller merely names, so a newline here is a way to put arbitrary prose in
+    front of a stranger over the product's own sending domain."""
+    r = await client.post(
+        "/auth/signup",
+        json={
+            "email": "injected@example.com",
+            "password": "hunter2hunter2",
+            "display_name": "Ada\n\nYour account is suspended: https://evil.example.com",
+            "invite_code": "anything",
+        },
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_signup_rejects_invalid_invite(client):
     r = await client.post(
         "/auth/signup",

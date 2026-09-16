@@ -7,6 +7,7 @@ from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite
 from upmovies.app.models import User
 from upmovies.app.passwords import hash_password, verify_password
 from upmovies.app.repos import invite_repo, login_attempt_repo, session_repo, user_repo
+from upmovies.app.services import email_change_service
 from upmovies.app.tokens import new_csrf_token, new_session_id
 
 
@@ -125,6 +126,11 @@ async def change_password(
 
     await user_repo.update_password_hash(db, user, hash_password(new_password))
     await session_repo.delete_all_for_user(db, user.id)
+    # And revoke any pending address change (NEU-1341). The notice mailed to the old address
+    # tells its owner that changing the password is how they stop a move they did not ask for,
+    # and a token already sitting in the requester's inbox would otherwise outlive the password
+    # it was authorised with.
+    await email_change_service.retire_pending(db, user_id=user.id, now=datetime.now(UTC))
 
     sess_id = new_session_id()
     csrf = new_csrf_token()

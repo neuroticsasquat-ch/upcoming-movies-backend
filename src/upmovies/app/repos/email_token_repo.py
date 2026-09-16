@@ -17,8 +17,18 @@ async def create(
     user_id: UUID,
     purpose: str,
     expires_at: datetime,
+    new_email: str | None = None,
 ) -> EmailToken:
-    row = EmailToken(token=token, user_id=user_id, purpose=purpose, expires_at=expires_at)
+    """`new_email` is the address an email-change token moves the account to, and defaults to
+    None because the other two purposes have nothing to carry (see the `EmailToken`
+    docstring)."""
+    row = EmailToken(
+        token=token,
+        user_id=user_id,
+        purpose=purpose,
+        expires_at=expires_at,
+        new_email=new_email,
+    )
     db.add(row)
     await db.flush()
     return row

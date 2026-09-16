@@ -346,6 +346,14 @@ class Settings(BaseSettings):
     # mail actually needs. Like the value above, this is also mail copy, so `reset_service`
     # passes it into the template context rather than letting the two drift.
     reset_token_ttl_hours: int = Field(default=1, ge=1, alias="RESET_TOKEN_TTL_HOURS")
+    # How long an emailed email-change confirmation stays good (M1). An hour, matching the
+    # reset window rather than the verification one, because this token is reset-grade and not
+    # verify-grade: a spent verification token stamps a column, whereas spending this one moves
+    # the address the account signs in and recovers with — after which whoever holds the new
+    # inbox can take the password too. The flow is also synchronous by nature, so the short
+    # window costs a legitimate user one more click and denies a mistyped address a standing
+    # key. Mail copy as well as policy, so `email_change_service` passes it into the context.
+    email_change_token_ttl_hours: int = Field(default=1, ge=1, alias="EMAIL_CHANGE_TOKEN_TTL_HOURS")
 
     @property
     def cors_allowed_origins(self) -> list[str]:

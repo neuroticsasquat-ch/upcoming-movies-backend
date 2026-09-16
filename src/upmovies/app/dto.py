@@ -7,7 +7,16 @@ from pydantic import BaseModel, EmailStr, Field
 class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    display_name: str = Field(min_length=1, max_length=100)
+    # No control characters, newlines included (NEU-1341). A display name is one line of text
+    # by definition, and this is the only route that sets one — but it is also a value that
+    # every transactional mail interpolates into its *plain-text* part, where autoescape is
+    # deliberately off (`mail/templates.py`) because escaping a text body renders `&amp;` to
+    # the reader. `mail.templates.render` already collapses the subject for this reason; the
+    # body cannot be collapsed without destroying the template's own layout, so the value is
+    # constrained where it enters instead. Until NEU-1341 the blast radius was self-inflicted
+    # — every mail went to the account's own address — and `POST /auth/email-change/request`
+    # is the first route that mails an address the caller merely names.
+    display_name: str = Field(min_length=1, max_length=100, pattern=r"^[^\x00-\x1f\x7f]+$")
     invite_code: str = Field(min_length=1, max_length=128)
 
 
@@ -53,6 +62,25 @@ class PasswordResetConsumeRequest(BaseModel):
 
     token: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class EmailChangeRequest(BaseModel):
+    """The address to move the account to, plus the password that authorises the move.
+
+    The password is asked for even though the route is already authed and CSRF-guarded, because
+    a session left open on a borrowed machine is exactly the way an account gets walked off
+    with — and an address change is the one edit that takes the account with it."""
+
+    new_email: EmailStr
+    current_password: str
+
+
+class EmailChangeConfirmRequest(BaseModel):
+    """The token from the mail sent to the new address. Nothing else: the address to move to
+    was fixed when the token was issued, so accepting it again here would let the holder of a
+    link redirect the change somewhere the account owner never nominated."""
+
+    token: str = Field(min_length=1, max_length=256)
 
 
 class UserOut(BaseModel):

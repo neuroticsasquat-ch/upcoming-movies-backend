@@ -1,0 +1,17 @@
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+Someone asked to move your {{ product_name }} account from this address to
+{{ new_email }}, using your current password. We have sent a confirmation link to
+that address; the account will not move until the link is used, and the link expires
+in {{ expires_in_hours }} hour{{ '' if expires_in_hours == 1 else 's' }}.
+
+If that was you, there is nothing to do here.
+
+If it was not, your password is known to somebody else. Setting a new password cancels
+the pending change, so do that now:
+
+- If you can still sign in, change your password from your account settings.
+- If you cannot, use the "forgot password" link on the sign-in page. Resetting from
+  this address cancels the pending change too, and signs out every other session.
+
+— {{ product_name }}
