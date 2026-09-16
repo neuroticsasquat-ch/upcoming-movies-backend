@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.dto import AccountDeleteRequest, AuthedUserOut
+from upmovies.app.entitlements import is_entitled
 from upmovies.app.errors import InvalidCredentials
 from upmovies.app.models import User
 from upmovies.app.services import account_service
@@ -25,6 +26,7 @@ async def me(
         display_name=user.display_name,
         is_admin=user.is_admin,
         email_verified=is_verified(user),
+        entitled=is_entitled(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )

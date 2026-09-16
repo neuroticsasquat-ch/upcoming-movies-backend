@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class SignupRequest(BaseModel):
@@ -105,6 +105,12 @@ class UserOut(BaseModel):
     # business. Every authed response carries it, not just `GET /me`, so the context is
     # populated from the signup and login replies too.
     email_verified: bool
+    # Derived from `entitled_until` for the same reason and on the same terms (D-41): the
+    # frontend's AuthContext branches on a yes/no — locked panel or timeline — and the grant's
+    # end date is the admin surface's business, not the account holder's. Every authed response
+    # carries it, so a grant made while the user is signed in takes effect on their next
+    # `GET /me` rather than needing a sign-out.
+    entitled: bool
     created_at: datetime
 
 
@@ -122,3 +128,43 @@ class InviteOut(BaseModel):
     created_at: datetime
     consumed_at: datetime | None
     consumed_by_user_id: UUID | None
+
+
+class AdminUserOut(BaseModel):
+    """One account as the admin grant page sees it (D-38).
+
+    Distinct from `UserOut`, which is the account holder's view of themselves: this one carries
+    the raw `entitled_until` and `email_verified_at` timestamps rather than the booleans derived
+    from them, because an admin deciding whether to extend a grant is asking *when*, not
+    *whether*. `display_name` and anything resembling a credential are deliberately absent —
+    the page lists accounts to grant access to, it is not an account inspector."""
+
+    id: UUID
+    email: str
+    is_admin: bool
+    email_verified_at: datetime | None
+    entitled_until: datetime | None
+    created_at: datetime
+
+
+class AdminUserPage(BaseModel):
+    """A page of accounts plus the total it was drawn from, so the caller can page a search
+    whose result count it cannot otherwise know."""
+
+    items: list[AdminUserOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntitlementGrantRequest(BaseModel):
+    """The new expiry for a grant. A naive value is read as UTC rather than refused, the way
+    `/admin/runs`'s `since` is: an admin page posting a date picker's value should get the day
+    it meant, not one shifted by the server's timezone."""
+
+    entitled_until: datetime
+
+    @field_validator("entitled_until")
+    @classmethod
+    def _assume_utc(cls, v: datetime) -> datetime:
+        return v.replace(tzinfo=UTC) if v.tzinfo is None else v

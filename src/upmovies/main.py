@@ -30,6 +30,7 @@ from upmovies.routers import (
     moderation_admin,
     public,
     sources_admin,
+    users_admin,
 )
 
 if dsn := os.environ.get("SENTRY_DSN"):
@@ -106,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(invites_admin.router)
     app.include_router(moderation_admin.router)
     app.include_router(sources_admin.router)
+    app.include_router(users_admin.router)
     app.include_router(auth.router)
     app.include_router(me.router)
     app.include_router(public.router)
