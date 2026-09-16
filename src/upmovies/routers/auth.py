@@ -21,9 +21,16 @@ from upmovies.app.services import (
     reset_service,
     verification_service,
 )
+from upmovies.app.turnstile import TurnstileUnavailable, Verifier
 from upmovies.app.verification import is_verified
 from upmovies.config import Settings, get_settings
-from upmovies.deps import get_current_user, get_mailer, get_session, require_csrf
+from upmovies.deps import (
+    get_current_user,
+    get_mailer,
+    get_session,
+    get_turnstile,
+    require_csrf,
+)
 from upmovies.mail import Mailer
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -79,7 +86,28 @@ async def signup(
     db: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
     mailer: Mailer = Depends(get_mailer),
+    verifier: Verifier = Depends(get_turnstile),
 ) -> AuthedUserOut:
+    """Open the account and sign the new user in.
+
+    Since NEU-1343 the door is held by Cloudflare Turnstile rather than by an invite code
+    (D-18). The challenge is verified **before** anything is written, and a refusal is a 403
+    with no user row and no mail — a bot check that ran after the account existed would be a
+    bot check that had already lost. An invite code may still ride along; `account_service`
+    spends it in the same transaction as the user."""
+    ip = request.client.host if request.client else None
+    try:
+        solved = await verifier.verify(payload.turnstile_token)
+    except TurnstileUnavailable as err:
+        # No verdict is not a pass: the signup is refused, loudly, so an outage at the
+        # provider is an outage here rather than an open door nobody notices
+        # (`app/turnstile.py`). 503 because the caller did nothing wrong and retrying later
+        # is exactly the right advice.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="turnstile_unavailable"
+        ) from err
+    if not solved:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid_turnstile")
     try:
         user, sess_id, csrf = await account_service.signup(
             db,
@@ -87,9 +115,10 @@ async def signup(
             password=payload.password,
             display_name=payload.display_name,
             invite_code=payload.invite_code,
+            require_invite=not settings.signup_open,
             ttl_days=settings.session_ttl_days,
             user_agent=request.headers.get("user-agent"),
-            ip=request.client.host if request.client else None,
+            ip=ip,
         )
     except InvalidInvite as err:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid_invite") from err
