@@ -105,7 +105,7 @@ class EmailToken(Base):
 
     One table with a `purpose` column rather than one table per flow, because M1 asks for
     three flows that differ only in what consuming the token *does* — verification here,
-    password reset (NEU-1342) and email change (NEU-1341) — and the row shape (who, what for,
+    password reset (NEU-1340) and email change (NEU-1341) — and the row shape (who, what for,
     issued, expires, consumed) is the same for all three. `purpose` is what stops a token
     issued for one from being spent on another.
 
@@ -113,7 +113,14 @@ class EmailToken(Base):
     `app.invite.code` already are: a reader of this table holding a live verification token
     can already read `app.session`, which is the stronger credential of the two. Single use is
     `consumed_at`, not a delete, so a second click on the same link is distinguishable from a
-    link that never existed."""
+    link that never existed.
+
+    One qualification on that last point, since NEU-1340: a completed password reset stamps
+    `consumed_at` on the user's *other* live reset tokens as well, to retire them. So the
+    column means "no longer spendable, and here is when it stopped being so" rather than
+    strictly "someone clicked this"; for `purpose='reset'` rows the two are not the same
+    question. Nothing reads it to answer either one — `InvalidToken` is deliberately one error
+    for every cause — so this costs forensic precision and no behaviour."""
 
     __tablename__ = "email_token"
     __table_args__ = (

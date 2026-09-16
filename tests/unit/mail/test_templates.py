@@ -50,7 +50,7 @@ def test_the_text_part_carries_the_link_as_text_not_only_as_a_button():
 
 
 def test_the_ship_has_exactly_the_templates_it_claims():
-    assert available_templates() == ("verify",)
+    assert available_templates() == ("reset", "verify")
     assert validate_templates() == []
 
 

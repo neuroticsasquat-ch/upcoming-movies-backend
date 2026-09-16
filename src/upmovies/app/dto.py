@@ -37,6 +37,24 @@ class VerificationConsumeRequest(BaseModel):
     token: str = Field(min_length=1, max_length=256)
 
 
+class PasswordResetRequest(BaseModel):
+    """The address to mail a reset link to. Unauthenticated, and answered identically whether
+    or not there is an account behind it."""
+
+    email: EmailStr
+
+
+class PasswordResetConsumeRequest(BaseModel):
+    """A reset link plus the password to set with it.
+
+    `new_password` carries the same bounds as `SignupRequest.password` and
+    `PasswordChangeRequest.new_password`: a reset is one of three ways a password gets set, and
+    the weakest of them would be the one that decides the policy."""
+
+    token: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class UserOut(BaseModel):
     id: UUID
     email: str

@@ -1,0 +1,14 @@
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+Someone asked to reset the password on your {{ product_name }} account. If that was
+you, set a new one here:
+
+{{ reset_url }}
+
+The link is good for {{ expires_in_hours }} hour{{ '' if expires_in_hours == 1 else 's' }}
+and can only be used once. Using it signs you out on every device.
+
+If you did not ask for this, you can ignore this email — your password will not change
+until the link above is used, and nobody can read it from this message.
+
+— {{ product_name }}
