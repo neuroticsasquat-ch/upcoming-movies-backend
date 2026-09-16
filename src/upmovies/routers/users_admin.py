@@ -6,22 +6,20 @@ Human-facing, so `require_current_admin` (session cookie + `is_admin`) rather th
 borrows. Granting access is a decision a person makes about another person, and the audit line it
 writes is only worth writing if it names one.
 
-This router is the *only* way `app.user.entitled_until` is written until the billing project takes
-over. There is no signup trial and no global setting (D-37), so an account that nobody has visited
-here has no access at all."""
+These routes are the *only* way `app.user.entitled_until` is written until the billing project
+takes over. There is no signup trial and no global setting (D-37), so an account that nobody has
+visited here has no access at all."""
 
-import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.dto import AdminUserOut, AdminUserPage, EntitlementGrantRequest
+from upmovies.app.errors import NotFound
 from upmovies.app.models import User
-from upmovies.app.repos import user_repo
+from upmovies.app.services import entitlement_service
 from upmovies.deps import get_session, require_csrf, require_current_admin
-
-log = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/admin/users",
@@ -41,13 +39,6 @@ def _to_out(user: User) -> AdminUserOut:
     )
 
 
-async def _load_target(db: AsyncSession, user_id: UUID) -> User:
-    user = await user_repo.get_by_id(db, user_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found")
-    return user
-
-
 @router.get("", response_model=AdminUserPage)
 async def list_users(
     limit: int = Query(default=50, ge=1, le=200),
@@ -60,7 +51,9 @@ async def list_users(
     Expired grants stay in the list rather than reading as never-granted: the page renders the
     raw `entitled_until`, so "lapsed last month" and "never had access" are distinguishable,
     which is the difference between extending a grant and making one."""
-    items, total = await user_repo.list_page(db, limit=limit, offset=offset, email_query=q)
+    items, total = await entitlement_service.list_accounts(
+        db, limit=limit, offset=offset, email_query=q
+    )
     return AdminUserPage(items=[_to_out(u) for u in items], total=total, limit=limit, offset=offset)
 
 
@@ -80,17 +73,14 @@ async def grant_entitlement(
     PUT rather than POST because it is idempotent by construction: the body carries the new
     expiry outright rather than a duration to add, so replaying it lands the same date. An
     admin extending a grant is choosing a date on a picker, not asking for "another year"."""
-    user = await _load_target(db, user_id)
-    previous = user.entitled_until
-    await user_repo.set_entitled_until(db, user, entitled_until=payload.entitled_until)
-    await db.commit()
-    log.info(
-        "entitlement granted by admin_id=%s to user_id=%s until=%s (was %s)",
-        admin.id,
-        user.id,
-        payload.entitled_until.isoformat(),
-        previous.isoformat() if previous else None,
-    )
+    try:
+        user = await entitlement_service.grant(
+            db, user_id=user_id, entitled_until=payload.entitled_until, granted_by=admin
+        )
+    except NotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found"
+        ) from None
     return _to_out(user)
 
 
@@ -106,21 +96,12 @@ async def revoke_entitlement(
 ) -> AdminUserOut:
     """End this account's access, returning it to the state every signup starts in.
 
-    Only `entitled_until` is cleared. Follows, watchlist items, dismissals, settings and the
-    iCal token are left exactly as they are, so a later grant restores the account rather than
-    handing back an empty one (D-40) — which is also why this deletes an entitlement and never
-    a user.
-
     Returns the account rather than 204 so the grant page can re-render the row it just changed
     without a second round trip, matching the grant above."""
-    user = await _load_target(db, user_id)
-    previous = user.entitled_until
-    await user_repo.set_entitled_until(db, user, entitled_until=None)
-    await db.commit()
-    log.info(
-        "entitlement revoked by admin_id=%s from user_id=%s (was %s)",
-        admin.id,
-        user.id,
-        previous.isoformat() if previous else None,
-    )
+    try:
+        user = await entitlement_service.revoke(db, user_id=user_id, revoked_by=admin)
+    except NotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found"
+        ) from None
     return _to_out(user)

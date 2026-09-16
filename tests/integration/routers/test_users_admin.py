@@ -1,5 +1,6 @@
 """The grant surface (D-38) and the request-time gate it feeds (D-39)."""
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -12,6 +13,8 @@ from upmovies.app import tokens
 from upmovies.app.entitlements import entitled_user_clause, require_entitled
 from upmovies.app.models import EmailToken, Session, User
 from upmovies.app.repos import session_repo
+
+_AUDIT_LOGGER = "upmovies.app.services.entitlement_service"
 
 FUTURE = datetime(2099, 1, 1, tzinfo=UTC)
 PAST = datetime(2000, 1, 1, tzinfo=UTC)
@@ -78,6 +81,17 @@ async def test_list_pages_and_reports_the_total_it_paged(admin_authed_client, ma
     assert len(second["items"]) == 2
     ids = {u["id"] for u in first["items"]} | {u["id"] for u in second["items"]}
     assert len(ids) == 4
+
+
+async def test_search_treats_like_wildcards_as_literal_characters(admin_authed_client, make_user):
+    # The value comes from a search box, so `%` is a character in an address someone is looking
+    # for, not a wildcard they meant to write.
+    await make_user(email="a%b@example.com")
+    await make_user(email="unrelated@example.com")
+    r = await admin_authed_client.get("/admin/users", params={"q": "a%b"})
+    assert [u["email"] for u in r.json()["items"]] == ["a%b@example.com"]
+    r = await admin_authed_client.get("/admin/users", params={"q": "%"})
+    assert [u["email"] for u in r.json()["items"]] == ["a%b@example.com"]
 
 
 async def test_list_does_not_require_csrf_header(admin_authed_client):
@@ -226,6 +240,32 @@ async def test_revoking_suppresses_and_never_destroys(admin_authed_client, sessi
         .all()
     )
     assert len(email_tokens) == 1
+
+
+async def test_both_writes_log_the_acting_admin_and_the_target(
+    admin_authed_client, make_user, caplog
+):
+    """The audit line is the whole reason this surface is session-authed rather than
+    ADMIN_TOKEN'd: a grant is one person's decision about another, and a log that named
+    neither would not be worth writing."""
+    user = await make_user(email="audited@example.com")
+    admin = admin_authed_client.user
+
+    with caplog.at_level(logging.INFO, logger=_AUDIT_LOGGER):
+        await admin_authed_client.put(
+            _entitlement_url(user), json={"entitled_until": FUTURE.isoformat()}
+        )
+        await admin_authed_client.delete(_entitlement_url(user))
+
+    audit = [r for r in caplog.records if r.name == _AUDIT_LOGGER]
+    assert [r.levelno for r in audit] == [logging.INFO, logging.INFO]
+    granted, revoked = (r.getMessage() for r in audit)
+    assert f"admin_id={admin.id}" in granted and f"user_id={user.id}" in granted
+    assert FUTURE.isoformat() in granted
+    assert f"admin_id={admin.id}" in revoked and f"user_id={user.id}" in revoked
+    # The previous value is carried so a revoke says what was taken away, not just that
+    # something was.
+    assert FUTURE.isoformat() in revoked
 
 
 # --- what the gate does with the column ----------------------------------------------------

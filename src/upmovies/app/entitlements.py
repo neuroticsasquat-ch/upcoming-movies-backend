@@ -64,7 +64,14 @@ def require_entitled() -> Callable[[User], Awaitable[User]]:
 def entitled_user_clause() -> ColumnElement[bool]:
     """The batch-time gate: a predicate over `app.user` for a query that selects recipients.
 
-    `func.now()` rather than a Python timestamp so the comparison happens in the database, in
-    one place, at the moment each row is read — a batch pass that runs for minutes must not
-    decide entitlement against the clock reading it had when it started."""
+    `func.now()` rather than a Python timestamp so the rule is spelled once, in SQL, exactly as
+    D-37 states it — a pass that filtered on a timestamp it computed itself would be a second
+    copy of the rule, free to drift from `is_entitled`.
+
+    Note what it does *not* buy, since the name invites the assumption: Postgres `now()` is
+    `transaction_timestamp()`, fixed when the transaction began, not a fresh reading per row.
+    Every row a long pass examines inside one transaction is therefore judged against the same
+    instant. That is the behaviour to want here — a digest run should not post to half its
+    recipients under one clock and half under another — but a pass that needs the wall clock as
+    it advances must commit between batches rather than reach for `clock_timestamp()`."""
     return and_(User.entitled_until.is_not(None), User.entitled_until > func.now())

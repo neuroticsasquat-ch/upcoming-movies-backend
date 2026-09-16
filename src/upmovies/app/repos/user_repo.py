@@ -67,10 +67,12 @@ async def list_page(
     be paged from the row count alone.
 
     `email_query` is a case-insensitive substring match. `email` is CITEXT, so `contains`
-    already compares case-insensitively without a `lower()` on either side."""
+    already compares case-insensitively without a `lower()` on either side. `autoescape` is on
+    because the value comes from a search box: a `%` or `_` typed into it is a character
+    someone is looking for in an address, not a wildcard they meant to write."""
     filters = []
     if email_query:
-        filters.append(User.email.contains(email_query))
+        filters.append(User.email.contains(email_query, autoescape=True))
 
     total = await db.scalar(select(func.count()).select_from(User).where(*filters))
     rows = await db.execute(
