@@ -39,6 +39,18 @@ class User(Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When this account's access to subscriber functionality runs out; NULL means it never
+    # had any (D-37). Closed by default and closed for every existing row — there is no
+    # backfill, no signup trial and deliberately no global "everyone is entitled" setting,
+    # because the only way in is a per-user grant (D-38) until *bl: Subscription & Billing*
+    # takes over writing this column from a payment provider.
+    #
+    # A timestamp rather than a boolean so that ending a grant is a write of a past value
+    # rather than a delete: revoking suppresses and never destroys (D-40), and the date is
+    # what answers "when did this lapse?" for a support ticket. `app.entitlements` is the
+    # single place that turns it into a yes/no, so the M3 and M7 surfaces that gate on it do
+    # not each re-derive the rule.
+    entitled_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

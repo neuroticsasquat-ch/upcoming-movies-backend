@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.models import User
@@ -55,3 +55,44 @@ async def update_email(db: AsyncSession, user: User, *, email: str, verified_at:
     verifying it" expressible, and the M1 contract has no such state."""
     user.email = email
     user.email_verified_at = verified_at
+
+
+async def list_page(
+    db: AsyncSession, *, limit: int, offset: int, email_query: str | None = None
+) -> tuple[list[User], int]:
+    """One page of accounts, newest first, with the total the page was drawn from.
+
+    The total comes back alongside the rows because the admin grant page (NEU-1392) needs to
+    know whether there is a next page, and a search over an unknown number of accounts cannot
+    be paged from the row count alone.
+
+    `email_query` is a case-insensitive substring match. `email` is CITEXT, so `contains`
+    already compares case-insensitively without a `lower()` on either side. `autoescape` is on
+    because the value comes from a search box: a `%` or `_` typed into it is a character
+    someone is looking for in an address, not a wildcard they meant to write."""
+    filters = []
+    if email_query:
+        filters.append(User.email.contains(email_query, autoescape=True))
+
+    total = await db.scalar(select(func.count()).select_from(User).where(*filters))
+    rows = await db.execute(
+        select(User)
+        .where(*filters)
+        .order_by(User.created_at.desc(), User.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(rows.scalars()), total or 0
+
+
+async def set_entitled_until(
+    db: AsyncSession, user: User, *, entitled_until: datetime | None
+) -> None:
+    """Grant, extend, or end this account's access, on the loaded model. Caller commits.
+
+    One setter for all three because they are one write: a grant and an extension differ only
+    in what was there before, and a revoke is `None` (D-38 — a past timestamp ends a grant just
+    as well, and nothing here deletes a row). Deliberately touches nothing else: follows,
+    watchlist items, dismissals, settings and the iCal token survive a revoke untouched, so a
+    later grant restores the account exactly as it was (D-40)."""
+    user.entitled_until = entitled_until

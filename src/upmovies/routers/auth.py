@@ -13,6 +13,7 @@ from upmovies.app.dto import (
     VerificationConsumeRequest,
     VerificationRequest,
 )
+from upmovies.app.entitlements import is_entitled
 from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite, InvalidToken
 from upmovies.app.models import User
 from upmovies.app.rate_limit import rate_limit
@@ -142,6 +143,7 @@ async def signup(
         display_name=user.display_name,
         is_admin=user.is_admin,
         email_verified=is_verified(user),
+        entitled=is_entitled(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
@@ -181,6 +183,7 @@ async def login(
         display_name=user.display_name,
         is_admin=user.is_admin,
         email_verified=is_verified(user),
+        entitled=is_entitled(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
@@ -239,6 +242,7 @@ async def change_password(
         display_name=user.display_name,
         is_admin=user.is_admin,
         email_verified=is_verified(user),
+        entitled=is_entitled(user),
         created_at=user.created_at,
         csrf_token=csrf,
     )
