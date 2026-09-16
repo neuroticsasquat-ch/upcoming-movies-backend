@@ -119,6 +119,9 @@ services:
       # live product, and the TTL, which is also the number the mail copy quotes.
       PRODUCT_NAME: "${PRODUCT_NAME:-Backlotter}"
       VERIFY_TOKEN_TTL_HOURS: "${VERIFY_TOKEN_TTL_HOURS:-24}"
+      # Password reset (NEU-1340), here for the same reason and deliberately the shorter
+      # window: this link sets the password and drops every session.
+      RESET_TOKEN_TTL_HOURS: "${RESET_TOKEN_TTL_HOURS:-1}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

@@ -5,13 +5,15 @@ from upmovies.app.dto import (
     AuthedUserOut,
     LoginRequest,
     PasswordChangeRequest,
+    PasswordResetConsumeRequest,
+    PasswordResetRequest,
     SignupRequest,
     VerificationConsumeRequest,
     VerificationRequest,
 )
 from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite, InvalidToken
 from upmovies.app.models import User
-from upmovies.app.services import account_service, verification_service
+from upmovies.app.services import account_service, reset_service, verification_service
 from upmovies.app.verification import is_verified
 from upmovies.config import Settings, get_settings
 from upmovies.deps import get_current_user, get_mailer, get_session, require_csrf
@@ -234,6 +236,57 @@ async def verify_email(
     nothing to update."""
     try:
         await verification_service.consume(db, token=payload.token)
+    except InvalidToken as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_token"
+        ) from err
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/reset/request", status_code=status.HTTP_202_ACCEPTED)
+async def request_password_reset(
+    payload: PasswordResetRequest,
+    db: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    mailer: Mailer = Depends(get_mailer),
+) -> Response:
+    """Mail a password-reset link to an address.
+
+    Always 202, with the same empty body, whether the address is unknown or was just mailed —
+    the sibling `/verify/request` reasoning applies with more force here, because this is the
+    route someone probes when they want to know which of a list of addresses is worth
+    attacking. That includes provider failures: reporting one would report that there was
+    something to send. Throttling is the M1 rate limiter's job (D-19, its own ticket); this
+    route does none of its own yet."""
+    await reset_service.request(db, email=str(payload.email), mailer=mailer, settings=settings)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/reset", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_password(
+    payload: PasswordResetConsumeRequest,
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    """Spend a reset token, set the new password, and drop every session the account has.
+
+    No session required and no CSRF, for the reason `/auth/verify` needs neither: the mail is
+    opened on a device that by definition could not sign in, and the token in the body *is*
+    the credential, so there is no ambient authority for a cross-site post to borrow.
+
+    Answers with no body and opens no session. Not signing the caller in is the conservative
+    half of a route whose whole job is to invalidate credentials, and it costs the legitimate
+    user nothing — they now hold a password that works.
+
+    It also leaves this browser's cookies alone, which is the same thing `/auth/verify` does
+    and is not an oversight. The tempting move is to clear them, on the theory that this
+    browser may hold one of the sessions just deleted. But the route is reached without a
+    session, so there is nothing tying the cookie in the request to the account in the token:
+    a reset link opened in a browser already signed in as *somebody else* would sign that
+    person out of their own live session. A cookie whose session row is gone already resolves
+    to `None` and answers 401 on the next request, which is the state the clearing was
+    supposed to produce anyway."""
+    try:
+        await reset_service.consume(db, token=payload.token, new_password=payload.new_password)
     except InvalidToken as err:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_token"

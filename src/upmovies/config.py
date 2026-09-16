@@ -339,6 +339,13 @@ class Settings(BaseSettings):
     # the account. The value is also mail *copy* — the template tells the reader how long they
     # have — so the two cannot drift: `verification_service` passes this into the context.
     verify_token_ttl_hours: int = Field(default=24, ge=1, alias="VERIFY_TOKEN_TTL_HOURS")
+    # How long an emailed password-reset link stays good (M1). Deliberately much shorter than
+    # the verification window above, because the two links are not worth the same: a spent
+    # verification token stamps a column, a spent reset token *is* the account — it sets the
+    # password and drops every session. An hour is the window someone who just asked for the
+    # mail actually needs. Like the value above, this is also mail copy, so `reset_service`
+    # passes it into the template context rather than letting the two drift.
+    reset_token_ttl_hours: int = Field(default=1, ge=1, alias="RESET_TOKEN_TTL_HOURS")
 
     @property
     def cors_allowed_origins(self) -> list[str]:
