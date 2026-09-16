@@ -44,6 +44,7 @@ Scripts that need to run in production must be copied into the image. Add `COPY 
 | Run migrations | `task migrate` |
 | New migration | `task makemigration -- "message"` |
 | Prod DB refresh (local) | `task db:refresh` |
+| Release notes for a tag (host) | `task release-notes -- v0.4.1` |
 
 Before claiming work done: `task test && task lint && task typecheck` must all pass. Run `task format` first (ruff also reformats).
 
@@ -105,5 +106,7 @@ The frontend lives at `../frontend`. Read its `AGENTS.md` before working on fron
 
 - Type hints: `X | None`, `X | Y` (no `Optional`/`Union`). No `from __future__ import annotations`.
 - Ruff (line length 100, rules E,F,W,I,B,UP). Use `import x as x` re-export in `__init__.py` to avoid F401.
-- Commits: Conventional Commits with trailing Linear ID: `feat: add X (NEU-123)`. PR titles same format.
+- Commits: Conventional Commits with a scope and a trailing Linear ID: `feat(auth): add X (NEU-123)`. PR titles same format.
+- The scope is the component (`auth`, `mail`, `retrieval`, …) and drives release notes: `cliff.toml` groups `RELEASE_NOTES.md` by it, and scopeless commits fall under "General".
+- Release notes: tag first, then `task release-notes -- v0.4.1`. Runs on the **host** (git-cliff needs git history and isn't in the image) — the one documented exception to the container rule. It prepends a section; never rebuild the file wholesale, never call `git-cliff` directly.
 - Branch: per ticket using Linear's generated branch name.

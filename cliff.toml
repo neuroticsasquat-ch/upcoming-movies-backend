@@ -52,7 +52,7 @@ filter_commits = false
 # Turn Linear IDs and PR numbers into links before rendering.
 commit_preprocessors = [
   { pattern = '\(NEU-(\d+)\)', replace = "([NEU-${1}](https://linear.app/neuroticsasquatch/issue/NEU-${1}))" },
-  { pattern = '\(#(\d+)\)', replace = "([#${1}](https://github.com/neuroticsasquat-ch/music-discovery-engine/pull/${1}))" },
+  { pattern = '\(#(\d+)\)', replace = "([#${1}](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/${1}))" },
 ]
 # First match wins. Kept types carry a default_scope so scopeless commits still
 # group cleanly under "General"; everything else is skipped.
@@ -72,7 +72,7 @@ sort_commits = "oldest"
 # 2. Uncomment and set:
 # [remote.github]
 # owner = "neuroticsasquat-ch"
-# repo  = "music-discovery-engine"
+# repo  = "upcoming-movies-backend"
 # 3. Run with a token: `git cliff --github-token $GH_TOKEN` (or GITHUB_TOKEN env).
 # 4. In `body`, group on the PR label instead of scope, e.g. iterate
 #    `commit.github.pr_labels` and bucket by the project label. This needs custom
