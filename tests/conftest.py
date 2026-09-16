@@ -3,7 +3,12 @@ import os
 os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 os.environ.pop("COOKIE_DOMAIN", None)
 
-pytest_plugins = ["tests.fixtures.users", "tests.fixtures.public", "tests.fixtures.mail"]
+pytest_plugins = [
+    "tests.fixtures.users",
+    "tests.fixtures.public",
+    "tests.fixtures.mail",
+    "tests.fixtures.turnstile",
+]
 
 from upmovies.config import Settings  # noqa: E402
 

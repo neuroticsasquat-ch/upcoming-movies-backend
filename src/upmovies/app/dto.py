@@ -17,7 +17,19 @@ class SignupRequest(BaseModel):
     # — every mail went to the account's own address — and `POST /auth/email-change/request`
     # is the first route that mails an address the caller merely names.
     display_name: str = Field(min_length=1, max_length=100, pattern=r"^[^\x00-\x1f\x7f]+$")
-    invite_code: str = Field(min_length=1, max_length=128)
+    # The solved Turnstile challenge, verified server-side before anything is written
+    # (NEU-1343, D-18). Required, and required whatever `SIGNUP_OPEN` says: the invite code
+    # was never a bot check — it was a *scarcity* check, and it stopped being either the
+    # moment signup opened. 2048 is the ceiling Cloudflare documents for the response value;
+    # the bound is here so a megabyte of body is refused before it reaches an outbound call.
+    turnstile_token: str = Field(min_length=1, max_length=2048)
+    # Optional since NEU-1343: an invite is the admin comp path, not the gate. Supplied, it
+    # is still validated and consumed exactly as before — a code that is unknown, spent or
+    # issued to another address fails the signup rather than being ignored, because someone
+    # typing a code in is telling us they were given one, and silently opening a plain
+    # account instead would hide a mistake worth seeing. Required again when `SIGNUP_OPEN`
+    # is off, which is that setting's whole job.
+    invite_code: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class LoginRequest(BaseModel):

@@ -37,6 +37,7 @@ async def _signup(client, make_invite, email: str = "new@example.com") -> None:
             "email": email,
             "password": "hunter2hunter2",
             "display_name": "Newcomer",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -174,6 +175,7 @@ async def test_a_failing_provider_does_not_fail_the_signup(client, make_invite):
             "email": "unlucky@example.com",
             "password": "hunter2hunter2",
             "display_name": "Unlucky",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )

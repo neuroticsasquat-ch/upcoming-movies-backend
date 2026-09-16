@@ -125,6 +125,15 @@ services:
       # Email change (NEU-1341), the same short window and for the same reason: spending this
       # link moves the address the account signs in and recovers with.
       EMAIL_CHANGE_TOKEN_TTL_HOURS: "${EMAIL_CHANGE_TOKEN_TTL_HOURS:-1}"
+      # Open signup (D-18, NEU-1343). Cloudflare Turnstile's secret key, and the switch that
+      # puts the invite requirement back. The secret is seeded **empty** on purpose, unlike
+      # every other line here: an unset value refuses signups rather than taking unverified
+      # ones, so the window between this landing and the real key going into the Coolify UI
+      # (spec §7) costs signups instead of quietly admitting scripts. The line is present for
+      # the Coolify gotcha above — a variable absent from the file at first deploy is one
+      # somebody has to add by hand.
+      TURNSTILE_SECRET: "${TURNSTILE_SECRET:-}"
+      SIGNUP_OPEN: "${SIGNUP_OPEN:-true}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

@@ -311,6 +311,28 @@ class Settings(BaseSettings):
     login_lockout_threshold: int = Field(default=5, alias="LOGIN_LOCKOUT_THRESHOLD")
     login_lockout_window_minutes: int = Field(default=15, alias="LOGIN_LOCKOUT_WINDOW_MINUTES")
 
+    # Cloudflare Turnstile's server-side secret (D-18, M1) — the whole of what stops `POST
+    # /auth/signup` being a script's endpoint now that an invite code is no longer required.
+    #
+    # Empty by default, and empty means signup is **refused** rather than unguarded. That is
+    # the opposite of the call `MAIL_PROVIDER` makes above, deliberately: a forgotten mail
+    # provider sends nothing, which is recoverable and loud in the log, while a forgotten
+    # secret that failed open would take real signups from real people the whole time it went
+    # unnoticed — they look exactly like the legitimate ones, and there is no undo. A deploy
+    # that has not set the Coolify variable yet (spec §7) refuses signups for those minutes;
+    # `app/turnstile.py` argues the direction, `deps.get_turnstile` serves the 503.
+    #
+    # `dev-bypass` is the one value that verifies without calling Cloudflare, for local work
+    # and the suite, which have no site key and are forbidden the live network anyway.
+    turnstile_secret: str = Field(default="", alias="TURNSTILE_SECRET")
+    # The rollback switch for open signup (D-18). False does not close signup — it restores
+    # the invite requirement, which is what "rolling back" this change means: the state the
+    # route was in before, with the comped-invite path still working and Turnstile still
+    # verified. Closing signup outright is not offered here, because the failure this exists
+    # to answer is "the open door is being abused", and an admin who can still issue invites
+    # can still let people in while it is shut.
+    signup_open: bool = Field(default=True, alias="SIGNUP_OPEN")
+
     # Transactional mail (D-30, M1). `noop` by default, and the default is the interesting
     # part: every deploy that exists today has no Resend account, so defaulting to `resend`
     # would fail each of their boots the moment this merges, for a capability none of them

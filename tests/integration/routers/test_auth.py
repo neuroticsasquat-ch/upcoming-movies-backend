@@ -4,17 +4,24 @@ Merges tests from tests/test_auth_routes.py and the auth handler tests from
 tests/test_route_handlers.py.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import pytest
 from fastapi import HTTPException, Request, Response
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from upmovies.app.dto import (
     LoginRequest,
     PasswordChangeRequest,
     SignupRequest,
 )
+from upmovies.app.models import Invite, User
 from upmovies.app.services import account_service
+from upmovies.app.turnstile import TurnstileUnavailable
 from upmovies.config import get_settings
+from upmovies.deps import get_turnstile
 from upmovies.mail import MailGateway, NoopTransport
 from upmovies.main import app
 from upmovies.routers import auth as auth_router
@@ -43,6 +50,7 @@ async def test_signup_creates_user_and_sets_cookies(client, make_invite):
             "email": "Alice@example.com",
             "password": "hunter2hunter2",
             "display_name": "Alice",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -66,6 +74,7 @@ async def test_signup_rejects_duplicate_email_case_insensitive(client, make_invi
             "email": "bob@example.com",
             "password": "hunter2hunter2",
             "display_name": "Bob",
+            "turnstile_token": "solved",
             "invite_code": invite1,
         },
     )
@@ -77,6 +86,7 @@ async def test_signup_rejects_duplicate_email_case_insensitive(client, make_invi
                 "email": "BOB@example.com",
                 "password": "hunter2hunter2",
                 "display_name": "Bob2",
+                "turnstile_token": "solved",
                 "invite_code": invite2,
             },
         )
@@ -92,6 +102,7 @@ async def test_signup_rejects_short_password(client):
             "email": "c@example.com",
             "password": "short",
             "display_name": "C",
+            "turnstile_token": "solved",
             "invite_code": "anything",
         },
     )
@@ -106,6 +117,7 @@ async def test_signup_rejects_invalid_email(client):
             "email": "not-an-email",
             "password": "hunter2hunter2",
             "display_name": "X",
+            "turnstile_token": "solved",
             "invite_code": "anything",
         },
     )
@@ -124,6 +136,7 @@ async def test_signup_rejects_a_display_name_carrying_a_newline(client):
             "email": "injected@example.com",
             "password": "hunter2hunter2",
             "display_name": "Ada\n\nYour account is suspended: https://evil.example.com",
+            "turnstile_token": "solved",
             "invite_code": "anything",
         },
     )
@@ -138,6 +151,7 @@ async def test_signup_rejects_invalid_invite(client):
             "email": "noinvite@example.com",
             "password": "hunter2hunter2",
             "display_name": "NoInvite",
+            "turnstile_token": "solved",
             "invite_code": "this-code-does-not-exist",
         },
     )
@@ -154,6 +168,7 @@ async def test_signup_rejects_consumed_invite(client, make_invite):
             "email": "first@example.com",
             "password": "hunter2hunter2",
             "display_name": "First",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -165,6 +180,7 @@ async def test_signup_rejects_consumed_invite(client, make_invite):
                 "email": "second@example.com",
                 "password": "hunter2hunter2",
                 "display_name": "Second",
+                "turnstile_token": "solved",
                 "invite_code": invite,
             },
         )
@@ -181,11 +197,163 @@ async def test_signup_rejects_email_hint_mismatch(client, make_invite):
             "email": "bob@example.com",
             "password": "hunter2hunter2",
             "display_name": "Bob",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
     assert r.status_code == 403
     assert r.json()["detail"] == "invalid_invite"
+
+
+# ---------------------------------------------------------------------------
+# Open signup: Turnstile is the gate, the invite is a comp path (NEU-1343, D-18)
+# ---------------------------------------------------------------------------
+
+
+def _signup_body(email: str = "open@example.com", **overrides) -> dict[str, object]:
+    return {
+        "email": email,
+        "password": "hunter2hunter2",
+        "display_name": "Open",
+        "turnstile_token": "solved",
+        **overrides,
+    }
+
+
+@contextmanager
+def _settings_override(**overrides: object) -> Iterator[None]:
+    """Run the app against a copy of the settings. Both the route and `deps.get_turnstile`
+    read `get_settings`, so one override moves them together."""
+    app.dependency_overrides[get_settings] = lambda: get_settings().model_copy(update=overrides)
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+async def _user_exists(session, email: str) -> bool:
+    rows = await session.execute(select(User).where(User.email == email))
+    return rows.scalar_one_or_none() is not None
+
+
+async def test_signup_succeeds_with_no_invite_at_all(client, session):
+    """The change itself: a solved challenge is the whole of what open signup asks for."""
+    r = await client.post("/auth/signup", json=_signup_body())
+
+    assert r.status_code == 201
+    assert r.json()["email"] == "open@example.com"
+    assert {c.name for c in r.cookies.jar} >= {"upmovies_session", "csrf_token"}
+
+
+async def test_signup_hands_turnstile_the_token_from_the_body(client, turnstile):
+    await client.post("/auth/signup", json=_signup_body(email="scored@example.com"))
+
+    assert turnstile.seen == ["solved"]
+
+
+async def test_a_failed_challenge_is_refused_and_writes_nothing(client, session, turnstile):
+    """403 before the user row, not after: a bot check that ran after the account existed
+    would be a bot check that had already lost."""
+    turnstile.verdict = False
+
+    r = await client.post("/auth/signup", json=_signup_body(email="bot@example.com"))
+
+    assert r.status_code == 403
+    assert r.json()["detail"] == "invalid_turnstile"
+    assert not await _user_exists(session, "bot@example.com")
+
+
+async def test_an_unreachable_turnstile_refuses_the_signup(client, session, turnstile):
+    """No verdict is not a pass (`app/turnstile.py`): an outage at Cloudflare closes the door
+    rather than opening it, and says so with a 503 the caller can retry."""
+    turnstile.failure = TurnstileUnavailable("siteverify is down")
+
+    r = await client.post("/auth/signup", json=_signup_body(email="outage@example.com"))
+
+    assert r.status_code == 503
+    assert r.json()["detail"] == "turnstile_unavailable"
+    assert not await _user_exists(session, "outage@example.com")
+
+
+async def test_signup_is_refused_when_no_turnstile_secret_is_configured(client, session):
+    """An unset `TURNSTILE_SECRET` is an unguarded door, so the route refuses to be one. The
+    autouse stub is dropped here precisely so `deps.get_turnstile` runs for real."""
+    app.dependency_overrides.pop(get_turnstile, None)
+
+    with _settings_override(turnstile_secret=""):
+        r = await client.post("/auth/signup", json=_signup_body(email="ungated@example.com"))
+
+    assert r.status_code == 503
+    assert r.json()["detail"] == "turnstile_unconfigured"
+    assert not await _user_exists(session, "ungated@example.com")
+
+
+async def test_a_supplied_invite_is_still_validated_and_consumed(client, session, make_invite):
+    """The comp path survives the change intact: a code that is offered is spent, in the same
+    transaction as the user it let in."""
+    code = await make_invite()
+
+    r = await client.post(
+        "/auth/signup", json=_signup_body(email="comped@example.com", invite_code=code)
+    )
+
+    assert r.status_code == 201
+    invite = await session.get(Invite, code)
+    assert invite is not None
+    # The route committed through its own session, so the copy this one holds is stale.
+    await session.refresh(invite)
+    assert invite.consumed_at is not None
+    assert invite.consumed_by_user_id is not None
+
+
+async def test_a_bad_invite_still_fails_the_signup_rather_than_being_ignored(client, session):
+    """Someone typing a code in is telling us they were given one. Quietly opening a plain
+    account instead would hide a mistake worth seeing."""
+    r = await client.post(
+        "/auth/signup", json=_signup_body(email="typo@example.com", invite_code="not-a-code")
+    )
+
+    assert r.status_code == 403
+    assert r.json()["detail"] == "invalid_invite"
+    assert not await _user_exists(session, "typo@example.com")
+
+
+async def test_signup_open_false_restores_the_invite_requirement(client, session):
+    """The rollback switch (D-18): off does not close signup, it puts the invite back in
+    front of it."""
+    with _settings_override(signup_open=False):
+        r = await client.post("/auth/signup", json=_signup_body(email="rolled@example.com"))
+
+    assert r.status_code == 403
+    assert r.json()["detail"] == "invalid_invite"
+    assert not await _user_exists(session, "rolled@example.com")
+
+
+async def test_an_invite_still_gets_in_while_signup_is_closed(client, make_invite):
+    """The other half of the switch: an admin who can issue invites can still let people in
+    while the open door is shut."""
+    code = await make_invite()
+
+    with _settings_override(signup_open=False):
+        r = await client.post(
+            "/auth/signup", json=_signup_body(email="still-in@example.com", invite_code=code)
+        )
+
+    assert r.status_code == 201
+
+
+async def test_the_challenge_is_verified_even_while_signup_is_closed(client, turnstile):
+    """Turnstile is not the thing `SIGNUP_OPEN` rolls back — an invite code was never a bot
+    check."""
+    turnstile.verdict = False
+
+    with _settings_override(signup_open=False):
+        r = await client.post(
+            "/auth/signup", json=_signup_body(email="closed-bot@example.com", invite_code="x")
+        )
+
+    assert r.status_code == 403
+    assert r.json()["detail"] == "invalid_turnstile"
 
 
 @pytest.mark.asyncio
@@ -197,6 +365,7 @@ async def test_login_succeeds_with_correct_credentials(client, make_invite):
             "email": "lo@example.com",
             "password": "hunter2hunter2",
             "display_name": "Lo",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -222,6 +391,7 @@ async def test_login_rejects_wrong_password(client, make_invite):
             "email": "wp@example.com",
             "password": "hunter2hunter2",
             "display_name": "WP",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -253,6 +423,7 @@ async def test_logout_clears_cookies_and_invalidates_session(client, make_invite
             "email": "out@example.com",
             "password": "hunter2hunter2",
             "display_name": "Out",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -272,6 +443,7 @@ async def test_logout_requires_csrf(client, make_invite):
             "email": "cs@example.com",
             "password": "hunter2hunter2",
             "display_name": "CS",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -288,6 +460,7 @@ async def test_change_password_requires_correct_current_password(client, make_in
             "email": "pc@example.com",
             "password": "hunter2hunter2",
             "display_name": "PC",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -309,6 +482,7 @@ async def test_change_password_rotates_session(client, make_invite):
             "email": "rot@example.com",
             "password": "hunter2hunter2",
             "display_name": "Rot",
+            "turnstile_token": "solved",
             "invite_code": invite,
         },
     )
@@ -358,7 +532,7 @@ def _request(*, cookies: dict[str, str] | None = None) -> Request:
 
 
 @pytest.mark.asyncio
-async def test_signup_route_returns_authed_user_and_sets_cookies(session, make_invite):
+async def test_signup_route_returns_authed_user_and_sets_cookies(session, make_invite, turnstile):
     invite = await make_invite()
     request = _request()
     response = Response()
@@ -367,10 +541,12 @@ async def test_signup_route_returns_authed_user_and_sets_cookies(session, make_i
         email="signup@example.com",
         password="hunter2hunter2",
         display_name="Sign",
+        turnstile_token="solved",
         invite_code=invite,
     )
-    # Called directly rather than through the app, so the `get_mailer` dependency is never
-    # resolved and the mailer has to be handed over by name (NEU-1339).
+    # Called directly rather than through the app, so neither `get_mailer` nor
+    # `get_turnstile` is resolved and both have to be handed over by name (NEU-1339,
+    # NEU-1343).
     result = await auth_router.signup(
         payload,
         request,
@@ -378,6 +554,7 @@ async def test_signup_route_returns_authed_user_and_sets_cookies(session, make_i
         db=session,
         settings=settings,
         mailer=MailGateway(settings, transport=NoopTransport()),
+        verifier=turnstile,
     )
     assert result.email == "signup@example.com"
     assert result.csrf_token
@@ -387,7 +564,9 @@ async def test_signup_route_returns_authed_user_and_sets_cookies(session, make_i
 
 
 @pytest.mark.asyncio
-async def test_signup_route_raises_409_on_duplicate_email(session, make_user, make_invite):
+async def test_signup_route_raises_409_on_duplicate_email(
+    session, make_user, make_invite, turnstile
+):
     await make_user(email="dup@example.com")
     invite = await make_invite()
     request = _request()
@@ -397,10 +576,13 @@ async def test_signup_route_raises_409_on_duplicate_email(session, make_user, ma
         email="dup@example.com",
         password="hunter2hunter2",
         display_name="Dup",
+        turnstile_token="solved",
         invite_code=invite,
     )
     with pytest.raises(HTTPException) as ei:
-        await auth_router.signup(payload, request, response, db=session, settings=settings)
+        await auth_router.signup(
+            payload, request, response, db=session, settings=settings, verifier=turnstile
+        )
     assert ei.value.status_code == 409
     assert ei.value.detail == "email_in_use"
 
