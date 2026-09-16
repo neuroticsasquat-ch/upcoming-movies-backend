@@ -35,6 +35,7 @@ up edits; changes to `pyproject.toml` require `task build`.
 | Lint / format / typecheck | `task lint` / `task format` / `task typecheck` |
 | Coverage (HTML in `./htmlcov`) | `task coverage` |
 | Migrate / new migration | `task migrate` / `task makemigration -- "message"` |
+| Release notes for a tag (host) | `task release-notes -- v0.4.1` |
 | Create local DBs | `task db:init` |
 | Refresh local content from prod | `task db:refresh` |
 
@@ -99,7 +100,15 @@ models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
 
 - Type hints use `X | None` / `X | Y` — no `Optional`/`Union`, no `from __future__ import annotations`.
 - Ruff: line length 100, rules `E,F,W,I,B,UP`. Use `import x as x` re-exports in `__init__.py`.
-- Commits and PR titles: Conventional Commits with a trailing Linear ID — `feat: add X (NEU-123)`.
+- Commits and PR titles: Conventional Commits with a **scope** and a trailing Linear ID —
+  `feat(auth): add X (NEU-123)`. The scope is the component (`auth`, `mail`, `retrieval`, `feed`,
+  …), not the Linear project, and it is load-bearing rather than decorative: `cliff.toml` groups
+  `RELEASE_NOTES.md` by scope, so a scopeless commit lands under a catch-all "General" heading.
   Branch per ticket using Linear's generated name.
+- Release notes: tag the release, then `task release-notes -- v0.4.1`. git-cliff renders only
+  user-facing types (`feat`/`fix`/`perf`/`revert`) and **prepends** the new section —
+  `RELEASE_NOTES.md` accumulates per-release chunks and is never rebuilt wholesale. This is the
+  one task that runs on the host rather than in the container, because git-cliff reads git
+  history and tags; don't call `git-cliff` directly.
 - The frontend is a sibling repo at `../frontend`; read its `AGENTS.md` before
   touching it.

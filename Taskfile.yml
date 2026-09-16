@@ -86,3 +86,49 @@ tasks:
     desc: 'Run pytest with coverage (HTML report in ./htmlcov)'
     cmds:
       - "{{.EXEC}} pytest --cov=src/upmovies --cov-report=term-missing --cov-report=html {{.CLI_ARGS}}"
+
+  release-notes:
+    desc: 'Prepend a tag''s notes to RELEASE_NOTES.md (task release-notes -- v0.4.1)'
+    silent: true
+    # Runs on the HOST, deliberately breaking this file's otherwise universal
+    # "everything goes through the container" rule: git-cliff reads git history and
+    # tags, and neither the binary nor a usable .git lives in the image.
+    cmds:
+      - |
+        set -eu
+        tag="{{.CLI_ARGS}}"
+        if [ -z "$tag" ]; then
+          echo "usage: task release-notes -- vX.Y.Z" >&2
+          exit 1
+        fi
+        # Tags first, always. git-cliff renders a tag it cannot see as "## Unreleased"
+        # rather than failing, and that heading then sticks in the committed file.
+        git fetch --tags --force --quiet
+        if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+          echo "no such tag: $tag — tag the release before writing its notes" >&2
+          exit 1
+        fi
+        version="${tag#v}"
+        if grep -qF "## $version — " RELEASE_NOTES.md 2>/dev/null; then
+          echo "RELEASE_NOTES.md already has a section for $version; nothing to do" >&2
+          exit 0
+        fi
+        prev="$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)"
+        if [ -n "$prev" ]; then range="$prev..$tag"; else range="$tag"; fi
+        section="$(git-cliff --config cliff.toml --strip all "$range")"
+        if [ -z "$section" ]; then
+          echo "git-cliff produced nothing for $range (no user-facing commits?)" >&2
+          exit 1
+        fi
+        # Prepend, never rebuild: RELEASE_NOTES.md is an accumulation of per-release
+        # chunks, and older sections were written against older cliff.toml settings.
+        tmp="$(mktemp)"
+        {
+          echo "# Release notes"
+          echo
+          echo "$section"
+          echo
+          tail -n +2 RELEASE_NOTES.md | sed '/./,$!d'
+        } > "$tmp"
+        mv "$tmp" RELEASE_NOTES.md
+        echo "Prepended $version to RELEASE_NOTES.md"
