@@ -120,7 +120,15 @@ class EmailToken(Base):
     column means "no longer spendable, and here is when it stopped being so" rather than
     strictly "someone clicked this"; for `purpose='reset'` rows the two are not the same
     question. Nothing reads it to answer either one — `InvalidToken` is deliberately one error
-    for every cause — so this costs forensic precision and no behaviour."""
+    for every cause — so this costs forensic precision and no behaviour.
+
+    `new_email` is the one column that is not shared: it carries the address an email-change
+    token moves the account *to*, and is NULL for the other two purposes. A nullable column on
+    the shared table rather than a table of its own, because the flow is the third of the three
+    this table was built for and differs from its siblings only in what consuming the token
+    does. It is deliberately not a CHECK constraint keyed on `purpose` — that would spell a
+    purpose string into DDL, where changing it costs a migration — so `email_change_service` is
+    the one writer that sets it and the one reader that requires it."""
 
     __tablename__ = "email_token"
     __table_args__ = (
@@ -133,6 +141,9 @@ class EmailToken(Base):
         PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
     )
     purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    # CITEXT to match `app.user.email`, so the uniqueness question this address is put to at
+    # confirm time is asked in the same case-insensitive terms the constraint answers in.
+    new_email: Mapped[str | None] = mapped_column(CITEXT(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

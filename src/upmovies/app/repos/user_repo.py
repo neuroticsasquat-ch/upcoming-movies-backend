@@ -44,3 +44,14 @@ async def update_password_hash(db: AsyncSession, user: User, new_hash: str) -> N
 async def mark_email_verified(db: AsyncSession, user: User, *, verified_at: datetime) -> None:
     """Stamp the address as confirmed on the loaded model. Caller commits."""
     user.email_verified_at = verified_at
+
+
+async def update_email(db: AsyncSession, user: User, *, email: str, verified_at: datetime) -> None:
+    """Move the account to `email` and stamp it confirmed, on the loaded model. Caller commits.
+
+    The two writes are one call because there is no case for either alone: the only way an
+    address changes is by the new one proving control of itself, so a changed address is a
+    verified address by construction. Splitting them would make "set the email without
+    verifying it" expressible, and the M1 contract has no such state."""
+    user.email = email
+    user.email_verified_at = verified_at

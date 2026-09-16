@@ -335,7 +335,10 @@ Absorbs *bl: Transactional Email* and *bl: Open Signup & Abuse Controls*. Nothin
   `app/entitlements.py` with `is_entitled(user)` and the `require_entitled()` dependency;
   `/admin/users` list + grant/revoke routes behind `require_current_admin`. The seam must land in
   M1 because M3 and M7 tickets cite it; it gates nothing until those tickets apply it.
-- Frontend: `/verify`, `/reset`, `/forgot` routes; `AuthContext.user.email_verified` and
+- Frontend: `/verify`, `/reset`, `/forgot`, `/email-change` routes; the last one lands the
+  confirmation link `POST /auth/email-change/request` mails to the new address and posts its
+  token to `POST /auth/email-change/confirm` (NEU-1341);
+  `AuthContext.user.email_verified` and
   `AuthContext.user.entitled` booleans; `/admin/users` grant page.
 
 ### M2 — Claim ledger and the event/state split
