@@ -15,6 +15,7 @@ from upmovies.app.dto import (
 )
 from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite, InvalidToken
 from upmovies.app.models import User
+from upmovies.app.rate_limit import rate_limit
 from upmovies.app.services import (
     account_service,
     email_change_service,
@@ -78,7 +79,12 @@ def _clear_auth_cookies(response: Response, settings: Settings) -> None:
         )
 
 
-@router.post("/signup", status_code=status.HTTP_201_CREATED, response_model=AuthedUserOut)
+@router.post(
+    "/signup",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AuthedUserOut,
+    dependencies=[Depends(rate_limit("signup"))],
+)
 async def signup(
     payload: SignupRequest,
     request: Request,
@@ -141,7 +147,11 @@ async def signup(
     )
 
 
-@router.post("/login", response_model=AuthedUserOut)
+@router.post(
+    "/login",
+    response_model=AuthedUserOut,
+    dependencies=[Depends(rate_limit("login"))],
+)
 async def login(
     payload: LoginRequest,
     request: Request,
@@ -234,7 +244,11 @@ async def change_password(
     )
 
 
-@router.post("/verify/request", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/verify/request",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("auth_request"))],
+)
 async def request_verification(
     payload: VerificationRequest,
     db: AsyncSession = Depends(get_session),
@@ -246,8 +260,9 @@ async def request_verification(
     Always 202, whether the address is unknown, already verified, or was just mailed: the
     route takes a bare email address and needs no session, so a response that varied would
     tell an anonymous caller which addresses have accounts. One address, one route, one
-    outcome — which is also the shape the M1 rate limiter buckets (its own ticket; this route
-    does no throttling of its own yet)."""
+    outcome — which is also the shape the `auth_request` bucket meters it as (NEU-1344):
+    the route puts mail in somebody else's inbox, so the limit is a bound on how much of it
+    an anonymous caller can make this service send."""
     await verification_service.request(
         db, email=str(payload.email), mailer=mailer, settings=settings
     )
@@ -279,7 +294,11 @@ async def verify_email(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/reset/request", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/reset/request",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("auth_request"))],
+)
 async def request_password_reset(
     payload: PasswordResetRequest,
     db: AsyncSession = Depends(get_session),
@@ -292,8 +311,8 @@ async def request_password_reset(
     the sibling `/verify/request` reasoning applies with more force here, because this is the
     route someone probes when they want to know which of a list of addresses is worth
     attacking. That includes provider failures: reporting one would report that there was
-    something to send. Throttling is the M1 rate limiter's job (D-19, its own ticket); this
-    route does none of its own yet."""
+    something to send. Throttling is the `auth_request` bucket's job (D-19, NEU-1344),
+    which this route shares with its two siblings."""
     await reset_service.request(db, email=str(payload.email), mailer=mailer, settings=settings)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
@@ -333,7 +352,7 @@ async def reset_password(
 @router.post(
     "/email-change/request",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(rate_limit("auth_request"))],
 )
 async def request_email_change(
     payload: EmailChangeRequest,

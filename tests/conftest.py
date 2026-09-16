@@ -2,6 +2,13 @@ import os
 
 os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 os.environ.pop("COOKIE_DOMAIN", None)
+# The rate limiter is off for the suite as a whole (NEU-1344). Every route test shares one
+# client address, so with it on the fifth signup in the suite would 429 whichever test happened
+# to run fifth — the limiter would be measuring pytest, not the route. `RATE_LIMIT_ENABLED` is
+# the documented switch for exactly this. The tests that exercise the limiter turn it back on
+# by overriding `get_settings` with their own `Settings`, in
+# `tests/integration/routers/test_rate_limit.py`.
+os.environ["RATE_LIMIT_ENABLED"] = "false"
 
 pytest_plugins = [
     "tests.fixtures.users",

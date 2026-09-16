@@ -9,6 +9,11 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.rate_limit import (
+    RateLimited,
+    rate_limited_handler,
+    validate_rate_limit_configuration,
+)
 from upmovies.config import get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.runs import mark_stale_runs_cancelled
@@ -57,6 +62,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # mail credential discovered mid-signup loses it *after* the user row is committed and
     # before the verification mail exists — a state the account flow cannot retry out of.
     validate_mail_configuration(settings)
+    # And the buckets (NEU-1344, D-19). Cheapest of the three — it parses six strings and
+    # reaches nothing — but the same argument: a malformed limit is either no limit at all or
+    # a route that refuses everybody, and neither is a thing to discover from traffic.
+    validate_rate_limit_configuration(settings)
     async with SessionLocal() as session:
         await run_startup_cleanup(session, stale_after_minutes=settings.ingest_stale_run_minutes)
         await session.commit()
@@ -87,6 +96,10 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token"],
     )
+    # The 429 the rate-limit dependency raises. A handler rather than an `HTTPException`
+    # because the body carries the bucket and the wait alongside the detail string, and
+    # FastAPI's own handler renders only `{"detail": ...}` (`app/rate_limit.py`).
+    app.add_exception_handler(RateLimited, rate_limited_handler)
     app.include_router(health.router)
     app.include_router(ingest_admin.router)
     app.include_router(admin_runs.router)

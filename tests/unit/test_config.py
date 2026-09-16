@@ -508,6 +508,17 @@ _PINNED_PROD_FALLBACKS = (
     # a fallback left at `noop` is a production that goes on sending nothing while the deploy
     # reports success.
     ("MAIL_PROVIDER", "mail_provider"),
+    # The rate-limit buckets (NEU-1344), for the same reason: a bucket is only as good as the
+    # value production actually boots with, and a fallback left behind here wins over the code
+    # silently. Only the string buckets are pinned — `RATE_LIMIT_ENABLED` and
+    # `RATE_LIMIT_PUBLIC_ENABLED` are bools, and the comparison below reads the compose value
+    # through the field's own type, where `bool("false")` is True.
+    ("RATE_LIMIT_SIGNUP", "rate_limit_signup"),
+    ("RATE_LIMIT_LOGIN", "rate_limit_login"),
+    ("RATE_LIMIT_AUTH_REQUEST", "rate_limit_auth_request"),
+    ("RATE_LIMIT_IMPORT", "rate_limit_import"),
+    ("RATE_LIMIT_PUBLIC", "rate_limit_public"),
+    ("RATE_LIMIT_ICS", "rate_limit_ics"),
 )
 
 

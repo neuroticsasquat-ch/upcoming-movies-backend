@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.rate_limit import rate_limit
 from upmovies.config import get_settings
 from upmovies.deps import get_session
 from upmovies.public import service
@@ -15,8 +16,14 @@ from upmovies.public.sitemap import render_sitemap
 
 router = APIRouter(tags=["public"])
 
+# Every read the anonymous site makes shares one bucket (spec §2). `/sitemap.xml` is
+# deliberately not in it: it is fetched by crawlers, cached upstream, and metering it would
+# throttle indexing rather than abuse. The bucket is inert until `RATE_LIMIT_PUBLIC_ENABLED`
+# is set — see `app/rate_limit.py` for why it ships off.
+_public_limit = Depends(rate_limit("public"))
 
-@router.get("/films/search", response_model=FilmIndexResponse)
+
+@router.get("/films/search", response_model=FilmIndexResponse, dependencies=[_public_limit])
 async def search_films(
     q: str = Query(..., max_length=200),
     limit: int = Query(default=20, ge=1, le=100),
@@ -36,7 +43,7 @@ async def search_films(
     return await service.get_film_search(session, q=q, limit=limit, offset=offset)
 
 
-@router.get("/films/{ref}", response_model=FilmDetailResponse)
+@router.get("/films/{ref}", response_model=FilmDetailResponse, dependencies=[_public_limit])
 async def get_film(
     ref: str,
     session: AsyncSession = Depends(get_session),
@@ -50,7 +57,7 @@ async def get_film(
     return film
 
 
-@router.get("/feed", response_model=FeedResponse)
+@router.get("/feed", response_model=FeedResponse, dependencies=[_public_limit])
 async def get_feed(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -59,7 +66,7 @@ async def get_feed(
     return await service.get_feed(session, limit=limit, offset=offset)
 
 
-@router.get("/feed/grouped", response_model=FeedDayResponse)
+@router.get("/feed/grouped", response_model=FeedDayResponse, dependencies=[_public_limit])
 async def get_grouped_feed(
     # limit/offset count distinct days (newest first), not film rows.
     limit: int = Query(default=10, ge=1, le=100),
@@ -69,7 +76,7 @@ async def get_grouped_feed(
     return await service.get_feed_grouped(session, limit=limit, offset=offset)
 
 
-@router.get("/calendar", response_model=CalendarResponse)
+@router.get("/calendar", response_model=CalendarResponse, dependencies=[_public_limit])
 async def get_calendar(
     # limit/offset count distinct release dates (soonest first), not film rows.
     limit: int = Query(default=20, ge=1, le=200),

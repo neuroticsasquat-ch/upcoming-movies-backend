@@ -134,6 +134,30 @@ services:
       # somebody has to add by hand.
       TURNSTILE_SECRET: "${TURNSTILE_SECRET:-}"
       SIGNUP_OPEN: "${SIGNUP_OPEN:-true}"
+      # Per-IP rate limiting (D-19, NEU-1344). Every bucket is listed even though the code
+      # carries the same defaults, for the Coolify gotcha above: a variable absent at first
+      # deploy is one somebody has to add by hand later, and two of these are the knobs an
+      # incident is answered with. The strings are `"<capacity>/<refill_per_minute>"`; a
+      # malformed one fails the container at boot rather than the route at its first caller.
+      RATE_LIMIT_ENABLED: "${RATE_LIMIT_ENABLED:-true}"
+      # **Ships false, and this is the rollout order** (spec §5): deploy this, then set
+      # SSR_ORIGIN_SECRET here and as a Wrangler secret and deploy the frontend sibling
+      # (NEU-1389), and only then flip this to true in the Coolify UI and restart. Flipped
+      # before the Worker signs its requests, it throttles the entire server-rendered site
+      # through a handful of Cloudflare egress IPs.
+      RATE_LIMIT_PUBLIC_ENABLED: "${RATE_LIMIT_PUBLIC_ENABLED:-false}"
+      RATE_LIMIT_SIGNUP: "${RATE_LIMIT_SIGNUP:-5/0.083}"
+      RATE_LIMIT_LOGIN: "${RATE_LIMIT_LOGIN:-20/1.33}"
+      RATE_LIMIT_AUTH_REQUEST: "${RATE_LIMIT_AUTH_REQUEST:-5/0.083}"
+      RATE_LIMIT_IMPORT: "${RATE_LIMIT_IMPORT:-6/0.1}"
+      RATE_LIMIT_PUBLIC: "${RATE_LIMIT_PUBLIC:-240/120}"
+      RATE_LIMIT_ICS: "${RATE_LIMIT_ICS:-30/30}"
+      # The secret the SSR Worker signs its API calls with, so it can name the visitor it is
+      # rendering for instead of being metered as one caller. Seeded **empty**, like
+      # TURNSTILE_SECRET above: unset means the signature header is ignored, never that a
+      # signed request is refused, so this deploying ahead of the Worker costs nothing. Must
+      # match the Wrangler secret of the same name exactly.
+      SSR_ORIGIN_SECRET: "${SSR_ORIGIN_SECRET:-}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

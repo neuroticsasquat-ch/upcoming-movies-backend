@@ -50,11 +50,13 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
 
 - **`upmovies.main:app`** — the HTTP service. `create_app()` mounts routers; `lifespan` calls
   `validate_stage_configuration(settings)` (a stage routed at an unpriced/uncredentialed
-  `(provider, model)` kills the container at boot, not mid-publish) and
-  `validate_mail_configuration(settings)`, cancels runs orphaned by a crash, and opens the one
-  process-wide `MailGateway` that `deps.get_mailer` hands to routes.
+  `(provider, model)` kills the container at boot, not mid-publish),
+  `validate_mail_configuration(settings)` and `validate_rate_limit_configuration(settings)`,
+  cancels runs orphaned by a crash, and opens the one process-wide `MailGateway` that
+  `deps.get_mailer` hands to routes.
 - **`python -m upmovies.pipeline_run {daily|hourly|sweep}`** — the Coolify scheduled tasks, a
-  *separate process* that re-runs the same startup validation. `daily` = tmdb → feeds(per-film) →
+  *separate process* that re-runs the stage and mail validation (not the rate-limit one — it
+  serves no HTTP). `daily` = tmdb → feeds(per-film) →
   link → synthesize, sequential and fail-fast; `hourly` = light feeds pass; `sweep` runs on its own
   slot ~2h ahead of daily and is deliberately **not** in the daily chain (ADR-0013). Each pings a
   healthchecks.io deadman (`/start`, base, `/fail`).
@@ -81,6 +83,10 @@ models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
 - **LLM gateway** resolves a provider per *stage* (link, cluster, summarize, source_judge), never per
   model, and **never falls back** — answering one stage from another provider would misattribute cost
   and latency.
+- **Rate limiting** is one dependency, `Depends(rate_limit("<bucket>"))` (`app/rate_limit.py`):
+  per-IP token buckets, in-process, keyed on `request.client.host` — which is the real caller only
+  because both CMDs pass `--proxy-headers`. A request signed with `SSR_ORIGIN_SECRET` names its
+  visitor instead. `RATE_LIMIT_ENABLED=false` bypasses everything, which is how the suite runs.
 - **Admin auth is two things:** `require_admin` (bearer `ADMIN_TOKEN`, machine-facing) vs
   `require_current_admin` (session cookie + `is_admin`, human-facing UI). `require_csrf` guards
   cookie-authed mutations.
