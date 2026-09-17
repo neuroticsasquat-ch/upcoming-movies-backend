@@ -117,17 +117,28 @@ class ReleaseDateOut(BaseModel):
 
 
 class CollectionOut(BaseModel):
+    # TMDB collection id, which is the `franchise` entity id in the follow graph (D-10).
+    id: int
     name: str
     poster_path: str | None = None
 
 
+class CompanyOut(BaseModel):
+    # TMDB company id, the `company` entity id in the follow graph (D-10).
+    id: int
+    name: str
+
+
 class CastMemberOut(BaseModel):
+    # TMDB person id (= `catalog.person`'s PK), the `person` entity id (D-10).
+    person_id: int
     name: str
     character: str | None
     profile_path: str | None
 
 
 class CrewMemberOut(BaseModel):
+    person_id: int  # see CastMemberOut.person_id
     name: str
     job: str | None
     department: str | None
@@ -142,6 +153,10 @@ class DayGroup(BaseModel):
 
 class FilmDetailResponse(BaseModel):
     ref: str
+    # `catalog.film`'s UUID — the id `/me/watchlist` takes and the `title` entity id the follow
+    # graph keys on (D-10). Opaque, and every route that accepts it is behind cookie auth, CSRF
+    # and `require_entitled()`, so exposing it on this public endpoint grants nothing.
+    id: UUID
     title: str
     tmdb_id: int
     imdb_id: str | None = None
@@ -163,6 +178,10 @@ class FilmDetailResponse(BaseModel):
     # its spec sheet; it reads directors from `crew` instead, so no `directors` field here.
     production_countries: list[str] = []
     production_companies: list[str] = []
+    # The same companies as `production_companies`, carrying the id a `company` follow needs.
+    # A new field beside the names rather than a widening of them, so that the frontend and this
+    # service deploy independently in either order with no flag day.
+    companies: list[CompanyOut] = []
     collection: CollectionOut | None = None
     alternative_titles: list[str] = []
     cast: list[CastMemberOut] = []
