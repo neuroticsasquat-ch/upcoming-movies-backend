@@ -278,3 +278,74 @@ class TMDBAccountMoviesResponse(TMDBDiscoverResponse):
     because these two endpoints are the only ones here that answer for a *person* rather than
     for the catalog, and a caller reading a discover response back from them would have to
     check which."""
+
+
+# `/search/person` — the first half of the D-21 candidate union. A hit carries the person
+# fields `catalog.person` stores plus the two the deterministic scorer reads directly:
+# `known_for_department` (department vs the role the article gives them) and `popularity`
+# (tiebreak only). `known_for` supplies the filmography-overlap feature without a second
+# request per candidate, which for a ten-candidate shortlist is ten requests saved.
+
+
+class TMDBKnownForTitle(BaseModel):
+    """One entry in a person search hit's `known_for` list.
+
+    TMDB mixes films and television here and names them differently — a film has
+    `title`/`original_title`, a show has `name`/`original_name` — so both pairs are modelled
+    and `display_title` picks whichever the entry carries. Parsing TV entries as movies would
+    fail validation on the missing `title` and lose the whole hit, and dropping them would
+    hide an overlap the article may well be naming."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    media_type: str | None = None
+    title: str | None = None
+    name: str | None = None
+    original_title: str | None = None
+    original_name: str | None = None
+
+    @property
+    def display_title(self) -> str | None:
+        """The entry's title in its own language-neutral field, film or show."""
+        return self.title or self.name
+
+    @property
+    def display_original_title(self) -> str | None:
+        """The entry's original-language title, which is how a non-English production is
+        named in a trade story that does not use its English release title."""
+        return self.original_title or self.original_name
+
+
+class TMDBPersonSearchHit(BaseModel):
+    """A person as `/search/person` returns them (D-21).
+
+    The person fields are the same set `catalog.person` holds, which is what lets an accepted
+    hit go through `ingest.tmdb.upsert.upsert_people` unchanged rather than through a second
+    write that would have to be kept agreeing with it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    original_name: str | None = None
+    profile_path: str | None = None
+    known_for_department: str | None = None
+    gender: int | None = None
+    popularity: float | None = None
+    known_for: list[TMDBKnownForTitle] = Field(default_factory=list)
+
+
+class TMDBPersonSearchResponse(BaseModel):
+    """The paged envelope returned by `/search/person`.
+
+    The same four envelope fields as `TMDBDiscoverResponse` but not a subclass of it: the
+    results are people, and narrowing an inherited `list[TMDBMovieSummary]` to a different
+    type is the one thing a subclass cannot honestly do."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    page: int
+    results: list[TMDBPersonSearchHit] = Field(default_factory=list)
+    total_pages: int
+    total_results: int
