@@ -179,9 +179,11 @@ async def test_gather_candidates_unions_all_three_sources(session):
     _search("Chris Evans", [make_person_search_hit(12), make_person_search_hit(10)])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Chris Evans", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Chris Evans", now=NOW
+            )
+        ).candidates
 
     assert [c.person_id for c in candidates] == [10, 11, 12]
     credited, changed, searched = candidates
@@ -209,9 +211,11 @@ async def test_gather_candidates_caps_the_union_anchored_first(session):
     _search("Somebody", [make_person_search_hit(i) for i in range(200, 220)])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Somebody", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Somebody", now=NOW
+            )
+        ).candidates
 
     assert len(candidates) == 10
     assert [c.person_id for c in candidates[:6]] == list(range(10, 16))
@@ -225,9 +229,11 @@ async def test_gather_candidates_on_a_film_with_no_credits_is_search_only(sessio
     _search("Nobody Known", [make_person_search_hit(30)])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Nobody Known", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Nobody Known", now=NOW
+            )
+        ).candidates
 
     assert [(c.person_id, c.anchored) for c in candidates] == [(30, False)]
 
@@ -239,9 +245,11 @@ async def test_gather_candidates_with_no_search_hits_keeps_the_film_anchored_one
     _search("Unfindable", [])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Unfindable", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Unfindable", now=NOW
+            )
+        ).candidates
 
     assert [(c.person_id, c.from_search, c.credited) for c in candidates] == [(10, False, True)]
 
@@ -256,9 +264,11 @@ async def test_a_non_seed_grade_credit_flags_a_search_hit_but_claims_no_place(se
     _search("Ludwig Goransson", [make_person_search_hit(40)])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Ludwig Goransson", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Ludwig Goransson", now=NOW
+            )
+        ).candidates
 
     assert [c.person_id for c in candidates] == [40]
     assert (candidates[0].credited, candidates[0].from_search) == (True, True)
@@ -274,9 +284,11 @@ async def test_a_non_seed_grade_credit_alone_is_not_a_candidate(session):
     _search("Somebody Else", [])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Somebody Else", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Somebody Else", now=NOW
+            )
+        ).candidates
 
     assert [c.person_id for c in candidates] == [43]
 
@@ -293,8 +305,10 @@ async def test_anchored_tier_orders_by_strongest_attachment(session):
     _search("Anyone", [])
 
     async with _client() as client:
-        candidates = await gather_candidates(
-            session, client, film_id=film.id, name_as_written="Anyone", now=NOW
-        )
+        candidates = (
+            await gather_candidates(
+                session, client, film_id=film.id, name_as_written="Anyone", now=NOW
+            )
+        ).candidates
 
     assert [c.person_id for c in candidates] == [52, 51, 50, 53]

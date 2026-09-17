@@ -1,6 +1,7 @@
 from upmovies.link.resolve.candidates import CANDIDATE_CAP as CANDIDATE_CAP
 from upmovies.link.resolve.candidates import CHANGE_STREAM_WINDOW_DAYS as CHANGE_STREAM_WINDOW_DAYS
 from upmovies.link.resolve.candidates import Candidate as Candidate
+from upmovies.link.resolve.candidates import CandidateSet as CandidateSet
 from upmovies.link.resolve.candidates import CatalogPerson as CatalogPerson
 from upmovies.link.resolve.candidates import ChangeFact as ChangeFact
 from upmovies.link.resolve.candidates import CreditFact as CreditFact

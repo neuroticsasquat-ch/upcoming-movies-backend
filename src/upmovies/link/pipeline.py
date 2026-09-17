@@ -21,6 +21,7 @@ from upmovies.ingest.runs import (
     record_progress,
     total_failure_error,
 )
+from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import (
     StoryCandidates,
@@ -28,6 +29,12 @@ from upmovies.link.linker import (
     reject_zero_candidate_stories,
     story_dek,
 )
+from upmovies.link.resolve.pipeline import (
+    DEFAULT_MENTIONS_PER_RUN,
+    ResolutionResult,
+    run_resolution,
+)
+from upmovies.link.resolve.scoring import Thresholds
 from upmovies.link.retrieval.health import (
     MAX_ZERO_CANDIDATE_RATE,
     MIN_STORIES_FOR_BREACH,
@@ -296,6 +303,9 @@ async def run_link_ingest(
     retrieval_max_zero_candidate_rate: float = MAX_ZERO_CANDIDATE_RATE,
     retrieval_health_min_stories: int = MIN_STORIES_FOR_BREACH,
     retrieval_saturation_warn_rate: float = SATURATION_WARN_RATE,
+    tmdb_client: TMDBClient | None = None,
+    resolve_thresholds: Thresholds | None = None,
+    resolve_mentions_per_run: int = DEFAULT_MENTIONS_PER_RUN,
 ) -> LinkIngestResult:
     run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
@@ -441,6 +451,22 @@ async def run_link_ingest(
         )
         await s.commit()
 
+    # --- Stage 3: resolve the person mentions clustering just extracted (D-21) ---
+    # Inside the link run rather than beside it: the mentions are written by the stage above,
+    # so the ordering is a data dependency and not a scheduling choice, and a `resolve` run
+    # kind would put a second row on `/admin/runs` for one pass of one daily stage. Skipped
+    # entirely without a TMDB client — every caller that resolves passes one, and the ones
+    # that exercise the LLM stages alone are not made to open a client they never call.
+    resolution = ResolutionResult()
+    if tmdb_client is not None:
+        resolution = await run_resolution(
+            session_factory=session_factory,
+            client=tmdb_client,
+            run_id=run_id,
+            thresholds=resolve_thresholds,
+            limit=resolve_mentions_per_run,
+        )
+
     # Two independent guards, joined only here. `total_failure_error` watches model
     # availability on its narrow "produced nothing at all" rule; the breach watches the rate
     # at which retrieval disposes of stories no model ever sees (ADR-0010). A run can trip
@@ -469,6 +495,7 @@ async def run_link_ingest(
                         f"linked {linked}, rejected {rejected}",
                         f"{events_created} events from {stories_clustered} stories "
                         f"({stories_rejected} stale-stage rejected)",
+                        resolution.detail(),
                         saturation_note,
                     ),
                 )

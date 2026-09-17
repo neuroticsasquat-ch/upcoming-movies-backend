@@ -264,6 +264,26 @@ class Settings(BaseSettings):
     link_retrieval_saturation_warn_rate: float = Field(
         default=0.05, ge=0.0, le=1.0, alias="LINK_RETRIEVAL_SATURATION_WARN_RATE"
     )
+    # Person resolution (D-21, M4). Thresholds rather than constants because M4 ships before
+    # there is a corpus of resolved mentions to tune them against, and the first weeks of
+    # `/admin/resolution` are what will say whether the band is too wide or too narrow —
+    # an answer that should reach production from env rather than from a deploy.
+    #
+    # They mirror `link.resolve.scoring`'s own module defaults, which carry the derivation;
+    # `config` cannot import them (that module reads none of this, but the pair is pinned by
+    # a test either way, the same arrangement the retrieval settings use).
+    resolve_accept_floor: float = Field(default=0.5, ge=0.0, le=1.0, alias="RESOLVE_ACCEPT_FLOOR")
+    resolve_accept_margin: float = Field(
+        default=0.12, ge=0.0, le=1.0, alias="RESOLVE_ACCEPT_MARGIN"
+    )
+    # One `/search/person` request per uncached mention, so this is a request budget as much
+    # as a work limit: the first run after deploy faces every mention clustering has ever
+    # extracted. The remainder is the next run's backlog, not a loss.
+    resolve_mentions_per_run: int = Field(default=500, ge=0, alias="RESOLVE_MENTIONS_PER_RUN")
+    # The kill switch. Resolution is the one part of the link stage that talks to TMDB, so an
+    # outage there is answered by turning it off for a day rather than by letting the pass
+    # burn its budget on retries — the mentions keep until it is back on.
+    resolve_enabled: bool = Field(default=True, alias="RESOLVE_ENABLED")
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
     source_judge_provider: Provider = Field(default="anthropic", alias="SOURCE_JUDGE_PROVIDER")

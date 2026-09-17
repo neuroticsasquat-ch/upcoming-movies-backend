@@ -112,6 +112,28 @@ class CatalogPerson:
 
 
 @dataclass(frozen=True)
+class CandidateSet:
+    """What one gather produced: the capped candidate list, and the raw `/search/person`
+    hits behind it.
+
+    The hits are kept alongside rather than discarded because two things downstream need
+    them and neither can recover them from the candidates. The scorer's `not_in_tmdb` route
+    (INV-8) turns on the search having returned *nothing*, which the list cannot say — an
+    empty list is equally a film with no credits and a name nobody holds, and a full one may
+    have evicted every hit at the cap. And accepting a candidate TMDB found but the catalog
+    has never held means writing `catalog.person` first, which `ingest.tmdb.upsert.
+    upsert_people` does from the hit itself rather than from the seven fields a `Candidate`
+    happens to have kept.
+    """
+
+    candidates: list["Candidate"]
+    search_hits: list[TMDBPersonSearchHit]
+
+    def hit_for(self, person_id: int) -> TMDBPersonSearchHit | None:
+        return next((hit for hit in self.search_hits if hit.id == person_id), None)
+
+
+@dataclass(frozen=True)
 class Candidate:
     """One person a mention could be, with its provenance and the facts scoring reads."""
 
@@ -198,12 +220,16 @@ async def gather_candidates(
     now: datetime | None = None,
     window_days: int = CHANGE_STREAM_WINDOW_DAYS,
     cap: int = CANDIDATE_CAP,
-) -> list[Candidate]:
+) -> CandidateSet:
     """Read all three sources for one mention and build its candidate set.
 
     One TMDB request per mention and three queries, none of them per candidate: the
     filmography read is a single `IN` over the whole union. `now` is injectable so a test
     can place the 14-day window around fixture rows rather than around the clock.
+
+    Returns the search hits with the candidates: they are this function's only reader of
+    TMDB, and what the scorer and the accept path need from them cannot be reconstructed
+    from the capped list — see `CandidateSet`.
     """
     search_hits = await client.search_person(name_as_written)
     credited = await load_credited_people(session, film_id)
@@ -214,12 +240,15 @@ async def gather_candidates(
         *(person.person_id for person in credited),
         *(person.person_id for person in change_stream),
     }
-    return build_candidates(
-        search_hits=search_hits,
-        credited=credited,
-        change_stream=change_stream,
-        catalog_filmography=await load_catalog_filmography(session, person_ids),
-        cap=cap,
+    return CandidateSet(
+        candidates=build_candidates(
+            search_hits=search_hits,
+            credited=credited,
+            change_stream=change_stream,
+            catalog_filmography=await load_catalog_filmography(session, person_ids),
+            cap=cap,
+        ),
+        search_hits=list(search_hits),
     )
 
 

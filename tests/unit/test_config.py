@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from upmovies.config import MailProvider, Provider, Settings
+from upmovies.link.resolve.scoring import ACCEPT_FLOOR, ACCEPT_MARGIN
 from upmovies.link.retrieval import (
     DEFAULT_CANDIDATE_LIMIT,
     DEFAULT_SCORE_THRESHOLD,
@@ -376,6 +377,54 @@ def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
     s = Settings()  # type: ignore[call-arg]
     assert s.link_retrieval_threshold == DEFAULT_SCORE_THRESHOLD
     assert s.link_retrieval_max_candidates == DEFAULT_CANDIDATE_LIMIT
+
+
+_RESOLVE_ENV = (
+    "RESOLVE_ACCEPT_FLOOR",
+    "RESOLVE_ACCEPT_MARGIN",
+    "RESOLVE_MENTIONS_PER_RUN",
+    "RESOLVE_ENABLED",
+)
+
+
+def _clear_resolve(monkeypatch):
+    for key in _RESOLVE_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_resolve_defaults_match_the_scorer(monkeypatch):
+    """The two thresholds must not drift from `link.resolve.scoring`'s own, which carry the
+    derivation. Same duplication and same pinning as the retrieval pair above."""
+    _set_required(monkeypatch)
+    _clear_resolve(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.resolve_accept_floor == ACCEPT_FLOOR
+    assert s.resolve_accept_margin == ACCEPT_MARGIN
+    assert s.resolve_mentions_per_run == 500
+    assert s.resolve_enabled is True
+
+
+def test_settings_resolve_thresholds_move_from_env(monkeypatch):
+    """The band widens by config, not by deploy — M4 ships before there is a corpus of
+    resolved mentions to tune it against."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("RESOLVE_ACCEPT_FLOOR", "0.62")
+    monkeypatch.setenv("RESOLVE_ACCEPT_MARGIN", "0.2")
+    monkeypatch.setenv("RESOLVE_ENABLED", "false")
+    s = Settings()  # type: ignore[call-arg]
+    assert (s.resolve_accept_floor, s.resolve_accept_margin) == (0.62, 0.2)
+    assert s.resolve_enabled is False
+
+
+@pytest.mark.parametrize("floor", ["-0.1", "1.5"])
+def test_settings_resolve_accept_floor_rejects_out_of_range(monkeypatch, floor):
+    """Scores are bounded 0..1 by construction, so a floor outside that range can only mean a
+    mistake — above 1.0 nothing ever accepts and every mention becomes an unlinked queue
+    entry."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("RESOLVE_ACCEPT_FLOOR", floor)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
 
 
 def test_settings_link_retrieval_tuning_overrides_from_env(monkeypatch):
