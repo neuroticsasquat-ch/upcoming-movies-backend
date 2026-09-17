@@ -10,11 +10,15 @@ import httpx
 
 from upmovies.config import Settings
 from upmovies.ingest.tmdb.schemas import (
+    TMDBAccount,
+    TMDBAccountMoviesResponse,
     TMDBDiscoverResponse,
     TMDBMovieDetails,
     TMDBMovieSummary,
     TMDBPersonMovieCredits,
+    TMDBRequestToken,
     TMDBSearchResponse,
+    TMDBSessionResponse,
 )
 from upmovies.logging_config import redact_api_key
 
@@ -34,6 +38,35 @@ class TMDBNotFound(httpx.HTTPStatusError):
     catches it unchanged; a caller that wants to tell the two apart puts a narrower clause
     ahead of its own.
     """
+
+
+class TMDBAuthRejected(httpx.HTTPStatusError):
+    """TMDB refused a request token at `/authentication/session/new` (D-16).
+
+    The user's half of the approve flow failing — they closed the page without approving, the
+    token expired at TMDB's end, or it has already been spent — and therefore a 400 to whoever
+    called the callback route, not a server fault. Its own type for the same reason
+    `TMDBNotFound` is one: the caller needs to tell a condition it can report from one it can
+    only log."""
+
+
+TMDB_INVALID_API_KEY = 7
+"""TMDB's own `status_code` for a dead API key, which it also answers 401 for.
+
+Read so that the one 401 meaning *our deployment is broken* is not reported to a user as
+"you did not approve" — they would retry the approve screen forever against a key that is the
+actual fault. Every other 401 from that endpoint is the token."""
+
+
+def _is_rejected_token(resp: httpx.Response) -> bool:
+    """Whether a failed `/authentication/session/new` is the token's fault rather than ours."""
+    if resp.status_code != httpx.codes.UNAUTHORIZED:
+        return False
+    try:
+        body = resp.json()
+    except ValueError:
+        return True
+    return not (isinstance(body, dict) and body.get("status_code") == TMDB_INVALID_API_KEY)
 
 
 class RateLimiter:
@@ -229,3 +262,86 @@ class TMDBClient:
         url = f"{self._base_url}/person/{person_id}/movie_credits"
         resp = await self._request("GET", url)
         return TMDBPersonMovieCredits.model_validate(resp.json())
+
+    # --- v3 user authorization and the account lists (D-16) ---------------------------------
+    #
+    # The only endpoints here that act for a *user* rather than for the catalog. They are on
+    # this client rather than a second one because they want the same window, the same retry
+    # policy and the same key-scrubbing: an import competing with the daily pass for TMDB's
+    # budget is exactly what the shared limiter exists to arbitrate (NEU-1399).
+
+    async def create_request_token(self) -> str:
+        """A fresh request token for the approve flow. The user approves it on themoviedb.org;
+        `create_session` then exchanges it."""
+        url = f"{self._base_url}/authentication/token/new"
+        resp = await self._request("GET", url)
+        return TMDBRequestToken.model_validate(resp.json()).request_token
+
+    async def create_session(self, request_token: str) -> str:
+        """Exchange an **approved** request token for a session id.
+
+        `TMDBAuthRejected` when TMDB refuses the token — not approved, already spent, or
+        expired at their end. That is the user's half of the flow failing and is a 400 to the
+        caller, which is why it is told apart from the 401 that means *our* API key is dead:
+        the second is a deployment fault and must not be reported as "you did not approve"."""
+        url = f"{self._base_url}/authentication/session/new"
+        try:
+            resp = await self._request("POST", url, json={"request_token": request_token})
+        except httpx.HTTPStatusError as e:
+            if _is_rejected_token(e.response):
+                raise TMDBAuthRejected(str(e), request=e.request, response=e.response) from e
+            raise
+        return TMDBSessionResponse.model_validate(resp.json()).session_id
+
+    async def account(self, session_id: str) -> TMDBAccount:
+        """Whose account this session reads — the id the lists below are fetched under."""
+        url = f"{self._base_url}/account"
+        resp = await self._request("GET", url, params={"session_id": session_id})
+        return TMDBAccount.model_validate(resp.json())
+
+    async def account_watchlist_movies(
+        self, account_id: int, session_id: str, *, limit: int | None = None
+    ) -> list[TMDBMovieSummary]:
+        """Every movie on this account's TMDB watchlist, paged."""
+        return await self._account_movies(
+            f"/account/{account_id}/watchlist/movies", session_id, limit=limit
+        )
+
+    async def account_favorite_movies(
+        self, account_id: int, session_id: str, *, limit: int | None = None
+    ) -> list[TMDBMovieSummary]:
+        """Every movie this account has marked favorite, paged."""
+        return await self._account_movies(
+            f"/account/{account_id}/favorite/movies", session_id, limit=limit
+        )
+
+    async def _account_movies(
+        self, path: str, session_id: str, *, limit: int | None
+    ) -> list[TMDBMovieSummary]:
+        """Page through one of the account lists until TMDB runs out of pages, or `limit` rows
+        have been collected.
+
+        `limit` is the caller's row cap reaching down into the paging rather than being applied
+        to the result, so an account with a five-figure watchlist costs the pages the import
+        will actually use instead of every page and then a slice."""
+        movies: list[TMDBMovieSummary] = []
+        page = 1
+        while True:
+            resp = await self._request(
+                "GET",
+                f"{self._base_url}{path}",
+                params={"session_id": session_id, "page": page},
+            )
+            payload = TMDBAccountMoviesResponse.model_validate(resp.json())
+            movies.extend(payload.results)
+            if limit is not None and len(movies) >= limit:
+                return movies[:limit]
+            if page >= payload.total_pages or not payload.results:
+                return movies
+            page += 1
+
+    async def delete_session(self, session_id: str) -> None:
+        """Invalidate a session id at TMDB. The last thing an import does, in a `finally`:
+        nothing here stores the credential, so this is the only thing that ends it (D-16)."""
+        url = f"{self._base_url}/authentication/session"
+        await self._request("DELETE", url, json={"session_id": session_id})

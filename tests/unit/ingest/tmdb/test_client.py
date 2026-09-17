@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_mov
 from upmovies.config import Settings
 from upmovies.ingest.tmdb.client import (
     RateLimiter,
+    TMDBAuthRejected,
     TMDBClient,
     TMDBNotFound,
     reset_shared_limiters,
@@ -577,3 +579,154 @@ def test_production_call_sites_build_clients_through_from_settings():
         "build TMDB clients with `TMDBClient.from_settings(settings)` so they share the "
         f"process-wide rate limiter: {', '.join(offenders)}"
     )
+
+
+# --- v3 user authorization (D-16) ------------------------------------------------------------
+
+
+def _movie_page(page: int, total_pages: int, ids: list[int]) -> dict:
+    return {
+        "page": page,
+        "total_pages": total_pages,
+        "total_results": total_pages * len(ids),
+        "results": [
+            {"id": i, "title": f"Film {i}", "release_date": "2021-01-01", "popularity": 1.0}
+            for i in ids
+        ],
+    }
+
+
+@respx.mock
+async def test_create_request_token_returns_the_token():
+    route = respx.get(f"{BASE_URL}/authentication/token/new").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "success": True,
+                "expires_at": "2026-09-17 20:00:00 UTC",
+                "request_token": "tok-abc",
+            },
+        )
+    )
+    async with _client() as client:
+        assert await client.create_request_token() == "tok-abc"
+    assert route.called
+
+
+@respx.mock
+async def test_create_session_posts_the_request_token_and_returns_the_session_id():
+    route = respx.post(f"{BASE_URL}/authentication/session/new").mock(
+        return_value=httpx.Response(200, json={"success": True, "session_id": "sess-1"})
+    )
+    async with _client() as client:
+        assert await client.create_session("tok-abc") == "sess-1"
+
+    assert json.loads(route.calls.last.request.content) == {"request_token": "tok-abc"}
+
+
+@respx.mock
+async def test_an_unapproved_request_token_is_a_rejection_not_a_bare_http_error():
+    # TMDB answers 401 with its own status_code 3 when the user never approved the token.
+    respx.post(f"{BASE_URL}/authentication/session/new").mock(
+        return_value=httpx.Response(
+            401,
+            json={"success": False, "status_code": 3, "status_message": "Authentication failed"},
+        )
+    )
+    async with _client(retry_max_attempts=1) as client:
+        with pytest.raises(TMDBAuthRejected):
+            await client.create_session("tok-abc")
+
+
+@respx.mock
+async def test_a_dead_api_key_is_not_reported_as_a_rejected_token():
+    # Status code 7 is *our* credential, not the user's approval. Reporting it as a rejection
+    # would send the user back to the approve screen forever against a broken deployment.
+    respx.post(f"{BASE_URL}/authentication/session/new").mock(
+        return_value=httpx.Response(
+            401, json={"success": False, "status_code": 7, "status_message": "Invalid API key"}
+        )
+    )
+    async with _client(retry_max_attempts=1) as client:
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await client.create_session("tok-abc")
+    assert not isinstance(excinfo.value, TMDBAuthRejected)
+
+
+@respx.mock
+async def test_account_reads_the_id_and_username_under_the_session():
+    route = respx.get(f"{BASE_URL}/account").mock(
+        return_value=httpx.Response(200, json={"id": 42, "username": "cinephile", "name": "X"})
+    )
+    async with _client() as client:
+        account = await client.account("sess-1")
+
+    assert (account.id, account.username) == (42, "cinephile")
+    assert route.calls.last.request.url.params["session_id"] == "sess-1"
+
+
+@respx.mock
+async def test_account_watchlist_movies_pages_until_total_pages():
+    route = respx.get(f"{BASE_URL}/account/42/watchlist/movies").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json=_movie_page(
+                int(request.url.params["page"]), 3, [int(request.url.params["page"]) * 10]
+            ),
+        )
+    )
+    async with _client() as client:
+        movies = await client.account_watchlist_movies(42, "sess-1")
+
+    assert [m.id for m in movies] == [10, 20, 30]
+    assert [c.request.url.params["page"] for c in route.calls] == ["1", "2", "3"]
+    assert route.calls.last.request.url.params["session_id"] == "sess-1"
+
+
+@respx.mock
+async def test_account_favorite_movies_pages_the_favorites_endpoint():
+    respx.get(f"{BASE_URL}/account/42/favorite/movies").mock(
+        return_value=httpx.Response(200, json=_movie_page(1, 1, [7, 8]))
+    )
+    async with _client() as client:
+        movies = await client.account_favorite_movies(42, "sess-1")
+
+    assert [m.id for m in movies] == [7, 8]
+    assert [m.title for m in movies] == ["Film 7", "Film 8"]
+
+
+@respx.mock
+async def test_the_row_cap_stops_the_paging_rather_than_slicing_the_result():
+    # The cap reaches into the paging: an account with a five-figure watchlist costs the pages
+    # the import will use, not every page and then a slice.
+    route = respx.get(f"{BASE_URL}/account/42/watchlist/movies").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json=_movie_page(int(request.url.params["page"]), 50, [1, 2])
+        )
+    )
+    async with _client() as client:
+        movies = await client.account_watchlist_movies(42, "sess-1", limit=3)
+
+    assert len(movies) == 3
+    assert len(route.calls) == 2
+
+
+@respx.mock
+async def test_an_empty_page_ends_the_paging():
+    # A total_pages TMDB overstates must not become an unbounded loop.
+    respx.get(f"{BASE_URL}/account/42/favorite/movies").mock(
+        return_value=httpx.Response(200, json=_movie_page(1, 9, []))
+    )
+    async with _client() as client:
+        assert await client.account_favorite_movies(42, "sess-1") == []
+
+
+@respx.mock
+async def test_delete_session_sends_the_session_id():
+    route = respx.delete(f"{BASE_URL}/authentication/session").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    async with _client() as client:
+        await client.delete_session("sess-1")
+
+    assert json.loads(route.calls.last.request.content) == {"session_id": "sess-1"}

@@ -299,12 +299,29 @@ class WatchlistListResponse(BaseModel):
 
 
 class ImportUnmatchedOut(BaseModel):
-    """A row the resolver refused to place. `name` and `year` are the CSV's, verbatim, because
-    the user is going to look for them in their own export."""
+    """A title the import could not place, and why.
+
+    `name` and `year` are the source's, verbatim, because the user is going to look for them in
+    their own export or their own TMDB list. The three kinds are two different failures: a
+    Letterboxd row is unmatched because no `/search/movie` rule would place the title it names
+    (`watchlist`, `rating`), while a TMDB row is unmatched only when TMDB has since deleted the
+    entry its own list still points at (`tmdb_missing`) — there is no resolution step in that
+    import to fail, because the ids are authoritative (D-16)."""
 
     name: str
     year: int | None = None
-    kind: Literal["watchlist", "rating"]
+    kind: Literal["watchlist", "rating", "tmdb_missing"]
+
+
+class TMDBCallbackIn(BaseModel):
+    """What the frontend forwards after themoviedb.org sends the user back (D-16).
+
+    TMDB appends `request_token` and `approved` to `TMDB_REDIRECT_URL`; the page reads both and
+    posts them here. `approved` is carried rather than assumed because TMDB sends the user back
+    either way, and a refusal must not be answered by trying to exchange the token."""
+
+    request_token: str = Field(min_length=1, max_length=256)
+    approved: bool
 
 
 class ImportJobStartedOut(BaseModel):
@@ -324,6 +341,9 @@ class ImportJobOut(BaseModel):
     watchlist_created: int
     follows_created: int
     unmatched: list[ImportUnmatchedOut]
+    # The TMDB account a `tmdb` job read, for "Imported from @user"; NULL on a Letterboxd job
+    # and the only thing kept about that account (D-16).
+    tmdb_username: str | None = None
     # Set only on a `failed` job. The runner writes `str(exception)` here, which is why the
     # route is the one place it is rendered: it is a one-line cause for a user to quote back,
     # not a payload anything should branch on.

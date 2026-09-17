@@ -228,3 +228,53 @@ class TMDBSearchResponse(TMDBDiscoverResponse):
     TMDB documents one envelope for both, so a future field belongs on both. Distinct from it
     by name because the two endpoints answer different questions and a caller reading
     `TMDBDiscoverResponse` back from a search would have to check which."""
+
+
+# The v3 user-authorization payloads (D-16). TMDB's approve flow is three endpoints that each
+# answer one field wrapped in a `success` envelope; they are modelled rather than read out of
+# the dict so the client keeps its promise that callers parse nothing.
+
+
+class TMDBRequestToken(BaseModel):
+    """`/authentication/token/new` — the token the user approves on themoviedb.org."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool
+    request_token: str
+    expires_at: str | None = None
+
+
+class TMDBSessionResponse(BaseModel):
+    """`/authentication/session/new` — an approved request token exchanged for a session id.
+
+    That session id can read *and write* the user's TMDB account, which is why nothing in this
+    codebase stores one: the import holds it in memory and deletes it in a `finally` (D-16)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool
+    session_id: str
+
+
+class TMDBAccount(BaseModel):
+    """`/account` — who the session belongs to.
+
+    Only the two fields the import needs: the numeric id the watchlist and favorites are read
+    under, and the username the job row records so the UI can say "Imported from @user"."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    username: str
+
+
+class TMDBAccountMoviesResponse(TMDBDiscoverResponse):
+    """The paged envelope returned by `/account/{id}/watchlist/movies` and
+    `/account/{id}/favorite/movies`.
+
+    Discover's envelope again, and a subclass for the same reason `TMDBSearchResponse` is one:
+    TMDB documents one paged shape and a future field belongs on all of them. Named apart
+    because these two endpoints are the only ones here that answer for a *person* rather than
+    for the catalog, and a caller reading a discover response back from them would have to
+    check which."""

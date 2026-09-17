@@ -364,8 +364,50 @@ class ImportJob(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The TMDB account this job read, for the UI's "Imported from @user" (D-16). NULL for a
+    # Letterboxd job, which has no account behind it.
+    #
+    # The *only* thing kept about that account, and deliberately: the one-shot design deletes
+    # the session id when the job ends, so nothing here can read the account again. The
+    # username is what lets the settings screen say which account was imported without a
+    # credential, and it is the whole of NEU-1359's replacement for the unlink affordance the
+    # spec removed (§4).
+    tmdb_username: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TmdbAuthRequest(Base):
+    """A TMDB request token this user has been sent off to approve, waiting for them to come
+    back (D-16).
+
+    The whole of the state the approve flow keeps, and it lives for fifteen minutes. TMDB's
+    redirect carries the request token and nothing else — no user, no signature — so without a
+    row saying who was sent which token, the callback would have to take the caller's word for
+    it and an approved token could be replayed against another account. The row is the binding,
+    and it is deleted the moment it is spent.
+
+    Note what is *not* here: the session id that token becomes. The original ticket stored one
+    per user, encrypted; the spec replaced that with a one-shot import whose last act is to
+    delete the session at TMDB, so the only long-lived credential in this flow is the one that
+    no longer exists. This table holds a value that is worthless without the user's browser
+    and expires on its own."""
+
+    __tablename__ = "tmdb_auth_request"
+    __table_args__ = (
+        # Pruning reads "everything older than fifteen minutes" across all users, which the
+        # primary key on the token cannot answer.
+        Index("ix_tmdb_auth_request_created_at", "created_at"),
+        {"schema": "app"},
+    )
+
+    request_token: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
