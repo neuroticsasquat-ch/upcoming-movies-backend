@@ -9,6 +9,16 @@ os.environ.pop("COOKIE_DOMAIN", None)
 # by overriding `get_settings` with their own `Settings`, in
 # `tests/integration/routers/test_rate_limit.py`.
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# The *outbound* TMDB window is shared process-wide since NEU-1399, and the suite is one
+# process — so every test that reaches `TMDBClient.from_settings` (the route and pipeline
+# tests that drive production code: `test_pipeline_run.py`, `routers/test_ingest_admin.py`,
+# `routers/test_imports.py`) would otherwise spend one cumulative 40-per-10s budget between
+# them and start waiting on each other's requests. Same reasoning as the line above: make it
+# inert for the tests that are not about it. Tests that construct `TMDBClient` directly are
+# unaffected either way — the raw constructor still gets a window of its own — and
+# `tests/unit/ingest/tmdb/test_client.py` builds its own `Settings` at a tiny window to
+# exercise the sharing. The window length is left alone; only the capacity moves.
+os.environ["TMDB_RATE_LIMIT_REQUESTS"] = "100000"
 
 pytest_plugins = [
     "tests.fixtures.users",

@@ -81,6 +81,12 @@ Two decisions (2026-09-15):
   status makes that visible instead of a hung request.
 - The TMDB limiter is process-wide, so a running import slows the daily chain if they
   overlap; acceptable for v1 (documented in AGENTS.md), revisit if imports become frequent.
+  **Correction, 2026-09-17 (NEU-1399):** both halves of that were wrong. The limiter was *per
+  client*, not process-wide, until NEU-1399 made it per process — so two imports at once asked
+  TMDB for twice the rate rather than sharing a budget. And an import never slowed the daily
+  chain either way: the chain is a separate `pipeline_run` process (ADR-0003), which no
+  process-wide limiter reaches. What NEU-1399 bounds is the API process, where concurrent
+  imports and `/admin/ingest/*` triggers are genuinely in-process.
 
 ## Acceptance criteria
 

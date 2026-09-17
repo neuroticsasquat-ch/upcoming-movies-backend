@@ -5,12 +5,6 @@ Why it is a job at all: a Letterboxd export carries no TMDB ids, so every row co
 configured 40 requests / 10 s a thousand-row library is minutes of work — far past any request
 the user will hold open, and past most proxies' patience too.
 
-That budget is this client's own, not the process's: `RateLimiter` lives inside each
-`TMDBClient`, so an import overlapping the daily chain asks TMDB for about twice the intended
-rate. The spec's §4 says the limiter is process-wide and that an import merely slows the chain;
-it is not, and the accepted-for-v1 reasoning is recorded in AGENTS.md rather than repeated
-here. Sharing one limiter across clients is the fix if imports become frequent.
-
 `routers/imports.py` parses and validates the file synchronously, so a bad upload is a 422 the
 uploader can act on, then hands the parsed rows here and answers 202 with a job id to poll.
 
@@ -143,13 +137,7 @@ async def run_letterboxd_import(job_id: UUID, export: LetterboxdExport, settings
     Nothing awaits this task, so an exception that escaped it would be swallowed by the event
     loop and the job would poll `running` forever."""
     try:
-        async with TMDBClient(
-            base_url=settings.tmdb_base_url,
-            api_key=settings.tmdb_api_key,
-            rate_calls=settings.tmdb_rate_limit_requests,
-            rate_window=settings.tmdb_rate_limit_window_seconds,
-            retry_max_attempts=settings.tmdb_retry_max_attempts,
-        ) as client:
+        async with TMDBClient.from_settings(settings) as client:
             await import_letterboxd(
                 session_factory=SessionLocal, client=client, job_id=job_id, export=export
             )
