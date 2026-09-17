@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -168,6 +169,8 @@ def add_event(session: AsyncSession):
         edited_at: datetime | None = None,
         provenance: str = "story",
         summary_model: str = "claude-haiku-4-5",
+        status: str = "published",
+        superseded_by: UUID | None = None,
     ) -> Event:
         event = Event(
             film_id=film.id,
@@ -176,6 +179,8 @@ def add_event(session: AsyncSession):
             occurred_at=occurred_at,
             region=region,
             provenance=provenance,
+            status=status,
+            superseded_by=superseded_by,
         )
         if created_at is not None:
             event.created_at = created_at

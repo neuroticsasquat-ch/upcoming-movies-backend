@@ -353,9 +353,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             event_type=event.event_type,
             confidence=event.confidence,
             created_at=event.created_at,
+            occurred_at=event.occurred_at,
             summary=summary,  # type: ignore  — guaranteed non-null by visible_events() filter
             summary_edited=edited_at is not None,
             provenance=event.provenance,
+            status=event.status,
+            superseded_by=event.superseded_by,
             sources=[
                 SourceOut(
                     url=source_url(story),
@@ -702,7 +705,10 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 Event.event_type,
                 Event.confidence,
                 Event.provenance,
+                Event.status,
+                Event.superseded_by,
                 Event.created_at,
+                Event.occurred_at,
                 cast(func.timezone("UTC", Event.created_at), Date).label("event_day"),
                 EventSummary.summary,
                 EventSummary.edited_at,
@@ -745,9 +751,12 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 event_type=e.event_type,
                 confidence=e.confidence,
                 created_at=e.created_at,
+                occurred_at=e.occurred_at,
                 summary=e.summary,
                 summary_edited=e.edited_at is not None,
                 provenance=e.provenance,
+                status=e.status,
+                superseded_by=e.superseded_by,
                 sources=[
                     SourceOut(
                         url=source_url(story),

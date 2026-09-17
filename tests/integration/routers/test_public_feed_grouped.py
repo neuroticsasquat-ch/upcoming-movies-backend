@@ -938,3 +938,41 @@ async def test_grouped_parenthetical_lookups_are_batched_per_page(
     assert len(body["items"]) == 3
     assert counts["country"] == 1
     assert counts["credit"] == 1  # the director lookup, batched over the page's film ids
+
+
+# NEU-1346 — the grouped feed ships the same claim-ledger fields as the film page, so a
+# superseded card renders marked and in place rather than disappearing (D-2).
+async def test_grouped_events_carry_status_superseded_by_and_occurred_at(
+    client, make_film, add_event
+):
+    film = await make_film(slug="superseded-2026")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    removal = await add_event(
+        film=film,
+        event_type="credit_removed",
+        summary="No longer directing.",
+        created_at=day,
+        occurred_at=datetime(2026, 5, 2, tzinfo=UTC),
+        sources=({"url": "https://variety.com/removal"},),
+    )
+    await add_event(
+        film=film,
+        event_type="crew_attached",
+        summary="Directing.",
+        created_at=day,
+        occurred_at=datetime(2026, 5, 1, tzinfo=UTC),
+        status="superseded",
+        superseded_by=removal.id,
+        sources=({"url": "https://variety.com/attachment"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    events = {e["event_type"]: e for e in item["events"]}
+
+    attachment = events["crew_attached"]
+    assert attachment["status"] == "superseded"
+    assert attachment["superseded_by"] == str(removal.id)
+    assert attachment["occurred_at"] == "2026-05-01T00:00:00Z"
+
+    assert events["credit_removed"]["status"] == "published"
+    assert events["credit_removed"]["superseded_by"] is None
