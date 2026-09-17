@@ -16,6 +16,7 @@ from upmovies.ingest.sweep import (
     AdmissionTranches,
     CreditDetachmentResult,
     CreditEventResult,
+    DerivationResult,
     EnumerateResult,
     FieldEventResult,
     RefreshResult,
@@ -564,7 +565,7 @@ def test_main_runs_the_chain_when_the_routing_is_sound(monkeypatch):
     assert pipeline_run.main(["daily"]) == 1
 
 
-# --- the sweep: five phases, one run row ---------------------------------------
+# --- the sweep: every phase, one run row ---------------------------------------
 
 
 def _stub_phases(
@@ -576,9 +577,10 @@ def _stub_phases(
     attached=None,
     detached=None,
     released=None,
+    derived=None,
 ):
-    """Replace all six sweep phases with fakes that record their kwargs and return the
-    given results. Returns (calls, captured) — call order and each phase's kwargs."""
+    """Replace every sweep phase with a fake that records its kwargs and returns the
+    given result. Returns (calls, captured) — call order and each phase's kwargs."""
     calls: list[str] = []
     captured: dict[str, dict] = {}
 
@@ -612,12 +614,18 @@ def _stub_phases(
         captured["release dates"] = kwargs
         return released if released is not None else ReleaseEventResult(changes_read=1)
 
+    async def fake_derivation(**kwargs):
+        calls.append("watchlist")
+        captured["watchlist"] = kwargs
+        return derived if derived is not None else DerivationResult(users_considered=1)
+
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_enumerate", fake_enumerate)
     monkeypatch.setattr("upmovies.pipeline_run.run_sweep_refresh", fake_refresh)
     monkeypatch.setattr("upmovies.pipeline_run.run_field_change_events", fake_events)
     monkeypatch.setattr("upmovies.pipeline_run.run_credit_attachment_events", fake_credits)
     monkeypatch.setattr("upmovies.pipeline_run.run_credit_detachment_events", fake_detachments)
     monkeypatch.setattr("upmovies.pipeline_run.run_release_date_events", fake_release)
+    monkeypatch.setattr("upmovies.pipeline_run.run_watchlist_derivation", fake_derivation)
     return calls, captured
 
 
@@ -648,6 +656,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
         carded=FieldEventResult(changes_read=9, events_created=3, skipped=6),
         attached=CreditEventResult(attachments_read=4, events_created=2, skipped=2),
         released=ReleaseEventResult(changes_read=11, events_created=3, skipped=8),
+        derived=DerivationResult(users_considered=6, items_created=2),
     )
     run_id = await create_run(session, kind="sweep")
     await session.commit()
@@ -661,6 +670,9 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
         "credits",
         "credit removals",
         "release dates",
+        # Last: it reads the credits refresh rebuilt, and depends on nothing the carding
+        # phases do (NEU-1352).
+        "watchlist",
     ]
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
@@ -672,6 +684,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
     assert "credits: 2 carded from 4 attachments" in row.detail
     assert "credit removals: 0 carded from 1 detachments" in row.detail
     assert "release dates: 3 carded from 11 changes" in row.detail
+    assert "watchlist: 2 derived for 6 users" in row.detail
 
 
 async def test_sweep_stage_passes_the_sweep_settings_to_every_phase(session, monkeypatch):
@@ -709,6 +722,13 @@ async def test_sweep_stage_passes_the_sweep_settings_to_every_phase(session, mon
     credits_kwargs = captured["credits"]
     assert credits_kwargs["lookback_days"] == settings.sweep_event_lookback_days
     assert credits_kwargs["run_id"] == run_id
+    # The derivation phase is the only one filtering *users*, and it reads the same film
+    # statuses and the same `today` as the phases above it (D-13).
+    derivation_kwargs = captured["watchlist"]
+    assert derivation_kwargs["excluded_statuses"] == frozenset({"Released", "Canceled"})
+    assert derivation_kwargs["today"] == enumerate_kwargs["today"]
+    assert derivation_kwargs["failure_threshold"] == settings.ingest_consecutive_failure_threshold
+    assert derivation_kwargs["run_id"] == run_id
     # Every phase shares the run row, and all must guard against the same outage.
     assert enumerate_kwargs["run_id"] == run_id == refresh_kwargs["run_id"]
     assert events_kwargs["run_id"] == run_id
@@ -747,6 +767,7 @@ async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkey
         "credits",
         "credit removals",
         "release dates",
+        "watchlist",
     ]
     row = await _run_row(session, run_id)
     assert row.status == "failed"
@@ -932,3 +953,20 @@ async def test_sweep_stage_fails_the_run_when_the_credit_phase_aborted(session, 
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "credits phase" in row.error
+
+
+async def test_sweep_stage_fails_the_run_when_the_derivation_phase_aborted(session, monkeypatch):
+    """The derivation phase runs last and writes no events, so an abort there is invisible
+    unless the run says so — the sweep's status is every phase's, not the carding phases'."""
+    _stub_phases(
+        monkeypatch,
+        derived=DerivationResult(aborted=True, abort_error="aborted after 10 failures"),
+    )
+    run_id = await create_run(session, kind="sweep")
+    await session.commit()
+
+    await pipeline_run.run_sweep_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "watchlist phase" in row.error
