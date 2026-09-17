@@ -6,7 +6,8 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film, FilmFieldChange
+from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange
+from upmovies.catalog.seed_grade import DIRECTOR_JOB, TOP_BILLED_ORDER, WRITER_JOBS
 
 # The one place `catalog` reads `news`. Dormancy is defined partly by what news did (or did
 # not) link, so the predicate cannot be expressed without `Story`; `news.models` imports
@@ -66,6 +67,31 @@ def in_play_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnE
     return and_(
         or_(Film.release_date.is_(None), Film.release_date >= today),
         or_(Film.status.is_(None), Film.status.not_in(excluded_statuses)),
+    )
+
+
+def seed_grade_credit_clause() -> ColumnElement[bool]:
+    """WHERE predicate over `catalog.film_credit` selecting the seed-grade credits — director,
+    Writer/Screenplay, or top-5 billed cast (`catalog.seed_grade`).
+
+    The SQL spelling of `seed_grade.is_seed_grade`, which decides the same cut one loaded row at
+    a time. It lives here rather than in `seed_grade` itself because that module is deliberately
+    free of SQLAlchemy — it is read by the TMDB payload side too — but it must exist exactly
+    once: the sweep's seed set and the timeline's person follows (D-11) both ask it of stored
+    rows, and a second spelling of the expression is precisely how the definition drifts, which
+    `catalog.seed_grade` exists to prevent.
+
+    A predicate over `film_credit` alone: it says nothing about the film, so a caller that cares
+    whether the film is still in play composes `in_play_clause` beside it.
+    """
+    return or_(
+        and_(FilmCredit.credit_type == "crew", FilmCredit.job == DIRECTOR_JOB),
+        and_(FilmCredit.credit_type == "crew", FilmCredit.job.in_(WRITER_JOBS)),
+        and_(
+            FilmCredit.credit_type == "cast",
+            FilmCredit.credit_order.is_not(None),
+            FilmCredit.credit_order < TOP_BILLED_ORDER,
+        ),
     )
 
 

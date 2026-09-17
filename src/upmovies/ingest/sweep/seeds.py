@@ -18,18 +18,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmCredit, Person
-from upmovies.catalog.queries import active_film_clause
-from upmovies.catalog.seed_grade import (
-    DIRECTOR_JOB,
-    TOP_BILLED_ORDER,
-    WRITER_JOBS,
-    crew_role,
-    is_top_billed,
-)
+from upmovies.catalog.queries import active_film_clause, seed_grade_credit_clause
+from upmovies.catalog.seed_grade import crew_role, is_top_billed
 from upmovies.ingest.tmdb.schemas import TMDBPersonMovieCredits
 
 SessionFactory = Callable[[], AsyncSession]
@@ -77,21 +71,12 @@ async def load_seed_person_ids(
     the seed set is defined by `film_credit`: a credit whose person row we never wrote is still
     a seed, and must not be silently dropped by the exclusion (NEU-1124).
     """
-    seed_grade = or_(
-        and_(FilmCredit.credit_type == "crew", FilmCredit.job == DIRECTOR_JOB),
-        and_(FilmCredit.credit_type == "crew", FilmCredit.job.in_(WRITER_JOBS)),
-        and_(
-            FilmCredit.credit_type == "cast",
-            FilmCredit.credit_order.is_not(None),
-            FilmCredit.credit_order < TOP_BILLED_ORDER,
-        ),
-    )
     stmt = (
         select(FilmCredit.person_id)
         .join(Film, Film.id == FilmCredit.film_id)
         .outerjoin(Person, Person.id == FilmCredit.person_id)
         .where(
-            seed_grade,
+            seed_grade_credit_clause(),
             Person.tmdb_missing_at.is_(None),
             active_film_clause(
                 today=today,
