@@ -113,10 +113,15 @@ W_FILMOGRAPHY = 0.10
 ACCEPT_FLOOR = 0.5
 ACCEPT_MARGIN = 0.12
 
-# The beats that name a person as attached to the film, which is what makes an empty name
-# search mean `not_in_tmdb` rather than `unlinked`. Drawn from the cluster instructions' own
-# event vocabulary, so a beat this does not list is one the model was never offered.
-ATTACHMENT_EVENT_TYPES = frozenset({"casting", "crew_attached", "announced", "production_start"})
+# The beats that name a person as attached to the film, which — alongside an extracted role —
+# is what makes an empty name search mean `not_in_tmdb` rather than `unlinked`. Every one is a
+# type `link.cluster._VALID_TYPES` actually offers the model, because `_mention_event_type`
+# drops anything outside that vocabulary before it reaches `features`: a beat listed here that
+# the prompt cannot emit would be a route that silently never fires. `crew_attached` is
+# deliberately **not** here for that reason — `news.Event`'s CHECK constraint allows it, but
+# the extraction prompt does not offer it, so a crew attachment arrives as `announced` or as
+# no beat at all and is caught by the role clause instead.
+ATTACHMENT_EVENT_TYPES = frozenset({"casting", "announced", "production_start"})
 
 # Generational suffixes, which trade style treats as optional: "Kenneth Branagh Jr." and
 # "Kenneth Branagh" are one person written two ways far more often than they are two people.
@@ -391,17 +396,23 @@ def _claims_a_debut(mention: Mention, search_empty: bool) -> bool:
     """Whether an empty name search means TMDB has no entry for this person (INV-8) rather
     than that we could not identify them.
 
-    Both halves are required. The search coming back empty is what rules out a person TMDB
-    holds; the story naming them as *attached* to the film is what makes their absence
-    surprising enough to record — a trade does not announce a casting for somebody who does
-    not exist. When the model reported no beat, an extracted role stands in for one: the
-    story said what this person does on the film, which is the same claim.
+    The search coming back empty is what rules out a person TMDB holds. What makes their
+    absence worth recording is the story claiming they have a job on this film — a trade does
+    not announce a casting, or name a director, for somebody who does not exist.
+
+    Either field may carry that claim, and neither takes priority over the other. The
+    **extracted role** is the one D-21 names, and any role the extraction reported is such a
+    claim by construction: the cluster prompt asks for "the job for crew" or "a character
+    name for a performer", both of which say this person works on this film. The **beat**
+    catches the case the role misses — a casting story that names somebody without saying
+    what part they have — and it is the addition to what the ticket asked for, not a
+    narrowing of it. A person named incidentally, with neither a role nor an attachment beat,
+    is an ordinary `unlinked` mention: a misspelling, or an executive quoted in passing, whose
+    absence from TMDB says nothing.
     """
     if not search_empty:
         return False
-    if mention.event_type is not None:
-        return mention.event_type in ATTACHMENT_EVENT_TYPES
-    return mention.role is not None
+    return mention.role is not None or mention.event_type in ATTACHMENT_EVENT_TYPES
 
 
 def _strip_suffix(normalized: str) -> str:

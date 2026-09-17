@@ -139,6 +139,13 @@ async def run_resolution(
                     window_days=window_days,
                     cap=cap,
                 )
+                # The link run's counters are already a whole-run total across units — the
+                # link stage counts stories, the cluster stage films (`link/pipeline.py`) —
+                # so a third unit changes nothing about how they are read, and the guard
+                # that matters reads its own in-memory counts. What this is really for is
+                # the heartbeat: `record_progress` ticks `last_progress_at`, and a pass that
+                # can spend several hundred TMDB requests without one would look to
+                # `mark_stale_runs_cancelled` exactly like a run orphaned by a crash.
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
             if path is not None:

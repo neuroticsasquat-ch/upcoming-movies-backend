@@ -10,9 +10,11 @@ from datetime import UTC, datetime
 
 import pytest
 
+from upmovies.link.cluster import _VALID_TYPES
 from upmovies.link.resolve.candidates import Candidate, ChangeFact, CreditFact
 from upmovies.link.resolve.scoring import (
     ACCEPT_FLOOR,
+    ATTACHMENT_EVENT_TYPES,
     W_NAME,
     Mention,
     Path,
@@ -326,14 +328,36 @@ def test_an_empty_search_with_no_attachment_claim_is_merely_unlinked():
     assert decision.path is Path.UNLINKED
 
 
-def test_an_extracted_role_stands_in_for_a_missing_beat():
+def test_an_extracted_role_is_a_debut_claim_whatever_the_beat():
+    """D-21 names the role, so it carries the claim on its own — a story can say what
+    somebody does on the film while the beat it names them in is a trailer drop."""
+    for event_type in (None, "trailer"):
+        decision = resolve_mention(
+            [],
+            mention=mention("Nobody Knownyet", role="director", event_type=event_type),
+            link_confidence=0.9,
+            search_empty=True,
+        )
+        assert decision.path is Path.NOT_IN_TMDB
+
+
+def test_an_attachment_beat_is_a_debut_claim_when_no_role_was_extracted():
+    """The addition to what the role clause catches: a casting story that names somebody
+    without saying which part they have."""
     decision = resolve_mention(
         [],
-        mention=mention("Nobody Knownyet", role="director"),
+        mention=mention("Nobody Knownyet", event_type="casting"),
         link_confidence=0.9,
         search_empty=True,
     )
     assert decision.path is Path.NOT_IN_TMDB
+
+
+def test_a_beat_the_extraction_prompt_cannot_emit_is_not_in_the_attachment_set():
+    """`crew_attached` is a `news.Event` type but not one the cluster instructions offer, so
+    listing it here would be a route that silently never fires."""
+    assert "crew_attached" not in ATTACHMENT_EVENT_TYPES
+    assert ATTACHMENT_EVENT_TYPES <= _VALID_TYPES
 
 
 def test_a_search_that_found_people_is_never_not_in_tmdb():
