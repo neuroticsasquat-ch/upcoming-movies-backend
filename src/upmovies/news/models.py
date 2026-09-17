@@ -88,7 +88,12 @@ class Event(Base):
             "provenance IN ('story', 'catalog')",
             name="ck_event_provenance",
         ),
+        CheckConstraint(
+            "status IN ('published', 'superseded')",
+            name="ck_event_status",
+        ),
         Index("ix_event_film_id", "film_id"),
+        Index("ix_event_superseded_by", "superseded_by"),
         # One catalog change, one event — structurally, not by convention. The field-change
         # reader sets `occurred_at` to the change's own `changed_at`, so this triple is that
         # change's natural key, and the reader re-reads a rolling window of changes every run
@@ -115,6 +120,16 @@ class Event(Base):
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
     provenance: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'story'"))
+    # Publication state, not visibility: a `superseded` card is still rendered everywhere a
+    # `published` one is, marked and linked to the event that corrected it (ADR-0017, D-2).
+    # Nothing is ever hidden or deleted by supersession.
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'published'"))
+    # The event that supersedes this one — an attachment card pointing forward at the
+    # `credit_removed` card that corrected it. SET NULL rather than CASCADE: losing the
+    # correction must not take the original claim out of the ledger with it.
+    superseded_by: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.event.id", ondelete="SET NULL"), nullable=True
+    )
     region: Mapped[str | None] = mapped_column(Text, nullable=True)
     subject_key: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

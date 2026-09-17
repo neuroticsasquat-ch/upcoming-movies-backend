@@ -94,3 +94,15 @@ The original residual above (disclose `occurred_at` on the card via `EventOut`) 
 future per-card-display ticket; with the film page grouped on `occurred_at`, the day heading
 already is the occurred date there, so per-card disclosure is redundant on the film page and
 deliberately publication-day on the feed.
+
+## Amendment — NEU-1346 (2026-09-17): the residual is closed, `EventOut` exposes `occurred_at`
+
+The residual left open above is now taken up. `EventOut` carries `occurred_at` alongside
+`created_at` on both read paths (`get_film_detail`, `get_feed_grouped`), so a card can disclose
+when the beat actually happened — the "first seen <date>" line on the film page (project spec D-9).
+
+**No ordering changed.** `created_at` is still the feed's grouping and sort axis, the film page is
+still grouped and ordered on `occurred_at` per the NEU-1204 amendment, and the flat `/feed`
+endpoint is untouched. This amendment is about disclosure only: the earlier statement in Context
+that "`EventOut` does not expose `occurred_at` at all" no longer holds, and nothing else in this
+ADR is affected.

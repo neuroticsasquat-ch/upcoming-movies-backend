@@ -75,10 +75,12 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     # casting's day (Mar) comes before trailer's day (Jan).
     all_events = _flatten_events(body)
     assert [e["event_type"] for e in all_events] == ["casting", "trailer"]
-    # Each event must expose created_at and must NOT expose occurred_at.
+    # Each event exposes both timestamps. `created_at` is still the publication axis
+    # (ADR-0016); `occurred_at` rides along purely as card disclosure — the residual ADR-0016
+    # left open and NEU-1346 closed. Neither field reorders anything.
     for event in all_events:
         assert "created_at" in event, "event must expose created_at"
-        assert "occurred_at" not in event, "event must not expose occurred_at"
+        assert "occurred_at" in event, "event must expose occurred_at"
     casting = _events_for_type(body, "casting")[0]
     assert casting["created_at"] == casting_created_at.isoformat().replace("+00:00", "Z")
     assert casting["confidence"] == "confirmed"
@@ -1493,3 +1495,36 @@ async def test_detail_does_not_ship_directors_and_keeps_crew(
     body = (await client.get("/films/no-directors-field-2026")).json()
     assert "directors" not in body
     assert [c["name"] for c in body["crew"]] == ["The Director"]
+
+
+# NEU-1346 — the film page is where supersession and first-seen dates surface (D-2, D-9).
+async def test_detail_event_carries_status_superseded_by_and_occurred_at(
+    client, make_film, add_event
+):
+    film = await make_film(slug="superseded-2026", title="A Superseded Credit")
+    removal = await add_event(
+        film=film,
+        event_type="credit_removed",
+        summary="No longer directing.",
+        occurred_at=datetime(2026, 5, 2, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="crew_attached",
+        summary="Directing.",
+        occurred_at=datetime(2026, 5, 1, tzinfo=UTC),
+        status="superseded",
+        superseded_by=removal.id,
+    )
+
+    r = await client.get("/films/superseded-2026")
+    assert r.status_code == 200
+    events = {e["event_type"]: e for e in _flatten_events(r.json())}
+
+    attachment = events["crew_attached"]
+    assert attachment["status"] == "superseded"
+    assert attachment["superseded_by"] == str(removal.id)
+    assert attachment["occurred_at"] == "2026-05-01T00:00:00Z"
+
+    assert events["credit_removed"]["status"] == "published"
+    assert events["credit_removed"]["superseded_by"] is None

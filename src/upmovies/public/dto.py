@@ -16,12 +16,22 @@ class EventOut(BaseModel):
     event_type: str
     confidence: str
     created_at: datetime
+    # When the beat itself happened, as against `created_at` when we carded it. Ordering is
+    # unaffected on either surface — `created_at` stays the feed axis (ADR-0016) and the film
+    # page still orders by `occurred_at` (NEU-1204). This ships it so the card can disclose a
+    # "first seen" line (D-9).
+    occurred_at: datetime
     summary: str
     summary_edited: bool
     # "story" | "catalog". A `catalog` event was created by a TMDB field or credit change with
     # no story behind it, so `sources` may legitimately be empty and the card attributes to
     # TMDB in place of outlets (ADR-0014).
     provenance: str
+    # "published" | "superseded", and the event that supersedes this one (D-2). A superseded
+    # card still renders in place; the client marks it and links to `superseded_by` rather
+    # than dropping it.
+    status: str
+    superseded_by: UUID | None
     sources: list[SourceOut]
 
 
