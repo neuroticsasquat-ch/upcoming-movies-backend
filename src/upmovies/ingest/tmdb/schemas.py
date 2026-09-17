@@ -133,7 +133,11 @@ class TMDBCredits(BaseModel):
 
 
 class TMDBMovieSummary(BaseModel):
-    """A movie as it appears in a `/discover/movie` results list."""
+    """A movie as it appears in a `/discover/movie` or `/search/movie` results list.
+
+    `popularity` is what breaks ties between search hits that match a title equally well
+    (`ingest.tmdb.resolution`), and `original_title` is the half of the match that catches a
+    non-English film exported under its original name — neither is incidental here."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -215,3 +219,12 @@ class TMDBDiscoverResponse(BaseModel):
     results: list[TMDBMovieSummary] = Field(default_factory=list)
     total_pages: int
     total_results: int
+
+
+class TMDBSearchResponse(TMDBDiscoverResponse):
+    """The paged envelope returned by `/search/movie`.
+
+    Identical in shape to discover's, and a subclass rather than a second copy of four fields:
+    TMDB documents one envelope for both, so a future field belongs on both. Distinct from it
+    by name because the two endpoints answer different questions and a caller reading
+    `TMDBDiscoverResponse` back from a search would have to check which."""

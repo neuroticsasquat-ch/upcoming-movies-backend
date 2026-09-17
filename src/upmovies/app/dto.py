@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from upmovies.catalog.headline_release import HeadlineReleaseKind
 
@@ -292,3 +292,42 @@ class WatchlistItemOut(BaseModel):
 
 class WatchlistListResponse(BaseModel):
     items: list[WatchlistItemOut]
+
+
+# The imports (D-15, D-16). The job row as the owner polls it — every field of `app.import_job`
+# except `user_id`, which the caller is.
+
+
+class ImportUnmatchedOut(BaseModel):
+    """A row the resolver refused to place. `name` and `year` are the CSV's, verbatim, because
+    the user is going to look for them in their own export."""
+
+    name: str
+    year: int | None = None
+    kind: Literal["watchlist", "rating"]
+
+
+class ImportJobStartedOut(BaseModel):
+    """The 202 from an upload: the id to poll, and nothing else — the job has not run yet."""
+
+    job_id: UUID
+
+
+class ImportJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    source: str
+    status: str
+    rows_total: int
+    rows_done: int
+    watchlist_created: int
+    follows_created: int
+    unmatched: list[ImportUnmatchedOut]
+    # Set only on a `failed` job. The runner writes `str(exception)` here, which is why the
+    # route is the one place it is rendered: it is a one-line cause for a user to quote back,
+    # not a payload anything should branch on.
+    error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None

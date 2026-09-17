@@ -2,6 +2,7 @@
 spine (keyed by `tmdb_id`) plus its normalized genre/company/country/language/collection
 relations. Pure DB I/O — the caller owns the transaction (commit/rollback)."""
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -40,7 +41,7 @@ from upmovies.ingest.tmdb.release_date_history import (
     mark_release_dates_observed,
     record_release_date_changes,
 )
-from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import TMDBCastMember, TMDBCrewMember, TMDBMovieDetails
 
 
 async def mark_film_missing(session: AsyncSession, tmdb_id: int) -> None:
@@ -69,6 +70,54 @@ async def mark_person_missing(session: AsyncSession, person_id: int) -> None:
     await session.execute(
         update(Person).where(Person.id == person_id).values(tmdb_missing_at=datetime.now(UTC))
     )
+
+
+async def upsert_people(
+    session: AsyncSession, members: Iterable[TMDBCastMember | TMDBCrewMember]
+) -> None:
+    """Upsert `catalog.person` rows for these cast/crew entries. Caller commits.
+
+    Split out of `_upsert_credits` for the Letterboxd import (D-15), which needs exactly this
+    and nothing else around it: a film the user rated four stars contributes its director and
+    top-2 billing as people to follow, and is then discarded — no `catalog.film` row, no
+    credits, because the catalog is the *upcoming*-film spine and a rated back-catalogue film
+    has nothing left to announce (`NEU-1356-letterboxd-import.md` §3). Sharing the write rather
+    than restating it is what keeps the two paths agreeing on the conflict set, and in
+    particular on clearing `tmdb_missing_at`.
+
+    Deduped by TMDB id, first entry winning, so one person billed and also credited as a
+    writer is one row — and so the statement cannot raise the "ON CONFLICT DO UPDATE command
+    cannot affect row a second time" that a duplicate id inside one `VALUES` produces."""
+    people_by_id: dict[int, dict] = {}
+    for m in members:
+        if m.id not in people_by_id:
+            people_by_id[m.id] = {
+                "id": m.id,
+                "name": m.name,
+                "original_name": m.original_name,
+                "profile_path": m.profile_path,
+                "known_for_department": m.known_for_department,
+                "gender": m.gender,
+                "popularity": m.popularity,
+            }
+    if not people_by_id:
+        return
+    stmt = insert(Person).values(list(people_by_id.values()))
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[Person.id],
+        set_={
+            "name": stmt.excluded.name,
+            "original_name": stmt.excluded.original_name,
+            "profile_path": stmt.excluded.profile_path,
+            "known_for_department": stmt.excluded.known_for_department,
+            "gender": stmt.excluded.gender,
+            "popularity": stmt.excluded.popularity,
+            # TMDB naming this person in a film's credits is proof the id is live again,
+            # which is the whole revival path for a tombstoned seed person (NEU-1124).
+            "tmdb_missing_at": None,
+        },
+    )
+    await session.execute(stmt)
 
 
 async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
@@ -350,47 +399,7 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     previous_seed_credits = await load_seed_credits(session, film_id)
 
     # Step 1 — People: union of cast + crew, deduped by TMDB person id.
-    people_by_id: dict[int, dict] = {}
-    for m in details.credits.cast:
-        if m.id not in people_by_id:
-            people_by_id[m.id] = {
-                "id": m.id,
-                "name": m.name,
-                "original_name": m.original_name,
-                "profile_path": m.profile_path,
-                "known_for_department": m.known_for_department,
-                "gender": m.gender,
-                "popularity": m.popularity,
-            }
-    for m in details.credits.crew:
-        if m.id not in people_by_id:
-            people_by_id[m.id] = {
-                "id": m.id,
-                "name": m.name,
-                "original_name": m.original_name,
-                "profile_path": m.profile_path,
-                "known_for_department": m.known_for_department,
-                "gender": m.gender,
-                "popularity": m.popularity,
-            }
-
-    if people_by_id:
-        stmt = insert(Person).values(list(people_by_id.values()))
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[Person.id],
-            set_={
-                "name": stmt.excluded.name,
-                "original_name": stmt.excluded.original_name,
-                "profile_path": stmt.excluded.profile_path,
-                "known_for_department": stmt.excluded.known_for_department,
-                "gender": stmt.excluded.gender,
-                "popularity": stmt.excluded.popularity,
-                # TMDB naming this person in a film's credits is proof the id is live again,
-                # which is the whole revival path for a tombstoned seed person (NEU-1124).
-                "tmdb_missing_at": None,
-            },
-        )
-        await session.execute(stmt)
+    await upsert_people(session, [*details.credits.cast, *details.credits.crew])
 
     # Step 2 — Credits rebuild: delete stale rows then reinsert current set.
     await session.execute(delete(FilmCredit).where(FilmCredit.film_id == film_id))

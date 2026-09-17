@@ -448,3 +448,41 @@ async def test_5xx_message_does_not_leak_the_api_key():
             await c.movie_details(500)
     assert "test-key" not in str(excinfo.value)
     assert "api_key=REDACTED" in str(excinfo.value)
+
+
+@respx.mock
+async def test_search_movie_sends_the_query_and_the_primary_release_year():
+    route = respx.get(f"{BASE_URL}/search/movie").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "page": 1,
+                "total_pages": 1,
+                "total_results": 1,
+                "results": [{"id": 438631, "title": "Dune", "release_date": "2021-09-15"}],
+            },
+        )
+    )
+    async with _client() as c:
+        hits = await c.search_movie("Dune", 2021)
+
+    assert [(h.id, h.title, h.release_date) for h in hits] == [(438631, "Dune", date(2021, 9, 15))]
+    params = route.calls.last.request.url.params
+    assert params.get("query") == "Dune"
+    assert params.get("primary_release_year") == "2021"
+    assert params.get("page") == "1"
+    # `year` matches a release in any country, which would let an import place a 1977 title on
+    # a modern restoration; `primary_release_year` is the narrower filter and the one used.
+    assert params.get("year") is None
+
+
+@respx.mock
+async def test_search_movie_omits_the_year_when_there_is_none():
+    route = respx.get(f"{BASE_URL}/search/movie").mock(
+        return_value=httpx.Response(
+            200, json={"page": 1, "total_pages": 1, "total_results": 0, "results": []}
+        )
+    )
+    async with _client() as c:
+        assert await c.search_movie("Untitled Project") == []
+    assert route.calls.last.request.url.params.get("primary_release_year") is None

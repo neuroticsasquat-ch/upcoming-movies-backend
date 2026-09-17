@@ -102,6 +102,19 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   **and** as the Wrangler secret of the same name, then deploy the frontend. (3) Only then set
   `RATE_LIMIT_PUBLIC_ENABLED=true` in the Coolify UI and restart. Both are Coolify UI changes, not
   compose edits — the fallbacks in `docker-compose.prod.yml` are seeds, per the gotcha above.
+- **The TMDB rate limiter is per client, not per process (NEU-1356).** `RateLimiter` is
+  constructed inside each `TMDBClient`, so two clients alive at once get a full
+  `TMDB_RATE_LIMIT_REQUESTS` window *each*. This never mattered while the only callers were the
+  pipeline stages, which run sequentially in one process and so are never concurrent — a
+  library import is the first caller that can overlap them, because it is spawned by a user
+  upload at whatever moment they choose. An import running against the daily chain therefore
+  asks TMDB for roughly double the intended rate rather than sharing one budget with it.
+  Accepted for v1: the client already backs off on 429 without spending its retry budget
+  (`ingest/tmdb/client.py`), so the failure mode is slower, not broken, and imports are rare.
+  Note that `NEU-1356-letterboxd-import.md` §4 asserts the opposite ("the TMDB limiter is
+  process-wide, so a running import slows the daily chain") — the spec is wrong about the code
+  as built, and this entry, not that line, is the accurate one. Revisit by sharing one limiter
+  across clients if imports become frequent.
 - **Long-running container holds the env it was created with.** After any env change: `docker compose -f ../docker-compose.yml up -d --force-recreate api` and `printenv` to confirm.
 - **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`. Autogenerate never emits `CheckConstraint` — write every `ck_*` by hand, and give any hand-named constraint the same `name=` in the model: the parity test (`tests/integration/test_migrations.py`) compares names, so a mismatch fails `task test`.
 
