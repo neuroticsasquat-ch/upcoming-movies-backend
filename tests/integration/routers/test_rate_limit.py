@@ -226,7 +226,7 @@ async def test_the_public_routes_share_one_bucket(client, store):
     settings = Settings(  # type: ignore[call-arg]
         RATE_LIMIT_ENABLED="true",
         RATE_LIMIT_PUBLIC_ENABLED="true",
-        RATE_LIMIT_PUBLIC="4/60",
+        RATE_LIMIT_PUBLIC="8/60",
     )
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_rate_limit_store] = lambda: store
@@ -235,8 +235,12 @@ async def test_the_public_routes_share_one_bucket(client, store):
         assert (await client.get("/feed/grouped")).status_code == 200
         assert (await client.get("/calendar")).status_code == 200
         assert (await client.get("/films/search?q=dune")).status_code == 200
+        assert (await client.get("/people/search?q=dune")).status_code == 200
+        assert (await client.get("/people/popular")).status_code == 200
+        assert (await client.get("/companies/search?q=dune")).status_code == 200
+        assert (await client.get("/collections/search?q=dune")).status_code == 200
         # The sitemap is deliberately outside the bucket — crawlers, cached upstream — so it
-        # answers after the other four have spent every token.
+        # answers after the other eight have spent every token.
         assert (await client.get("/films/0-nothing")).status_code == 429
         assert (await client.get("/sitemap.xml")).status_code == 200
     finally:

@@ -52,6 +52,10 @@ from upmovies.public.dto import (
     CalendarResponse,
     CastMemberOut,
     CollectionOut,
+    CollectionSearchItem,
+    CollectionSearchResponse,
+    CompanySearchItem,
+    CompanySearchResponse,
     CrewMemberOut,
     DayGroup,
     EventOut,
@@ -62,6 +66,9 @@ from upmovies.public.dto import (
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
+    PersonSearchItem,
+    PersonSearchResponse,
+    PopularPeopleResponse,
     ReleaseDateOut,
     SourceOut,
 )
@@ -259,18 +266,9 @@ def _title_match(nq: str) -> ColumnElement[bool]:
 async def get_film_search(
     session: AsyncSession, *, q: str, limit: int, offset: int
 ) -> FilmIndexResponse:
-    term = q.strip()
-    # Gate on alphanumeric count, not raw length: require at least MIN_QUERY_LEN
-    # alphanumeric characters. One check short-circuits blank/whitespace, single-
-    # character, and all-punctuation queries (e.g. "", "a", "%", "_", "--") to an
-    # empty page instead of running an unbounded %term% scan. This also gates the
-    # wildcard-literal path: "%"/"_" have zero alphanumerics, so they return empty
-    # here -- _escape_like / the wildcard-literal tests only exercise escaping for
-    # queries that clear this gate (e.g. "50%", which has two alphanumerics).
-    alphanumeric_len = sum(1 for c in term if c.isalnum())
-    if alphanumeric_len < MIN_QUERY_LEN:
+    nq = _searchable_query(q)
+    if nq is None:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
-    nq = _normalize_query(term)
     # Search spans the whole catalog: any slugged film whose title matches, regardless of
     # whether it has news events yet or is upcoming. This is deliberately broader than the
     # /films index and /feed, which gate on a visible, summarized event. The slug guard stays
@@ -298,6 +296,163 @@ async def get_film_search(
     )
     items = _film_index_items(list(films))
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+def _searchable_query(q: str) -> str | None:
+    """The folded query, or None when it is too short to search on.
+
+    Gates on alphanumeric count, not raw length: at least MIN_QUERY_LEN alphanumeric
+    characters. One check short-circuits blank, single-character and all-punctuation
+    queries ("", "a", "%", "--") to an empty page instead of an unbounded %term% scan. It
+    also closes the wildcard path: "%" and "_" carry no alphanumerics, and what survives the
+    fold is alphanumeric only, so no LIKE metacharacter ever reaches the database.
+    """
+    term = q.strip()
+    if sum(1 for c in term if c.isalnum()) < MIN_QUERY_LEN:
+        return None
+    return _normalize_query(term)
+
+
+def _name_match(nq: str, *cols: Any) -> ColumnElement[bool]:
+    """Fold each column the way `_normalize_query` folded the query and substring-match."""
+    pattern = f"%{nq}%"
+    return or_(*(_normalized_col(col).like(pattern) for col in cols))
+
+
+# A person TMDB has since deleted (`tmdb_missing_at` set) is not a follow target: nothing
+# will ever be ingested against them again, so a follow would be a dead row from day one.
+_LIVE_PERSON = Person.tmdb_missing_at.is_(None)
+
+
+def _person_search_items(people: list[Person]) -> list[PersonSearchItem]:
+    return [
+        PersonSearchItem(
+            id=p.id,
+            name=p.name,
+            known_for_department=p.known_for_department,
+            profile_path=p.profile_path,
+        )
+        for p in people
+    ]
+
+
+async def get_person_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> PersonSearchResponse:
+    """Search `catalog.person` by name / original_name (folded substring), most popular first.
+
+    Popularity is TMDB's score, refreshed on every film ingest that credits the person; a
+    NULL score sorts last so a stub row never outranks a scored one on a tie.
+    """
+    nq = _searchable_query(q)
+    if nq is None:
+        return PersonSearchResponse(items=[], total=0, limit=limit, offset=offset)
+    where = (_LIVE_PERSON, _name_match(nq, Person.name, Person.original_name))
+    total = await session.scalar(select(func.count()).select_from(Person).where(*where))
+    people = (
+        (
+            await session.execute(
+                select(Person)
+                .where(*where)
+                .order_by(nulls_last(Person.popularity.desc()), Person.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return PersonSearchResponse(
+        items=_person_search_items(list(people)), total=total or 0, limit=limit, offset=offset
+    )
+
+
+async def get_popular_people(session: AsyncSession, *, limit: int) -> PopularPeopleResponse:
+    """The onboarding grid (D-17): the most popular people who have a profile photo.
+
+    A faceless tile is useless on a wall of faces, and a person with no popularity score has
+    no claim to being "popular", so both are required rather than sorted to the end.
+    """
+    people = (
+        (
+            await session.execute(
+                select(Person)
+                .where(
+                    _LIVE_PERSON,
+                    Person.profile_path.is_not(None),
+                    Person.popularity.is_not(None),
+                )
+                .order_by(Person.popularity.desc(), Person.id.asc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return PopularPeopleResponse(items=_person_search_items(list(people)), limit=limit)
+
+
+async def get_company_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> CompanySearchResponse:
+    """Search `catalog.production_company` by name (folded substring), alphabetical.
+
+    Companies carry no popularity, so the order is the name itself: a stable, guessable
+    order for a list the user scans by eye.
+    """
+    nq = _searchable_query(q)
+    if nq is None:
+        return CompanySearchResponse(items=[], total=0, limit=limit, offset=offset)
+    where = _name_match(nq, ProductionCompany.name)
+    total = await session.scalar(select(func.count()).select_from(ProductionCompany).where(where))
+    companies = (
+        (
+            await session.execute(
+                select(ProductionCompany)
+                .where(where)
+                .order_by(func.lower(ProductionCompany.name).asc(), ProductionCompany.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = [
+        CompanySearchItem(
+            id=c.id, name=c.name, logo_path=c.logo_path, origin_country=c.origin_country
+        )
+        for c in companies
+    ]
+    return CompanySearchResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_collection_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> CollectionSearchResponse:
+    """Search `catalog.collection` (TMDB franchises) by name (folded substring), alphabetical."""
+    nq = _searchable_query(q)
+    if nq is None:
+        return CollectionSearchResponse(items=[], total=0, limit=limit, offset=offset)
+    where = _name_match(nq, Collection.name)
+    total = await session.scalar(select(func.count()).select_from(Collection).where(where))
+    collections = (
+        (
+            await session.execute(
+                select(Collection)
+                .where(where)
+                .order_by(func.lower(Collection.name).asc(), Collection.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = [
+        CollectionSearchItem(id=c.id, name=c.name, poster_path=c.poster_path) for c in collections
+    ]
+    return CollectionSearchResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
 async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse | None:

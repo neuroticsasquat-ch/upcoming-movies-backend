@@ -50,6 +50,63 @@ class FilmIndexResponse(BaseModel):
     offset: int
 
 
+class PersonSearchItem(BaseModel):
+    """A follow target from `catalog.person`. `id` is TMDB's person id — the same id
+    `POST /me/follows` takes for `entity_type=person`."""
+
+    id: int
+    name: str
+    known_for_department: str | None
+    profile_path: str | None
+
+
+class PersonSearchResponse(BaseModel):
+    items: list[PersonSearchItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class PopularPeopleResponse(BaseModel):
+    """The onboarding grid (D-17): a capped list, not a page — there is no `total` or
+    `offset` because the grid never scrolls past the first `limit` faces."""
+
+    items: list[PersonSearchItem]
+    limit: int
+
+
+class CompanySearchItem(BaseModel):
+    """`id` is TMDB's company id — what `POST /me/follows` takes for `entity_type=company`."""
+
+    id: int
+    name: str
+    logo_path: str | None
+    origin_country: str | None
+
+
+class CompanySearchResponse(BaseModel):
+    items: list[CompanySearchItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class CollectionSearchItem(BaseModel):
+    """`id` is TMDB's collection id — what `POST /me/follows` takes for
+    `entity_type=franchise`."""
+
+    id: int
+    name: str
+    poster_path: str | None
+
+
+class CollectionSearchResponse(BaseModel):
+    items: list[CollectionSearchItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class ReleaseDateOut(BaseModel):
     country: str
     release_type: int
