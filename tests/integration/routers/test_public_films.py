@@ -482,6 +482,7 @@ async def test_detail_exposes_film_metadata_all_fields(
     # companies: name-ascending — Alpha before Zeta
     assert body["production_companies"] == ["Alpha Films", "Zeta Studios"]
     assert body["collection"] == {
+        "id": 1,
         "name": "The Franchise Collection",
         "poster_path": "/collection.jpg",
     }
@@ -539,12 +540,12 @@ async def test_detail_metadata_is_scoped_per_film(
     body_a = (await client.get("/films/meta-scope-a-2026")).json()
     assert body_a["genres"] == ["Action", "Adventure"]
     assert body_a["production_companies"] == ["Alpha Films", "Zeta Studios"]
-    assert body_a["collection"] == {"name": "Collection A", "poster_path": None}
+    assert body_a["collection"] == {"id": 1, "name": "Collection A", "poster_path": None}
 
     body_b = (await client.get("/films/meta-scope-b-2026")).json()
     assert body_b["genres"] == ["Horror"]
     assert body_b["production_companies"] == ["Beta Films"]
-    assert body_b["collection"] == {"name": "Collection B", "poster_path": None}
+    assert body_b["collection"] == {"id": 2, "name": "Collection B", "poster_path": None}
 
 
 # ── alternative_titles exposure tests ────────────────────────────────────────
@@ -974,13 +975,17 @@ async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_
     body = r.json()
     cast = body["cast"]
     assert len(cast) == 3
-    # ordered by credit_order asc: Alice (1), Bob (2), Charlie (3)
+    # ordered by credit_order asc: Alice (1), Bob (2), Charlie (3). Each person_id travels with
+    # its own row through that re-ordering (D-10), so a follow button cannot key on a neighbour.
+    assert cast[0]["person_id"] == 1002
     assert cast[0]["name"] == "Alice Actor"
     assert cast[0]["character"] == "Alice"
     assert cast[0]["profile_path"] == "/alice.jpg"
+    assert cast[1]["person_id"] == 1003
     assert cast[1]["name"] == "Bob Actor"
     assert cast[1]["character"] == "Bob"
     assert cast[1]["profile_path"] is None
+    assert cast[2]["person_id"] == 1001
     assert cast[2]["name"] == "Charlie Actor"
     assert cast[2]["character"] == "Charlie"
     assert cast[2]["profile_path"] == "/charlie.jpg"
@@ -1007,7 +1012,12 @@ async def test_film_detail_crew_grouped_orderable(client, make_film, add_event, 
     crew = body["crew"]
     # Department priority: Directing → Writing → Production → Editing
     assert [c["job"] for c in crew] == ["Director", "Screenplay", "Producer", "Editor"]
-    assert crew[0] == {"name": "Director Person", "job": "Director", "department": "Directing"}
+    assert crew[0] == {
+        "person_id": 3003,
+        "name": "Director Person",
+        "job": "Director",
+        "department": "Directing",
+    }
 
 
 async def test_film_detail_crew_orders_within_job_by_credit_order(
@@ -1528,3 +1538,67 @@ async def test_detail_event_carries_status_superseded_by_and_occurred_at(
 
     assert events["credit_removed"]["status"] == "published"
     assert events["credit_removed"]["superseded_by"] is None
+
+
+# ── entity ids for follow buttons (NEU-1395) ─────────────────────────────────
+
+
+async def test_detail_carries_entity_ids_for_follows(
+    client, make_film, add_event, make_collection, attach_companies, attach_credits
+):
+    """Every follow affordance on the film page keys on an id (D-10): the film's own UUID for
+    the `title` follow and the watchlist toggle, TMDB person ids for cast and crew, the TMDB
+    collection id for `franchise`, and TMDB company ids for `company`. Each must match the row
+    it was sourced from."""
+    col = await make_collection(id=77, name="The Franchise Collection")
+    film = await make_film(slug="entity-ids-2026", title="Entity Ids Film", collection_id=col.id)
+    await add_event(film=film, summary="Event.")
+    await attach_companies(film, [(10, "Zeta Studios"), (5, "Alpha Films")])
+    await attach_credits(
+        film,
+        cast=[{"id": 1001, "name": "Alice Actor", "character": "Alice", "credit_order": 1}],
+        crew=[
+            {"id": 3001, "name": "Director Person", "job": "Director", "department": "Directing"}
+        ],
+    )
+
+    r = await client.get("/films/entity-ids-2026")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["id"] == str(film.id)
+    assert body["cast"][0]["person_id"] == 1001
+    assert body["crew"][0]["person_id"] == 3001
+    assert body["collection"]["id"] == 77
+    # name-ascending, same order as `production_companies`
+    assert body["companies"] == [
+        {"id": 5, "name": "Alpha Films"},
+        {"id": 10, "name": "Zeta Studios"},
+    ]
+
+
+async def test_detail_keeps_production_companies_names_beside_companies(
+    client, make_film, add_event, attach_companies
+):
+    """`companies` is a new field beside `production_companies`, not a widening of it — the
+    frontend and backend deploy independently in either order only while the old field keeps
+    its name and its `list[str]` type."""
+    film = await make_film(slug="companies-compat-2026")
+    await add_event(film=film, summary="Event.")
+    await attach_companies(film, [(10, "Zeta Studios"), (5, "Alpha Films")])
+
+    body = (await client.get("/films/companies-compat-2026")).json()
+
+    assert body["production_companies"] == ["Alpha Films", "Zeta Studios"]
+    assert [c["name"] for c in body["companies"]] == body["production_companies"]
+
+
+async def test_detail_sparse_film_has_id_and_empty_companies(client, make_film, add_event):
+    film = await make_film(slug="entity-ids-sparse-2026")
+    await add_event(film=film, summary="Event.")
+
+    body = (await client.get("/films/entity-ids-sparse-2026")).json()
+
+    assert body["id"] == str(film.id)
+    assert body["companies"] == []
+    assert body["collection"] is None

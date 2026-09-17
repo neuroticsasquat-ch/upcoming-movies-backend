@@ -57,6 +57,7 @@ from upmovies.public.dto import (
     CollectionOut,
     CollectionSearchItem,
     CollectionSearchResponse,
+    CompanyOut,
     CompanySearchItem,
     CompanySearchResponse,
     CrewMemberOut,
@@ -618,20 +619,16 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         .all()
     )
 
-    companies = list(
-        (
-            await session.execute(
-                select(ProductionCompany.name)
-                .join(
-                    FilmProductionCompany, FilmProductionCompany.company_id == ProductionCompany.id
-                )
-                .where(FilmProductionCompany.film_id == film.id)
-                .order_by(ProductionCompany.name.asc(), ProductionCompany.id.asc())
-            )
+    company_rows = (
+        await session.execute(
+            select(ProductionCompany.id, ProductionCompany.name)
+            .join(FilmProductionCompany, FilmProductionCompany.company_id == ProductionCompany.id)
+            .where(FilmProductionCompany.film_id == film.id)
+            .order_by(ProductionCompany.name.asc(), ProductionCompany.id.asc())
         )
-        .scalars()
-        .all()
-    )
+    ).all()
+    companies = [r.name for r in company_rows]
+    companies_out = [CompanyOut(id=r.id, name=r.name) for r in company_rows]
 
     countries = (await _production_countries_for_films(session, {film.id})).get(film.id, [])
 
@@ -641,7 +638,9 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             await session.execute(select(Collection).where(Collection.id == film.collection_id))
         ).scalar_one_or_none()
         if col_row is not None:
-            collection = CollectionOut(name=col_row.name, poster_path=col_row.poster_path)
+            collection = CollectionOut(
+                id=col_row.id, name=col_row.name, poster_path=col_row.poster_path
+            )
 
     _excluded_titles = {t.lower() for t in [film.title, film.original_title] if t}
     _alt_title_rows = list(
@@ -667,7 +666,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
 
     cast_rows = (
         await session.execute(
-            select(Person.name, FilmCredit.character, Person.profile_path)
+            select(Person.id, Person.name, FilmCredit.character, Person.profile_path)
             .join(FilmCredit, FilmCredit.person_id == Person.id)
             .where(FilmCredit.film_id == film.id, FilmCredit.credit_type == "cast")
             .order_by(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc())
@@ -675,13 +674,16 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         )
     ).all()
     cast_out = [
-        CastMemberOut(name=r.name, character=r.character, profile_path=r.profile_path)
+        CastMemberOut(
+            person_id=r.id, name=r.name, character=r.character, profile_path=r.profile_path
+        )
         for r in cast_rows
     ]
 
     crew_rows = (
         await session.execute(
             select(
+                Person.id,
                 Person.name,
                 FilmCredit.job,
                 FilmCredit.department,
@@ -692,12 +694,13 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         )
     ).all()
     crew_out = [
-        CrewMemberOut(name=r.name, job=r.job, department=r.department)
+        CrewMemberOut(person_id=r.id, name=r.name, job=r.job, department=r.department)
         for r in sorted(crew_rows, key=_crew_sort_key)
     ]
 
     return FilmDetailResponse(
         ref=film_ref(film.tmdb_id, film.title),
+        id=film.id,
         title=film.title,
         tmdb_id=film.tmdb_id,
         imdb_id=film.imdb_id,
@@ -717,6 +720,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         genres=genres,
         production_countries=countries,
         production_companies=companies,
+        companies=companies_out,
         collection=collection,
         alternative_titles=alternative_titles,
         cast=cast_out,
