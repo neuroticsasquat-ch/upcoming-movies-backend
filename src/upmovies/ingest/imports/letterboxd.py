@@ -19,11 +19,8 @@ import csv
 import io
 import zipfile
 from dataclasses import dataclass
-from typing import Literal
 
 from upmovies.app.errors import DomainError
-
-UnmatchedKind = Literal["watchlist", "rating"]
 
 WATCHLIST_MEMBER = "watchlist.csv"
 RATINGS_MEMBER = "ratings.csv"

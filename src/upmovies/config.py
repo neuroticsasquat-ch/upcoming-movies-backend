@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     tmdb_rate_limit_window_seconds: int = Field(default=10, alias="TMDB_RATE_LIMIT_WINDOW_SECONDS")
     tmdb_retry_max_attempts: int = Field(default=5, alias="TMDB_RETRY_MAX_ATTEMPTS")
 
+    # Where themoviedb.org sends the user back after they approve (or refuse) the import's
+    # request token (D-16). A frontend page, not a route here: TMDB appends `request_token` and
+    # `approved` as query params to whatever this names, and the page reads them and calls
+    # `POST /me/import/tmdb/callback` with the session cookie and the CSRF header the route
+    # requires. Pointing it straight at the API would arrive as a bare cross-site GET with
+    # neither.
+    tmdb_redirect_url: str = Field(
+        default="http://localhost:5173/welcome?tmdb=callback", alias="TMDB_REDIRECT_URL"
+    )
+
     # Rolling release-date window + filters for the TMDB discover ingestion.
     tmdb_release_window_past_days: int = Field(default=0, alias="TMDB_RELEASE_WINDOW_PAST_DAYS")
     tmdb_release_window_future_days: int = Field(

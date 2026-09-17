@@ -32,9 +32,22 @@ async def active_for_user(db: AsyncSession, user_id: UUID) -> ImportJob | None:
     return (await db.execute(stmt)).scalars().first()
 
 
-async def create(db: AsyncSession, *, user_id: UUID, source: str, rows_total: int) -> ImportJob:
+async def create(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    source: str,
+    rows_total: int,
+    tmdb_username: str | None = None,
+) -> ImportJob:
     """Open a job in `queued` and return it. Caller commits."""
-    job = ImportJob(user_id=user_id, source=source, status="queued", rows_total=rows_total)
+    job = ImportJob(
+        user_id=user_id,
+        source=source,
+        status="queued",
+        rows_total=rows_total,
+        tmdb_username=tmdb_username,
+    )
     db.add(job)
     await db.flush()
     await db.refresh(job)
@@ -87,3 +100,12 @@ async def finalize(
     if error is not None:
         values["error"] = error
     await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(**values))
+
+
+async def set_rows_total(db: AsyncSession, job_id: UUID, rows_total: int) -> None:
+    """Write the denominator once the runner knows it. Caller commits.
+
+    Separate from `record_progress` because only one source needs it: an upload knows its row
+    count while it is still validating the file, but the TMDB account import (D-16) cannot know
+    one until the job is already running and has read both lists."""
+    await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(rows_total=rows_total))
