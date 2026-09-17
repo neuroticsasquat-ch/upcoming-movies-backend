@@ -33,7 +33,7 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import Date, any_, case, cast, func, or_, select
+from sqlalchemy import Date, and_, any_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmReleaseDate
@@ -60,6 +60,14 @@ class HeadlineRelease:
     kind: HeadlineReleaseKind
     country: str | None
     bucket: str | None
+
+    def __post_init__(self) -> None:
+        """The contract `HeadlineReleaseOut` publishes, held here so both ends of it are one
+        object's business: a displayable kind always names the subject it came from, and the
+        primary fallback belongs to no country and no theatrical bucket."""
+        is_primary = self.kind == "primary"
+        if is_primary is not (self.country is None) or is_primary is not (self.bucket is None):
+            raise ValueError(f"country and bucket are set iff kind is not 'primary': {self!r}")
 
 
 async def headline_releases(
@@ -100,7 +108,13 @@ async def headline_releases(
             FilmReleaseDate.release_type.in_(tuple(sorted(THEATRICAL_RELEASE_TYPES))),
             or_(
                 FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
-                FilmReleaseDate.iso_3166_1 == any_(Film.origin_country),
+                # `displayable_regions` drops falsy origin entries; the `!= ""` is that same
+                # filter, and it has to be here rather than in Python or a film carrying an
+                # empty origin code would surface rows the film page declines to list.
+                and_(
+                    FilmReleaseDate.iso_3166_1 != "",
+                    FilmReleaseDate.iso_3166_1 == any_(Film.origin_country),
+                ),
             ),
         )
         .group_by(

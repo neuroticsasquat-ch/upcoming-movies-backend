@@ -164,3 +164,30 @@ async def test_one_query_resolves_a_whole_list_and_drops_nobody(session):
 
 async def test_no_film_ids_asks_the_database_nothing(session):
     assert await headline_releases(session, [], today=TODAY) == {}
+
+
+async def test_an_empty_origin_code_does_not_make_a_region_displayable(session):
+    # `displayable_regions` drops falsy origin entries, so the SQL region test must too — a
+    # film carrying `[""]` must not start surfacing rows the film page declines to list.
+    film = await _film(session, origin=[""], rows=[("", 3, 4), ("US", 3, 20)])
+
+    resolved = await headline_releases(session, [film.id], today=TODAY)
+
+    assert resolved[film.id] == HeadlineRelease(
+        date=TODAY + timedelta(days=20), kind="upcoming", country="US", bucket="wide"
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,country,bucket",
+    [
+        ("primary", "US", "wide"),
+        ("upcoming", None, "wide"),
+        ("released", "US", None),
+    ],
+)
+def test_a_headline_release_cannot_disagree_with_its_own_kind(kind, country, bucket):
+    # The contract `HeadlineReleaseOut` publishes: the primary fallback names no country and no
+    # bucket, a displayable kind names both. Held on the dataclass so neither end can drift.
+    with pytest.raises(ValueError):
+        HeadlineRelease(date=TODAY, kind=kind, country=country, bucket=bucket)
