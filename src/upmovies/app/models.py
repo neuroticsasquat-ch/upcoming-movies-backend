@@ -4,13 +4,14 @@ from uuid import UUID
 from sqlalchemy import (  # noqa: I001
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, INET
+from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -161,3 +162,127 @@ class EmailToken(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# The follow graph and the watchlist (M3, D-10 to D-14). Three tables, all keyed by the user
+# and the thing, with no surrogate ids: nothing outside these rows ever needs to name one, the
+# routes address them by `(entity_type, entity_id)` or `film_id`, and the composite key *is* the
+# "unique per (user, type, id)" rule rather than a second constraint beside it.
+
+FOLLOW_ENTITY_TYPES = ("person", "company", "franchise", "title")
+FOLLOW_SOURCES = ("manual", "letterboxd_import", "tmdb_import", "derived")
+WATCHLIST_SOURCES = ("manual", "derived_from_follow", "letterboxd_import", "tmdb_import")
+ALERT_PREFS = ("buy", "rent", "stream")
+DEFAULT_ALERT_PREFS = ("stream",)  # D-14; mirrored by the column's server default
+
+
+def _in_list(values: tuple[str, ...]) -> str:
+    return ", ".join(f"'{v}'" for v in values)
+
+
+class Follow(Base):
+    """A user's standing interest in a person, company, franchise or title (D-10).
+
+    A follow produces timeline rows and nothing else — never a push; that is the watchlist's
+    job — so nothing here carries preferences.
+
+    `entity_id` is text because the four entity types do not share an id space: people,
+    companies and franchises are TMDB integer ids (`catalog.person`, `catalog.production_company`
+    and `catalog.collection` use them as primary keys), while a title is a `catalog.film` row,
+    whose id is our UUID. One polymorphic column, rendered as the id the API already exposes for
+    that entity, beats four nullable FK columns with a CHECK that exactly one is set: the row is
+    read by entity type every time anyway (timeline filter, derivation), and the DTO normalises
+    the value on the way in so `"012"` and `"12"` cannot become two follows. The cost is that
+    the catalog cannot cascade a deletion into this table — acceptable, because films are never
+    deleted (spec §4.4) and people, companies and collections are only ever upserted."""
+
+    __tablename__ = "follow"
+    __table_args__ = (
+        CheckConstraint(
+            f"entity_type IN ({_in_list(FOLLOW_ENTITY_TYPES)})", name="ck_follow_entity_type"
+        ),
+        CheckConstraint(f"source IN ({_in_list(FOLLOW_SOURCES)})", name="ck_follow_source"),
+        # The derivation pass (D-13) and the timeline (D-11) ask "who follows this entity?",
+        # the reverse of the primary key's "what does this user follow?".
+        Index("ix_follow_entity", "entity_type", "entity_id"),
+        {"schema": "app"},
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), primary_key=True
+    )
+    entity_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    entity_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class WatchlistItem(Base):
+    """A title the user wants to be *told* about — the only row in the system that produces a
+    push (D-13, D-14).
+
+    `source` records who put it here. `manual` is the user; `derived_from_follow` is the follow
+    graph acting on their behalf, and is the value that makes a later removal a dismissal
+    rather than a plain delete; the two import sources are named here because D-15 and D-16
+    write them, and a CHECK that did not know about them would fail the import tickets at the
+    constraint rather than the review.
+
+    `alert_prefs` is the subset of `{buy, rent, stream}` availability beats this item may alert
+    on; the push-whitelist beats (a date assigned or moved, a home-release date, a trailer) are
+    always on for a watchlist item and are deliberately not represented here, so they cannot
+    be switched off. The default `{stream}` is a server default so a row written by the
+    derivation pass or an import gets it without each writer restating it."""
+
+    __tablename__ = "watchlist_item"
+    __table_args__ = (
+        CheckConstraint(
+            f"source IN ({_in_list(WATCHLIST_SOURCES)})", name="ck_watchlist_item_source"
+        ),
+        CheckConstraint(
+            f"alert_prefs <@ ARRAY[{_in_list(ALERT_PREFS)}]::text[]",
+            name="ck_watchlist_item_alert_prefs",
+        ),
+        # The notify pass (D-31) and the provider poll's scoped set (D-27) ask "who has this
+        # film watchlisted?", the reverse of the primary key.
+        Index("ix_watchlist_item_film_id", "film_id"),
+        {"schema": "app"},
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), primary_key=True
+    )
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), primary_key=True
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    alert_prefs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{stream}'::text[]")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class WatchlistDismissal(Base):
+    """The user removed a derived watchlist item, and the follow graph must not put it back
+    (D-13).
+
+    A row rather than a flag on the item because the item is gone: the dismissal is the only
+    thing left that says the derivation already happened and was refused. Permanent by design —
+    nothing deletes these, and a revoke leaves them alone (D-40) — but it binds the *derivation*
+    only: the user adding the same film by hand is a `manual` item and is not blocked by it."""
+
+    __tablename__ = "watchlist_dismissal"
+    __table_args__ = {"schema": "app"}
+
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), primary_key=True
+    )
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
