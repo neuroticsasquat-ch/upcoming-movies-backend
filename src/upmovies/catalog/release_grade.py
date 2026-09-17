@@ -22,7 +22,10 @@ presentation concern; membership is not.
 **Why the primary date is not here.** `catalog.film.release_date` is TMDB's primary — the
 earliest release in *any* country of *any* type — so it is routinely a date this cut excludes.
 It survives as the year parenthetical after the film's title and nothing else, and it raises no
-events (NEU-1121). Anything reaching for "the film's release date" wants this module instead.
+events (NEU-1121). Anything reaching for "the film's release date" wants this module instead —
+and a surface with room for exactly one date wants `catalog.headline_release`, which chooses
+among the governing dates this cut defines and reaches for the primary only when there is
+nothing displayable to show.
 """
 
 from collections.abc import Sequence

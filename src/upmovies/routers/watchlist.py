@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.dto import (
+    HeadlineReleaseOut,
     WatchlistCreateRequest,
     WatchlistFilmOut,
     WatchlistItemOut,
@@ -19,6 +20,7 @@ from upmovies.app.entitlements import require_entitled
 from upmovies.app.errors import NotFound
 from upmovies.app.models import User, WatchlistItem
 from upmovies.app.services import watchlist_service
+from upmovies.catalog.headline_release import HeadlineRelease
 from upmovies.catalog.models import Film
 from upmovies.deps import get_session, require_csrf
 
@@ -27,7 +29,10 @@ entitled = require_entitled()
 router = APIRouter(prefix="/me/watchlist", tags=["me"], dependencies=[Depends(entitled)])
 
 
-def _to_out(item: WatchlistItem, film: Film) -> WatchlistItemOut:
+def _to_out(item: WatchlistItem, film: Film, headline: HeadlineRelease | None) -> WatchlistItemOut:
+    """`headline` comes from the service, never off `Film`: the row shows the film's headline
+    release (NEU-1397), and `film.release_date` is the primary date the film page does not
+    display. `None` — no displayable row and no primary date — renders as "No date yet"."""
     return WatchlistItemOut(
         film=WatchlistFilmOut(
             id=film.id,
@@ -35,7 +40,16 @@ def _to_out(item: WatchlistItem, film: Film) -> WatchlistItemOut:
             slug=film.slug,
             title=film.title,
             poster_path=film.poster_path,
-            release_date=film.release_date,
+            headline_release=(
+                None
+                if headline is None
+                else HeadlineReleaseOut(
+                    date=headline.date,
+                    kind=headline.kind,
+                    country=headline.country,
+                    bucket=headline.bucket,
+                )
+            ),
         ),
         source=item.source,
         alert_prefs=item.alert_prefs,
@@ -49,7 +63,9 @@ async def list_watchlist(
     db: AsyncSession = Depends(get_session),
 ) -> WatchlistListResponse:
     items = await watchlist_service.list_items(db, user=user)
-    return WatchlistListResponse(items=[_to_out(item, film) for item, film in items])
+    return WatchlistListResponse(
+        items=[_to_out(item, film, headline) for item, film, headline in items]
+    )
 
 
 @router.post(
@@ -67,7 +83,7 @@ async def add_to_watchlist(
     """Add a film. 201 with the new row, or 200 with the existing one, untouched — a toggle
     clicked twice should not fail, and PATCH is how prefs change."""
     try:
-        item, film, created = await watchlist_service.add(
+        item, film, headline, created = await watchlist_service.add(
             db, user=user, film_id=payload.film_id, alert_prefs=payload.alert_prefs
         )
     except NotFound:
@@ -76,7 +92,7 @@ async def add_to_watchlist(
         ) from None
     if not created:
         response.status_code = status.HTTP_200_OK
-    return _to_out(item, film)
+    return _to_out(item, film, headline)
 
 
 @router.patch(
@@ -91,14 +107,14 @@ async def update_alert_prefs(
     db: AsyncSession = Depends(get_session),
 ) -> WatchlistItemOut:
     try:
-        item, film = await watchlist_service.set_alert_prefs(
+        item, film, headline = await watchlist_service.set_alert_prefs(
             db, user=user, film_id=film_id, alert_prefs=payload.alert_prefs
         )
     except NotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="watchlist_item_not_found"
         ) from None
-    return _to_out(item, film)
+    return _to_out(item, film, headline)
 
 
 @router.delete(
