@@ -470,7 +470,11 @@ async def supersede_prior_attachment_cards(session: AsyncSession, *, removal: Ev
     Returns the number of cards marked. Caller owns the commit; `removal` must be flushed so
     its id exists for the FK.
     """
-    marked = 0
+    # Resolve every target before marking any. Marking inside the loop would autoflush the
+    # first UPDATE ahead of the next name's query, and a card two departing people share
+    # would then fail the `published` filter for the second — handing back an *older* card
+    # that person is on, which is not the one this removal corrects.
+    targets: dict[UUID, Event] = {}
     for name in removal.subject_key or []:
         stmt = (
             select(Event)
@@ -485,13 +489,12 @@ async def supersede_prior_attachment_cards(session: AsyncSession, *, removal: Ev
             .limit(1)
         )
         card = (await session.execute(stmt)).scalar_one_or_none()
-        # Two names on one card: the identity map hands back the instance already marked
-        # above, so the guard keeps the count honest whatever the autoflush setting.
-        if card is None or card.superseded_by is not None:
-            continue
+        if card is not None:
+            targets[card.id] = card
+    for card in targets.values():
         card.status = "superseded"
         card.superseded_by = removal.id
-        marked += 1
+    marked = len(targets)
     await session.flush()
     return marked
 

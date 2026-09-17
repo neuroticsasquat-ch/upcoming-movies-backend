@@ -1116,3 +1116,53 @@ async def test_an_attachment_card_after_the_removal_is_not_superseded(
         "published",
         None,
     )
+
+
+async def test_two_departures_sharing_one_card_do_not_reach_an_older_card(
+    session, session_factory, run_id
+):
+    """Two people on one casting card leave together: that card is marked once, and an older
+    trade-story card one of them is also on stays published — it is not the claim this
+    removal corrects. (Marking mid-loop would autoflush the first update and let the second
+    name's query fall through to the older card.)"""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    lead = await _person(session, 100, "Timothée Chalamet")
+    costar = await _person(session, 200, "Zendaya")
+    older_story_card = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="rumored",
+        provenance="story",
+        occurred_at=YESTERDAY - timedelta(days=30),
+        region=None,
+        subject_key=["zendaya"],
+    )
+    session.add(older_story_card)
+    await session.flush()
+    await session.commit()
+    # Zendaya is already carded by the story, so the catalog card below names only Chalamet
+    # unless we bypass suppression: write the shared card directly.
+    shared = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=YESTERDAY,
+        region=None,
+        subject_key=["timothée chalamet", "zendaya"],
+    )
+    session.add(shared)
+    await session.flush()
+    await _cast(session, film, lead, change=CREDIT_REMOVED, changed_at=NOW)
+    await _cast(session, film, costar, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    await _run_detachment(session_factory, run_id)
+
+    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    cards = {e.id: e for e in await _by_type(session, film, "casting")}
+    assert (cards[shared.id].status, cards[shared.id].superseded_by) == ("superseded", removal.id)
+    assert (cards[older_story_card.id].status, cards[older_story_card.id].superseded_by) == (
+        "published",
+        None,
+    )
