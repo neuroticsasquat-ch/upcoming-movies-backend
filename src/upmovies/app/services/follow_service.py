@@ -16,7 +16,13 @@ from upmovies.app.services import derivation_service
 
 
 async def follow(
-    db: AsyncSession, *, user: User, entity_type: str, entity_id: str, source: str = "manual"
+    db: AsyncSession,
+    *,
+    user: User,
+    entity_type: str,
+    entity_id: str,
+    source: str = "manual",
+    derive: bool = True,
 ) -> tuple[Follow, EntityLabel | None, bool]:
     """Follow `entity_id`, commit, and say what it is called and whether the row is new.
 
@@ -38,6 +44,22 @@ async def follow(
     user has since dismissed — which the dismissal check would refuse anyway, making the work
     pure cost.
 
+    `derive=False` turns that off for the imports (D-15, D-16), and only for them. An import
+    writes the watchlist the user actually asked for — the films on their Letterboxd watchlist —
+    and then creates hundreds of person follows in one pass; deriving from each would put every
+    in-play film by every director they have ever rated four stars onto the watchlist, inline,
+    as a side effect of an onboarding upload. `NEU-1356-letterboxd-import.md` §3 defers that to
+    the sweep's derivation pass (NEU-1352), which runs it for every entitled user anyway. So
+    this is a deferral, not a suppression: the items appear on the next sweep, and the user's
+    first screen is the one they uploaded rather than one the graph inferred.
+
+    §3 scopes that rule to *person* follows, but the imports pass `derive=False` for their title
+    follows as well, and the two reasons differ. For a person it is the cost argument above. For
+    a title it is that the derivation has nothing left to do: the import has already written that
+    exact film's watchlist item, a line above, with its own `source` — so the pass would either
+    match the row it just wrote and change nothing, or find a dismissal and refuse (D-13). Both
+    outcomes are the same as skipping it, one statement cheaper.
+
     Idempotent: a second follow of the same entity returns the existing row untouched — its
     `source` and `created_at` record the *first* time the user showed interest, and an import
     re-run must not rewrite a manual follow as an imported one (D-15). `NotFound` if the catalog
@@ -53,9 +75,10 @@ async def follow(
     created = await follow_repo.create(
         db, user_id=user.id, entity_type=entity_type, entity_id=entity_id, source=source
     )
-    await derivation_service.derive_for_follow(
-        db, user_id=user.id, entity_type=entity_type, entity_id=entity_id
-    )
+    if derive:
+        await derivation_service.derive_for_follow(
+            db, user_id=user.id, entity_type=entity_type, entity_id=entity_id
+        )
     await db.commit()
     return created, label, True
 

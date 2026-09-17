@@ -16,6 +16,9 @@ dependencies = [
     "feedparser>=6.0.14",
     "argon2-cffi>=25.1.0",
     "email-validator>=2.3.0",
+    # Multipart form parsing, for the library-import upload (NEU-1356). FastAPI declares it
+    # as an optional extra rather than a dependency, so it has to be named here.
+    "python-multipart>=0.0.20",
     "sentry-sdk[fastapi]>=2.67.1",
     "opentelemetry-distro",
     "opentelemetry-exporter-otlp-proto-http",

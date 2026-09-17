@@ -8,10 +8,11 @@ from sqlalchemy import (  # noqa: I001
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET
+from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -286,3 +287,85 @@ class WatchlistDismissal(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+# The import jobs (D-15, D-16). A Letterboxd or TMDB import is minutes of TMDB requests for a
+# library of any size, so it cannot run inside the upload request: the row below is what the
+# upload returns instead, and what the onboarding UI polls (NEU-1358).
+
+IMPORT_SOURCES = ("letterboxd", "tmdb")
+IMPORT_STATUSES = ("queued", "running", "succeeded", "failed")
+ACTIVE_IMPORT_STATUSES = ("queued", "running")
+"""The statuses that count as "this user already has an import going" — the set the partial
+unique index below is built on, and the one `import_job_repo.active_for_user` asks about."""
+
+
+class ImportJob(Base):
+    """One user's import of their library from another service, and its progress (D-15).
+
+    Shaped after `ingest.ingest_run` — a row created up front, moved through a status, always
+    finalized — but deliberately its own table rather than a `kind` on that one. The two are
+    read by different people for different reasons: `ingest_run` is operational, unscoped to
+    any user and surfaced to an operator through `/admin/runs`, while this row belongs to the
+    user who made it, is returned to them by `GET /me/import/{id}`, and carries counts that
+    only mean something for an import. Putting a user_id and four import counters on
+    `ingest_run` would make every column nullable for one half of its rows.
+
+    `unmatched` is the report the spec asks for, and it is on the row rather than derived: a
+    title the resolver could not place is not an error and not a retry — it is the one thing
+    the user has to act on by hand, so it has to survive the job finishing and outlive the
+    poll that happened to observe it.
+
+    The parsed rows are deliberately *not* stored. They live in memory, handed to the task the
+    upload spawns, because the task runs in the same process that parsed them: persisting a
+    thousand-row library as JSONB to pass it between two frames of one process would be the
+    largest column in the `app` schema, written once and read once. The cost is that a job
+    orphaned by a restart cannot resume — but neither can `ingest_run`'s, for the same reason,
+    and the user's remedy is the same upload they already have."""
+
+    __tablename__ = "import_job"
+    __table_args__ = (
+        CheckConstraint(f"source IN ({_in_list(IMPORT_SOURCES)})", name="ck_import_job_source"),
+        CheckConstraint(f"status IN ({_in_list(IMPORT_STATUSES)})", name="ck_import_job_status"),
+        # "One running job per user" (spec §1) as a constraint rather than only as the check
+        # the route makes before inserting. The route's check answers with a clean 409, which
+        # is what the caller should see; this is what makes the answer true when two uploads
+        # arrive together, which a read-then-insert cannot be on its own.
+        Index(
+            "uq_import_job_active_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text(f"status IN ({_in_list(ACTIVE_IMPORT_STATUSES)})"),
+        ),
+        # The user's own history, newest first — the only way this table is read by anyone but
+        # the job's own runner.
+        Index("ix_import_job_user_id_created_at", "user_id", "created_at"),
+        {"schema": "app"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    rows_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    rows_done: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    watchlist_created: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    follows_created: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # `[{"name": str, "year": int | None, "kind": "watchlist" | "rating"}]`, in the order the
+    # rows were read. A list rather than a table of its own: it is written once by the runner,
+    # read whole by the one route that renders it, and never queried across users.
+    unmatched: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

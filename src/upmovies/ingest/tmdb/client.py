@@ -11,7 +11,9 @@ import httpx
 from upmovies.ingest.tmdb.schemas import (
     TMDBDiscoverResponse,
     TMDBMovieDetails,
+    TMDBMovieSummary,
     TMDBPersonMovieCredits,
+    TMDBSearchResponse,
 )
 from upmovies.logging_config import redact_api_key
 
@@ -137,6 +139,26 @@ class TMDBClient:
         url = f"{self._base_url}/discover/movie"
         resp = await self._request("GET", url, params={"page": page, **params})
         return TMDBDiscoverResponse.model_validate(resp.json())
+
+    async def search_movie(self, query: str, year: int | None = None) -> list[TMDBMovieSummary]:
+        """Search `/search/movie` by title, optionally narrowed to a release year.
+
+        First page only — twenty hits. The caller (`ingest.tmdb.resolution`) matches on an
+        exact folded title, so a film that is not in the first page under its own name is not
+        going to be matched on the second either; paging would double the request count of an
+        import for hits no rule can accept.
+
+        `primary_release_year` rather than `year`: the two are different filters at TMDB, and
+        this one asks about the film's first release, which is the date the search results
+        themselves carry. `year` matches a release in *any* country in that year, which for a
+        back-catalogue film matches a re-release and would let an import place a 1977 title on
+        a 2020 restoration."""
+        url = f"{self._base_url}/search/movie"
+        params: dict[str, str | int] = {"query": query, "page": 1}
+        if year is not None:
+            params["primary_release_year"] = year
+        resp = await self._request("GET", url, params=params)
+        return TMDBSearchResponse.model_validate(resp.json()).results
 
     async def movie_details(self, tmdb_id: int) -> TMDBMovieDetails:
         """Fetch full details for a single movie from `/movie/{id}`. Attaches the verbatim
