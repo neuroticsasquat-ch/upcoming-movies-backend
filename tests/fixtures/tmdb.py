@@ -112,3 +112,39 @@ def make_credit_entry(tmdb_id: int, **overrides: Any) -> dict[str, Any]:
     }
     row.update(overrides)
     return row
+
+
+def make_person_search_hit(person_id: int, **overrides: Any) -> dict[str, Any]:
+    """One `/search/person` result row, with the `known_for` block TMDB attaches."""
+    row: dict[str, Any] = {
+        "id": person_id,
+        "name": f"Person {person_id}",
+        "original_name": f"Person {person_id}",
+        "profile_path": f"/profile{person_id}.jpg",
+        "known_for_department": "Acting",
+        "gender": 2,
+        "popularity": 12.5,
+        "adult": False,  # extra field we don't consume
+        "known_for": [
+            {
+                "id": 1000 + person_id,
+                "media_type": "movie",
+                "title": f"Known For {person_id}",
+                "original_title": f"Known For {person_id}",
+            }
+        ],
+    }
+    row.update(overrides)
+    return row
+
+
+def make_person_search_page(
+    *, results: list[dict[str, Any]], page: int = 1, total_pages: int = 1
+) -> dict[str, Any]:
+    """A `/search/person` envelope — discover's four fields around person hits."""
+    return {
+        "page": page,
+        "total_pages": total_pages,
+        "total_results": len(results),
+        "results": results,
+    }

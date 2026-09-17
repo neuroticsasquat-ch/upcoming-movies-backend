@@ -41,7 +41,12 @@ from upmovies.ingest.tmdb.release_date_history import (
     mark_release_dates_observed,
     record_release_date_changes,
 )
-from upmovies.ingest.tmdb.schemas import TMDBCastMember, TMDBCrewMember, TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import (
+    TMDBCastMember,
+    TMDBCrewMember,
+    TMDBMovieDetails,
+    TMDBPersonSearchHit,
+)
 
 
 async def mark_film_missing(session: AsyncSession, tmdb_id: int) -> None:
@@ -73,9 +78,11 @@ async def mark_person_missing(session: AsyncSession, person_id: int) -> None:
 
 
 async def upsert_people(
-    session: AsyncSession, members: Iterable[TMDBCastMember | TMDBCrewMember]
+    session: AsyncSession,
+    members: Iterable[TMDBCastMember | TMDBCrewMember | TMDBPersonSearchHit],
 ) -> None:
-    """Upsert `catalog.person` rows for these cast/crew entries. Caller commits.
+    """Upsert `catalog.person` rows for these cast/crew entries or person search hits.
+    Caller commits.
 
     Split out of `_upsert_credits` for the Letterboxd import (D-15), which needs exactly this
     and nothing else around it: a film the user rated four stars contributes its director and
@@ -84,6 +91,13 @@ async def upsert_people(
     has nothing left to announce (`NEU-1356-letterboxd-import.md` §3). Sharing the write rather
     than restating it is what keeps the two paths agreeing on the conflict set, and in
     particular on clearing `tmdb_missing_at`.
+
+    A `/search/person` hit is accepted alongside them because person resolution (D-21) needs
+    exactly the same write for the candidate it accepts: the hit carries the same seven person
+    fields, and a person named in a trade story is as good a proof that the id is live as one
+    named in a film's credits. Sharing this rather than writing `catalog.person` a third way
+    is what keeps every path agreeing on the conflict set — most of all on clearing
+    `tmdb_missing_at`, which a separate resolver write would be free to forget.
 
     Deduped by TMDB id, first entry winning, so one person billed and also credited as a
     writer is one row — and so the statement cannot raise the "ON CONFLICT DO UPDATE command
@@ -112,8 +126,9 @@ async def upsert_people(
             "known_for_department": stmt.excluded.known_for_department,
             "gender": stmt.excluded.gender,
             "popularity": stmt.excluded.popularity,
-            # TMDB naming this person in a film's credits is proof the id is live again,
-            # which is the whole revival path for a tombstoned seed person (NEU-1124).
+            # TMDB returning this person at all — in a film's credits, or as a search hit —
+            # is proof the id is live again, which is the whole revival path for a
+            # tombstoned seed person (NEU-1124).
             "tmdb_missing_at": None,
         },
     )

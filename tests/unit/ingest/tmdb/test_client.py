@@ -7,7 +7,13 @@ import httpx
 import pytest
 import respx
 
-from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
+from tests.fixtures.tmdb import (
+    make_credit_entry,
+    make_details,
+    make_person_movie_credits,
+    make_person_search_hit,
+    make_person_search_page,
+)
 from upmovies.config import Settings
 from upmovies.ingest.tmdb.client import (
     RateLimiter,
@@ -730,3 +736,94 @@ async def test_delete_session_sends_the_session_id():
         await client.delete_session("sess-1")
 
     assert json.loads(route.calls.last.request.content) == {"session_id": "sess-1"}
+
+
+@respx.mock
+async def test_search_person_sends_the_query_and_parses_the_scoring_fields():
+    route = respx.get(f"{BASE_URL}/search/person").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_person_search_page(
+                results=[
+                    make_person_search_hit(
+                        2037,
+                        name="Cillian Murphy",
+                        known_for_department="Acting",
+                        popularity=41.2,
+                        known_for=[
+                            {"id": 872585, "media_type": "movie", "title": "Oppenheimer"},
+                            {"id": 63247, "media_type": "tv", "name": "Peaky Blinders"},
+                        ],
+                    )
+                ]
+            ),
+        )
+    )
+    async with _client() as c:
+        hits = await c.search_person("Cillian Murphy")
+
+    assert [h.id for h in hits] == [2037]
+    hit = hits[0]
+    assert hit.name == "Cillian Murphy"
+    # The three fields D-21's scorer reads off the hit itself: department vs the role the
+    # article gives them, popularity as a tiebreak, and the known-for overlap.
+    assert hit.known_for_department == "Acting"
+    assert hit.popularity == 41.2
+    assert [k.display_title for k in hit.known_for] == ["Oppenheimer", "Peaky Blinders"]
+
+    params = route.calls.last.request.url.params
+    assert params.get("query") == "Cillian Murphy"
+    assert params.get("page") == "1"
+
+
+@respx.mock
+async def test_search_person_returns_empty_for_a_name_tmdb_does_not_know():
+    respx.get(f"{BASE_URL}/search/person").mock(
+        return_value=httpx.Response(200, json=make_person_search_page(results=[]))
+    )
+    async with _client() as c:
+        assert await c.search_person("Nobody At All") == []
+
+
+@respx.mock
+async def test_search_person_goes_through_the_rate_limiter():
+    """Three searches on a 2-per-second client wait, the way every other endpoint does.
+
+    Asserted on the clock rather than by inspecting `_limiter`, matching
+    `test_rate_limiter_enforces_rate`: what NEU-1361 owes is that the one external call
+    person resolution makes spends the shared TMDB budget, and an identity check would
+    still pass if `search_person` bypassed `_request`.
+    """
+    respx.get(f"{BASE_URL}/search/person").mock(
+        return_value=httpx.Response(200, json=make_person_search_page(results=[]))
+    )
+    client = TMDBClient(
+        base_url=BASE_URL,
+        api_key="test-key",
+        rate_calls=2,
+        rate_window=1,
+        retry_base_delay=0.01,
+    )
+    start = time.monotonic()
+    async with client as c:
+        await c.search_person("One")
+        await c.search_person("Two")
+        await c.search_person("Three")
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 1.0, f"3 searches at 2/s should wait, took {elapsed:.3f}s"
+
+
+@respx.mock
+async def test_search_person_retries_a_server_error():
+    route = respx.get(f"{BASE_URL}/search/person").mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(200, json=make_person_search_page(results=[make_person_search_hit(1)])),
+        ]
+    )
+    async with _client() as c:
+        hits = await c.search_person("Retry Me")
+
+    assert [h.id for h in hits] == [1]
+    assert route.call_count == 2

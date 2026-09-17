@@ -16,6 +16,8 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBMovieDetails,
     TMDBMovieSummary,
     TMDBPersonMovieCredits,
+    TMDBPersonSearchHit,
+    TMDBPersonSearchResponse,
     TMDBRequestToken,
     TMDBSearchResponse,
     TMDBSessionResponse,
@@ -243,6 +245,23 @@ class TMDBClient:
             params["primary_release_year"] = year
         resp = await self._request("GET", url, params=params)
         return TMDBSearchResponse.model_validate(resp.json()).results
+
+    async def search_person(self, query: str) -> list[TMDBPersonSearchHit]:
+        """Search `/search/person` by name — the first candidate source for person
+        resolution (D-21).
+
+        First page only — twenty hits — and for a firmer reason than `search_movie`'s: the
+        resolver caps its whole candidate union at ten, and the union also includes the film's
+        current credits and its recent change stream. A name whose right person is on page two
+        of TMDB's own relevance ranking is not going to survive that cap, so the second page
+        would cost a request per mention to widen a shortlist that is then truncated.
+
+        No `year`-style narrowing exists here, so nothing is passed beyond the query: TMDB
+        ranks person hits by its own popularity signal, which the scorer re-reads from
+        `popularity` as a tiebreak rather than trusting as an ordering (D-21)."""
+        url = f"{self._base_url}/search/person"
+        resp = await self._request("GET", url, params={"query": query, "page": 1})
+        return TMDBPersonSearchResponse.model_validate(resp.json()).results
 
     async def movie_details(self, tmdb_id: int) -> TMDBMovieDetails:
         """Fetch full details for a single movie from `/movie/{id}`. Attaches the verbatim
