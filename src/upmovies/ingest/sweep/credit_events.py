@@ -22,6 +22,14 @@ and three cards about one beat, and `uq_event_catalog_change` enforces the same 
 structurally: one catalog event per film, type and timestamp. Detachments share the same
 grouping discipline — one `credit_removed` card per (film, changed_at).
 
+**A removal card supersedes the attachment card it corrects** (ADR-0017, D-2). Carding a
+`credit_removed` event marks, for each person it names, their most recent published
+attachment card (`crew_attached`/`casting`, any provenance, occurred before the removal)
+`superseded` and points its `superseded_by` at the removal. The original stays on every
+surface; the marker is the only change. A re-attachment after that is a fresh `published`
+card — removal-aware suppression already lets it through — so attach → remove → re-attach
+reads superseded, published, published.
+
 Contract with the pipeline conventions, matching the other phases: one session per item
 so a failure never rolls back the others, `record_progress` against the run id, abort after N
 consecutive failures, and **no `finalize_run`** — all phases share one `ingest_run` row.
@@ -43,6 +51,7 @@ from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.credit_history import CREDIT_ADDED, CREDIT_REMOVED
 from upmovies.news.catalog_events import (
+    CREDIT_EVENT_TYPES,
     CREDIT_REMOVED_EVENT_TYPE,
     CREDIT_ROLE_EVENT_TYPES,
 )
@@ -438,11 +447,56 @@ async def _has_prior_attachment_card(
     norm = normalize_name(person_name)
     carded = exists().where(
         Event.film_id == film_id,
-        Event.event_type.in_(("crew_attached", "casting")),
+        Event.event_type.in_(CREDIT_EVENT_TYPES),
         Event.subject_key.any(norm),  # pyright: ignore[reportArgumentType]
         Event.occurred_at < before,
     )
     return bool((await session.execute(select(carded))).scalar())
+
+
+async def supersede_prior_attachment_cards(session: AsyncSession, *, removal: Event) -> int:
+    """Mark the attachment card each person named on `removal` was current on (D-2).
+
+    Per name on the removal's `subject_key`: the most recent *published* attachment card
+    (`crew_attached`/`casting`, any provenance) that occurred before the removal is set
+    `superseded` with `superseded_by` pointing at the removal. Only the most recent one — an
+    older card the same person is on (a trade-story casting card before the catalog carded
+    them, say) was already the earlier claim, not the one this removal corrects. Nothing is
+    hidden or deleted; the card keeps its place on every surface.
+
+    The card, not the name, is the unit of supersession: `status` lives on the event row, so
+    a casting card naming three people is marked when any one of them departs.
+
+    Returns the number of cards marked. Caller owns the commit; `removal` must be flushed so
+    its id exists for the FK.
+    """
+    # Resolve every target before marking any. Marking inside the loop would autoflush the
+    # first UPDATE ahead of the next name's query, and a card two departing people share
+    # would then fail the `published` filter for the second — handing back an *older* card
+    # that person is on, which is not the one this removal corrects.
+    targets: dict[UUID, Event] = {}
+    for name in removal.subject_key or []:
+        stmt = (
+            select(Event)
+            .where(
+                Event.film_id == removal.film_id,
+                Event.event_type.in_(CREDIT_EVENT_TYPES),
+                Event.subject_key.any(name),  # pyright: ignore[reportArgumentType]
+                Event.status == "published",
+                Event.occurred_at < removal.occurred_at,
+            )
+            .order_by(Event.occurred_at.desc(), Event.created_at.desc())
+            .limit(1)
+        )
+        card = (await session.execute(stmt)).scalar_one_or_none()
+        if card is not None:
+            targets[card.id] = card
+    for card in targets.values():
+        card.status = "superseded"
+        card.superseded_by = removal.id
+    marked = len(targets)
+    await session.flush()
+    return marked
 
 
 async def _has_forward_reattachment(
@@ -482,7 +536,9 @@ async def _card_detachment_group(
     dwell_days: int,
 ) -> bool:
     """Create the event and its deterministic summary for one detachment group, or report that
-    it was already carded. One transaction covers both writes. Caller owns the commit."""
+    it was already carded. One transaction covers both writes and the supersession marks on
+    the attachment cards it corrects, so a removal can never reach the feed with its
+    original still reading `published`. Caller owns the commit."""
     if await _already_carded(
         session,
         film_id=group.film_id,
@@ -542,6 +598,7 @@ async def _card_detachment_group(
         ),
         source_updated_at=event.updated_at,
     )
+    await supersede_prior_attachment_cards(session, removal=event)
     return True
 
 
