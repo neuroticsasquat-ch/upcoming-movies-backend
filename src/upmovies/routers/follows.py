@@ -17,6 +17,7 @@ from upmovies.app.dto import (
 from upmovies.app.entitlements import require_entitled
 from upmovies.app.errors import NotFound
 from upmovies.app.models import Follow, User
+from upmovies.app.repos.follow_repo import EntityLabel
 from upmovies.app.services import follow_service
 from upmovies.deps import get_session, require_csrf
 
@@ -25,10 +26,14 @@ entitled = require_entitled()
 router = APIRouter(prefix="/me/follows", tags=["me"], dependencies=[Depends(entitled)])
 
 
-def _to_out(follow: Follow) -> FollowOut:
+def _to_out(follow: Follow, label: EntityLabel | None) -> FollowOut:
+    """`label` is `None` for a follow the catalog cannot resolve; the row is still returned, with
+    nulls, because nothing here deletes user graph rows (D-40)."""
     return FollowOut(
         entity_type=follow.entity_type,
         entity_id=follow.entity_id,
+        name=None if label is None else label.name,
+        image_path=None if label is None else label.image_path,
         source=follow.source,
         created_at=follow.created_at,
     )
@@ -40,7 +45,7 @@ async def list_follows(
     db: AsyncSession = Depends(get_session),
 ) -> FollowListResponse:
     items = await follow_service.list_follows(db, user=user)
-    return FollowListResponse(items=[_to_out(f) for f in items])
+    return FollowListResponse(items=[_to_out(f, label) for f, label in items])
 
 
 @router.post(
@@ -58,7 +63,7 @@ async def create_follow(
     """Follow an entity. 201 with the new row, or 200 with the existing one: a follow button
     that is clicked twice should not fail the second time, and the caller can tell which."""
     try:
-        follow, created = await follow_service.follow(
+        follow, label, created = await follow_service.follow(
             db, user=user, entity_type=payload.entity_type, entity_id=payload.entity_id
         )
     except NotFound:
@@ -67,7 +72,7 @@ async def create_follow(
         ) from None
     if not created:
         response.status_code = status.HTTP_200_OK
-    return _to_out(follow)
+    return _to_out(follow, label)
 
 
 @router.delete(

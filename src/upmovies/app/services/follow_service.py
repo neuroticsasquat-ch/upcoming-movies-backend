@@ -11,13 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.app.errors import NotFound
 from upmovies.app.models import Follow, User
 from upmovies.app.repos import follow_repo
+from upmovies.app.repos.follow_repo import EntityLabel
 from upmovies.app.services import derivation_service
 
 
 async def follow(
     db: AsyncSession, *, user: User, entity_type: str, entity_id: str, source: str = "manual"
-) -> tuple[Follow, bool]:
-    """Follow `entity_id`, commit, and say whether the row is new.
+) -> tuple[Follow, EntityLabel | None, bool]:
+    """Follow `entity_id`, commit, and say what it is called and whether the row is new.
 
     A new follow derives its watchlist items in the same transaction (D-13), so a user who
     follows a director sees their in-play films on the watchlist by the time the request
@@ -44,9 +45,10 @@ async def follow(
     existing = await follow_repo.get(
         db, user_id=user.id, entity_type=entity_type, entity_id=entity_id
     )
+    label = await follow_repo.get_entity_label(db, entity_type=entity_type, entity_id=entity_id)
     if existing is not None:
-        return existing, False
-    if not await follow_repo.entity_exists(db, entity_type=entity_type, entity_id=entity_id):
+        return existing, label, False
+    if label is None:
         raise NotFound()
     created = await follow_repo.create(
         db, user_id=user.id, entity_type=entity_type, entity_id=entity_id, source=source
@@ -55,11 +57,16 @@ async def follow(
         db, user_id=user.id, entity_type=entity_type, entity_id=entity_id
     )
     await db.commit()
-    return created, True
+    return created, label, True
 
 
-async def list_follows(db: AsyncSession, *, user: User) -> list[Follow]:
-    return await follow_repo.list_for_user(db, user.id)
+async def list_follows(db: AsyncSession, *, user: User) -> list[tuple[Follow, EntityLabel | None]]:
+    """Every follow with the label its entity carries in the catalog, in one grouped lookup per
+    entity type. A follow the catalog cannot resolve keeps its place in the list with a `None`
+    label — see `FollowOut`."""
+    follows = await follow_repo.list_for_user(db, user.id)
+    labels = await follow_repo.entity_labels(db, follows)
+    return [(f, labels.get((f.entity_type, f.entity_id))) for f in follows]
 
 
 async def unfollow(db: AsyncSession, *, user: User, entity_type: str, entity_id: str) -> None:

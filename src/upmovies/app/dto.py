@@ -203,8 +203,17 @@ class FollowCreateRequest(BaseModel):
 
 
 class FollowOut(BaseModel):
+    """A follow, with enough of the entity to label the row.
+
+    `name` and `image_path` are nullable and that is load-bearing: a follow can outlive the
+    entity it names (a person purged from TMDB, a row written before a backfill), and D-40 says
+    nothing here deletes user graph rows. An unresolvable follow is listed with nulls rather
+    than filtered out."""
+
     entity_type: str
     entity_id: str
+    name: str | None
+    image_path: str | None
     source: str
     created_at: datetime
 

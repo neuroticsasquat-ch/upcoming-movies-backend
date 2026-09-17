@@ -334,3 +334,238 @@ async def test_following_a_person_with_no_qualifying_credit_derives_nothing(
     )
     assert r.status_code == 201
     assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
+
+
+# --- entity names on the list (NEU-1396) ---------------------------------------------------
+
+
+async def test_every_entity_type_carries_its_name_and_image(entitled_client, session, film):
+    """One name column per type (D-10's four entities), each from its own catalog table."""
+    from upmovies.catalog.models import Collection, Person, ProductionCompany
+
+    session.add(Person(id=287, name="Brad Pitt", profile_path="/pitt.jpg"))
+    session.add(ProductionCompany(id=508, name="Regency", logo_path="/regency.png"))
+    session.add(Collection(id=10, name="Fight Club Collection", poster_path="/fc.jpg"))
+    film.poster_path = "/film.jpg"
+    await session.commit()
+
+    for entity_type, entity_id in [
+        ("person", "287"),
+        ("company", "508"),
+        ("franchise", "10"),
+        ("title", str(film.id)),
+    ]:
+        r = await entitled_client.post(
+            "/me/follows", json={"entity_type": entity_type, "entity_id": entity_id}
+        )
+        assert r.status_code == 201, (entity_type, r.json())
+
+    r = await entitled_client.get("/me/follows")
+    assert {(f["entity_type"], f["name"], f["image_path"]) for f in r.json()["items"]} == {
+        ("person", "Brad Pitt", "/pitt.jpg"),
+        ("company", "Regency", "/regency.png"),
+        ("franchise", "Fight Club Collection", "/fc.jpg"),
+        ("title", film.title, "/film.jpg"),
+    }
+
+
+async def test_a_follow_the_catalog_cannot_resolve_is_listed_with_nulls(entitled_client, session):
+    """The row survives with `name: null` rather than being filtered out or 500ing.
+
+    A follow can outlive the entity it names — a person purged from TMDB, a row written before a
+    backfill — and D-40 says nothing here deletes user graph rows. Dropping the unjoinable rows
+    is the obvious wrong implementation: it would hide a follow the user can still see the
+    effects of, and it would quietly break the restore-after-revocation guarantee."""
+    from sqlalchemy import select
+
+    from upmovies.app.models import Follow
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=287, name="Brad Pitt", profile_path="/pitt.jpg"))
+    await session.commit()
+
+    await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "287"})
+
+    # A follow of an entity the catalog has never held, written straight to the table: the route
+    # refuses to create one (404), which is exactly why it has to be forged here.
+    followed = (await session.execute(select(Follow))).scalars().first()
+    assert followed is not None
+    session.add(
+        Follow(
+            user_id=followed.user_id,
+            entity_type="person",
+            entity_id="999999",
+            source="letterboxd_import",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.get("/me/follows")
+    assert r.status_code == 200
+    items = {f["entity_id"]: f for f in r.json()["items"]}
+    assert set(items) == {"287", "999999"}
+    assert (items["999999"]["name"], items["999999"]["image_path"]) == (None, None)
+    assert items["287"]["name"] == "Brad Pitt"
+
+
+async def test_a_malformed_entity_id_does_not_break_the_list(entitled_client, session):
+    """Belt and braces, like the shape guards in `app/follow_queries.py`: `normalise_entity_id`
+    keeps these out of the table, but the importers (D-15, D-16) call the service directly, and
+    one bad row must degrade to a null name rather than abort the whole statement."""
+    from sqlalchemy import select
+
+    from upmovies.app.models import Follow
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=287, name="Brad Pitt"))
+    await session.commit()
+    await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "287"})
+
+    followed = (await session.execute(select(Follow))).scalars().first()
+    assert followed is not None
+    session.add(
+        Follow(
+            user_id=followed.user_id,
+            entity_type="person",
+            entity_id="not-a-number",
+            source="letterboxd_import",
+        )
+    )
+    session.add(
+        Follow(
+            user_id=followed.user_id,
+            entity_type="title",
+            entity_id="not-a-uuid",
+            source="letterboxd_import",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.get("/me/follows")
+    assert r.status_code == 200
+    items = {f["entity_id"]: f for f in r.json()["items"]}
+    assert items["not-a-number"]["name"] is None
+    assert items["not-a-uuid"]["name"] is None
+    assert items["287"]["name"] == "Brad Pitt"
+
+
+async def test_creating_a_follow_answers_with_the_name(entitled_client, session):
+    """`FollowOut` is the POST's response too, so a follow button can label its new row without
+    a second request — and the idempotent second POST answers identically."""
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=287, name="Brad Pitt", profile_path="/pitt.jpg"))
+    await session.commit()
+
+    first = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "287"}
+    )
+    assert first.status_code == 201
+    assert (first.json()["name"], first.json()["image_path"]) == ("Brad Pitt", "/pitt.jpg")
+
+    again = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "287"}
+    )
+    assert again.status_code == 200
+    assert again.json() == first.json()
+
+
+async def test_an_out_of_range_entity_id_does_not_break_the_list(entitled_client, session):
+    """A TMDB id past int32 is the one malformed shape that is *syntactically* fine: it passes
+    `normalise_entity_id`'s positive-integer check and `int()` parses it, so the guard that
+    catches `"not-a-number"` lets it through — and the catalog's keys are `Integer`. Before this
+    was bounded, such a row aborted the whole statement in the driver, taking every other follow
+    on the list down with it."""
+    from sqlalchemy import select
+
+    from upmovies.app.models import Follow
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=287, name="Brad Pitt"))
+    await session.commit()
+    await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "287"})
+
+    followed = (await session.execute(select(Follow))).scalars().first()
+    assert followed is not None
+    session.add(
+        Follow(
+            user_id=followed.user_id,
+            entity_type="person",
+            entity_id="9999999999",
+            source="letterboxd_import",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.get("/me/follows")
+    assert r.status_code == 200
+    items = {f["entity_id"]: f for f in r.json()["items"]}
+    assert items["9999999999"]["name"] is None
+    assert items["287"]["name"] == "Brad Pitt"
+
+
+async def test_two_spellings_of_one_id_both_get_the_name(entitled_client, session):
+    """`normalise_entity_id` keeps the second spelling out of the table, but the importers write
+    through the service, so both can be present. Labelling one and nulling the other would be
+    the worse failure — it looks like the catalog is missing the entity."""
+    from sqlalchemy import select
+
+    from upmovies.app.models import Follow
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=287, name="Brad Pitt"))
+    await session.commit()
+    await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "287"})
+
+    followed = (await session.execute(select(Follow))).scalars().first()
+    assert followed is not None
+    session.add(
+        Follow(
+            user_id=followed.user_id,
+            entity_type="person",
+            entity_id="0287",
+            source="letterboxd_import",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.get("/me/follows")
+    items = {f["entity_id"]: f for f in r.json()["items"]}
+    assert set(items) == {"287", "0287"}
+    assert items["287"]["name"] == "Brad Pitt"
+    assert items["0287"]["name"] == "Brad Pitt"
+
+
+async def test_a_title_follow_of_a_film_the_catalog_lost_is_listed_with_nulls(
+    entitled_client, session, film
+):
+    """The UUID branch of the same guarantee: well-formed id, no such row."""
+    from uuid import uuid4
+
+    from sqlalchemy import select
+
+    from upmovies.app.models import Follow
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+
+    followed = (await session.execute(select(Follow))).scalars().first()
+    assert followed is not None
+    missing = str(uuid4())
+    session.add(
+        Follow(
+            user_id=followed.user_id,
+            entity_type="title",
+            entity_id=missing,
+            source="letterboxd_import",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.get("/me/follows")
+    assert r.status_code == 200
+    items = {f["entity_id"]: f for f in r.json()["items"]}
+    assert set(items) == {str(film.id), missing}
+    assert (items[missing]["name"], items[missing]["image_path"]) == (None, None)
+    assert items[str(film.id)]["name"] == film.title
