@@ -102,19 +102,25 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   **and** as the Wrangler secret of the same name, then deploy the frontend. (3) Only then set
   `RATE_LIMIT_PUBLIC_ENABLED=true` in the Coolify UI and restart. Both are Coolify UI changes, not
   compose edits — the fallbacks in `docker-compose.prod.yml` are seeds, per the gotcha above.
-- **The TMDB rate limiter is per client, not per process (NEU-1356).** `RateLimiter` is
-  constructed inside each `TMDBClient`, so two clients alive at once get a full
-  `TMDB_RATE_LIMIT_REQUESTS` window *each*. This never mattered while the only callers were the
-  pipeline stages, which run sequentially in one process and so are never concurrent — a
-  library import is the first caller that can overlap them, because it is spawned by a user
-  upload at whatever moment they choose. An import running against the daily chain therefore
-  asks TMDB for roughly double the intended rate rather than sharing one budget with it.
-  Accepted for v1: the client already backs off on 429 without spending its retry budget
-  (`ingest/tmdb/client.py`), so the failure mode is slower, not broken, and imports are rare.
-  Note that `NEU-1356-letterboxd-import.md` §4 asserts the opposite ("the TMDB limiter is
-  process-wide, so a running import slows the daily chain") — the spec is wrong about the code
-  as built, and this entry, not that line, is the accurate one. Revisit by sharing one limiter
-  across clients if imports become frequent.
+- **The outbound TMDB rate limiter is per process, not per deployment (NEU-1399).** Clients
+  built with `TMDBClient.from_settings(settings)` share one `RateLimiter`, so the API process's
+  concurrent consumers — a Letterboxd import per upload (`routers/imports.py`), the
+  `/admin/ingest/*` triggers that spawn stage runners in-process, the TMDB account import when
+  it lands — spend a single `TMDB_RATE_LIMIT_REQUESTS` budget between them rather than one
+  each. **Build production clients with the classmethod**; the raw constructor still gives a
+  window of its own (that is what tests want), and `tests/unit/ingest/tmdb/test_client.py`
+  fails if a new `src/` or `scripts/` call site uses it. What this does *not* bound is the
+  deployment: each `python -m upmovies.pipeline_run` invocation is a separate process (ADR-0003)
+  with its own window, as is `scripts/probe_undated_candidates.py`, so the API plus a running
+  daily chain can still ask TMDB for more than the configured rate — bounded by the number of
+  live processes, not by the number of clients. Cross-process limiting is deliberately not
+  built: it means a shared Postgres or Redis round-trip on the hot path of every TMDB request,
+  and the failure mode here is politeness, not correctness (the client honours `Retry-After` on
+  429 without spending its retry budget). Not to be confused with the *inbound* per-IP limiter
+  in `app/rate_limit.py`, which is a different mechanism with different settings.
+  Note that `NEU-1356-letterboxd-import.md` §4 originally asserted the limiter was already
+  process-wide *and* that an import shared the daily chain's budget; it carries a dated
+  correction — the chain was always a separate process, so no process-wide limiter reaches it.
 - **Long-running container holds the env it was created with.** After any env change: `docker compose -f ../docker-compose.yml up -d --force-recreate api` and `printenv` to confirm.
 - **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`. Autogenerate never emits `CheckConstraint` — write every `ck_*` by hand, and give any hand-named constraint the same `name=` in the model: the parity test (`tests/integration/test_migrations.py`) compares names, so a mismatch fails `task test`.
 

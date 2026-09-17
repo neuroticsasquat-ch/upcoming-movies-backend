@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from upmovies.config import Settings
 from upmovies.ingest.tmdb.schemas import (
     TMDBDiscoverResponse,
     TMDBMovieDetails,
@@ -59,9 +60,37 @@ class RateLimiter:
             self._timestamps.append(time.monotonic())
 
 
+_SHARED_LIMITERS: dict[tuple[int, float], RateLimiter] = {}
+
+
+def _shared_limiter(calls: int, window: float) -> RateLimiter:
+    """The process's one limiter for these limits, created on first ask.
+
+    Keyed rather than a bare singleton so a test that builds a client at its own tiny window
+    cannot leave that window behind for whatever runs next (NEU-1399).
+    """
+    key = (calls, window)
+    if key not in _SHARED_LIMITERS:
+        _SHARED_LIMITERS[key] = RateLimiter(calls, window)
+    return _SHARED_LIMITERS[key]
+
+
+def reset_shared_limiters() -> None:
+    """Drop every shared window. Tests only."""
+    _SHARED_LIMITERS.clear()
+
+
 class TMDBClient:
     """Async context manager over httpx. The v3 API key is sent as the `api_key`
-    query param on every request via the client's default params."""
+    query param on every request via the client's default params.
+
+    **Build production clients with `TMDBClient.from_settings(settings)`**, which hands them
+    the process-wide limiter so every concurrent consumer shares one TMDB budget. The raw
+    constructor gives the client a window of its own — that is for tests, and for a caller
+    that deliberately wants an independent budget. `tests/unit/ingest/tmdb/test_client.py`
+    pins the production call sites to the classmethod, because a new one built the old way
+    would silently reintroduce the doubling (NEU-1399).
+    """
 
     def __init__(
         self,
@@ -72,12 +101,34 @@ class TMDBClient:
         retry_max_attempts: int = 5,
         retry_base_delay: float = 0.5,
         timeout: float = 30.0,
+        *,
+        limiter: RateLimiter | None = None,
     ):
         self._base_url = base_url.rstrip("/")
-        self._limiter = RateLimiter(rate_calls, rate_window)
+        self._limiter = limiter or RateLimiter(rate_calls, rate_window)
         self._retry_max = retry_max_attempts
         self._retry_base = retry_base_delay
         self._client = httpx.AsyncClient(timeout=timeout, params={"api_key": api_key})
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "TMDBClient":
+        """Build a client sharing this process's TMDB window.
+
+        Sharing is defined as *clients built from the app settings share* — the actual intent —
+        rather than *clients whose numbers happen to match*, which would make test isolation
+        rest on no two suites picking the same limits.
+        """
+        return cls(
+            base_url=settings.tmdb_base_url,
+            api_key=settings.tmdb_api_key,
+            rate_calls=settings.tmdb_rate_limit_requests,
+            rate_window=settings.tmdb_rate_limit_window_seconds,
+            retry_max_attempts=settings.tmdb_retry_max_attempts,
+            limiter=_shared_limiter(
+                settings.tmdb_rate_limit_requests,
+                settings.tmdb_rate_limit_window_seconds,
+            ),
+        )
 
     async def __aenter__(self) -> "TMDBClient":
         return self

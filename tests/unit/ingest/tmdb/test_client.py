@@ -1,12 +1,19 @@
 import time
 from datetime import date
+from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
 from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient, TMDBNotFound
+from upmovies.config import Settings
+from upmovies.ingest.tmdb.client import (
+    RateLimiter,
+    TMDBClient,
+    TMDBNotFound,
+    reset_shared_limiters,
+)
 from upmovies.ingest.tmdb.schemas import (
     TMDBCredits,
     TMDBDiscoverResponse,
@@ -486,3 +493,87 @@ async def test_search_movie_omits_the_year_when_there_is_none():
     async with _client() as c:
         assert await c.search_movie("Untitled Project") == []
     assert route.calls.last.request.url.params.get("primary_release_year") is None
+
+
+def _shared_settings() -> Settings:
+    """Settings at a window small enough to prove sharing in about a second.
+
+    The rest comes from the environment as everywhere else; only the TMDB capacity and window
+    move, and `TMDB_RATE_LIMIT_REQUESTS` has to be overridden explicitly because
+    `tests/conftest.py` sets it to 100000 to keep the shared window inert for the rest of the
+    suite.
+    """
+    return Settings(  # type: ignore[call-arg]
+        TMDB_RATE_LIMIT_REQUESTS="2",
+        TMDB_RATE_LIMIT_WINDOW_SECONDS="1",
+        TMDB_BASE_URL=BASE_URL,
+    )
+
+
+@respx.mock
+async def test_clients_from_settings_share_one_rate_limit_window():
+    """Three requests across two `from_settings` clients spend one 2-per-second budget.
+
+    Asserts the wait rather than the wiring, on the real clock, the way
+    `test_rate_limiter_enforces_rate` does — the point of NEU-1399 is the behaviour, and an
+    identity check on `_limiter` would still pass if `_request` stopped consulting it.
+    """
+    reset_shared_limiters()
+    respx.get(f"{BASE_URL}/movie/1").mock(
+        return_value=httpx.Response(200, json=make_details(tmdb_id=1))
+    )
+    settings = _shared_settings()
+
+    start = time.monotonic()
+    async with TMDBClient.from_settings(settings) as a, TMDBClient.from_settings(settings) as b:
+        await a.movie_details(1)
+        await a.movie_details(1)
+        await b.movie_details(1)
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 1.0, (
+        f"3 requests across two shared clients at 2/s should wait, took {elapsed:.3f}s"
+    )
+
+
+@respx.mock
+async def test_directly_constructed_clients_keep_independent_windows():
+    """The raw constructor is still a budget of its own — no existing caller changed behaviour."""
+    reset_shared_limiters()
+    respx.get(f"{BASE_URL}/movie/1").mock(
+        return_value=httpx.Response(200, json=make_details(tmdb_id=1))
+    )
+
+    def independent() -> TMDBClient:
+        return TMDBClient(base_url=BASE_URL, api_key="test-key", rate_calls=2, rate_window=1)
+
+    start = time.monotonic()
+    async with independent() as a, independent() as b:
+        await a.movie_details(1)
+        await a.movie_details(1)
+        await b.movie_details(1)
+    elapsed = time.monotonic() - start
+
+    # Loose on purpose. The only thing this has to separate is "no wait" from "waited out a
+    # 1 s window", so anything under a second discriminates; the headroom above three mocked
+    # requests goes to a loaded CI box, not to precision this assertion does not need.
+    assert elapsed < 0.9, f"two independent 2/s windows should not wait, took {elapsed:.3f}s"
+
+
+def test_production_call_sites_build_clients_through_from_settings():
+    """Sharing only happens through `from_settings`, so nothing but a structural check stops a
+    future consumer from constructing a client the old way and silently reintroducing the
+    doubling — no behavioural test would fail (NEU-1399, D-6)."""
+    root = Path(__file__).resolve().parents[4]
+    offenders = [
+        f"{path.relative_to(root)}:{n}"
+        for d in ("src/upmovies", "scripts")
+        for path in sorted((root / d).rglob("*.py"))
+        if path != root / "src/upmovies/ingest/tmdb/client.py"
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if "TMDBClient(" in line
+    ]
+    assert not offenders, (
+        "build TMDB clients with `TMDBClient.from_settings(settings)` so they share the "
+        f"process-wide rate limiter: {', '.join(offenders)}"
+    )

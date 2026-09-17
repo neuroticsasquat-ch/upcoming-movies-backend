@@ -82,13 +82,7 @@ async def _finalize_failed(run_id: UUID, error: str) -> None:
 async def run_tmdb_stage(run_id: UUID, settings: Settings) -> None:
     try:
         today = date.today()
-        async with TMDBClient(
-            base_url=settings.tmdb_base_url,
-            api_key=settings.tmdb_api_key,
-            rate_calls=settings.tmdb_rate_limit_requests,
-            rate_window=settings.tmdb_rate_limit_window_seconds,
-            retry_max_attempts=settings.tmdb_retry_max_attempts,
-        ) as client:
+        async with TMDBClient.from_settings(settings) as client:
             await run_tmdb_ingest(
                 session_factory=_session_factory,
                 client=client,
@@ -189,13 +183,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
     try:
         today = date.today()
         now = datetime.now(UTC)
-        async with TMDBClient(
-            base_url=settings.tmdb_base_url,
-            api_key=settings.tmdb_api_key,
-            rate_calls=settings.tmdb_rate_limit_requests,
-            rate_window=settings.tmdb_rate_limit_window_seconds,
-            retry_max_attempts=settings.tmdb_retry_max_attempts,
-        ) as client:
+        async with TMDBClient.from_settings(settings) as client:
             enumerated = await run_sweep_enumerate(
                 session_factory=_session_factory,
                 client=client,
