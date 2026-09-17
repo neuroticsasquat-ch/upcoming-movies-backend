@@ -398,7 +398,9 @@ async def get_company_search(
     """Search `catalog.production_company` by name (folded substring), alphabetical.
 
     Companies carry no popularity, so the order is the name itself: a stable, guessable
-    order for a list the user scans by eye.
+    order for a list the user scans by eye. It sorts on the same fold the match uses, so
+    "Mission: Impossible" and "Mission Impossible" sit together whatever the DB collation
+    makes of the punctuation.
     """
     nq = _searchable_query(q)
     if nq is None:
@@ -410,7 +412,7 @@ async def get_company_search(
             await session.execute(
                 select(ProductionCompany)
                 .where(where)
-                .order_by(func.lower(ProductionCompany.name).asc(), ProductionCompany.id.asc())
+                .order_by(_normalized_col(ProductionCompany.name).asc(), ProductionCompany.id.asc())
                 .limit(limit)
                 .offset(offset)
             )
@@ -441,7 +443,7 @@ async def get_collection_search(
             await session.execute(
                 select(Collection)
                 .where(where)
-                .order_by(func.lower(Collection.name).asc(), Collection.id.asc())
+                .order_by(_normalized_col(Collection.name).asc(), Collection.id.asc())
                 .limit(limit)
                 .offset(offset)
             )

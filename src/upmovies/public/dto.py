@@ -51,8 +51,8 @@ class FilmIndexResponse(BaseModel):
 
 
 class PersonSearchItem(BaseModel):
-    """A follow target from `catalog.person`. `id` is TMDB's person id — the same id
-    `POST /me/follows` takes for `entity_type=person`."""
+    """A follow target from `catalog.person`. `id` is TMDB's person id; stringified, it is
+    the `entity_id` `POST /me/follows` takes for `entity_type=person`."""
 
     id: int
     name: str
@@ -76,7 +76,8 @@ class PopularPeopleResponse(BaseModel):
 
 
 class CompanySearchItem(BaseModel):
-    """`id` is TMDB's company id — what `POST /me/follows` takes for `entity_type=company`."""
+    """`id` is TMDB's company id; stringified, it is the `entity_id` `POST /me/follows` takes
+    for `entity_type=company`."""
 
     id: int
     name: str
@@ -92,8 +93,8 @@ class CompanySearchResponse(BaseModel):
 
 
 class CollectionSearchItem(BaseModel):
-    """`id` is TMDB's collection id — what `POST /me/follows` takes for
-    `entity_type=franchise`."""
+    """`id` is TMDB's collection id; stringified, it is the `entity_id` `POST /me/follows`
+    takes for `entity_type=franchise`."""
 
     id: int
     name: str
