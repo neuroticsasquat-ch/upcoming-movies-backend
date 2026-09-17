@@ -316,3 +316,50 @@ def attach_credits(session: AsyncSession):
         await session.commit()
 
     return _attach
+
+
+@pytest.fixture
+def make_person(session: AsyncSession):
+    async def _make(
+        *,
+        id: int,
+        name: str,
+        original_name: str | None = None,
+        profile_path: str | None = "/p.jpg",
+        known_for_department: str | None = "Acting",
+        popularity: float | None = None,
+        tmdb_missing_at: datetime | None = None,
+    ) -> Person:
+        person = Person(
+            id=id,
+            name=name,
+            original_name=original_name,
+            profile_path=profile_path,
+            known_for_department=known_for_department,
+            popularity=popularity,
+            tmdb_missing_at=tmdb_missing_at,
+        )
+        session.add(person)
+        await session.commit()
+        return person
+
+    return _make
+
+
+@pytest.fixture
+def make_company(session: AsyncSession):
+    async def _make(
+        *,
+        id: int,
+        name: str,
+        logo_path: str | None = None,
+        origin_country: str | None = None,
+    ) -> ProductionCompany:
+        company = ProductionCompany(
+            id=id, name=name, logo_path=logo_path, origin_country=origin_country
+        )
+        session.add(company)
+        await session.commit()
+        return company
+
+    return _make

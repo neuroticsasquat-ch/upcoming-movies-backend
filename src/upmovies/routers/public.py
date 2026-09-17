@@ -7,10 +7,14 @@ from upmovies.deps import get_session
 from upmovies.public import service
 from upmovies.public.dto import (
     CalendarResponse,
+    CollectionSearchResponse,
+    CompanySearchResponse,
     FeedDayResponse,
     FeedResponse,
     FilmDetailResponse,
     FilmIndexResponse,
+    PersonSearchResponse,
+    PopularPeopleResponse,
 )
 from upmovies.public.sitemap import render_sitemap
 
@@ -55,6 +59,57 @@ async def get_film(
     if film is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="film not found")
     return film
+
+
+# Entity search stays public rather than behind `require_entitled()` (M3 contracts): it feeds
+# the film page's follow buttons and the onboarding grid, both of which render before — and
+# regardless of whether — the visitor is entitled. The short-query rule matches /films/search:
+# fewer than two alphanumerics is "no query yet" and returns an empty page, not 422.
+
+
+@router.get("/people/search", response_model=PersonSearchResponse, dependencies=[_public_limit])
+async def search_people(
+    q: str = Query(..., max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> PersonSearchResponse:
+    """Search people by name / original name (case- and accent-insensitive substring),
+    most popular first. `id` is the TMDB person id a follow is keyed on."""
+    return await service.get_person_search(session, q=q, limit=limit, offset=offset)
+
+
+@router.get("/people/popular", response_model=PopularPeopleResponse, dependencies=[_public_limit])
+async def popular_people(
+    limit: int = Query(default=30, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> PopularPeopleResponse:
+    """The onboarding grid (D-17): the `limit` most popular people who have a profile photo."""
+    return await service.get_popular_people(session, limit=limit)
+
+
+@router.get("/companies/search", response_model=CompanySearchResponse, dependencies=[_public_limit])
+async def search_companies(
+    q: str = Query(..., max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> CompanySearchResponse:
+    """Search production companies by name (folded substring), alphabetical."""
+    return await service.get_company_search(session, q=q, limit=limit, offset=offset)
+
+
+@router.get(
+    "/collections/search", response_model=CollectionSearchResponse, dependencies=[_public_limit]
+)
+async def search_collections(
+    q: str = Query(..., max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> CollectionSearchResponse:
+    """Search TMDB collections (franchises) by name (folded substring), alphabetical."""
+    return await service.get_collection_search(session, q=q, limit=limit, offset=offset)
 
 
 @router.get("/feed", response_model=FeedResponse, dependencies=[_public_limit])
