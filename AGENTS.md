@@ -64,7 +64,7 @@ Single-container FastAPI service. Python 3.13, SQLAlchemy 2 (async) + asyncpg, A
 - `link/` — Story→film linking, retrieval, clustering, source gate
 - `synthesize/` — Event summarization
 
-DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `create_all` from models; prod uses Alembic migrations.
+DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `create_all` from models; prod uses Alembic migrations. The suite proves the two agree: `tests/integration/test_migrations.py` builds a scratch DB with `alembic upgrade head`, diffs it against the `create_all` schema, and round-trips the head revision.
 
 ### Key patterns
 
@@ -103,7 +103,7 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   `RATE_LIMIT_PUBLIC_ENABLED=true` in the Coolify UI and restart. Both are Coolify UI changes, not
   compose edits — the fallbacks in `docker-compose.prod.yml` are seeds, per the gotcha above.
 - **Long-running container holds the env it was created with.** After any env change: `docker compose -f ../docker-compose.yml up -d --force-recreate api` and `printenv` to confirm.
-- **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`.
+- **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`. Autogenerate never emits `CheckConstraint` — write every `ck_*` by hand, and give any hand-named constraint the same `name=` in the model: the parity test (`tests/integration/test_migrations.py`) compares names, so a mismatch fails `task test`.
 
 
 ## Sibling repo
