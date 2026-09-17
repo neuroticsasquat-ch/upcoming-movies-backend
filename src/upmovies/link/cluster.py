@@ -22,7 +22,7 @@ from upmovies.news.catalog_events import (
     CREDIT_EVENT_TYPES,
     ONCE_PER_FILM_EVENT_TYPES,
 )
-from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.models import Event, EventStory, Story, StoryPerson
 from upmovies.news.source_quality import (
     best_tier,
     domain_for_story,
@@ -82,7 +82,7 @@ def is_stale_stage(
 
 
 _SUMMARY_MAX = 500
-_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_MAX_TOKENS = 8192  # see `link_cluster_max_tokens` (config.py) for why 8192
 _HEADLINES_PER_EVENT = 3
 
 _INSTRUCTIONS = """You group a single film's news stories into distinct EVENTS — real beats \
@@ -162,17 +162,53 @@ plain restatement.
 For a "release_date" event, put the exact date the story asserts in "claimed_date" as \
 YYYY-MM-DD (null if the story gives no concrete date). For every non-release_date event, null.
 
+Separately from the events, list in "mentions" every PERSON the new stories name — \
+performers, directors, writers, other crew, executives — one entry per person per story. \
+This is an extraction task, not a judgement one: report who the story names, whether or not \
+their beat became an event.
+
+- "n": the story number the mention is read from.
+- "name_as_written": the person's name copied EXACTLY as that story writes it. Do not \
+correct spelling, expand initials, drop or add accents, or convert it to any other form of \
+the name. Never emit an id, a database key, or a number of any kind in place of a name — you \
+do not know them and must not guess.
+- "role": the role the story gives the person — a character name for a performer \
+("Batman"), or the job for crew ("director", "showrunner", "composer"). null if the story \
+names no role.
+- "department": which department that role belongs to — one of Acting, Directing, Writing, \
+Production, Camera, Editing, Sound, Art, Costume & Make-Up, Visual Effects, Crew. null when \
+the story gives you nothing to decide it on.
+- "title_mentioned": another film or series title the story names in connection with THIS \
+person — a previous or upcoming credit of theirs ("known for X"). null if it names none. \
+This is never the film the payload is about.
+- "event_type": which beat of this story the person is named in connection with, from the \
+same vocabulary as an event's "type". null if the mention is incidental to every beat.
+- "evidence_span": a SHORT verbatim quote from the story — the sentence or clause that names \
+the person. Quote it, do not paraphrase.
+
 Return ONLY JSON — no prose, no markdown:
 {"events": [{"existing": <existing event number or null>, "type": <type or null>, \
 "confidence": "confirmed" | "rumored" | null, "region": <ISO 3166-1 alpha-2 or null>, \
 "cast": [<performer name>, ...] for a casting event, else null, \
 "claimed_date": <YYYY-MM-DD or null>, \
-"stories": [<story number n>, ...]}]}
+"stories": [<story number n>, ...]}], \
+"mentions": [{"n": <story number n>, "name_as_written": <name>, "role": <role or null>, \
+"department": <department or null>, "title_mentioned": <other title or null>, \
+"event_type": <type or null>, "evidence_span": <short quote>}]}
 
 When "existing" is a number, attach its "stories" to that event ("type"/"confidence" may \
 be null). Otherwise it is a new event and "type"/"confidence" are required. "existing" \
 refers to an EXISTING event's number; "stories" lists NEW story numbers "n". Every new \
-story's "n" must appear in exactly one group."""
+story's "n" must appear in exactly one group. "mentions" is independent of the grouping: a \
+story with no person named contributes none, a story naming four people contributes four."""
+
+# The version of `_INSTRUCTIONS` above, stamped onto every `story_person` row the extraction
+# pass writes. Bumped to 2 by NEU-1360, which added the "mentions" contract — rows written
+# before it have no mention tuples behind them at all, and a re-extraction has to be able to
+# tell those apart from rows this prompt produced. A module constant rather than a setting
+# (unlike `SUMMARY_PROMPT_VERSION`, which exists so an operator can force a re-render):
+# the version describes the text directly above it, so the two cannot drift apart.
+CLUSTER_PROMPT_VERSION = "2"
 
 
 @dataclass
@@ -180,6 +216,7 @@ class ClusterResult:
     events_created: int
     stories_clustered: int
     stories_rejected: int = 0
+    mentions_recorded: int = 0
 
 
 @dataclass
@@ -201,6 +238,95 @@ class ClusterGroup:
     region: str | None = None
     claimed_date: date | None = None
     cast: list[str] | None = None
+
+
+@dataclass
+class ClusterMention:
+    """One person one story names, exactly as the model reported them (D-20). Names only —
+    the model never emits ids (INV-5), so nothing here identifies anybody yet."""
+
+    story_index: int
+    name_as_written: str
+    role: str | None = None
+    department: str | None = None
+    title_mentioned: str | None = None
+    event_type: str | None = None
+    evidence_span: str | None = None
+
+
+_EVIDENCE_SPAN_MAX = 500
+# Exactly what a new event's "type" may be — the group vocabulary plus the `off_topic` marker
+# the instructions also offer. A mention names a beat out of the same list or names none.
+_MENTION_EVENT_TYPES = _VALID_TYPES | {"off_topic"}
+
+
+def _mention_text(value: object, *, limit: int | None = None) -> str | None:
+    """One optional free-text mention field: strings only, stripped, empty becomes None.
+    A number, object or list here is the model answering a different question than the one
+    asked, and is dropped rather than coerced into a string that would read like evidence."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if limit is not None:
+        text = text[:limit]
+    return text or None
+
+
+def _mention_event_type(value: object) -> str | None:
+    """The beat a mention was named in connection with, kept only when it is one of the types
+    the instructions actually offer. A group's `type` is validated before it can become an
+    event; this is the same validation for the copy that lands in `features`, so the scorer
+    reading it later gets a type from the vocabulary or nothing — never a word the model
+    invented, which would silently never match."""
+    event_type = _mention_text(value)
+    return event_type if event_type in _MENTION_EVENT_TYPES else None
+
+
+def parse_cluster_mentions(raw: str, *, n_stories: int) -> list[ClusterMention]:
+    """Pure parse of the extraction half of the cluster response (D-20). Returns [] when the
+    JSON is unparseable or carries no usable "mentions" — deliberately *not* None, because a
+    story with nobody named in it is the ordinary case and must not be distinguishable here
+    from a malformed block. The grouping half is what decides whether a reply parsed at all:
+    `parse_cluster_groups` runs against the same text and raises through its caller, so a
+    genuinely broken reply never reaches the point where mentions would be written.
+
+    De-duplicates within a story on the normalized name, keeping the first entry: the same
+    person named twice in one article is one mention of them, and `normalize_name` is the same
+    key `Event.subject_key` uses, so "Chris Evans" and "chris  evans" do not become two rows.
+    Across stories they stay separate — each story is its own piece of evidence."""
+    try:
+        data = json.loads(_extract_json_object(raw))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    mentions: list[ClusterMention] = []
+    seen: set[tuple[int, str]] = set()
+    for item in data.get("mentions") or []:
+        if not isinstance(item, dict):
+            continue
+        n = item.get("n")
+        if not isinstance(n, int) or not (1 <= n <= n_stories):
+            continue
+        name = _mention_text(item.get("name_as_written"))
+        if name is None:
+            continue
+        key = (n, normalize_name(name))
+        if key in seen:
+            continue
+        seen.add(key)
+        mentions.append(
+            ClusterMention(
+                story_index=n,
+                name_as_written=name,
+                role=_mention_text(item.get("role")),
+                department=_mention_text(item.get("department")),
+                title_mentioned=_mention_text(item.get("title_mentioned")),
+                event_type=_mention_event_type(item.get("event_type")),
+                evidence_span=_mention_text(item.get("evidence_span"), limit=_EVIDENCE_SPAN_MAX),
+            )
+        )
+    return mentions
 
 
 def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | None:
@@ -279,8 +405,9 @@ def assemble_cluster_payload(
     validate_clustering harness. No DB, no LLM.
 
     The instructions are the stable prefix and the per-film payload is what varies; that this
-    stage has never actually cached (the instructions sit under Sonnet 4.6's 2048-token floor,
-    NEU-377) is now the adapter's business rather than a fact encoded here."""
+    stage has never actually cached (the instructions sit under Sonnet 4.6's 2048-token floor —
+    ~2.0k tokens as of NEU-1360, which is close enough that the next prompt to grow may cross
+    it, NEU-377) is now the adapter's business rather than a fact encoded here."""
     user: dict[str, Any] = {
         "as_of_date": run_date.isoformat(),
         "film": {
@@ -565,6 +692,7 @@ async def apply_cluster_decisions(
         session, film_id=plan.film_id, event_types=("casting",)
     )
     assigned: set[UUID] = set()
+    clustered_sids: set[UUID] = set()
     events_created = stories_clustered = stories_rejected = 0
 
     def _reject_group(sids: list[UUID], *, llm: str, event_type: str | None, note: str) -> int:
@@ -773,9 +901,74 @@ async def apply_cluster_decisions(
         for sid in group_sids:
             session.add(EventStory(event_id=event.id, story_id=sid))
             assigned.add(sid)
+            clustered_sids.add(sid)
             stories_clustered += 1
 
-    return ClusterResult(events_created, stories_clustered, stories_rejected)
+    mentions_recorded = _record_mentions(
+        session,
+        film_id=plan.film_id,
+        raw=raw,
+        story_ids=story_ids,
+        clustered_sids=clustered_sids,
+    )
+    return ClusterResult(events_created, stories_clustered, stories_rejected, mentions_recorded)
+
+
+def _record_mentions(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    raw: str,
+    story_ids: list[UUID],
+    clustered_sids: set[UUID],
+) -> int:
+    """Persist the reply's mention tuples as unresolved `story_person` rows (D-20, D-24).
+
+    Only for stories that actually clustered. A rejected story has had its `film_id` nulled —
+    off-topic, stale-stage, an uncorroborated release date — and resolution is film-scoped from
+    end to end: candidates come from the linked film's credits and change stream, and
+    `resolution_cache` is keyed by film. A mention with no film behind it could never be
+    resolved, so recording one would only grow an unlinked queue nobody can work (D-25).
+    Stories *held* for a later run are not clustered either, and are re-extracted when they are.
+
+    Every row lands unresolved — `person_id`, `confidence`, `path` and `resolved_at` NULL —
+    because no resolver exists yet (NEU-1362 onward). `features` carries the two extraction
+    fields that have no column of their own, which the scorer later needs: the other title the
+    article names alongside the person, and the beat they were named in connection with."""
+    mentions = parse_cluster_mentions(raw, n_stories=len(story_ids))
+    recorded = 0
+    dropped = 0
+    for mention in mentions:
+        sid = story_ids[mention.story_index - 1]
+        if sid not in clustered_sids:
+            dropped += 1
+            continue
+        session.add(
+            StoryPerson(
+                story_id=sid,
+                name_as_written=mention.name_as_written,
+                role=mention.role,
+                department=mention.department,
+                evidence_span=mention.evidence_span,
+                features={
+                    "title_mentioned": mention.title_mentioned,
+                    "event_type": mention.event_type,
+                },
+                prompt_version=CLUSTER_PROMPT_VERSION,
+            )
+        )
+        recorded += 1
+    if mentions:
+        # Alongside the per-group decision lines, so extraction yield is measured rather than
+        # guessed once this runs in production — a prompt that quietly stops emitting mentions
+        # otherwise looks exactly like a run of stories with nobody named in them.
+        log.info(
+            "cluster mentions: film=%s recorded=%d dropped_unclustered=%d",
+            film_id,
+            recorded,
+            dropped,
+        )
+    return recorded
 
 
 async def cluster_film_events(

@@ -205,7 +205,12 @@ class Settings(BaseSettings):
     # falls to 11.4% of the request, against 14.7% at 15. A batch of 40 overruns the reply
     # ceiling outright.
     link_batch_size: int = Field(default=20, alias="LINK_BATCH_SIZE")
-    link_cluster_max_tokens: int = Field(default=4096, alias="LINK_CLUSTER_MAX_TOKENS")
+    # 8192, not 4096, since NEU-1360: the cluster reply now carries the per-story mention
+    # tuples (a verbatim `evidence_span` each) in the same JSON object as the groups. A reply
+    # cut off at the ceiling is not a partial loss — `parse_cluster_groups` returns None and
+    # the whole film's clustering raises — so the headroom is what keeps a busy film from
+    # failing on a beat it used to cluster fine.
+    link_cluster_max_tokens: int = Field(default=8192, alias="LINK_CLUSTER_MAX_TOKENS")
     link_cluster_attach_limit: int = Field(default=25, alias="LINK_CLUSTER_ATTACH_LIMIT")
     link_singular_dedup_days: int = Field(default=14, alias="LINK_SINGULAR_DEDUP_DAYS")
     link_release_change_window_days: int = Field(
