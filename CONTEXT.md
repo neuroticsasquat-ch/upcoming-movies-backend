@@ -335,6 +335,18 @@ through to a later date. It is the per-subject analogue of the **primary release
 is country- and type-agnostic; the two must not be conflated.
 _Avoid_: primary release date (TMDB's scalar, country-agnostic), earliest release (too vague).
 
+**Headline release**:
+The one release a film *row* leads with when a surface has room for a single date. It is a
+choice among the film's **governing release dates**, not a new date: the earliest *upcoming* one
+across the film's displayable subjects; failing that, the most recent *past* one (the film is
+out); failing that, the **primary release date**, carried with a marker so the reader knows it is
+unconfirmed rather than a date this site would list. It names its **kind** (upcoming / released /
+primary) and, for the two displayable kinds, the subject (country, bucket) it came from. The
+watchlist row shows it today (NEU-1397); timeline and iCal rows are expected to. A film with no
+displayable row and no primary date has none.
+_Avoid_: next release date (wrong for a released film), release date (ambiguous between the
+primary scalar and the per-row TMDB value), US date (origin-country dates qualify too).
+
 **Title parenthetical**:
 The bracketed run after a film's title on a public surface. Composed of up to three elements —
 **production countries**, director (prefixed `Dir: `), and release year — in that order, joined

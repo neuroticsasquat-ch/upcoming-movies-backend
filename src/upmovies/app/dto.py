@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
+from upmovies.catalog.headline_release import HeadlineReleaseKind
+
 
 class SignupRequest(BaseModel):
     email: EmailStr
@@ -228,16 +230,36 @@ def normalise_alert_prefs(prefs: list[str]) -> list[str]:
     return [p for p in ("buy", "rent", "stream") if p in prefs]
 
 
+class HeadlineReleaseOut(BaseModel):
+    """The one date a film row leads with, and enough context to render it honestly.
+
+    `kind` is the difference between a date this site lists and TMDB's primary date, which it
+    does not (`catalog.headline_release`): `upcoming` and `released` come from a displayable
+    subject and carry that subject's `country` and `bucket`, while `primary` is the last-resort
+    fallback and carries neither, so a client can mark it unconfirmed. The bucket identifiers
+    are lowercase `limited`/`wide` — display labels are the frontend's business."""
+
+    date: date
+    kind: HeadlineReleaseKind
+    country: str | None
+    bucket: str | None
+
+
 class WatchlistFilmOut(BaseModel):
     """Enough of the film to render a watchlist row without a second request per item. The
-    film page is the place for the rest."""
+    film page is the place for the rest.
+
+    There is deliberately no `release_date`: it used to be `catalog.film.release_date`, TMDB's
+    primary date, which the film page never displays — so a row could cite a date that the page
+    it links to did not show (NEU-1397). `headline_release` is the displayable answer, and it is
+    null only for a film with no displayable release row and no primary date."""
 
     id: UUID
     tmdb_id: int
     slug: str | None
     title: str
     poster_path: str | None
-    release_date: date | None
+    headline_release: HeadlineReleaseOut | None
 
 
 class WatchlistCreateRequest(BaseModel):

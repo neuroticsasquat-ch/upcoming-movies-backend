@@ -1,22 +1,52 @@
 """`/me/watchlist` (D-13, D-14): the watchlist's CRUD and the dismissal a removed derived item
 leaves behind, behind the entitlement gate (D-39)."""
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from tests.fixtures.catalog import add_film
 from upmovies.app.models import WatchlistDismissal, WatchlistItem
+from upmovies.catalog.models import FilmReleaseDate
+
+# The service asks the clock for "today", so the fixture's release date has to move with it — a
+# literal would quietly stop being upcoming one day and take the assertions with it.
+UPCOMING = datetime.now(tz=UTC).date() + timedelta(days=30)
+
+
+def _at(day: date) -> datetime:
+    return datetime.combine(day, datetime.min.time(), tzinfo=UTC)
 
 
 @pytest.fixture
 async def film(session):
+    """Fight Club, carrying a displayable US wide date **and** a different primary date.
+
+    The two disagree on purpose: the payload must lead with the displayable one, so a row that
+    went back to echoing `film.release_date` (the pre-NEU-1397 behaviour) fails here rather
+    than passing on a date the film page never shows."""
     f = await add_film(
-        session, tmdb_id=550, title="Fight Club", slug="fight-club", release_date=date(2027, 3, 5)
+        session,
+        tmdb_id=550,
+        title="Fight Club",
+        slug="fight-club",
+        origin_country=["US"],
+        release_date=date(2027, 3, 5),
+    )
+    session.add(
+        FilmReleaseDate(film_id=f.id, iso_3166_1="US", release_type=3, release_date=_at(UPCOMING))
     )
     await session.commit()
     return f
+
+
+HEADLINE = {
+    "date": UPCOMING.isoformat(),
+    "kind": "upcoming",
+    "country": "US",
+    "bucket": "wide",
+}
 
 
 async def _dismissals(session) -> list[WatchlistDismissal]:
@@ -59,7 +89,7 @@ async def test_add_a_film_and_list_it_with_the_default_prefs(entitled_client, fi
         "slug": "fight-club",
         "title": "Fight Club",
         "poster_path": None,
-        "release_date": "2027-03-05",
+        "headline_release": HEADLINE,
     }
     assert body["source"] == "manual"
     assert body["alert_prefs"] == ["stream"]
@@ -133,6 +163,71 @@ async def test_a_user_sees_only_their_own_watchlist(entitled_client, make_user, 
 
     r = await entitled_client.get("/me/watchlist")
     assert r.json()["items"] == []
+
+
+# --- the headline release (NEU-1397) -------------------------------------------------------
+
+
+async def test_list_carries_the_headline_release(entitled_client, film):
+    await entitled_client.post("/me/watchlist", json={"film_id": str(film.id)})
+
+    r = await entitled_client.get("/me/watchlist")
+    assert r.status_code == 200
+    assert r.json()["items"][0]["film"]["headline_release"] == HEADLINE
+
+
+async def test_patch_carries_the_headline_release(entitled_client, film):
+    await entitled_client.post("/me/watchlist", json={"film_id": str(film.id)})
+
+    r = await entitled_client.patch(f"/me/watchlist/{film.id}", json={"alert_prefs": ["buy"]})
+    assert r.status_code == 200
+    assert r.json()["film"]["headline_release"] == HEADLINE
+
+
+async def test_a_film_with_no_date_at_all_is_listed_with_a_null_headline_release(
+    entitled_client, session
+):
+    # No displayable row and no primary date. The row is still the user's watchlist row: it is
+    # returned with a null date for the frontend's "No date yet", never dropped.
+    undated = await add_film(session, tmdb_id=551, title="Untitled", slug="untitled")
+    await session.commit()
+
+    r = await entitled_client.post("/me/watchlist", json={"film_id": str(undated.id)})
+    assert r.status_code == 201
+    assert r.json()["film"]["headline_release"] is None
+
+    r = await entitled_client.get("/me/watchlist")
+    assert [i["film"]["headline_release"] for i in r.json()["items"]] == [None]
+
+
+async def test_a_film_with_nothing_displayable_falls_back_to_the_primary_date(
+    entitled_client, session
+):
+    # A non-origin-country date is not displayable, so the primary answers — marked `primary`
+    # so the frontend can render it as unconfirmed rather than as a date this site lists.
+    f = await add_film(
+        session,
+        tmdb_id=552,
+        title="Cliffhanger",
+        slug="cliffhanger",
+        origin_country=["US"],
+        release_date=date(2029, 4, 2),
+    )
+    session.add(
+        FilmReleaseDate(
+            film_id=f.id, iso_3166_1="DE", release_type=3, release_date=_at(date(2029, 4, 2))
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.post("/me/watchlist", json={"film_id": str(f.id)})
+    assert r.status_code == 201
+    assert r.json()["film"]["headline_release"] == {
+        "date": "2029-04-02",
+        "kind": "primary",
+        "country": None,
+        "bucket": None,
+    }
 
 
 # --- alert prefs ---------------------------------------------------------------------------

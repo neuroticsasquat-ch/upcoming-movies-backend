@@ -7,6 +7,7 @@ matters most — a removed derived item is a *dismissal* — must not depend on 
 the removing."""
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.app.errors import NotFound
 from upmovies.app.models import DEFAULT_ALERT_PREFS, User, WatchlistItem
 from upmovies.app.repos import watchlist_repo
+from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import Film
+
+
+async def _headline(db: AsyncSession, film: Film) -> HeadlineRelease | None:
+    """The one film's headline release, through the same batch query the list path uses.
+
+    A film with no displayable release row and no primary date has none (NEU-1397)."""
+    resolved = await headline_releases(db, [film.id], today=datetime.now(tz=UTC).date())
+    return resolved.get(film.id)
 
 
 async def add(
@@ -24,7 +34,7 @@ async def add(
     film_id: UUID,
     alert_prefs: Sequence[str] | None = None,
     source: str = "manual",
-) -> tuple[WatchlistItem, Film, bool]:
+) -> tuple[WatchlistItem, Film, HeadlineRelease | None, bool]:
     """Put `film_id` on the watchlist, commit, and say whether the row is new.
 
     Idempotent, and an existing row is returned untouched — prefs included, because a second
@@ -37,7 +47,7 @@ async def add(
         raise NotFound()
     existing = await watchlist_repo.get(db, user_id=user.id, film_id=film_id)
     if existing is not None:
-        return existing, film, False
+        return existing, film, await _headline(db, film), False
     created = await watchlist_repo.create(
         db,
         user_id=user.id,
@@ -46,16 +56,24 @@ async def add(
         alert_prefs=list(DEFAULT_ALERT_PREFS if alert_prefs is None else alert_prefs),
     )
     await db.commit()
-    return created, film, True
+    return created, film, await _headline(db, film), True
 
 
-async def list_items(db: AsyncSession, *, user: User) -> list[tuple[WatchlistItem, Film]]:
-    return await watchlist_repo.list_for_user(db, user.id)
+async def list_items(
+    db: AsyncSession, *, user: User
+) -> list[tuple[WatchlistItem, Film, HeadlineRelease | None]]:
+    """Every item with the film's headline release (NEU-1397), resolved for the whole list in
+    one query rather than one per row. A film without one keeps its place, with `None`."""
+    items = await watchlist_repo.list_for_user(db, user.id)
+    headlines = await headline_releases(
+        db, [film.id for _, film in items], today=datetime.now(tz=UTC).date()
+    )
+    return [(item, film, headlines.get(film.id)) for item, film in items]
 
 
 async def set_alert_prefs(
     db: AsyncSession, *, user: User, film_id: UUID, alert_prefs: Sequence[str]
-) -> tuple[WatchlistItem, Film]:
+) -> tuple[WatchlistItem, Film, HeadlineRelease | None]:
     """Replace the item's prefs and commit. `NotFound` if the film is not on the watchlist."""
     item = await watchlist_repo.get(db, user_id=user.id, film_id=film_id)
     if item is None:
@@ -64,7 +82,7 @@ async def set_alert_prefs(
     assert film is not None  # the item's FK guarantees it
     await watchlist_repo.set_alert_prefs(db, item, alert_prefs=list(alert_prefs))
     await db.commit()
-    return item, film
+    return item, film, await _headline(db, film)
 
 
 async def remove(db: AsyncSession, *, user: User, film_id: UUID) -> None:
