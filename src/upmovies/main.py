@@ -23,6 +23,7 @@ from upmovies.mail import MailGateway, validate_mail_configuration
 from upmovies.routers import (
     admin_runs,
     auth,
+    follows,
     health,
     ingest_admin,
     invites_admin,
@@ -31,6 +32,7 @@ from upmovies.routers import (
     public,
     sources_admin,
     users_admin,
+    watchlist,
 )
 
 if dsn := os.environ.get("SENTRY_DSN"):
@@ -110,6 +112,8 @@ def create_app() -> FastAPI:
     app.include_router(users_admin.router)
     app.include_router(auth.router)
     app.include_router(me.router)
+    app.include_router(follows.router)
+    app.include_router(watchlist.router)
     app.include_router(public.router)
     return app
 
