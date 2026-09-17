@@ -31,6 +31,7 @@ from upmovies.routers import (
     moderation_admin,
     public,
     sources_admin,
+    timeline,
     users_admin,
     watchlist,
 )
@@ -114,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(me.router)
     app.include_router(follows.router)
     app.include_router(watchlist.router)
+    app.include_router(timeline.router)
     app.include_router(public.router)
     return app
 

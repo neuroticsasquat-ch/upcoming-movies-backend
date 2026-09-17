@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import (
     ColumnElement,
     Date,
+    Select,
     any_,
     case,
     cast,
@@ -19,6 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.follow_queries import followed_film_ids
 from upmovies.catalog.models import (
     Collection,
     Film,
@@ -39,6 +41,7 @@ from upmovies.catalog.release_grade import (
     RELEASE_TYPE_BUCKETS,
     displayable_regions,
 )
+from upmovies.config import get_settings
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import visible_events
 from upmovies.public.arc import (
@@ -804,7 +807,23 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
     return FeedResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) -> FeedDayResponse:
+async def get_feed_grouped(
+    session: AsyncSession,
+    *,
+    limit: int,
+    offset: int,
+    film_filter: Select[tuple[UUID]] | None = None,
+) -> FeedDayResponse:
+    """The grouped feed — and, given a `film_filter`, any narrowing of it (NEU-1351).
+
+    `film_filter` is a `SELECT film.id` the caller composes; the timeline passes the films its
+    user follows (`app.follow_queries.followed_film_ids`). It narrows the *film* scope only, and
+    so applies identically to the day count, the day window and the film-day rows — which is
+    what makes a filtered page the same DTO with fewer rows in it, day pagination and all, rather
+    than a second query to keep in step with this one. NEU-1365's event-level branch (D-11's
+    "events naming a resolved followed person") arrives as a second, event-scoped parameter
+    beside this one; see `app.follow_queries`.
+    """
     # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
     # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
     # number of distinct days, so the client knows when no more days remain.
@@ -814,13 +833,14 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
     visible = (Film.slug.is_not(None), visible_events(), _region_visible())
+    scoped = (Film.id.in_(film_filter),) if film_filter is not None else ()
 
     distinct_days = (
         select(day.label("day"))
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(*visible)
+        .where(*visible, *scoped)
         .group_by(day)
     )
     total_days = await session.scalar(select(func.count()).select_from(distinct_days.subquery()))
@@ -844,7 +864,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .select_from(Event)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(*visible, day.in_(select(window.c.day)))
+            .where(*visible, *scoped, day.in_(select(window.c.day)))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
             .order_by(day.desc(), _natural_title_col().asc(), Film.slug.asc())
         )
@@ -961,6 +981,35 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
         if catalog_events:
             items.append(_make_item(row, catalog_events, False, ship_events=False))
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
+
+
+async def get_timeline(
+    session: AsyncSession, *, user_id: UUID, limit: int, offset: int
+) -> FeedDayResponse:
+    """The grouped feed restricted to the films this user follows (D-11, D-12).
+
+    Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
+    and the feed are the same product surface — same DTO, same `created_at` day grouping, same
+    day pagination (ADR-0016) — and the client swaps one for the other on `/` as soon as `me`
+    resolves. Two queries would be two things to keep in step.
+
+    Takes a `user_id` rather than a `User` so nothing request-scoped reaches the filter, which
+    the notify pass (NEU-1379) runs from `pipeline_run`. Entitlement is the route's gate (D-39),
+    not this function's: an unentitled user gets 403 from `require_entitled()` and never arrives
+    here, because an empty timeline would read as "nothing happened" rather than "you do not
+    have access" (D-41).
+    """
+    settings = get_settings()
+    return await get_feed_grouped(
+        session,
+        limit=limit,
+        offset=offset,
+        film_filter=followed_film_ids(
+            user_id=user_id,
+            today=datetime.now(UTC).date(),
+            excluded_statuses=settings.tmdb_excluded_statuses,
+        ),
+    )
 
 
 async def _directors_for_films(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
