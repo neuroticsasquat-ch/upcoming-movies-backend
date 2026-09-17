@@ -81,8 +81,9 @@ async def test_following_a_director_shows_only_their_films(
 async def test_every_seed_grade_credit_counts_and_nothing_below_it_does(
     entitled_client, session, make_film, add_event, follow
 ):
-    # The three grades `catalog/seed_grade.py` defines, one film each, plus the two that are
-    # deliberately not seed grade: a 6th-billed role and a producer credit (D-11). The credits
+    # The three grades `catalog/seed_grade.py` defines, one film each, plus the three that are
+    # deliberately not seed grade: a 6th-billed role, an unbilled one (TMDB leaves `order` off
+    # the long tail, which is exactly the cut) and a producer credit (D-11). The credits
     # are written directly because `attach_credits` inserts the person per call, and this is
     # one person credited on five films.
     from upmovies.catalog.models import FilmCredit, Person
@@ -95,6 +96,7 @@ async def test_every_seed_grade_credit_counts_and_nothing_below_it_does(
         "Writer": {"credit_type": "crew", "job": "Screenplay", "department": "Writing"},
         "Top Billed": {"credit_type": "cast", "credit_order": 4},
         "Sixth Billed": {"credit_type": "cast", "credit_order": 5},
+        "Unbilled": {"credit_type": "cast", "credit_order": None},
         "Producer": {"credit_type": "crew", "job": "Producer", "department": "Production"},
     }
     for title, credit in grades.items():
@@ -139,6 +141,21 @@ async def test_a_title_follow_reaches_a_released_film(
     await add_event(film=film, summary="a")
 
     await follow("title", film.id)
+
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(film)]
+
+
+async def test_a_company_follow_reaches_a_released_film(
+    entitled_client, make_film, add_event, attach_companies, follow
+):
+    # As with a title: only the person branch carries the in-play cut, so a company's back
+    # catalogue still reaches the timeline.
+    film = await make_film(slug="released", status="Released", release_date=date(2020, 1, 1))
+    await attach_companies(film, [(508, "Regency")])
+    await add_event(film=film, summary="a")
+
+    await follow("company", 508)
 
     items = (await entitled_client.get("/me/timeline")).json()["items"]
     assert [i["film_ref"] for i in items] == [ref(film)]

@@ -42,12 +42,23 @@ from upmovies.catalog.queries import in_play_clause, seed_grade_credit_clause
 def _followed_tmdb_ids(user_id: UUID, entity_type: str) -> Select[tuple[int]]:
     """The TMDB ids this user follows under `entity_type`.
 
-    The cast is safe because `entity_id` is polymorphic text normalised on the way in
-    (`app.dto.normalise_entity_id`): a person, company or franchise follow can only hold the
-    decimal spelling of a positive integer. It sits in the same SELECT as the `entity_type`
-    filter, so no row of another type is ever cast."""
+    `entity_id` is polymorphic text, so person, company and franchise ids have to be cast back
+    to integers to meet the catalog's keys. The digit guard sits beside the `entity_type` filter
+    in the same SELECT, so the cast only ever sees a row of this type whose value is a decimal
+    integer, and a row that is neither is skipped rather than failing the statement.
+
+    Belt and braces on top of `app.dto.normalise_entity_id`, which is what *should* keep a
+    non-numeric id out of the table — but it is a boundary rule, applied by the follow routes'
+    request models, while `follow_service.follow` takes an `entity_id` straight from its caller
+    and the imports (D-15, D-16) are about to become such callers. A row that slipped through
+    would otherwise not degrade this filter, it would abort the whole statement: every branch is
+    OR-ed into one subquery, so the user's entire timeline would 500 — and the notify pass
+    (NEU-1379), which runs this over every user at once, would fail for all of them over one
+    bad row."""
     return select(cast(Follow.entity_id, Integer)).where(
-        Follow.user_id == user_id, Follow.entity_type == entity_type
+        Follow.user_id == user_id,
+        Follow.entity_type == entity_type,
+        Follow.entity_id.regexp_match(r"^[0-9]+$"),
     )
 
 
@@ -63,11 +74,13 @@ def followed_film_ids(
 ) -> Select[tuple[UUID]]:
     """`SELECT film.id` for every film this user's follows reach (D-11).
 
-    Written to be used as `Film.id.in_(followed_film_ids(...))`. `correlate(None)` is
-    load-bearing: the enclosing query selects from `catalog.film` too, and SQLAlchemy would
-    otherwise auto-correlate this subquery's own `film` to the outer one — turning "the films
-    you follow" into "this film, if you follow it" by way of a FROM-less subquery. Spelling it
-    out keeps the subquery standalone whatever the caller's FROM list holds.
+    Written to be used as `Film.id.in_(followed_film_ids(...))`. `correlate(None)` keeps the
+    subquery standalone whatever the caller's FROM list holds: the timeline's enclosing query
+    selects from `catalog.film` too, and SQLAlchemy would otherwise auto-correlate this
+    subquery's own `film` to the outer one and render it without a FROM. Inside an `IN` over
+    `film.id` that happens to come out to the same rows, so this is not load-bearing there — it
+    is what stops the builder's meaning depending on the query it is dropped into, which is the
+    whole premise of handing the same SELECT to the notify pass (NEU-1379).
 
     A user with no follows yields no rows, so the timeline of an empty follow graph is empty
     rather than the whole feed — the onboarding prompt D-12 asks for is the client's call to
