@@ -77,7 +77,10 @@ models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
   scripts. **Register new model modules there.**
 - **Postgres schemas:** `app`, `catalog`, `news`, `ingest`. Tests build them with `create_all`; prod
   uses Alembic. Add the model column first (tests pick it up immediately), then generate and review
-  the migration.
+  the migration. The suite proves the two agree: `tests/integration/test_migrations.py` builds a
+  scratch DB with `alembic upgrade head`, diffs its columns/constraints/indexes against the
+  `create_all` schema (by name and definition, so a hand-named constraint in a migration needs the
+  same `name=` in the model), and round-trips the head revision.
 - **Pipelines** take `(session_factory, run_id, …)`, commit per item, and always finalize their run —
   `failed` on crash — because `routers/ingest_admin.py` reuses the same runners.
 - **LLM gateway** resolves a provider per *stage* (link, cluster, summarize, source_judge), never per

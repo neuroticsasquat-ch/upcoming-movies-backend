@@ -127,8 +127,12 @@ class Event(Base):
     # The event that supersedes this one — an attachment card pointing forward at the
     # `credit_removed` card that corrected it. SET NULL rather than CASCADE: losing the
     # correction must not take the original claim out of the ledger with it.
+    # `name=` matches the hand-named constraint in migration 65ba376f1b57; the parity test
+    # (tests/integration/test_migrations.py) compares constraint names, so the two must agree.
     superseded_by: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("news.event.id", ondelete="SET NULL"), nullable=True
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_event_superseded_by_event"),
+        nullable=True,
     )
     region: Mapped[str | None] = mapped_column(Text, nullable=True)
     subject_key: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
@@ -183,8 +187,11 @@ class EventSummary(Base):
     # narrows the one case write-once does not cover (a deterministic body being superseded,
     # ADR-0014). Mainly these drive the summary_edited DTO flag and gate the reset-to-AI action.
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # `name=` matches migration 8db18de6d77c, for the same reason as `Event.superseded_by`.
     edited_by: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="SET NULL"), nullable=True
+        PGUUID(as_uuid=True),
+        ForeignKey("app.user.id", ondelete="SET NULL", name="fk_event_summary_edited_by_user"),
+        nullable=True,
     )
 
 
