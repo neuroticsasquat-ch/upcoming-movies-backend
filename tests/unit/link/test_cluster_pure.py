@@ -1,7 +1,12 @@
 import json
 from datetime import date
 
-from upmovies.link.cluster import _INSTRUCTIONS, assemble_cluster_payload, parse_cluster_groups
+from upmovies.link.cluster import (
+    _INSTRUCTIONS,
+    assemble_cluster_payload,
+    parse_cluster_groups,
+    parse_cluster_mentions,
+)
 
 
 def test_assemble_cluster_payload_shape():
@@ -233,3 +238,134 @@ def test_parse_cast_absent_is_none():
     )
     groups = parse_cluster_groups(raw, n_stories=1)
     assert groups is not None and groups[0].cast is None
+
+
+def test_instructions_ask_for_mention_tuples():
+    """NEU-1360 (D-20): the extraction half of the contract — names as written, never ids."""
+    text = _INSTRUCTIONS.lower()
+    assert "mentions" in text
+    assert "name_as_written" in text
+    assert "evidence_span" in text
+    assert "title_mentioned" in text
+    assert "never emit an id" in text
+
+
+def test_parse_cluster_mentions_extracts_the_tuple():
+    raw = json.dumps(
+        {
+            "events": [],
+            "mentions": [
+                {
+                    "n": 2,
+                    "name_as_written": "Chris Evans",
+                    "role": "Batman",
+                    "department": "Acting",
+                    "title_mentioned": "The Gray Man",
+                    "event_type": "casting",
+                    "evidence_span": "Chris Evans is set to star.",
+                }
+            ],
+        }
+    )
+    mentions = parse_cluster_mentions(raw, n_stories=2)
+    assert len(mentions) == 1
+    m = mentions[0]
+    assert m.story_index == 2
+    assert m.name_as_written == "Chris Evans"
+    assert m.role == "Batman"
+    assert m.department == "Acting"
+    assert m.title_mentioned == "The Gray Man"
+    assert m.event_type == "casting"
+    assert m.evidence_span == "Chris Evans is set to star."
+
+
+def test_parse_cluster_mentions_optional_fields_default_to_none():
+    raw = '{"mentions": [{"n": 1, "name_as_written": "Ana de Armas"}]}'
+    mentions = parse_cluster_mentions(raw, n_stories=1)
+    assert len(mentions) == 1
+    m = mentions[0]
+    assert (m.role, m.department, m.title_mentioned, m.event_type, m.evidence_span) == (
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_parse_cluster_mentions_drops_out_of_range_and_nameless():
+    raw = json.dumps(
+        {
+            "mentions": [
+                {"n": 3, "name_as_written": "Out Of Range"},
+                {"n": 0, "name_as_written": "Also Out"},
+                {"n": "1", "name_as_written": "Index Not An Int"},
+                {"n": 1, "name_as_written": "   "},
+                {"n": 1},
+                "not an object",
+                {"n": 1, "name_as_written": "Kept Name"},
+            ]
+        }
+    )
+    mentions = parse_cluster_mentions(raw, n_stories=2)
+    assert [m.name_as_written for m in mentions] == ["Kept Name"]
+
+
+def test_parse_cluster_mentions_ignores_non_string_free_text():
+    """A number or object where a quote belongs is the model answering a different question:
+    dropped, never coerced into something that would read like evidence."""
+    raw = json.dumps(
+        {
+            "mentions": [
+                {
+                    "n": 1,
+                    "name_as_written": "Ryan Gosling",
+                    "role": 7,
+                    "evidence_span": {"quote": "nope"},
+                }
+            ]
+        }
+    )
+    mentions = parse_cluster_mentions(raw, n_stories=1)
+    assert (mentions[0].role, mentions[0].evidence_span) == (None, None)
+
+
+def test_parse_cluster_mentions_dedupes_within_a_story_only():
+    raw = json.dumps(
+        {
+            "mentions": [
+                {"n": 1, "name_as_written": "Chris Evans", "role": "first wins"},
+                {"n": 1, "name_as_written": "chris  evans", "role": "dropped"},
+                {"n": 2, "name_as_written": "Chris Evans", "role": "other story"},
+            ]
+        }
+    )
+    mentions = parse_cluster_mentions(raw, n_stories=2)
+    assert [(m.story_index, m.role) for m in mentions] == [(1, "first wins"), (2, "other story")]
+
+
+def test_parse_cluster_mentions_truncates_evidence_span():
+    raw = json.dumps({"mentions": [{"n": 1, "name_as_written": "A", "evidence_span": "x" * 900}]})
+    assert parse_cluster_mentions(raw, n_stories=1)[0].evidence_span == "x" * 500
+
+
+def test_parse_cluster_mentions_absent_or_unparseable_is_empty_not_none():
+    assert parse_cluster_mentions('{"events": []}', n_stories=1) == []
+    assert parse_cluster_mentions('{"mentions": null}', n_stories=1) == []
+    assert parse_cluster_mentions('{"mentions": [trunc', n_stories=1) == []
+    assert parse_cluster_mentions("[]", n_stories=1) == []
+
+
+def test_parse_cluster_mentions_drops_an_invented_event_type():
+    """The beat is validated against the same vocabulary a group's "type" is: a word the model
+    invented would never match anything downstream, so it lands as None rather than as noise."""
+    raw = json.dumps(
+        {
+            "mentions": [
+                {"n": 1, "name_as_written": "A", "event_type": "casting"},
+                {"n": 2, "name_as_written": "B", "event_type": "gossip"},
+            ]
+        }
+    )
+    mentions = parse_cluster_mentions(raw, n_stories=2)
+    assert [m.event_type for m in mentions] == ["casting", None]

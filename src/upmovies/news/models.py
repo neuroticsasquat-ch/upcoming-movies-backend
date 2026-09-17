@@ -225,3 +225,104 @@ class SourceDomain(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class StoryPerson(Base):
+    """One person the cluster stage's extraction pass found named in a story — the raw mention,
+    before anything has decided who it is (D-20, D-24).
+
+    Written at clustering from the model's own tuples, which carry names only and never ids
+    (INV-5): whatever resolution eventually decides, it decides in Python from these rows.
+    Until M4's resolver lands, every row arrives with `person_id`, `confidence`, `path` and
+    `resolved_at` NULL — an unresolved mention, which is a valid resting state and not a
+    failure. `person_id` NULL with `path='not_in_tmdb'` stays valid afterwards (INV-8).
+
+    `features` and `candidates` are the resolver's working notes, kept so a decision can be
+    read back rather than re-derived (D-25's `/admin/resolution` page reads them). `features`
+    starts out holding the extraction-time context the model reported alongside the mention —
+    `title_mentioned` (another film the article names) and `event_type` (the beat the person is
+    named in connection with) — neither of which is a column of its own, and both of which the
+    scorer needs: filmography overlap with other titles named in the article is one of D-21's
+    features.
+
+    **The resolver merges into `features`; it must not replace it.** Those two keys are the
+    only record of what the extraction pass saw, written at clustering and never regenerated —
+    the story is clustered by then, so no later run re-reads it. A resolver that assigns a
+    fresh dict of computed scores destroys the very inputs D-21 says to score on.
+
+    `prompt_version` is the version of the cluster instructions that produced the mention, for
+    the same reason `event_summary` carries one: an extraction prompt that changes meaning has
+    to be distinguishable from the rows written before it, or a re-extraction cannot tell what
+    it is replacing."""
+
+    __tablename__ = "story_person"
+    __table_args__ = (
+        CheckConstraint(
+            "path IS NULL OR path IN ('accepted', 'tiebreak', 'unlinked', 'not_in_tmdb')",
+            name="ck_story_person_path",
+        ),
+        Index("ix_story_person_story_id", "story_id"),
+        Index("ix_story_person_person_id", "person_id"),
+        {"schema": "news"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    story_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.story.id", ondelete="CASCADE"), nullable=False
+    )
+    # SET NULL rather than CASCADE: TMDB deleting a person must not delete the record that a
+    # trade story named them — the mention is ours, the person row is TMDB's (cf. `Person.
+    # tmdb_missing_at`). `name=` is carried into the migration, which the parity test compares.
+    person_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("catalog.person.id", ondelete="SET NULL", name="fk_story_person_person"),
+        nullable=True,
+    )
+    name_as_written: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    department: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_span: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    candidates: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class ResolutionCache(Base):
+    """A name-to-person decision, remembered per (source domain, name as written, film) so the
+    same trade naming the same person on the same film is not re-resolved every run (D-24).
+
+    The triple is the primary key, which is the unique key the cache needs: the same name means
+    different people on different films, and one outlet's house style for a name ("Chris Evans"
+    vs "Christopher Evans") is not another's. `person_id` NULL is a cached *negative* — nobody
+    in TMDB matches — and is as much an answer as a hit is (INV-8).
+
+    Nothing writes this yet: M4's resolver (NEU-1362 onward) fills it. The table lands with the
+    extraction schema so the two migrate together."""
+
+    __tablename__ = "resolution_cache"
+    __table_args__ = ({"schema": "news"},)
+
+    source_domain: Mapped[str] = mapped_column(Text, primary_key=True)
+    name_as_written: Mapped[str] = mapped_column(Text, primary_key=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    person_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("catalog.person.id", ondelete="SET NULL", name="fk_resolution_cache_person"),
+        nullable=True,
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    resolved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

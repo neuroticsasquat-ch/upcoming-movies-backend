@@ -285,7 +285,7 @@ async def run_link_ingest(
     attach_limit: int = 25,
     batch_size: int,
     floor: float,
-    cluster_max_tokens: int = 4096,
+    cluster_max_tokens: int = 8192,  # see `link_cluster_max_tokens` (config.py) for why 8192
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
