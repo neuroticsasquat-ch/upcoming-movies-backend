@@ -37,6 +37,11 @@ _LABEL_COLUMNS: dict[
 }
 
 
+# The catalog's TMDB keys are `Integer`, i.e. Postgres int4. A bind outside that range is
+# rejected by the driver rather than simply matching nothing, so the bound belongs here.
+_INT32_MAX = 2**31 - 1
+
+
 def _entity_key(entity_type: str, entity_id: str) -> int | UUID | None:
     """The catalog primary key `entity_id` names, or `None` when it is not of that shape.
 
@@ -46,11 +51,24 @@ def _entity_key(entity_type: str, entity_id: str) -> int | UUID | None:
     takes an `entity_id` straight from its caller and the imports (D-15, D-16) are about to
     become such callers. Returning `None` rather than raising is the same belt-and-braces choice
     the shape guards in `app/follow_queries.py` make, for the same reason: one bad row should
-    cost that row its name, not abort the statement the user's whole list is built from."""
+    cost that row its name, not abort the statement the user's whole list is built from.
+
+    The range check is the half that is easy to miss: an id past int32 parses fine in Python and
+    passes `normalise_entity_id`'s positive-integer test, then fails in asyncpg as it is bound
+    against an `Integer` column — which is not one row losing its name, it is the whole list
+    500ing on behalf of one bad row. (`app/follow_queries.py`'s `^[0-9]+$` guards have the same
+    hole against the same population; closing it there is a separate change, since the callers
+    that would hit it are batch passes rather than this route.)"""
+    if entity_type == "title":
+        try:
+            return UUID(entity_id)
+        except ValueError:
+            return None
     try:
-        return UUID(entity_id) if entity_type == "title" else int(entity_id)
+        key = int(entity_id)
     except ValueError:
         return None
+    return key if 0 < key <= _INT32_MAX else None
 
 
 async def get(
@@ -112,20 +130,25 @@ async def entity_labels(
     length — rather than a correlated subquery or a round trip per row. A follow whose entity the
     catalog does not hold simply has no key here; the caller renders it with nulls and keeps the
     row (D-40)."""
-    ids_by_type: dict[str, dict[int | UUID, str]] = defaultdict(dict)
+    ids_by_type: dict[str, dict[int | UUID, list[str]]] = defaultdict(lambda: defaultdict(list))
     for follow in follows:
         if follow.entity_type not in _LABEL_COLUMNS:
             continue
         key = _entity_key(follow.entity_type, follow.entity_id)
         if key is not None:
             # Keyed by the catalog pk so the row that comes back can be matched to the follow it
-            # belongs to without re-normalising: "0287" and "287" are the same person.
-            ids_by_type[follow.entity_type][key] = follow.entity_id
+            # belongs to without re-normalising, and holding *every* spelling that resolved to
+            # that pk: "0287" and "287" are the same person, and a writer that bypassed
+            # `normalise_entity_id` can leave both in the table. Keeping one would label one of
+            # the two rows and silently null the other.
+            ids_by_type[follow.entity_type][key].append(follow.entity_id)
 
     labels: dict[tuple[str, str], EntityLabel] = {}
     for entity_type, ids in ids_by_type.items():
         pk, name, image = _LABEL_COLUMNS[entity_type]
         rows = await db.execute(select(pk, name, image).where(pk.in_(ids)))
         for key, entity_name, image_path in rows:
-            labels[(entity_type, ids[key])] = EntityLabel(name=entity_name, image_path=image_path)
+            label = EntityLabel(name=entity_name, image_path=image_path)
+            for entity_id in ids[key]:
+                labels[(entity_type, entity_id)] = label
     return labels
