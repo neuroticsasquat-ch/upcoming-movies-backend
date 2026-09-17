@@ -26,9 +26,10 @@ from upmovies.config import Settings  # noqa: E402
 # source a test should see, so Settings reads no env file here.
 Settings.model_config["env_file"] = None
 
-from collections.abc import AsyncIterator  # noqa: E402
+from collections.abc import AsyncIterator, Iterator  # noqa: E402
 
 import pytest  # noqa: E402
+from argon2 import PasswordHasher  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
@@ -37,9 +38,29 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 
 import upmovies.models  # noqa: F401, E402  -- register every model with Base.metadata
+from upmovies.app import passwords  # noqa: E402
 from upmovies.db import Base  # noqa: E402
 
 _SCHEMAS = ("app", "catalog", "news", "ingest")
+
+
+# Password hashing runs at argon2's minimum cost for the suite as a whole (NEU-1393). The
+# production `PasswordHasher()` defaults (t=3, m=64 MiB, p=4) cost ~70 ms per hash, and every
+# user the `make_user` fixture creates pays one -- ~10-20 s of the run, spread too thin to show
+# in `--durations`, deriving hashes whose strength no test asserts. argon2 `verify` reads the
+# parameters back out of the hash string, so a cheap hash also verifies cheaply and the verify
+# side needs nothing. `hash_password` / `verify_password` read the module global on every call,
+# which is what makes swapping it here reach `account_service`, `reset_service`,
+# `email_change_service` and the fixtures alike; `src/` is untouched. The fixture yields the
+# hasher `passwords.py` really built so the one file that tests the hasher itself,
+# `tests/unit/app/test_passwords.py`, can put that exact object back for its own tests --
+# asserting on production's parameters means nothing if the test constructs its own hasher.
+@pytest.fixture(scope="session", autouse=True)
+def cheap_password_hasher() -> Iterator[PasswordHasher]:
+    production = passwords._hasher
+    passwords._hasher = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+    yield production
+    passwords._hasher = production
 
 
 @pytest.fixture(scope="session")
