@@ -1,6 +1,6 @@
 """The sweep's `ingest_run.detail` line.
 
-All five phases share one run row, so the four sets of counters have to be legible side by
+Every phase shares one run row, so their counters have to be legible side by
 side: the failure this exists to make visible is a run that enumerated fine and refreshed
 nothing, which is otherwise indistinguishable from a healthy pass on `/admin/runs` — and costs
 the whole catalog-sourced-event feature (spec §6.2). The two event phases are on the same line
@@ -19,6 +19,11 @@ what the open tranche let in and what stopped the rest, and a bare total leaves 
 is still closed" and "they were all below the corroboration threshold" — one an env change
 away from each other — indistinguishable (NEU-1086).
 
+The derivation clause (NEU-1352) reports the users it considered beside the items it wrote,
+because `0 items` is the healthy steady state — most sweeps qualify nothing new for anybody —
+and on its own it is indistinguishable from the pass selecting nobody at all, which is what a
+dropped entitlement grant or a broken follow-graph filter would look like.
+
 The attachment clause is here because nowhere else keeps it: the histogram is built on every
 sweep and was only ever logged, and Coolify runs the sweep through `docker exec`, whose output
 never reaches `docker logs` and dies with the container. `detail` is the only durable outlet
@@ -30,6 +35,7 @@ from collections import Counter
 
 from upmovies.ingest.runs import format_skip_detail
 from upmovies.ingest.sweep.credit_events import CreditDetachmentResult, CreditEventResult
+from upmovies.ingest.sweep.derivation_phase import DerivationResult
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
 from upmovies.ingest.sweep.field_events import FieldEventResult
 from upmovies.ingest.sweep.refresh_phase import RefreshResult
@@ -75,6 +81,7 @@ def sweep_detail(
     attached: CreditEventResult,
     detached: CreditDetachmentResult,
     released: ReleaseEventResult,
+    derived: DerivationResult,
 ) -> str:
     """One line reporting all phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
@@ -98,6 +105,8 @@ def sweep_detail(
         f"release dates: {released.events_created} carded from "
         f"{released.changes_read} changes, "
         f"{released.skipped} already carded, {released.failures} failed",
+        f"watchlist: {derived.items_created} derived for "
+        f"{derived.users_considered} users, {derived.failures} failed",
     ]
     attachments = _format_attachment_detail(enumerated.attachment_histogram)
     if attachments:
@@ -115,4 +124,6 @@ def sweep_detail(
         parts.append(f"credit removals aborted: {detached.abort_error}")
     if released.aborted:
         parts.append(f"release dates aborted: {released.abort_error}")
+    if derived.aborted:
+        parts.append(f"watchlist aborted: {derived.abort_error}")
     return "; ".join(parts)

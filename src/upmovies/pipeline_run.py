@@ -40,6 +40,7 @@ from upmovies.ingest.sweep import (
     AdmissionTranches,
     CreditDetachmentResult,
     CreditEventResult,
+    DerivationResult,
     EnumerateResult,
     FieldEventResult,
     RefreshResult,
@@ -50,6 +51,7 @@ from upmovies.ingest.sweep import (
     run_release_date_events,
     run_sweep_enumerate,
     run_sweep_refresh,
+    run_watchlist_derivation,
     sweep_detail,
 )
 from upmovies.ingest.tmdb.client import TMDBClient
@@ -176,8 +178,9 @@ async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
 
 
 async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
-    """All four sweep phases against one run row: enumerate, refresh, card the field changes
-    and the credit attachments refreshing produced, then the run's terminal status.
+    """Every sweep phase against one run row: enumerate, refresh, card the field changes and
+    the credit attachments refreshing produced, derive the watchlist items the new credits
+    qualify, then the run's terminal status.
 
     The odd one out among the stage runners: the phases it calls do **not** finalize. They
     share a single `ingest_run` row — one sweep, one row on `/admin/runs` — so the status,
@@ -264,10 +267,24 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             corroboration_window_days=settings.link_release_change_window_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
+        # D-13's maintenance half (NEU-1352), and the only phase that writes nothing to the
+        # catalog or the feed: it reads `catalog.film_credit` as refresh has just rebuilt it and
+        # adds the watchlist items those credits newly qualify. Last, because it depends on that
+        # rebuild and on nothing the carding phases do — a film is derivable whether or not its
+        # attachment carded — and because a failure here must not cost the day's events.
+        derived = await run_watchlist_derivation(
+            session_factory=_session_factory,
+            run_id=run_id,
+            today=today,
+            excluded_statuses=settings.tmdb_excluded_statuses,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
         # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
         # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
         # to be covered by the same net as the work it reports on.
-        await _finalize_sweep(run_id, enumerated, refreshed, carded, attached, detached, released)
+        await _finalize_sweep(
+            run_id, enumerated, refreshed, carded, attached, detached, released, derived
+        )
     except Exception as e:
         log.exception("sweep crashed")
         await _finalize_failed(run_id, str(e))
@@ -281,6 +298,7 @@ async def _finalize_sweep(
     attached: CreditEventResult,
     detached: CreditDetachmentResult,
     released: ReleaseEventResult,
+    derived: DerivationResult,
 ) -> None:
     """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
     failures, and the every-phase detail line either way — a run that aborted still reports
@@ -294,6 +312,7 @@ async def _finalize_sweep(
             ("credits", attached),
             ("credit removals", detached),
             ("release dates", released),
+            ("watchlist", derived),
         )
         if result.aborted
     ]
@@ -303,7 +322,9 @@ async def _finalize_sweep(
             run_id,
             status="failed" if aborts else "succeeded",
             error="; ".join(aborts) or None,
-            detail=sweep_detail(enumerated, refreshed, carded, attached, detached, released),
+            detail=sweep_detail(
+                enumerated, refreshed, carded, attached, detached, released, derived
+            ),
         )
         await s.commit()
 

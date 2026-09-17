@@ -39,8 +39,16 @@ from upmovies.catalog.models import Film, FilmCredit, FilmProductionCompany
 from upmovies.catalog.queries import in_play_clause, seed_grade_credit_clause
 
 
-def _followed_tmdb_ids(user_id: UUID, entity_type: str) -> Select[tuple[int]]:
-    """The TMDB ids this user follows under `entity_type`.
+def followed_tmdb_ids(
+    user_id: UUID, entity_type: str, *, entity_id: str | None = None
+) -> Select[tuple[int]]:
+    """The TMDB ids this user follows under `entity_type`, or just `entity_id` when one is named.
+
+    Public because the derived-watchlist pass (D-13, `app.services.derivation_service`) reads the
+    follow graph with a different *film* rule but the same *id* rule, and a second spelling of the
+    cast and the guard below is how the two would drift apart. `entity_id` narrows the graph to one
+    row for the follow-creation half of that pass, which derives from the follow just made rather
+    than re-deriving everything the user follows.
 
     `entity_id` is polymorphic text, so person, company and franchise ids have to be cast back
     to integers to meet the catalog's keys. The digit guard sits beside the `entity_type` filter
@@ -55,18 +63,29 @@ def _followed_tmdb_ids(user_id: UUID, entity_type: str) -> Select[tuple[int]]:
     OR-ed into one subquery, so the user's entire timeline would 500 — and the notify pass
     (NEU-1379), which runs this over every user at once, would fail for all of them over one
     bad row."""
-    return select(cast(Follow.entity_id, Integer)).where(
+    stmt = select(cast(Follow.entity_id, Integer)).where(
         Follow.user_id == user_id,
         Follow.entity_type == entity_type,
         Follow.entity_id.regexp_match(r"^[0-9]+$"),
     )
+    return stmt if entity_id is None else stmt.where(Follow.entity_id == entity_id)
 
 
-def _followed_film_uuids(user_id: UUID) -> Select[tuple[UUID]]:
-    """The film ids this user follows by title — `entity_id` is our UUID for that type."""
-    return select(cast(Follow.entity_id, PGUUID(as_uuid=True))).where(
-        Follow.user_id == user_id, Follow.entity_type == "title"
+def followed_film_uuids(user_id: UUID, *, entity_id: str | None = None) -> Select[tuple[UUID]]:
+    """The film ids this user follows by title — `entity_id` is our UUID for that type — or just
+    `entity_id` when one is named, on the same terms as `followed_tmdb_ids`.
+
+    Shape-guarded for the same reason and at the same cost as the digit guard above: `title` is
+    the one type whose id is not an integer, so it needs its own pattern, and a row that is not
+    a UUID would abort the statement rather than degrade it. The batch callers are what make
+    that expensive — the derivation pass (D-13) would raise for that user on every sweep for as
+    long as the row exists, and the notify pass (NEU-1379) for every user at once."""
+    stmt = select(cast(Follow.entity_id, PGUUID(as_uuid=True))).where(
+        Follow.user_id == user_id,
+        Follow.entity_type == "title",
+        Follow.entity_id.regexp_match(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"),
     )
+    return stmt if entity_id is None else stmt.where(Follow.entity_id == entity_id)
 
 
 def followed_film_ids(
@@ -88,10 +107,10 @@ def followed_film_ids(
     """
     person_films = select(FilmCredit.film_id).where(
         seed_grade_credit_clause(),
-        FilmCredit.person_id.in_(_followed_tmdb_ids(user_id, "person")),
+        FilmCredit.person_id.in_(followed_tmdb_ids(user_id, "person")),
     )
     company_films = select(FilmProductionCompany.film_id).where(
-        FilmProductionCompany.company_id.in_(_followed_tmdb_ids(user_id, "company"))
+        FilmProductionCompany.company_id.in_(followed_tmdb_ids(user_id, "company"))
     )
     return (
         select(Film.id)
@@ -102,8 +121,8 @@ def followed_film_ids(
                     in_play_clause(today=today, excluded_statuses=excluded_statuses),
                 ),
                 Film.id.in_(company_films),
-                Film.collection_id.in_(_followed_tmdb_ids(user_id, "franchise")),
-                Film.id.in_(_followed_film_uuids(user_id)),
+                Film.collection_id.in_(followed_tmdb_ids(user_id, "franchise")),
+                Film.id.in_(followed_film_uuids(user_id)),
             )
         )
         .correlate(None)

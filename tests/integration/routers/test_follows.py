@@ -236,3 +236,101 @@ async def test_list_does_not_require_csrf_header(entitled_client):
     del entitled_client.headers["X-CSRF-Token"]
     r = await entitled_client.get("/me/follows")
     assert r.status_code == 200
+
+
+# --- derived watchlist items (D-13) --------------------------------------------------------
+
+
+async def test_following_a_director_derives_their_in_play_films(entitled_client, session):
+    """The synchronous half of the derivation (D-13): the items are on the list by the time the
+    POST answers, so the client that just followed can render the watchlist without a second
+    round trip waiting on the sweep."""
+    from datetime import date
+
+    from upmovies.catalog.models import FilmCredit, Person
+
+    film = await add_film(session, tmdb_id=551, release_date=date(2099, 1, 1))
+    session.add(Person(id=525, name="Christopher Nolan"))
+    await session.flush()
+    session.add(
+        FilmCredit(
+            credit_id="c-551-525",
+            film_id=film.id,
+            person_id=525,
+            credit_type="crew",
+            job="Director",
+            department="Directing",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "525"}
+    )
+    assert r.status_code == 201
+
+    r = await entitled_client.get("/me/watchlist")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert [(i["film"]["title"], i["source"], i["alert_prefs"]) for i in items] == [
+        (film.title, "derived_from_follow", ["stream"])
+    ]
+
+
+async def test_a_dismissed_film_is_never_derived_again(entitled_client, session):
+    """Follow → derive → remove (which writes the dismissal) → follow something else that
+    reaches the same film. The film stays off the list, which is the whole point of the
+    dismissal row being permanent."""
+    from datetime import date
+
+    from upmovies.catalog.models import Collection
+
+    session.add(Collection(id=10, name="A Franchise"))
+    film = await add_film(session, tmdb_id=552, release_date=date(2099, 1, 1), collection_id=10)
+    await session.commit()
+
+    r = await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+    assert r.status_code == 201
+    assert len((await entitled_client.get("/me/watchlist")).json()["items"]) == 1
+
+    r = await entitled_client.delete(f"/me/watchlist/{film.id}")
+    assert r.status_code == 204
+
+    r = await entitled_client.post(
+        "/me/follows", json={"entity_type": "franchise", "entity_id": "10"}
+    )
+    assert r.status_code == 201
+    assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
+
+
+async def test_following_a_person_with_no_qualifying_credit_derives_nothing(
+    entitled_client, session
+):
+    """A follow is not a watchlist add: the writer cut (D-13) means the POST can legitimately
+    leave the watchlist empty, and the route must still answer 201."""
+    from datetime import date
+
+    from upmovies.catalog.models import FilmCredit, Person
+
+    film = await add_film(session, tmdb_id=553, release_date=date(2099, 1, 1))
+    session.add(Person(id=488, name="A Writer"))
+    await session.flush()
+    session.add(
+        FilmCredit(
+            credit_id="c-553-488",
+            film_id=film.id,
+            person_id=488,
+            credit_type="crew",
+            job="Screenplay",
+            department="Writing",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "488"}
+    )
+    assert r.status_code == 201
+    assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
