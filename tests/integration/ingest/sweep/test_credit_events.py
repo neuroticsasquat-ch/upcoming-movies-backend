@@ -248,9 +248,10 @@ async def test_a_second_pass_over_the_same_window_cards_nothing_new(
     assert len(await _events(session, film)) == 2
 
 
-async def test_a_later_observation_of_the_same_film_cards_again(session, session_factory, run_id):
-    """Two observations are two beats. The skip is keyed on the observation's timestamp, not
-    on the film — a second performer arriving on Tuesday is not the Monday card."""
+async def test_observations_clearing_in_one_pass_are_one_card(session, session_factory, run_id):
+    """D-7 reverses NEU-1083's per-observation grouping. Quarantine releases a film's credits
+    together however many observations they arrived over, so two performers three days apart
+    that card in the same pass are one beat, dated at the later of them."""
     film = await add_film(session, 1)
     await _cast(
         session, film, await _person(session, 1, "Zendaya"), changed_at=NOW - timedelta(days=3)
@@ -260,10 +261,34 @@ async def test_a_later_observation_of_the_same_film_cards_again(session, session
 
     result = await _run(session_factory, run_id)
 
-    assert result.events_created == 2
-    assert [e.occurred_at for e in await _events(session, film)] == sorted(
-        [NOW - timedelta(days=3), YESTERDAY]
-    )
+    assert result.events_created == 1
+    (event,) = await _events(session, film)
+    assert event.occurred_at == YESTERDAY
+    assert event.subject_key == ["zendaya", "josh brolin"]
+
+
+async def test_an_attachment_clearing_after_a_card_cards_only_itself(
+    session, session_factory, run_id
+):
+    """The other half of collapsing: a burst that grows between passes must not re-card the
+    people the first pass already named. The group's latest timestamp moves, so it is a new
+    card under `uq_event_catalog_change`, and per-person suppression carries the rest."""
+    film = await add_film(session, 1)
+    early = await _person(session, 1, "Zendaya")
+    await _cast(session, film, early, changed_at=NOW - timedelta(days=3))
+    await session.commit()
+
+    first = await _run(session_factory, run_id)
+
+    await _cast(session, film, await _person(session, 2, "Josh Brolin"))
+    await session.commit()
+
+    second = await _run(session_factory, run_id)
+
+    assert (first.events_created, second.events_created) == (1, 1)
+    events = await _events(session, film)
+    # Both are `casting`, so `_events`' ordering says nothing about which is which.
+    assert {tuple(e.subject_key) for e in events} == {("zendaya",), ("josh brolin",)}
 
 
 async def test_a_detachment_is_history_but_not_a_beat(session, session_factory, run_id):
@@ -564,6 +589,46 @@ async def test_the_gate_holds_people_individually_within_one_observation(
     assert (result.attachments_read, result.held, result.events_created) == (2, 1, 1)
     (event,) = await _events(session, film)
     assert event.subject_key == ["zendaya"]
+
+
+async def test_a_burst_clearing_together_is_one_card_in_billing_order(
+    session, session_factory, run_id
+):
+    """The done-when clause. A whole top-billed cast observed over four days, every hold
+    expiring by this pass: one `casting` card naming all of them, dated at the latest of
+    them, with the body reading in TMDB's billing order rather than in the order the history
+    diff emitted.
+
+    Five people, not the ticket's six: `TOP_BILLED_ORDER` is 5, so a sixth cast credit is
+    below the seed grade — the history never records it and the gate's presence check would
+    never release it. Five *is* the whole burst.
+    """
+    film = await add_film(session, 1)
+    # Deliberately mismatched: the diff order (by `changed_at`) is the reverse of billing.
+    names = ["Fifth", "Fourth", "Third", "Second", "First"]
+    days = [7, 7, 6, 5, 4]
+    for offset, (name, day) in enumerate(zip(names, days, strict=True)):
+        person = await _person(session, 100 + offset, name)
+        await _cast(session, film, person, changed_at=NOW - timedelta(days=day))
+        await _still_attached(
+            session, film, person, credit_type="cast", job=None, credit_order=4 - offset
+        )
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert (result.attachments_read, result.events_created, result.held) == (5, 1, 0)
+    (event,) = await _events(session, film)
+    assert event.event_type == "casting"
+    assert event.occurred_at == NOW - timedelta(days=4)
+    assert event.subject_key == ["first", "second", "third", "fourth", "fifth"]
+    assert (await _summary(session, event)).summary == (
+        "First, Second, Third, Fourth and Fifth join the cast."
+    )
+
+    # And the re-read stays idempotent: same rows, same latest timestamp, same card.
+    again = await _quarantined(session_factory, run_id)
+    assert (again.events_created, again.skipped) == (0, 1)
 
 
 async def test_quarantine_zero_cards_immediately(session, session_factory, run_id):

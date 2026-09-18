@@ -43,14 +43,22 @@ def derive_arc_stage(status: str | None) -> str:
     return ARC_STAGES[_RANK[_STATUS_BASELINE.get(status or "", "announced")]]
 
 
+def event_stage_rank(event_type: str) -> int:
+    """Where one event type sits on the arc — the ranking `most_significant_event_type` and
+    `ordered_event_types` both sort by, exposed so a caller can order *rows* by the same
+    scale rather than reimplementing it.
+
+    A type with no arc stage (`other`, `first_look`) ranks below `announced` at -1, which is
+    what keeps an other-only group from outranking a real beat.
+    """
+    return _RANK[_EVENT_STAGE[event_type]] if event_type in _EVENT_STAGE else -1
+
+
 def most_significant_event_type(event_types: Iterable[str]) -> str:
     """Return the most-significant event_type from a non-empty group, using the same
     ordering as the film arc. event_types with no arc stage (i.e. "other") rank below
     "announced", so an other-only group returns "other"."""
-    return max(
-        event_types,
-        key=lambda t: _RANK[_EVENT_STAGE[t]] if t in _EVENT_STAGE else -1,
-    )
+    return max(event_types, key=event_stage_rank)
 
 
 def ordered_event_types(event_types: Iterable[str]) -> list[str]:
@@ -62,7 +70,4 @@ def ordered_event_types(event_types: Iterable[str]) -> list[str]:
     rank alone would leave them in whatever order `array_agg` returned, which is not stable
     between requests.
     """
-    return sorted(
-        set(event_types),
-        key=lambda t: (-(_RANK[_EVENT_STAGE[t]] if t in _EVENT_STAGE else -1), t),
-    )
+    return sorted(set(event_types), key=lambda t: (-event_stage_rank(t), t))

@@ -36,7 +36,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-3"
+TEMPLATE_VERSION = "deterministic-4"
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,10 @@ class CreditAttached:
     role: str  # "director" | "writer" | "cast"
     name: str
     character: str | None = None
+    credit_order: int | None = None
+    """TMDB's billing position for a `cast` credit, read from live `catalog.film_credit`.
+    None for crew, which is ranked by `ROLE_ORDER` rather than by a number, and for a caller
+    that has no billing data to give."""
 
 
 @dataclass(frozen=True)
@@ -195,10 +199,36 @@ def _join_names(names: list[str]) -> str:
     return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
+# Sorts after every real billing position, so a credit with no `credit_order` never
+# displaces one that has it. Wider than TMDB's cast lists will ever be.
+_UNBILLED = 1 << 30
+
+
+def credit_order_key(credit: CreditAttached) -> tuple[int, int]:
+    """Canonical order for the credits of one group: strongest role first, then billing
+    order within the role (D-7).
+
+    Shared with the sweep's `group_attachments`, so the names a card *stores* in
+    `subject_key` sit in the same order the body *reads* them — one definition of "billing
+    order", not two that drift.
+
+    Crew credits carry no `credit_order` and so all share the sentinel: a stable sort leaves
+    them in the order the caller supplied, which is the order the credit history produced.
+    `ROLE_ORDER` is the only ranking between a director and a writer, and inventing a second
+    one here would fight it.
+    """
+    role = ROLE_ORDER.index(credit.role) if credit.role in ROLE_ORDER else len(ROLE_ORDER)
+    return (role, _UNBILLED if credit.credit_order is None else credit.credit_order)
+
+
 def _render_role(role: str, people: list[CreditAttached]) -> str:
     # Unlike a TMDB status, `role` is set by our own trigger sites from a fixed vocabulary — an
     # unknown one is a bug in the caller, not new data from upstream, so it raises rather than
     # falling back to a body nobody wrote.
+    # Billing order is the cast's own ranking, and a burst card can name six of them (D-7),
+    # so the body has to read top-billed first rather than in whichever order the history
+    # diff emitted. Crew all share the sentinel, so this is a no-op for them.
+    people = sorted(people, key=credit_order_key)
     names = _join_names([p.name for p in people])
     match role:
         case "director":
@@ -218,7 +248,11 @@ def _render_role(role: str, people: list[CreditAttached]) -> str:
 def _render_credits(change: CreditsAttached) -> str:
     """One clause per role, strongest attachment first (`ROLE_ORDER`, spec §3.2), so a
     director and a writer attached in the same edit read in a fixed order rather than in
-    whichever order the diff happened to emit them."""
+    whichever order the diff happened to emit them.
+
+    Within the `cast` clause the people read in billing order (`credit_order_key`, D-7): a
+    burst card collapses everyone who cleared quarantine in one pass, and the order they are
+    named in is the only ranking the body carries."""
     by_role: dict[str, list[CreditAttached]] = {}
     for credit in change.credits:
         by_role.setdefault(credit.role, []).append(credit)

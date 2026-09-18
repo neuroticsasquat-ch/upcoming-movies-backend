@@ -16,11 +16,15 @@ holds no rows at all for a film whose credits the catalog had never observed, so
 nothing here to read. The integration tests assert it anyway — it is the failure that would be
 most visible in production, and this phase is where it would surface.
 
-**One observation is one card.** TMDB routinely gains a whole top-billed cast between two
-ingests. The grouping below is the difference between one `casting` card naming three people
-and three cards about one beat, and `uq_event_catalog_change` enforces the same thing
-structurally: one catalog event per film, type and timestamp. Detachments share the same
-grouping discipline — one `credit_removed` card per (film, changed_at).
+**One burst is one card** (ADR-0017, D-7). TMDB routinely gains a whole top-billed cast
+between two ingests, and quarantine then releases those credits together however many
+observations they arrived over. Attachments are therefore grouped per **(film, event type,
+sweep pass)**, not per observation: six cast members whose holds expire in the same pass are
+one `casting` card naming all six, dated at the latest `changed_at` among them.
+`uq_event_catalog_change` — one catalog event per film, type and timestamp — still holds,
+because the group carries exactly one timestamp. Detachments are *not* collapsed this way:
+they never pass through quarantine, so they keep the per-observation discipline of one
+`credit_removed` card per (film, changed_at).
 
 **An attachment is quarantined before it cards** (ADR-0017, D-3). A `change='added'` row is
 eligible only once it has survived `SWEEP_CREDIT_QUARANTINE_HOURS` *and* the credit is still
@@ -45,7 +49,7 @@ consecutive failures, and **no `finalize_run`** — all phases share one `ingest
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -71,6 +75,7 @@ from upmovies.synthesize.deterministic import (
     CreditDetached,
     CreditsAttached,
     CreditsDetached,
+    credit_order_key,
     write_deterministic_summary,
 )
 
@@ -86,15 +91,25 @@ class AttachedCredit:
     name: str
     role: str
     changed_at: datetime
+    credit_order: int | None = None
+    """TMDB's billing position for this credit *right now*, stamped by the quarantine gate
+    from the live `catalog.film_credit` row it already reads. None for crew, which has no
+    billing position, and None whenever the gate is disabled — see `quarantine_attachments`."""
 
 
 @dataclass(frozen=True)
 class CreditGroup:
-    """The credits one observation of one film attached, and the single event they card as."""
+    """The credits one sweep pass carded for one film and one event type, and the single
+    event they card as."""
 
     film_id: UUID
     event_type: str
     changed_at: datetime
+    """The *latest* `changed_at` in the group, which the event stores as `occurred_at`
+    (D-7). The latest rather than the earliest because a burst is news when its last member
+    landed, and because a later pass that collapses a strictly larger burst then lands on a
+    strictly later timestamp — never colliding with the card the smaller burst already
+    wrote under `uq_event_catalog_change`."""
     credits: tuple[CreditAttached, ...]
 
 
@@ -169,27 +184,45 @@ def credit_role(credit_type: str, job: str | None) -> str | None:
 
 
 def group_attachments(attachments: list[AttachedCredit]) -> list[CreditGroup]:
-    """One group — and so one event — per (film, observation, event type). Pure.
+    """One group — and so one event — per (film, event type) in this pass. Pure.
 
-    Keyed on `changed_at` rather than on the run: the timestamp is what `occurred_at` records
-    and what `uq_event_catalog_change` keys on, so two observations stay two cards however
-    close together the sweep reads them.
+    Burst collapsing (D-7). The caller passes exactly the attachments that cleared quarantine
+    on *this* pass, so "the pass" needs no key of its own: everything handed in is by
+    construction one pass's worth. `changed_at` is therefore no longer part of the key — six
+    credits that landed over four days and came off hold together are one beat, and carding
+    them as four is the burst the quarantine window created.
 
-    Cast and crew split even within one observation: `casting` is an existing type with its
-    own meaning on the feed, and one body naming the director and the third-billed performer
-    is neither beat.
+    The group's `changed_at` is the **latest** in it, which is what the event stores as
+    `occurred_at`. That keeps `uq_event_catalog_change` satisfiable (one timestamp per group)
+    and keeps the re-read idempotent: the next pass over the same rolling window regroups the
+    same rows to the same latest timestamp and finds the card already there.
+
+    Cast and crew split even within one pass: `casting` is an existing type with its own
+    meaning on the feed, and one body naming the director and the third-billed performer is
+    neither beat.
+
+    Credits are ordered canonically (`credit_order_key`) — strongest role first, then billing
+    order within the role — so the body reads and the `subject_key` stores top-billed first
+    rather than in whichever order the history diff emitted.
     """
-    groups: dict[tuple[UUID, datetime, str], list[CreditAttached]] = {}
+    groups: dict[tuple[UUID, str], list[CreditAttached]] = {}
+    latest: dict[tuple[UUID, str], datetime] = {}
     for attached in attachments:
-        event_type = CREDIT_ROLE_EVENT_TYPES[attached.role]
-        groups.setdefault((attached.film_id, attached.changed_at, event_type), []).append(
-            CreditAttached(role=attached.role, name=attached.name)
+        key = (attached.film_id, CREDIT_ROLE_EVENT_TYPES[attached.role])
+        groups.setdefault(key, []).append(
+            CreditAttached(
+                role=attached.role, name=attached.name, credit_order=attached.credit_order
+            )
         )
+        latest[key] = max(attached.changed_at, latest.get(key, attached.changed_at))
     return [
         CreditGroup(
-            film_id=film_id, event_type=event_type, changed_at=changed_at, credits=tuple(credits)
+            film_id=film_id,
+            event_type=event_type,
+            changed_at=latest[(film_id, event_type)],
+            credits=tuple(sorted(credits, key=credit_order_key)),
         )
-        for (film_id, changed_at, event_type), credits in groups.items()
+        for (film_id, event_type), credits in groups.items()
     ]
 
 
@@ -236,22 +269,26 @@ async def load_attachment_backlog(
     return attached
 
 
-async def _present_seed_roles(
+async def _present_seed_credits(
     session: AsyncSession, *, film_ids: set[UUID]
-) -> set[tuple[UUID, int, str]]:
+) -> dict[tuple[UUID, int, str], int | None]:
     """Every `(film, person, seed-grade role)` that `catalog.film_credit` holds *right now*
-    for these films. One query for the whole backlog rather than one per attachment: the
-    quarantine gate asks this of every aged row, and the rolling window makes that the same
-    rows on every pass for as long as the hold lasts.
+    for these films, mapped to that credit's billing order. One query for the whole backlog
+    rather than one per attachment: the quarantine gate asks this of every aged row, and the
+    rolling window makes that the same rows on every pass for as long as the hold lasts.
 
     Seed grade is re-derived here rather than assumed from the change row that recorded the
     attachment. `film_credit` is delete-and-rebuilt on every ingest, and a cast member who has
     since slipped out of the top-5 billing no longer holds a seed-grade credit — which is
     exactly how `credit_history` would diff them, as removed. Reading the same predicate is
     what stops the two disagreeing about what "still attached" means.
+
+    Membership answers the gate; the value answers D-7's body ordering. Both are properties of
+    the same live row, so they are read together — `film_credit_change` records no billing
+    position of its own, and asking for it in a second query would be asking twice.
     """
     if not film_ids:
-        return set()
+        return {}
     stmt = select(
         FilmCredit.film_id,
         FilmCredit.person_id,
@@ -259,13 +296,13 @@ async def _present_seed_roles(
         FilmCredit.job,
         FilmCredit.credit_order,
     ).where(FilmCredit.film_id.in_(film_ids))
-    present: set[tuple[UUID, int, str]] = set()
+    present: dict[tuple[UUID, int, str], int | None] = {}
     for row in await session.execute(stmt):
         if not is_seed_grade(row.credit_type, row.job, row.credit_order):
             continue
         role = credit_role(row.credit_type, row.job)
         if role is not None:
-            present.add((row.film_id, row.person_id, role))
+            present[(row.film_id, row.person_id, role)] = row.credit_order
     return present
 
 
@@ -303,6 +340,12 @@ async def quarantine_attachments(
     A reverted attachment counts as held rather than as its own outcome. It will be re-read
     and re-held on every pass until it falls out of the rolling window, which is the correct
     end state — there is no card to write and nothing to remember.
+
+    Every eligible attachment comes back stamped with its live `credit_order`, which D-7's
+    body ordering needs and only `film_credit` has. Disabling the gate disables the stamp
+    with it: `0` reads no live state at all, by design, so a cast body written under it falls
+    back to the order the history diff produced. That is the pre-D-3 behaviour the `0` path
+    exists to preserve, not a second ordering rule.
     """
     if quarantine_hours <= 0 or not attachments:
         return attachments, []
@@ -314,11 +357,12 @@ async def quarantine_attachments(
         (aged if attached.changed_at + hold <= now else held).append(attached)
     if not aged:
         return [], held
-    present = await _present_seed_roles(session, film_ids={a.film_id for a in aged})
+    present = await _present_seed_credits(session, film_ids={a.film_id for a in aged})
     eligible: list[AttachedCredit] = []
     for attached in aged:
-        if (attached.film_id, attached.person_id, attached.role) in present:
-            eligible.append(attached)
+        key = (attached.film_id, attached.person_id, attached.role)
+        if key in present:
+            eligible.append(replace(attached, credit_order=present[key]))
         else:
             held.append(attached)
     return eligible, held

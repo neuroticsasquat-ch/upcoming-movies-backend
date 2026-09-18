@@ -46,6 +46,7 @@ from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import visible_events
 from upmovies.public.arc import (
     derive_arc_stage,
+    event_stage_rank,
     most_significant_event_type,
     ordered_event_types,
 )
@@ -1012,6 +1013,14 @@ async def get_feed_grouped(
             items.append(_make_item(row, news_events, True))
         if catalog_events:
             items.append(_make_item(row, catalog_events, False, ship_events=False))
+
+    # Within a day, the bigger beat leads (D-7): a casting burst outranks a status change,
+    # and a trailer outranks both. Sorted here rather than in SQL because the ranking is
+    # `_EVENT_STAGE`'s, and a CASE expression restating it is a second copy to keep in step.
+    # A *stable* sort over rows SQL already returned in title order, so significance ranks
+    # first and title still breaks its ties — the day axis is untouched, it is only re-keyed
+    # here because every row of every windowed day is already in hand.
+    items.sort(key=lambda item: (item.day, event_stage_rank(item.top_event_type)), reverse=True)
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
 
 
