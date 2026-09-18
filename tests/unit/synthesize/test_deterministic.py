@@ -138,6 +138,32 @@ def test_several_cast_attached_in_one_observation_read_as_one_beat():
     ) == ("Timothée Chalamet, Zendaya and Rebecca Ferguson join the cast.")
 
 
+def test_a_cast_clause_reads_in_billing_order():
+    """A burst card can name six performers (D-7), and the order they are named in is the
+    only ranking the body carries — so it is TMDB's billing order, not the diff's."""
+    assert render_summary(
+        CreditsAttached(
+            credits=(
+                CreditAttached(role="cast", name="Rebecca Ferguson", credit_order=2),
+                CreditAttached(role="cast", name="Timothée Chalamet", credit_order=0),
+                CreditAttached(role="cast", name="Zendaya", credit_order=1),
+            )
+        )
+    ) == ("Timothée Chalamet, Zendaya and Rebecca Ferguson join the cast.")
+
+
+def test_an_unbilled_cast_credit_reads_after_the_billed_ones():
+    """No `credit_order` means no claim on a position — never a claim on the first one."""
+    assert render_summary(
+        CreditsAttached(
+            credits=(
+                CreditAttached(role="cast", name="Unbilled"),
+                CreditAttached(role="cast", name="Top Billed", credit_order=0),
+            )
+        )
+    ) == ("Top Billed and Unbilled join the cast.")
+
+
 def test_two_people_in_one_role_share_a_clause():
     assert render_summary(
         CreditsAttached(
@@ -175,7 +201,7 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "deterministic-3"
+    assert TEMPLATE_VERSION == "deterministic-4"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────

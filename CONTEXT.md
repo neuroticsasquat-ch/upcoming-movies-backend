@@ -617,6 +617,17 @@ sweep detail line, apart from carded and already-carded.
 _Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
 moderation.
 
+**Burst**:
+Every credit attachment for one film and one event type that a single **sweep** pass cards
+together. **Quarantine** releases a film's credits when their holds expire, not when they were
+observed, so a whole top-billed cast that arrived over four days comes off hold in one pass and
+is *one* beat: one card naming everyone, dated at the latest change it names, its people read in
+billing order (`credit_order`). The grouping key is `(film, event type, pass)` — the pass, not
+the observation, which is what makes it a burst rather than a day's worth of cards. Crew and cast
+never share one: `casting` and `crew_attached` are separate beats. Detachments are never
+collapsed this way — they pass through no quarantine, so they stay one card per observation.
+_Avoid_: batch (nothing is queued), digest (that is a delivery format), roll-up, merge.
+
 **Publication** (of an event):
 The moment an event becomes visible in the app — `created_at`, the axis every feed surface and
 every notification keys on (ADR-0016). Distinct from when the change *occurred*
