@@ -419,7 +419,11 @@ availability — without ever tracking churn.
   "providers"`.
 - Event type `now_available` registered in `ck_event_type`, `_EVENT_STAGE` (ranks above
   `release_date`), excluded from LLM vocabularies.
-- `FilmDetail.where_to_watch: {flatrate: [...], rent: [...], buy: [...], attribution: "JustWatch"}`.
+- `FilmDetail.where_to_watch: {region: "US", flatrate: [...], rent: [...], buy: [...],
+  link: str | None, attribution: "JustWatch"} | None` — `None` when no poll has found the
+  film anywhere. `link` is TMDB's per-film watch page; it and `attribution` are what TMDB's
+  terms require (link back, credit JustWatch), not decoration. Provider entries are
+  `{id, name, logo_path}` (NEU-1376).
 - Calendar DTO gains `bucket ∈ premiere|limited|wide|digital|physical`.
 
 ### M7 — Notifications, digest, and calendar

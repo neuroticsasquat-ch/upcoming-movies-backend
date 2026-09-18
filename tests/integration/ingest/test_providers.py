@@ -774,3 +774,42 @@ async def test_a_film_nobody_carries_cards_nothing(session, session_factory, tmd
 
     assert result.cards == 0
     assert await _cards(session, film) == []
+
+
+@respx.mock
+async def test_the_snapshot_is_written_in_the_order_tmdb_listed_the_services(
+    session, session_factory, tmdb_client, run_id
+):
+    """The rebuild inserts a region's offers in the order the payload listed them, which is
+    JustWatch's own ranking.
+
+    Pinned here because the where-to-watch box (D-29, NEU-1376) reads the snapshot back
+    `ORDER BY id` and calls that ranking: `public.service._where_to_watch` has no ordering of
+    its own, so a dedup or grouping change in `offers_for_region` that reordered the insert
+    would silently reorder the box with that endpoint's own tests still green.
+    """
+    film = await _add_released_film(session, 507)
+    await session.commit()
+    respx.get(f"{BASE_URL}/movie/507/watch/providers").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_watch_providers(
+                507,
+                regions=_named(
+                    {
+                        "flatrate": [(8, "Netflix"), (15, "Hulu"), (1, "AMC+")],
+                        "rent": [(2, "Apple TV")],
+                    }
+                ),
+            ),
+        )
+    )
+
+    await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert await _current(session, film) == [
+        (8, "flatrate"),
+        (15, "flatrate"),
+        (1, "flatrate"),
+        (2, "rent"),
+    ]

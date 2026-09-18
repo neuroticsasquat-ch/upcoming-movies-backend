@@ -22,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
 from upmovies.catalog.models import (
+    MONETIZATION_TYPES,
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmAvailabilityCurrent,
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
@@ -34,6 +36,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
     ProductionCountry,
+    WatchProvider,
 )
 from upmovies.catalog.ref import film_ref, parse_film_ref
 from upmovies.catalog.release_grade import (
@@ -75,8 +78,10 @@ from upmovies.public.dto import (
     PersonSearchItem,
     PersonSearchResponse,
     PopularPeopleResponse,
+    ProviderOut,
     ReleaseDateOut,
     SourceOut,
+    WhereToWatchOut,
 )
 from upmovies.public.release import release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label, source_url
@@ -479,6 +484,68 @@ async def get_collection_search(
     return CollectionSearchResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
+async def _where_to_watch(
+    session: AsyncSession, film_id: UUID, *, region: str = PRIMARY_REGION
+) -> WhereToWatchOut | None:
+    """This film's current where-to-watch box, or `None` if nobody carries it (D-29).
+
+    Reads `film_availability_current` — the snapshot the provider poll rebuilds wholesale every
+    run — rather than the `availability_first_seen` ledger beside it. The two answer different
+    questions: the ledger says a film *was* on a service and never forgets, which is what
+    `now_available` cards off; the box says where a reader can watch it *now*, so a film that
+    has left every service must empty it rather than keep the last poll's answer.
+
+    **Ordered by primary key, which here means the order TMDB listed the services.** The
+    rebuild deletes and re-inserts a region in one statement in the order the poll observed —
+    JustWatch's own ranking, which is what puts the service most readers have at the head of the
+    list. Sorting by name instead would throw that ranking away for an alphabetical one nobody
+    asked for. The key is a surrogate, but the delete-and-rebuild is what makes it carry
+    meaning: the rows of a region are always written together, in one order, by one writer.
+    """
+    rows = (
+        await session.execute(
+            select(
+                FilmAvailabilityCurrent.monetization_type,
+                FilmAvailabilityCurrent.link,
+                WatchProvider.id,
+                WatchProvider.name,
+                WatchProvider.logo_path,
+            )
+            .join(WatchProvider, WatchProvider.id == FilmAvailabilityCurrent.provider_id)
+            .where(
+                FilmAvailabilityCurrent.film_id == film_id,
+                FilmAvailabilityCurrent.region == region,
+            )
+            .order_by(FilmAvailabilityCurrent.id.asc())
+        )
+    ).all()
+    if not rows:
+        return None
+    buckets: dict[str, list[ProviderOut]] = {kind: [] for kind in MONETIZATION_TYPES}
+    for row in rows:
+        # A type outside `MONETIZATION_TYPES` raises `KeyError` rather than being dropped: the
+        # table check-constrains the column to this same tuple, so one reaching here is a schema
+        # that moved without this read model, which should be loud. A type *added* to the tuple
+        # is the quieter half — it lands in `buckets` and then needs a field on
+        # `WhereToWatchOut` and a line below, or the box silently omits it.
+        buckets[row.monetization_type].append(
+            ProviderOut(id=row.id, name=row.name, logo_path=row.logo_path)
+        )
+    # The poll writes one `region.link` onto every row of a region (see
+    # `FilmAvailabilityCurrent`), so the rows never disagree: this reads the first of a set of
+    # equals, and is `None` only when TMDB gave the region no link at all.
+    link = next((row.link for row in rows if row.link is not None), None)
+    # Named rather than splatted from `buckets`: the keys are the model's fields, and a `**`
+    # would type-check against `attribution` too and hide a renamed bucket until runtime.
+    return WhereToWatchOut(
+        region=region,
+        flatrate=buckets["flatrate"],
+        rent=buckets["rent"],
+        buy=buckets["buy"],
+        link=link,
+    )
+
+
 async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse | None:
     """Resolve a film by URL ref (`<tmdb_id>-<title-slug>`), falling back to the legacy immutable
     `film.slug` for URLs minted before NEU-1143.
@@ -751,6 +818,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         alternative_titles=alternative_titles,
         cast=cast_out,
         crew=crew_out,
+        where_to_watch=await _where_to_watch(session, film.id),
     )
 
 
