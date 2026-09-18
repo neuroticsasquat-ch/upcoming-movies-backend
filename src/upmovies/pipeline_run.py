@@ -139,13 +139,16 @@ async def _resolve_client(settings: Settings) -> AsyncIterator[TMDBClient | None
 
 async def run_link_stage(run_id: UUID, settings: Settings) -> None:
     try:
-        # One gateway, three stages: `link`, `source_judge` and `cluster` all run inside
-        # `run_link_ingest` and each resolves its own provider from it. This used to be one
-        # `AnthropicClient` opened here and threaded down to all three (NEU-980, spec §5.3).
+        # One gateway, four stages: `link`, `source_judge`, `cluster` and `resolve` all run
+        # inside `run_link_ingest` and each resolves its own provider from it. This used to be
+        # one `AnthropicClient` opened here and threaded down to all three (NEU-980, spec §5.3).
         #
-        # The TMDB client is the fourth pass's and not a fourth model's: person resolution
+        # The TMDB client is the fourth pass's and not the `resolve` stage's: person resolution
         # (D-21) is deterministic Python over `/search/person`, and it runs here rather than
-        # on its own Coolify slot because it reads what clustering wrote a moment earlier.
+        # on its own Coolify slot because it reads what clustering wrote a moment earlier. The
+        # model it does reach for — the closed-set tiebreak (D-22) — answers only the narrow
+        # band that arithmetic could not separate, which is why it is a stage on the gateway
+        # above rather than a second client opened beside the TMDB one.
         # `RESOLVE_ENABLED=false` hands `run_link_ingest` no client at all, which is what
         # makes the switch a genuine skip rather than a pass that runs and discards its work.
         async with Gateway(settings) as gateway, _resolve_client(settings) as tmdb_client:
@@ -176,6 +179,7 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
                     accept_margin=settings.resolve_accept_margin,
                 ),
                 resolve_mentions_per_run=settings.resolve_mentions_per_run,
+                resolve_model=settings.resolve_model,
             )
     except Exception as e:
         log.exception("link ingest crashed")

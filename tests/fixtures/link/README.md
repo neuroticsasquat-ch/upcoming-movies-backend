@@ -376,3 +376,19 @@ the set is easier than the corpus: it under-represents the stories a strong mode
 Film-existence checks during review were made against a title index only to *confirm* a film the
 row had already been read to be about, never to discover what a row might be about; deriving
 labels from title matching would make the retrieval path's recall true by construction.
+
+---
+
+# `resolve_tiebreak_prompt.txt` — the resolve stage's golden prompt (NEU-1364)
+
+The whole request `link.resolve.tiebreak.build_tiebreak_request` renders for one fixed
+mention: the stable prefix, a `--- user ---` separator, then the JSON payload.
+`tests/unit/link/resolve/test_tiebreak.py` compares against it byte for byte.
+
+Unlike `validation_set.json` this is **not** ground truth about the world — it is a pin on our
+own output, and the separator is an artefact of writing two fields into one file. Its job is to
+make a prompt edit arrive as a reviewable diff. Every clause in the instruction block is there
+because a failure mode put it there (D-22: the closed set, "prefer null to a guess", "a shared
+name is never enough"), so regenerate the file in the same commit as the change and say in the
+PR what moved and why — a prompt is measured behaviour, and an unexplained rewording is an
+unmeasured edit to it.

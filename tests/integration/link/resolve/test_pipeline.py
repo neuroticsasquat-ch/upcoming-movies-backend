@@ -17,17 +17,25 @@ from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.gateway import StubGateway
 from tests.fixtures.tmdb import make_person_search_hit
 from upmovies.catalog.models import Person
-from upmovies.ingest.models import IngestRun
+from upmovies.ingest.models import IngestRun, LLMCall, RunLLMUsage
 from upmovies.ingest.runs import create_run
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.link.resolve.pipeline import run_resolution
 from upmovies.link.resolve.scoring import Thresholds
-from upmovies.llm import CallResult
+from upmovies.llm import CallResult, OpenAICompatClient
 from upmovies.news.models import ResolutionCache, Story, StoryPerson
 
 BASE = "https://api.themoviedb.org/3"
 NOW = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+
+# The `resolve` stage, on the one provider a test can put a real adapter in front of: the
+# Anthropic SDK moved to httpx2 and respx only intercepts httpx (`tests/unit/llm/conftest.py`).
+# A DeepInfra-hosted model keeps the whole path real — `Prompt` serialization, the wire request,
+# the usage mapping and the pricing key — where a fake `Completer` would only exercise this
+# module's own half of it.
+RESOLVE_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
+RESOLVE_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 
 
 def _client() -> TMDBClient:
@@ -105,6 +113,72 @@ async def _resolve(session_factory, session, **overrides):
             now=NOW,
             **overrides,
         )
+
+
+def _tiebreak_answer(content: str, *, prompt_tokens: int = 900) -> None:
+    """Mock the `resolve` stage's provider with one closed-set answer."""
+    respx.post(RESOLVE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1785283200,
+                "model": RESOLVE_MODEL,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": 12,
+                    "total_tokens": prompt_tokens + 12,
+                },
+            },
+        )
+    )
+
+
+def _resolve_gateway() -> tuple[StubGateway, OpenAICompatClient]:
+    client = OpenAICompatClient(provider="deepinfra", api_key="di-test")
+    gateway = StubGateway(
+        per_stage={"resolve": client},
+        per_stage_provider={"resolve": "deepinfra"},
+    )
+    return gateway, client
+
+
+async def _resolve_with_tiebreak(session_factory, session, **overrides):
+    gateway, client = _resolve_gateway()
+    try:
+        return await _resolve(
+            session_factory,
+            session,
+            gateway=gateway,
+            resolve_model=RESOLVE_MODEL,
+            **overrides,
+        )
+    finally:
+        await client.aclose()
+
+
+async def _two_namesakes(session, tmdb_id: int, slug: str):
+    """A mention TMDB answers with two equally-scoring people — the band, by construction."""
+    film = await add_film(session, tmdb_id, title="The Housemaid's Secret")
+    story = await _story(session, film, slug=slug, title="Chris Evans joins the thriller")
+    mention = await _mention(session, story, "Chris Evans")
+    await session.commit()
+    _search(
+        "Chris Evans",
+        [
+            make_person_search_hit(700, name="Chris Evans", popularity=90.0),
+            make_person_search_hit(701, name="Chris Evans", popularity=1.0),
+        ],
+    )
+    return film, story, mention
 
 
 @respx.mock
@@ -259,6 +333,165 @@ async def test_a_tie_between_namesakes_queues_a_tiebreak_and_names_nobody(sessio
     assert await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id)) is None
     # Popularity ordered the shortlist the resolve stage will read, and decided nothing else.
     assert [c["person_id"] for c in _logged_candidates(mention)] == [700, 701]
+
+
+# --- the resolve stage: the closed-set tiebreak (D-22, NEU-1364) -----------------
+#
+# The band the pass above queues, consumed. The prompt and the reply grammar are pinned in
+# `tests/unit/link/resolve/test_tiebreak.py`; what only a database and a wire can prove is
+# what lands on the row, what the telemetry says it cost, and that a defective answer changes
+# nothing.
+
+
+@respx.mock
+async def test_the_model_picking_an_option_names_that_person_on_the_tiebreak_route(
+    session_factory, session
+):
+    """An option answer accepts in every sense downstream reads — `person_id`, `confidence`,
+    the person upsert the FK owes — while `path` still records that a model decided it. D-25
+    exists so a human can find exactly these afterwards, which spelling it `accepted` would
+    make impossible."""
+    _, _, mention = await _two_namesakes(session, 20, "tiebreak-decided")
+    _tiebreak_answer('{"option": 2, "reason": "the composer, not the actor"}')
+
+    result = await _resolve_with_tiebreak(session_factory, session)
+
+    assert (result.tiebreak_asked, result.tiebreak_decided) == (1, 1)
+    assert (result.tiebreak, result.accepted) == (1, 0)
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (701, "tiebreak")
+    assert mention.confidence is not None and mention.confidence <= 0.95
+    assert await session.get(Person, 701) is not None
+    tiebreak = _features(mention)["resolution"]["tiebreak"]
+    assert (tiebreak["answer"], tiebreak["person_id"]) == (2, 701)
+    assert tiebreak["reason"] == "the composer, not the actor"
+
+
+@respx.mock
+async def test_a_tiebreak_accept_is_never_cached(session_factory, session):
+    """The one resolution a human is meant to review. Caching it would spread a single
+    unreviewed judgement across every later story from that publisher naming that name on that
+    film — and read back as an `accepted` hit that no longer looks like a tiebreak at all."""
+    film, _, _ = await _two_namesakes(session, 21, "tiebreak-uncached")
+    _tiebreak_answer('{"option": 1}')
+
+    await _resolve_with_tiebreak(session_factory, session)
+
+    assert await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id)) is None
+
+
+@respx.mock
+async def test_the_model_answering_none_unlinks_the_mention(session_factory, session):
+    """The answer the prompt asks for most often, and the safe one: an unlinked mention never
+    alerts, which is the failure mode this whole milestone exists to make impossible."""
+    _, _, mention = await _two_namesakes(session, 22, "tiebreak-none")
+    _tiebreak_answer('{"option": null, "reason": "neither is on this film"}')
+
+    result = await _resolve_with_tiebreak(session_factory, session)
+
+    assert (result.tiebreak_declined, result.unlinked, result.tiebreak) == (1, 1, 0)
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (None, "unlinked")
+    assert _features(mention)["resolution"]["tiebreak"]["answer"] is None
+
+
+@respx.mock
+async def test_an_out_of_list_answer_leaves_the_deterministic_decision_standing(
+    session_factory, session
+):
+    """Rejected, not coerced — the link stage's rule. The mention stays in the band with
+    nobody named, on the queue a human works, and is not asked again: the route is written, so
+    it leaves the backlog rather than buying a call every night forever."""
+    _, _, mention = await _two_namesakes(session, 23, "tiebreak-out-of-list")
+    _tiebreak_answer('{"option": 9}')
+
+    result = await _resolve_with_tiebreak(session_factory, session)
+
+    assert (result.tiebreak_rejected, result.tiebreak_decided) == (1, 0)
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (None, "tiebreak")
+    assert _features(mention)["resolution"]["tiebreak"]["out_of_list"] is True
+    assert mention.resolved_at == NOW
+
+
+@respx.mock
+async def test_an_unparseable_answer_leaves_the_deterministic_decision_standing(
+    session_factory, session
+):
+    _, _, mention = await _two_namesakes(session, 24, "tiebreak-garbage")
+    _tiebreak_answer("I really could not say")
+
+    result = await _resolve_with_tiebreak(session_factory, session)
+
+    assert result.tiebreak_rejected == 1
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (None, "tiebreak")
+    assert _features(mention)["resolution"]["tiebreak"]["unparseable"] is True
+
+
+@respx.mock
+async def test_the_call_is_logged_like_every_other_stage(session_factory, session):
+    """One `ingest.llm_call` row and one `ingest.run_llm_usage` row, both naming the provider
+    that actually answered — the pricing key is `(provider, model)`, so a row naming the wrong
+    host reports one provider's cost under another's name and no later analysis can tell."""
+    await _two_namesakes(session, 25, "tiebreak-logged")
+    _tiebreak_answer('{"option": 1}')
+
+    await _resolve_with_tiebreak(session_factory, session)
+
+    call = (await session.execute(select(LLMCall))).scalars().one()
+    assert (call.stage, call.provider, call.model) == ("resolve", "deepinfra", RESOLVE_MODEL)
+    assert (call.input_tokens, call.output_tokens) == (900, 12)
+    assert call.parse_ok is True
+    usage = (await session.execute(select(RunLLMUsage))).scalars().one()
+    assert (usage.stage, usage.model) == ("resolve", RESOLVE_MODEL)
+    assert usage.input_tokens == 900
+    assert usage.cost_usd > 0
+
+
+@respx.mock
+async def test_a_failed_tiebreak_call_leaves_the_mention_in_the_backlog(session_factory, session):
+    """A provider blip is the same class of thing as a TMDB blip and rests the same way: the
+    mention keeps until the next run rather than being recorded as answered. The call is still
+    a row — a failure nobody can price is a failure nobody can see."""
+    _, _, mention = await _two_namesakes(session, 26, "tiebreak-down")
+    respx.post(RESOLVE_URL).mock(return_value=httpx.Response(500))
+
+    result = await _resolve_with_tiebreak(session_factory, session)
+
+    assert (result.failed, result.resolved) == (1, 0)
+    await session.refresh(mention)
+    assert (mention.path, mention.resolved_at) == (None, None)
+    call = (await session.execute(select(LLMCall))).scalars().one()
+    assert (call.stage, call.ok) == ("resolve", False)
+
+
+@respx.mock
+async def test_the_band_is_left_alone_when_no_gateway_is_supplied(session_factory, session):
+    """Every deterministic decision still lands — the pass is not gated on having a model,
+    only the band is."""
+    _, _, mention = await _two_namesakes(session, 27, "no-gateway")
+
+    result = await _resolve(session_factory, session)
+
+    assert (result.tiebreak, result.tiebreak_asked) == (1, 0)
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (None, "tiebreak")
+    assert "tiebreak" not in _features(mention)["resolution"]
+
+
+@respx.mock
+async def test_the_detail_line_reports_the_band_only_when_one_was_asked(session_factory, session):
+    """A "0 asked" on every run's line is one the eye stops seeing — the same reason the link
+    run's saturation note is a clause it only sometimes carries."""
+    await _two_namesakes(session, 28, "detail-line")
+    _tiebreak_answer('{"option": 1}')
+
+    asked = await _resolve_with_tiebreak(session_factory, session)
+    assert "1 tiebreaks asked (1 decided, 0 none, 0 rejected)" in (asked.detail() or "")
+
+    quiet = await _resolve(session_factory, session)
+    assert quiet.detail() is None
 
 
 @respx.mock

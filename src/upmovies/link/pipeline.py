@@ -31,6 +31,7 @@ from upmovies.link.linker import (
 )
 from upmovies.link.resolve.pipeline import (
     DEFAULT_MENTIONS_PER_RUN,
+    DEFAULT_RESOLVE_MODEL,
     ResolutionResult,
     run_resolution,
 )
@@ -306,6 +307,7 @@ async def run_link_ingest(
     tmdb_client: TMDBClient | None = None,
     resolve_thresholds: Thresholds | None = None,
     resolve_mentions_per_run: int = DEFAULT_MENTIONS_PER_RUN,
+    resolve_model: str = DEFAULT_RESOLVE_MODEL,
 ) -> LinkIngestResult:
     run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
@@ -465,6 +467,12 @@ async def run_link_ingest(
             run_id=run_id,
             thresholds=resolve_thresholds,
             limit=resolve_mentions_per_run,
+            # The fourth stage this run may resolve a provider for (D-22), and the only one
+            # it may never call: the band the closed-set tiebreak answers is empty on a run
+            # whose names all separated on the arithmetic, and the pass resolves the stage
+            # where the band is rather than here.
+            gateway=gateway,
+            resolve_model=resolve_model,
         )
 
     # Two independent guards, joined only here. `total_failure_error` watches model
