@@ -94,14 +94,22 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 - **`db:refresh` silently reverts migrations.** Restores catalog/news/ingest from prod but leaves `app` alone. Alembic version lives in `app`, so `alembic current` still reads head while tables are gone. Re-apply with `alembic stamp <prod's rev> && task migrate`.
 - **Coolify shadows compose fallbacks:** a `${NAME:-default}` in compose is a seed, not a runtime default. After first deploy, Coolify stores the value and edits to the fallback are silent no-ops in prod. Change the value in the Coolify UI and restart.
 - **Deploy checklist for tuned constants** (T, K, dormancy, `SWEEP_CREDIT_QUARANTINE_HOURS`, `SWEEP_STORY_CONFIRM_DAYS`, the three `SWEEP_SANITY_*`, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
-- **`SWEEP_CREDIT_QUARANTINE_HOURS` must stay under `SWEEP_EVENT_LOOKBACK_DAYS` (NEU-1368, ADR-0017 D-3).**
-  In hours: 72 against 7 days = 168. The attachment hold has no queue table — the rolling lookback
-  *is* the queue — so a hold at or past the window means every attachment ages out before it is
-  eligible and the credit half quietly stops carding. `validate_sweep_configuration` refuses the
-  boot for that reason — in `pipeline_run` only, not the API, so a bad value fails the **hourly
-  task** (and its healthchecks.io deadman) within the hour rather than taking the site down.
-  Raising the window means raising `SWEEP_EVENT_LOOKBACK_DAYS` *first*, in the same Coolify
-  edit; both are seeded in `docker-compose.prod.yml`. `0` disables the hold and is exempt.
+- **`SWEEP_CREDIT_QUARANTINE_HOURS` must stay at least 48h under `SWEEP_EVENT_LOOKBACK_DAYS`
+  (NEU-1368, NEU-1401, ADR-0017 D-3).** In hours: 72 against a **120h ceiling** (7 days = 168,
+  minus 48). The
+  attachment hold has no queue table — the rolling lookback *is* the queue — so a hold that
+  reaches the window means every attachment ages out before it is eligible and the credit half
+  quietly stops carding. The ceiling sits 48h below the window rather than 1h below it because the
+  hold is only ever *observed* at a sweep pass: eligibility falling just after a pass waits for the
+  next one, so the **effective hold** runs up to a sweep period past the number configured (48h =
+  one daily pass plus one skipped or shifted one; NEU-1372 measured a nominal 72h holding for
+  ~94h). `validate_sweep_configuration` refuses the boot for that reason — in `pipeline_run` only,
+  not the API, so a bad value fails the **hourly task** (and its healthchecks.io deadman) within
+  the hour rather than taking the site down; its message names the ceiling and the lookback that
+  would admit the value. Raising the window means raising `SWEEP_EVENT_LOOKBACK_DAYS` *first*, in
+  the same Coolify edit; both are seeded in `docker-compose.prod.yml`. `0` disables the hold and is
+  exempt. `SWEEP_CREDIT_DWELL_DAYS` rounds up the same way but is deliberately **not** guarded —
+  the removal backfill can re-read what a mis-tuned dwell loses.
 - **The three `SWEEP_SANITY_*` refuse `0` (NEU-1370, ADR-0017 D-8).** `MAX_FILMS_PER_DAY=20`,
   `POSTHUMOUS_YEARS=2`, `MIN_AGE_YEARS=3`, all `ge=1` in `config.py` — unlike the two gates
   above, none has a coherent "off": a burst bar of 0 holds every attachment ever made, and a

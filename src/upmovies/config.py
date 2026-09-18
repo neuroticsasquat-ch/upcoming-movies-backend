@@ -79,22 +79,33 @@ class Settings(BaseSettings):
     # (NEU-1205). Forward-dwell: a removal cards only if the person does NOT re-attach within N
     # days after it. 0 disables the gate (reverts to plain NEU-1200). Must be <
     # SWEEP_EVENT_LOOKBACK_DAYS so a held removal is still in the rolling window when it becomes
-    # eligible; the backfill backstops a mis-tuned N above the lookback. Re-verify against prod.
+    # eligible — understated by the same rounding as the quarantine below, because a dwell is
+    # only ever observed at a sweep pass and its effective hold runs up to
+    # `SWEEP_HOLD_ROUNDING_HOURS` (48h) past N days. Deliberately left unguarded even so: the
+    # backfill backstops a mis-tuned N above the lookback (NEU-1401, D-1401.6). At the default 3
+    # days that still leaves 48h of headroom against a 7-day window. Re-verify against prod.
     sweep_credit_dwell_days: int = Field(default=3, ge=0, alias="SWEEP_CREDIT_DWELL_DAYS")
     # How long a credit *attachment* must age before it is eligible to card (ADR-0017, D-3).
     # The generalisation of the dwell gate above to the other direction: an added credit cards
     # only once it has survived the window *and* is still attached, so an edit that was never
     # true — vandalism, a misfile — publishes nothing at all rather than publishing and being
     # corrected. 0 disables the hold (reverts to immediate carding). Hours rather than days
-    # because the window is set from a survival curve that turns over inside a day, and the
-    # difference between 48 and 72 is a tuning step this must be able to express.
+    # because the difference between 48 and 72 is a tuning step this must be able to express —
+    # *not* because the curve turns over inside a day. It does not, and NEU-1372 found that
+    # cannot even be observed at a daily ingest cadence: the log is stamped almost entirely in
+    # one hour a day, nothing reverts before 18h, the mass sits at 24–36h, and there is a
+    # genuine heavy tail past 96h.
     #
-    # Must be < SWEEP_EVENT_LOOKBACK_DAYS (in hours) so a held attachment is still in the
-    # rolling window when it becomes eligible — and unlike the dwell gate, which the removal
-    # backfill backstops, nothing recovers an attachment that ages out unheld. That is why
-    # this constraint is *enforced* at boot (`ingest.sweep.validate_sweep_configuration`)
-    # rather than only documented. Default 72h until the M5 spike (D-4) reads the knee off
-    # `film_credit_change`; re-verify against prod.
+    # Must leave room for the sweep pass that *observes* the hold, not merely fit inside
+    # SWEEP_EVENT_LOOKBACK_DAYS: eligibility is only ever checked at a pass, so the effective
+    # hold runs up to `SWEEP_HOLD_ROUNDING_HOURS` (48h) longer than the value set here, and the
+    # ceiling is the lookback in hours *minus 48* — 120h at a 7-day window, not 167h. Unlike the
+    # dwell gate, which the removal backfill backstops, nothing recovers an attachment that ages
+    # out unheld, which is why this constraint is *enforced* at boot
+    # (`ingest.sweep.validate_sweep_configuration`) rather than only documented (NEU-1401).
+    # Default 72h. The M5 spike (D-4, NEU-1372) has since read the knee off `film_credit_change`;
+    # whether to retune from its findings is a separate decision and a separate deploy.
+    # Re-verify against prod.
     sweep_credit_quarantine_hours: int = Field(
         default=72, ge=0, alias="SWEEP_CREDIT_QUARANTINE_HOURS"
     )

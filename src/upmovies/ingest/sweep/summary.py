@@ -29,9 +29,9 @@ Read it against `attachments_read`, not on its own, and **not** as a health sign
 the two reasons a row is withheld — still inside the window, and already reverted — and in
 steady state the second dominates, which is the feature working rather than a fault. What it
 answers is "did the gate see this backlog at all"; what it cannot answer is whether the window
-is tuned right. The window being wider than the rolling lookback, the one tuning fault that
-would silently cost every attachment, is refused at boot instead
-(`validate_sweep_configuration`).
+is tuned right. The window leaving too little of the rolling lookback for the sweep pass that
+observes it, the one tuning fault that would silently cost every attachment, is refused at boot
+instead (`validate_sweep_configuration`).
 
 The holds clause (NEU-1370) is its own, beside the credits clause rather than inside it,
 because the two numbers are not the same kind. `held` merges quarantine's two reasons and is

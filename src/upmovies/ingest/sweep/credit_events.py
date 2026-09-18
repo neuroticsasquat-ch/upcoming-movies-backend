@@ -368,8 +368,9 @@ async def quarantine_attachments(
 
     Both conditions are re-evaluated from scratch on every pass, because both are properties
     of *now* rather than of the row. No `pending` state is written anywhere: the rolling
-    window is the queue, which is why the hold must stay inside it
-    (`validate_sweep_configuration`).
+    window is the queue, which is why the hold must fit inside it with room for the pass that
+    observes it — eligibility is only ever checked at a pass, so the effective hold rounds up
+    to the next one (`validate_sweep_configuration`, NEU-1401).
 
     This is the attachment-side generalisation of NEU-1205's forward-dwell gate, and the two
     are deliberately not one function. The removal gate asks whether the person came *back*
