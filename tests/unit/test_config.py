@@ -568,6 +568,11 @@ _PINNED_PROD_FALLBACKS = (
     ("RATE_LIMIT_IMPORT", "rate_limit_import"),
     ("RATE_LIMIT_PUBLIC", "rate_limit_public"),
     ("RATE_LIMIT_ICS", "rate_limit_ics"),
+    # The watch-provider poll's age window (NEU-1374). Tuning constants in the §4.5 sense —
+    # they set what the poll costs and how quickly a home release is noticed — so they fail the
+    # same way a stale K does: silently, with a green deploy.
+    ("PROVIDER_POLL_MIN_AGE_DAYS", "provider_poll_min_age_days"),
+    ("PROVIDER_POLL_MAX_AGE_DAYS", "provider_poll_max_age_days"),
 )
 
 

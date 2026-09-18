@@ -374,3 +374,54 @@ class TMDBPersonDetails(BaseModel):
     popularity: float | None = None
     profile_path: str | None = None
     known_for_department: str | None = None
+
+
+# `/movie/{id}/watch/providers` — who is carrying the film, per region (D-27). TMDB sources
+# this from JustWatch, whose terms require the attribution rendered wherever these names are.
+
+
+class TMDBWatchProvider(BaseModel):
+    """One provider offering a film under one monetization type.
+
+    `provider_id` and not `id`: this is the shape TMDB returns, and the id space is JustWatch's
+    provider catalogue rather than TMDB's own — `catalog.watch_provider` stores it under `id`
+    because there it is the table's own key."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    provider_id: int
+    provider_name: str
+    logo_path: str | None = None
+    display_priority: int | None = None
+
+
+class TMDBWatchProviderRegion(BaseModel):
+    """One region's offers: the JustWatch deep link TMDB hands out, and the provider lists per
+    monetization type.
+
+    Only the three types D-27 tracks are modelled. TMDB also returns `ads` and `free`, which
+    are deliberately dropped rather than folded into `flatrate`: an ad-supported tier is a
+    different claim about how a viewer watches the film, and `now_available` (D-28) cards a
+    first sighting per monetization type — so folding them would card a beat the product does
+    not mean. A missing key and an empty list are the same thing here, so all three default
+    empty."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    link: str | None = None
+    flatrate: list[TMDBWatchProvider] = Field(default_factory=list)
+    rent: list[TMDBWatchProvider] = Field(default_factory=list)
+    buy: list[TMDBWatchProvider] = Field(default_factory=list)
+
+
+class TMDBWatchProviders(BaseModel):
+    """The whole `/movie/{id}/watch/providers` payload: the film's id and a region-keyed map.
+
+    Every region is parsed, not just the one v1 polls. The endpoint answers for all of them in
+    one response — there is no per-region request to save by narrowing here — and the region
+    cut is the caller's (`PRIMARY_REGION`), the same way it is for release dates."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    results: dict[str, TMDBWatchProviderRegion] = Field(default_factory=dict)

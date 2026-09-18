@@ -19,7 +19,12 @@ fail-fast: the first stage that does not reach `succeeded` aborts the rest. A be
 healthchecks.io deadman ping (`/start` at the top, base URL on success, `/fail` on any
 failure) drives alerting.
 
-Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep}`.
+`run_providers` is a fourth slot on the same terms as the sweep: the D-27 watch-provider poll
+reads a working set the sweep has already dropped (films past their theatrical release), makes
+no model calls, and carries its own deadman so a poll that stops running does not hide behind a
+green sweep.
+
+Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers}`.
 """
 
 import asyncio
@@ -36,6 +41,7 @@ from sqlalchemy import select
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun
+from upmovies.ingest.providers import providers_detail, run_provider_poll
 from upmovies.ingest.runs import create_run, finalize_run, mark_stale_runs_cancelled
 from upmovies.ingest.sweep import (
     AdmissionTranches,
@@ -367,6 +373,41 @@ async def _finalize_sweep(
         await s.commit()
 
 
+async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
+    """The watch-provider poll against one run row (D-27): read the scoped set, write the
+    first-seen ledger and the current-availability snapshot, then the run's terminal status.
+
+    One phase, so unlike the sweep there is nothing to sequence — but the same division of
+    labour: the phase does not finalize, because the status, the error and the detail line
+    belong to whoever opened the run (§6.2).
+    """
+    try:
+        async with TMDBClient.from_settings(settings) as client:
+            polled = await run_provider_poll(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                today=date.today(),
+                min_age_days=settings.provider_poll_min_age_days,
+                max_age_days=settings.provider_poll_max_age_days,
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
+        # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
+        # has to be covered by the same net as the work it reports on.
+        async with SessionLocal() as s:
+            await finalize_run(
+                s,
+                run_id,
+                status="failed" if polled.aborted else "succeeded",
+                error=polled.abort_error,
+                detail=providers_detail(polled),
+            )
+            await s.commit()
+    except Exception as e:
+        log.exception("provider poll crashed")
+        await _finalize_failed(run_id, str(e))
+
+
 async def _run_tracked_stage(kind: str, runner: StageRunner, settings: Settings) -> str:
     """Open a run of `kind`, execute `runner` to completion (it finalizes its own run), and
     return the run's terminal status (`succeeded` / `failed` / `cancelled`)."""
@@ -394,6 +435,12 @@ async def _ping(base_url: str | None, suffix: str = "") -> None:
     except Exception:
         log.warning("healthcheck ping to %s failed", url, exc_info=True)
 
+
+# The modes that reach no model and send no mail, and so are exempted from the LLM-routing and
+# mail guards in `main` — see the comment there. Membership is a property of what a mode *does*,
+# not of its schedule: `providers` joins the sweep because the D-27 poll is TMDB reads and
+# catalog writes end to end (NEU-1374). M7's `notify` and `digest` will not join it.
+_NO_MODEL_CALL_MODES = frozenset({"sweep", "providers"})
 
 # Daily chain: TMDB refresh → per-film feed pass → LLM link/cluster → summarize. `feeds`
 # forces per_film=true; the light per_film=false pass runs hourly (run_hourly).
@@ -481,6 +528,23 @@ async def run_sweep(settings: Settings) -> bool:
     return True
 
 
+async def run_providers(settings: Settings) -> bool:
+    """Run the watch-provider poll on its own run kind. Returns True iff it succeeded.
+    Pings the providers deadman check at start / success / failure."""
+    await _clear_stale_runs(settings)
+    await _ping(settings.healthcheck_providers_url, "/start")
+    status = await _run_tracked_stage(
+        "providers", lambda rid, s: run_providers_stage(rid, s), settings
+    )
+    if status != "succeeded":
+        log.error("provider poll failed: ended %s", status)
+        await _ping(settings.healthcheck_providers_url, "/fail")
+        return False
+    log.info("provider poll succeeded")
+    await _ping(settings.healthcheck_providers_url)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "daily"
@@ -491,16 +555,16 @@ def main(argv: list[str] | None = None) -> int:
     # so the app having booted proves nothing about the env this one was handed (AGENTS.md's
     # "a long-running container holds the env it was created with"). Checked before the first
     # run row exists, so an unroutable stage costs no half-published run (NEU-981).
-    # Except for the sweep, which makes no model calls: failing it on an unrelated LLM
-    # routing typo would re-introduce exactly the shared failure mode §6.1 keeps it out of
+    # Except for the modes that make no model calls: failing one on an unrelated LLM
+    # routing typo would re-introduce exactly the shared failure mode §6.1 keeps them out of
     # the daily chain to avoid, and it would surface only as deadman silence.
-    # The mail configuration rides on the same guard, and inherits its sweep exemption for the
-    # same reason: the sweep is deliberately outside the daily chain's shared failure modes
-    # (§6.1), and failing it on a setting it never reads would put it back inside them. No
+    # The mail configuration rides on the same guard, and inherits that exemption for the
+    # same reason: those modes are deliberately outside the daily chain's shared failure modes
+    # (§6.1), and failing one on a setting it never reads would put it back inside them. No
     # mode sends mail *today* — the check is here because M7's notify and digest passes are
     # `pipeline_run` modes, and they should find the guard already in place rather than
     # discover a missing RESEND_API_KEY partway through a digest run.
-    if mode != "sweep":
+    if mode not in _NO_MODEL_CALL_MODES:
         validate_stage_configuration(settings)
         validate_mail_configuration(settings)
     # Unconditional, and so deliberately outside the exemption above: this one is the sweep's
@@ -521,8 +585,13 @@ def main(argv: list[str] | None = None) -> int:
         ok = asyncio.run(run_hourly(settings))
     elif mode == "sweep":
         ok = asyncio.run(run_sweep(settings))
+    elif mode == "providers":
+        ok = asyncio.run(run_providers(settings))
     else:
-        print(f"unknown mode {mode!r}: expected 'daily', 'hourly' or 'sweep'", file=sys.stderr)
+        print(
+            f"unknown mode {mode!r}: expected 'daily', 'hourly', 'sweep' or 'providers'",
+            file=sys.stderr,
+        )
         return 2
     return 0 if ok else 1
 

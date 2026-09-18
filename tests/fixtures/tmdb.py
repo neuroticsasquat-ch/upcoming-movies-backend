@@ -167,3 +167,44 @@ def make_person_search_page(
         "total_results": len(results),
         "results": results,
     }
+
+
+def make_provider(provider_id: int, **overrides: Any) -> dict[str, Any]:
+    """One entry in a `/movie/{id}/watch/providers` offer list."""
+    row: dict[str, Any] = {
+        "provider_id": provider_id,
+        "provider_name": f"Provider {provider_id}",
+        "logo_path": f"/provider{provider_id}.jpg",
+        "display_priority": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def make_watch_providers(
+    tmdb_id: int,
+    *,
+    region: str = "US",
+    flatrate: list[int] | None = None,
+    rent: list[int] | None = None,
+    buy: list[int] | None = None,
+    link: str | None = None,
+    regions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A `/movie/{id}/watch/providers` payload, given provider ids per monetization type.
+
+    Passing no ids at all yields `{"id": ..., "results": {}}` — TMDB's answer for a film
+    nobody carries anywhere, which is a 200 and not a 404. Pass ``regions`` to build the
+    region map directly when a test needs more than one region or an unusual shape.
+    """
+    if regions is not None:
+        return {"id": tmdb_id, "results": regions}
+    if flatrate is None and rent is None and buy is None:
+        return {"id": tmdb_id, "results": {}}
+    block: dict[str, Any] = {
+        "link": link if link is not None else f"https://www.themoviedb.org/movie/{tmdb_id}/watch"
+    }
+    for field, ids in (("flatrate", flatrate), ("rent", rent), ("buy", buy)):
+        if ids:
+            block[field] = [make_provider(pid) for pid in ids]
+    return {"id": tmdb_id, "results": {region: block}}

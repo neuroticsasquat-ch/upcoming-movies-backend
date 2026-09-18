@@ -13,6 +13,7 @@ from tests.fixtures.tmdb import (
     make_person_movie_credits,
     make_person_search_hit,
     make_person_search_page,
+    make_watch_providers,
 )
 from upmovies.config import Settings
 from upmovies.ingest.tmdb.client import (
@@ -827,3 +828,72 @@ async def test_search_person_retries_a_server_error():
 
     assert [h.id for h in hits] == [1]
     assert route.call_count == 2
+
+
+# --- /movie/{id}/watch/providers (D-27) ----------------------------------------
+
+
+@respx.mock
+async def test_watch_providers_parses_every_monetization_type():
+    respx.get(f"{BASE_URL}/movie/550/watch/providers").mock(
+        return_value=httpx.Response(
+            200, json=make_watch_providers(550, flatrate=[8], rent=[2], buy=[3])
+        )
+    )
+    async with _client() as c:
+        payload = await c.watch_providers(550)
+
+    us = payload.results["US"]
+    assert ([p.provider_id for p in us.flatrate], [p.provider_id for p in us.rent]) == ([8], [2])
+    assert [p.provider_id for p in us.buy] == [3]
+    assert us.link is not None
+
+
+@respx.mock
+async def test_watch_providers_reads_a_film_nobody_carries_as_empty_results():
+    """TMDB answers 200 with an empty `results` for a film no provider holds — the ordinary
+    case for anything unreleased. It must not be mistaken for a 404."""
+    respx.get(f"{BASE_URL}/movie/551/watch/providers").mock(
+        return_value=httpx.Response(200, json=make_watch_providers(551))
+    )
+    async with _client() as c:
+        payload = await c.watch_providers(551)
+
+    assert payload.results == {}
+
+
+@respx.mock
+async def test_watch_providers_drops_ad_supported_and_free_tiers():
+    """`ads` and `free` are deliberately not modelled (D-27): folding them into `flatrate`
+    would card a `now_available` beat the product does not mean."""
+    respx.get(f"{BASE_URL}/movie/552/watch/providers").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_watch_providers(
+                552,
+                regions={
+                    "US": {
+                        "link": "https://example.test/watch",
+                        "flatrate": [{"provider_id": 8, "provider_name": "Eight"}],
+                        "ads": [{"provider_id": 613, "provider_name": "Freevee"}],
+                        "free": [{"provider_id": 300, "provider_name": "Gratis"}],
+                    }
+                },
+            ),
+        )
+    )
+    async with _client() as c:
+        payload = await c.watch_providers(552)
+
+    assert [p.provider_id for p in payload.results["US"].flatrate] == [8]
+    assert not hasattr(payload.results["US"], "ads")
+
+
+@respx.mock
+async def test_watch_providers_raises_tmdb_not_found_on_404():
+    """The poll disposes of a deleted film rather than counting it as an outage, which needs
+    the 404 told apart from a transport failure."""
+    respx.get(f"{BASE_URL}/movie/9999/watch/providers").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.watch_providers(9999)

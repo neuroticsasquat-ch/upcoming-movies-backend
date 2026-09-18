@@ -156,6 +156,17 @@ class Settings(BaseSettings):
     # casting announcements to catch a vandal who could equally have typed 1 as 4.
     sweep_sanity_min_age_years: int = Field(default=3, ge=1, alias="SWEEP_SANITY_MIN_AGE_YEARS")
 
+    # The theatrical half of the watch-provider poll's scoped set (D-27): a film is polled
+    # while its US theatrical governing date is between these two ages, in days. The floor
+    # keeps the poll off films still in their theatrical window, where a home release is not
+    # yet plausible and a daily request would buy nothing; the ceiling is where a film that
+    # never got one stops costing a request a day forever. A film with a follow or a
+    # watchlist item is polled regardless of both — somebody is waiting on that answer.
+    # Both are placeholders in the §4.5 sense: erring wide costs requests, erring narrow
+    # silently delays or misses the `now_available` beat the whole milestone is for.
+    provider_poll_min_age_days: int = Field(default=14, ge=0, alias="PROVIDER_POLL_MIN_AGE_DAYS")
+    provider_poll_max_age_days: int = Field(default=200, ge=1, alias="PROVIDER_POLL_MAX_AGE_DAYS")
+
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the
     # three tranche flags below so a rollback is one move and does not disturb the ramp.
@@ -410,6 +421,10 @@ class Settings(BaseSettings):
     healthcheck_daily_url: str | None = Field(default=None, alias="HEALTHCHECK_DAILY_URL")
     healthcheck_hourly_url: str | None = Field(default=None, alias="HEALTHCHECK_HOURLY_URL")
     healthcheck_sweep_url: str | None = Field(default=None, alias="HEALTHCHECK_SWEEP_URL")
+    # `providers` is the D-27 poll, on its own slot and so with its own deadman for the same
+    # reason the sweep has one: it is not a stage in the daily chain, so a poll that stopped
+    # running would leave every other check green while the home-release beat went silent.
+    healthcheck_providers_url: str | None = Field(default=None, alias="HEALTHCHECK_PROVIDERS_URL")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

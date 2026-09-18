@@ -5,6 +5,7 @@ from sqlalchemy import (
     DDL,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
+    UniqueConstraint,
     event,
     text,
 )
@@ -487,6 +489,131 @@ class FilmReleaseDateChange(Base):
     changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+# --- Watch providers (D-27) --------------------------------------------------
+#
+# Two tables with opposite lifetimes over the same TMDB read. `availability_first_seen` is the
+# *ledger*: one row the first time a film is seen on a provider under a monetization type, never
+# updated, never deleted — it is what `now_available` cards off (D-28), and the reason D-27 says
+# the product never tracks churn. `film_availability_current` is the *snapshot*: what the
+# where-to-watch box renders (D-29), rebuilt wholesale from each poll, so a film leaving a
+# service disappears from the box without disturbing the fact that it was once there.
+#
+# Both are keyed on `(film_id, region, provider_id, monetization_type)`. Region is a column
+# rather than an assumption even though v1 polls `US` only: the ledger is insert-only, so a
+# later region would otherwise have to be told apart from the US rows by inference.
+
+MONETIZATION_TYPES = ("flatrate", "rent", "buy")
+"""The offer kinds D-27 tracks, and the TMDB response keys they are read from. TMDB's `ads` and
+`free` are deliberately not here — see `TMDBWatchProviderRegion`."""
+
+
+def _monetization_in_list() -> str:
+    return ", ".join(f"'{v}'" for v in MONETIZATION_TYPES)
+
+
+class WatchProvider(Base):
+    """A streaming, rental or purchase service, as TMDB (sourcing JustWatch) names it.
+
+    Upserted from whatever the poll observes rather than seeded from
+    `/watch/providers/movie`: the poll can only ever reference a provider it has just been
+    handed, so the list this table needs is exactly the list it sees, and a seeded catalogue
+    would mostly be providers for regions v1 never reads."""
+
+    __tablename__ = "watch_provider"
+    __table_args__ = {"schema": "catalog"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    """TMDB's `provider_id` — JustWatch's id space, not ours, so nothing generates it."""
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    logo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AvailabilityFirstSeen(Base):
+    """The first time this film was observed on this provider, in this region, under this
+    monetization type. Insert-only (D-27, D-28).
+
+    A surrogate key with a unique constraint over the four natural columns rather than a
+    composite primary key: `now_available` (D-28) cards one event per (film, monetization_type)
+    off the rows a poll newly inserted, and an event body that names the rows it was born from
+    wants a single id to name them by."""
+
+    __tablename__ = "availability_first_seen"
+    __table_args__ = (
+        UniqueConstraint(
+            "film_id",
+            "region",
+            "provider_id",
+            "monetization_type",
+            name="uq_availability_first_seen",
+        ),
+        CheckConstraint(
+            f"monetization_type IN ({_monetization_in_list()})",
+            name="ck_availability_first_seen_monetization_type",
+        ),
+        # The carding pass (D-28) reads a film's first-seen rows; the poll checks them per film
+        # before inserting. Both ask by film, which the unique constraint's index leads with —
+        # this is that index under a name the query planner reaches either way.
+        Index("ix_catalog_availability_first_seen_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.watch_provider.id"), nullable=False
+    )
+    monetization_type: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class FilmAvailabilityCurrent(Base):
+    """What a film is available on *now*, as the last poll saw it — the where-to-watch box's
+    table (D-29).
+
+    Delete-and-rebuild per (film, region) on every poll, so it holds no history and needs none:
+    the history that matters is `availability_first_seen`, which this pass writes beside it.
+    `link` is TMDB's JustWatch deep link for the film in that region — the same value on every
+    row of a region, denormalised so the box can render from one query.
+    """
+
+    __tablename__ = "film_availability_current"
+    __table_args__ = (
+        UniqueConstraint(
+            "film_id",
+            "region",
+            "provider_id",
+            "monetization_type",
+            name="uq_film_availability_current",
+        ),
+        CheckConstraint(
+            f"monetization_type IN ({_monetization_in_list()})",
+            name="ck_film_availability_current_monetization_type",
+        ),
+        Index("ix_catalog_film_availability_current_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.watch_provider.id"), nullable=False
+    )
+    monetization_type: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # --- Film column-change history trigger -------------------------------------
