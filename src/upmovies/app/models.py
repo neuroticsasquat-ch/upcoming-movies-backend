@@ -411,3 +411,127 @@ class TmdbAuthRequest(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+# Delivery (M7, D-31 to D-34). The per-user settings the digest and the calendar feed read, and
+# the queue the decision pass writes.
+
+DIGEST_CADENCES = ("daily", "weekly", "off")
+DEFAULT_DIGEST_CADENCE = "weekly"  # D-33; mirrored by the column's server default
+NOTIFICATION_KINDS = ("alert", "digest")
+NOTIFICATION_CHANNELS = ("email", "push")
+NOTIFICATION_STATUSES = ("queued", "sent", "failed", "suppressed")
+
+
+class UserSettings(Base):
+    """One user's delivery preferences: how often they want the digest, and the token their
+    calendar subscribes with (D-33, D-34).
+
+    Keyed by the user with no surrogate id, like the follow graph next door: there is one row per
+    user by definition and nothing ever names it another way.
+
+    **The row is created lazily, on first read** (`settings_service.get_or_create`), rather than
+    at signup. Signup would have to write a row for every account including the ones that never
+    reach a settings screen, and a backfill would have to invent one for every account that
+    already exists; a default-valued row that no one has looked at yet carries no information
+    that the defaults do not. Because every route that reaches this table is behind
+    `require_entitled()` (D-39), the row only ever appears for a user who holds a grant — and
+    D-40 keeps it, token included, when that grant lapses, so a renewed subscription resumes on
+    the same calendar URL rather than silently breaking one the user has already added to their
+    phone.
+
+    `ical_token` is `NOT NULL` and unique: it is the whole of `/calendar/{token}.ics`'s lookup,
+    so a duplicate would hand one user another's dates, and a NULL would be a settings row whose
+    calendar link cannot be rendered. Rotating it is a plain update (D-34) — the old value stops
+    resolving the moment it is overwritten, which is the point of the affordance."""
+
+    __tablename__ = "user_settings"
+    __table_args__ = (
+        CheckConstraint(
+            f"digest_cadence IN ({_in_list(DIGEST_CADENCES)})",
+            name="ck_user_settings_digest_cadence",
+        ),
+        {"schema": "app"},
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), primary_key=True
+    )
+    digest_cadence: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text(f"'{DEFAULT_DIGEST_CADENCE}'")
+    )
+    ical_token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class Notification(Base):
+    """One decision to tell one user about one event, and what became of it (D-31).
+
+    Written by the decision pass over newly published events — never by ingest, and never by a
+    route — which is why nothing in this ticket inserts here: the pass that does is NEU-1379.
+    The row exists before the mail does, so a send that fails is a `failed` row with its reason
+    rather than a silence, and a recipient who must not be mailed at all (unverified, D-31; or
+    unentitled, D-39) is a `suppressed` row rather than an absence that looks the same as the
+    pass never having considered them.
+
+    The unique key on `(user_id, event_id, kind, channel)` is what makes that pass re-runnable:
+    it selects newly published events by `created_at` since the last pass, so a pass that is
+    run twice, or whose window overlaps after a crash, reconsiders events it has already
+    decided. The key turns the second decision into a conflict to ignore instead of a second
+    mail. `kind` and `channel` are in it because the same event legitimately produces an alert
+    *and* a digest line, by email *and* (from D-36) by push — those are different deliveries of
+    the same news, not duplicates of one.
+
+    `event_id` cascades: an event deleted from the ledger takes its delivery decisions with it.
+    That is history the ledger no longer has a subject for, and notifications are not the claim
+    record — `news.event` is (ADR-0017)."""
+
+    __tablename__ = "notification"
+    __table_args__ = (
+        CheckConstraint(f"kind IN ({_in_list(NOTIFICATION_KINDS)})", name="ck_notification_kind"),
+        CheckConstraint(
+            f"channel IN ({_in_list(NOTIFICATION_CHANNELS)})", name="ck_notification_channel"
+        ),
+        CheckConstraint(
+            f"status IN ({_in_list(NOTIFICATION_STATUSES)})", name="ck_notification_status"
+        ),
+        Index(
+            "uq_notification_user_event_kind_channel",
+            "user_id",
+            "event_id",
+            "kind",
+            "channel",
+            unique=True,
+        ),
+        # The sender's own question: the backlog, oldest first. Not partial on
+        # `status = 'queued'`, so the operational read that follows a bad run — "what failed,
+        # and when?" — is served by the same index.
+        Index("ix_notification_status_created_at", "status", "created_at"),
+        {"schema": "app"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
+    )
+    event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.event.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Why a `failed` row failed, as the sender saw it. Free text rather than a code: it is read
+    # by a person looking at a row that did not go out, and the provider's own message is the
+    # most useful thing to put in front of them.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -351,3 +351,33 @@ class ImportJobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+# --- delivery settings (M7, D-33, D-34) -------------------------------------------------------
+
+DigestCadence = Literal["daily", "weekly", "off"]
+
+
+class UserSettingsOut(BaseModel):
+    """The whole of `/me/settings`, which is also the whole of `app.user_settings`.
+
+    `ical_token` is returned rather than only the rendered URL: the calendar panel has to show
+    the URL, offer it as a `webcal:` link and let the user copy it, and the base it hangs off is
+    the frontend's own knowledge of the API origin. Returning the token to its owner is not a
+    disclosure — it is theirs, over an authenticated, entitlement-gated request (D-39)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    digest_cadence: DigestCadence
+    ical_token: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserSettingsUpdateRequest(BaseModel):
+    """A PATCH of the settings. One field for now, and `digest_cadence` is required rather than
+    optional: a PATCH with nothing in it is a client bug, and pydantic saying so is cheaper than
+    a route that quietly does nothing. D-36's push preferences land beside it as their own
+    optional fields when they exist."""
+
+    digest_cadence: DigestCadence
