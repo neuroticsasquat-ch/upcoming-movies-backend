@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, exists, func, or_, select
+from sqlalchemy import Select, and_, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,10 +43,12 @@ from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
 from upmovies.app.models import Follow, Notification, User, WatchlistItem
 from upmovies.app.verification import verified_user_clause
+from upmovies.catalog.models import Film
 from upmovies.ingest.runs import last_successful_run_started_at, record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
-from upmovies.news.models import Event
+from upmovies.news.models import Event, EventSummary
+from upmovies.news.visibility import region_visible, visible_events
 
 log = logging.getLogger(__name__)
 
@@ -133,21 +135,51 @@ def now_available_matches_prefs(
     )
 
 
-def _published_window(since: datetime) -> ColumnElement[bool]:
-    """The events this pass decides about: published, confirmed, and new since the watermark.
+def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
+    """`SELECT event.id` for every event this pass may tell *anyone* about.
 
-    `created_at` rather than `occurred_at` because publication is the axis the product already
-    groups and paginates on (ADR-0016) — an event carded today about a change TMDB recorded
-    last week is news to the reader today, and dating the window by `occurred_at` would mail
-    nobody about it.
+    Written to be used as `Event.id.in_(deliverable_events(since))`, so both branches and the
+    counter share one definition of "in scope" rather than three.
 
-    `confidence = 'confirmed'` is D-32's floor and sits here, in the window, rather than in the
-    alert branch: a `rumored` event is not digest material either, and nothing `unconfirmed` is
-    ever queued in any kind."""
-    return and_(
-        Event.created_at > since,
-        Event.status == "published",
-        Event.confidence == "confirmed",
+    **The window.** `created_at` rather than `occurred_at`, because publication is the axis the
+    product already groups and paginates on (ADR-0016) — an event carded today about a change
+    TMDB recorded last week is news to the reader today, and dating the window by `occurred_at`
+    would mail nobody about it. `confidence = 'confirmed'` is D-32's floor and sits here rather
+    than in the alert branch: a `rumored` event is not digest material either, so nothing
+    `unconfirmed` is ever queued in any kind. `status = 'published'` leaves out a superseded
+    card in favour of the correction that replaced it.
+
+    **The visibility terms are the three the feed applies**, and they are not decoration. A
+    notification is a claim, made in the user's inbox, about a card they will then click
+    through to — so queueing one the product will not show them is worse than queueing
+    nothing. Each cuts a real case:
+
+    - the `EventSummary` join, because an event with no summary has no copy for a sender to put
+      in a mail. Hidden types are never summarized, so this and `visible_events()` overlap —
+      but only the join states the sender's actual precondition.
+    - `visible_events()`, so the `other` catch-all bucket (`news.visibility`) stays out.
+    - `region_visible()`, so an Indian release-date change does not mail every watchlist holder
+      about a date no surface will show them — D-32 is "US theatrical or home-release". This is
+      the term that needs `Film` in the query.
+    - `Film.slug.is_not(None)`, because a film with no slug has no page to link to.
+
+    `correlate(None)` for the reason `app.follow_queries` gives: the queries this is dropped
+    into select from `news.event` themselves, and the builder's meaning must not depend on the
+    one it lands in.
+    """
+    return (
+        select(Event.id)
+        .join(EventSummary, EventSummary.event_id == Event.id)
+        .join(Film, Film.id == Event.film_id)
+        .where(
+            Event.created_at > since,
+            Event.status == "published",
+            Event.confidence == "confirmed",
+            Film.slug.is_not(None),
+            visible_events(),
+            region_visible(),
+        )
+        .correlate(None)
     )
 
 
@@ -191,7 +223,7 @@ async def alert_event_ids(session: AsyncSession, *, user_id: UUID, since: dateti
         .where(
             WatchlistItem.user_id == user_id,
             Event.event_type.in_(PUSH_WHITELIST),
-            _published_window(since),
+            Event.id.in_(deliverable_events(since)),
         )
         .order_by(Event.created_at, Event.id)
     )
@@ -227,7 +259,7 @@ async def digest_event_ids(
     rows = await session.execute(
         select(Event.id)
         .where(
-            _published_window(since),
+            Event.id.in_(deliverable_events(since)),
             or_(
                 Event.film_id.in_(
                     followed_film_ids(
@@ -335,7 +367,7 @@ async def run_notify_pass(
 
     async with owned_session(session_factory) as s:
         result.events_considered = (
-            await s.execute(select(func.count()).select_from(Event).where(_published_window(since)))
+            await s.execute(select(func.count()).select_from(deliverable_events(since).subquery()))
         ).scalar_one()
         recipients = await load_recipients(s)
     result.users_considered = len(recipients)

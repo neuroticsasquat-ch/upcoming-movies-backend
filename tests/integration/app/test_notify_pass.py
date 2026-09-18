@@ -465,3 +465,87 @@ async def test_a_user_with_no_graph_is_never_considered(
 
     assert result.users_considered == 0
     assert await _rows(session) == []
+
+
+async def test_a_hidden_event_type_is_never_queued(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """`other` is the uncategorized catch-all, hidden from every surface (`news.visibility`).
+    A mail about a card the product will not show is worse than no mail."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="other", created_at=NEW)
+
+    result = await run_pass()
+
+    assert result.events_considered == 0
+    assert await _rows(session) == []
+
+
+async def test_an_event_with_no_summary_is_never_queued(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """The sender's precondition: a notification with no summary behind it is a mail with
+    nothing to say."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="casting", summary=None, created_at=NEW)
+
+    assert (await run_pass()).digests_queued == 0
+    assert await _rows(session) == []
+
+
+async def test_a_release_date_outside_the_films_visible_markets_is_never_queued(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """D-32 is "US theatrical or home-release". An Indian date change on a US film is hidden
+    from the feed and the film page by `region_visible()`, so alerting on it would mail news
+    the product then refuses to show."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune", origin_country=["US"])
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(
+        film=film, event_type="release_date", provenance="catalog", region="IN", created_at=NEW
+    )
+
+    result = await run_pass()
+
+    assert result.alerts_queued == 0
+    assert await _rows(session) == []
+
+
+async def test_a_release_date_in_the_films_origin_country_is_queued(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """The other side of the same rule — the film's own market is visible, so it alerts."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="rrr", title="RRR", origin_country=["IN"])
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(
+        film=film, event_type="release_date", provenance="catalog", region="IN", created_at=NEW
+    )
+
+    assert (await run_pass()).alerts_queued == 1
+
+
+async def test_a_film_with_no_slug_is_never_queued(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """No slug, no page to link the mail at."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    film.slug = None
+    await session.commit()
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="trailer", created_at=NEW)
+
+    assert (await run_pass()).alerts_queued == 0
+    assert await _rows(session) == []

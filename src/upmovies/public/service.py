@@ -8,7 +8,6 @@ from sqlalchemy import (
     ColumnElement,
     Date,
     Select,
-    any_,
     case,
     cast,
     distinct,
@@ -47,7 +46,7 @@ from upmovies.catalog.release_grade import (
 )
 from upmovies.config import get_settings
 from upmovies.news.models import Event, EventStory, EventSummary, Story
-from upmovies.news.visibility import visible_events
+from upmovies.news.visibility import region_visible, visible_events
 from upmovies.public.arc import (
     derive_arc_stage,
     event_stage_rank,
@@ -143,18 +142,6 @@ def _natural_title_col() -> ColumnElement[str]:
     before 'The Batman' as 'Batman' vs 'Batman' — the second word decides."""
     title = func.lower(Film.title)
     return func.regexp_replace(title, r"^(a|an|the)\s+", "", "i")
-
-
-def _region_visible() -> ColumnElement[bool]:
-    """SQL predicate: a release_date event reaches the public surface only when its region is
-    global (NULL) or in the film's primary set — US plus the film's origin countries. Other
-    event types are never region-filtered. Requires Film to be present in the query (NEU-446)."""
-    return or_(
-        Event.event_type != "release_date",
-        Event.region.is_(None),
-        Event.region == PRIMARY_REGION,
-        Event.region == any_(Film.origin_country),
-    )
 
 
 def _has_story() -> ColumnElement[bool]:
@@ -574,7 +561,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             )
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Event.film_id == film.id, visible_events(), _region_visible())
+            .where(Event.film_id == film.id, visible_events(), region_visible())
             .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
     ).all()
@@ -636,7 +623,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             )
         )
 
-    # The one definition, shared with the event writer and with `_region_visible` above
+    # The one definition, shared with the event writer and with `news.visibility.region_visible`
     # (`catalog.release_grade`). This used to take `origin_country[0]` while the visibility
     # predicate took all of them, so a co-production could surface an event about a date the
     # page declined to list — the drift NEU-1121 closes.
@@ -834,7 +821,7 @@ async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
             select(Film.tmdb_id, Film.title, func.max(Event.created_at))
             .join(Event, Event.film_id == Film.id)
             .join(EventSummary, EventSummary.event_id == Event.id)
-            .where(visible_events(), _region_visible())
+            .where(visible_events(), region_visible())
             .group_by(Film.id, Film.tmdb_id, Film.title)
             .order_by(Film.slug.asc())
         )
@@ -851,14 +838,14 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None), visible_events(), _region_visible())
+        .where(Film.slug.is_not(None), visible_events(), region_visible())
     )
     rows = (
         await session.execute(
             select(Event, EventSummary.summary, Film.tmdb_id, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Film.slug.is_not(None), visible_events(), _region_visible())
+            .where(Film.slug.is_not(None), visible_events(), region_visible())
             .order_by(Event.created_at.desc(), Event.id.asc())
             .limit(limit)
             .offset(offset)
@@ -954,7 +941,7 @@ async def get_feed_grouped(
     # (ADR-0016). A backfill or a new catalog tranche therefore lands as one tall day — that is
     # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
-    visible = (Film.slug.is_not(None), visible_events(), _region_visible())
+    visible = (Film.slug.is_not(None), visible_events(), region_visible())
     scoped = _feed_scope(film_filter, event_filter)
 
     distinct_days = (
