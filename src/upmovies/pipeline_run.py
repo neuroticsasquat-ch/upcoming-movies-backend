@@ -25,7 +25,8 @@ Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep}`.
 import asyncio
 import logging
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
@@ -57,6 +58,7 @@ from upmovies.ingest.sweep import (
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
 from upmovies.link.pipeline import run_link_ingest
+from upmovies.link.resolve.scoring import Thresholds
 from upmovies.llm import Gateway, validate_stage_configuration
 from upmovies.logging_config import configure_logging
 from upmovies.mail import validate_mail_configuration
@@ -120,12 +122,33 @@ async def run_feeds_stage(
         await _finalize_failed(run_id, str(e))
 
 
+@asynccontextmanager
+async def _resolve_client(settings: Settings) -> AsyncIterator[TMDBClient | None]:
+    """The TMDB client person resolution reads `/search/person` through, or None when
+    `RESOLVE_ENABLED` is off.
+
+    A context manager yielding None rather than a flag threaded into `run_link_ingest`: with
+    the switch off no client should be *opened* either, and the one place that can honour
+    that is the one place that would open it."""
+    if not settings.resolve_enabled:
+        yield None
+        return
+    async with TMDBClient.from_settings(settings) as client:
+        yield client
+
+
 async def run_link_stage(run_id: UUID, settings: Settings) -> None:
     try:
         # One gateway, three stages: `link`, `source_judge` and `cluster` all run inside
         # `run_link_ingest` and each resolves its own provider from it. This used to be one
         # `AnthropicClient` opened here and threaded down to all three (NEU-980, spec §5.3).
-        async with Gateway(settings) as gateway:
+        #
+        # The TMDB client is the fourth pass's and not a fourth model's: person resolution
+        # (D-21) is deterministic Python over `/search/person`, and it runs here rather than
+        # on its own Coolify slot because it reads what clustering wrote a moment earlier.
+        # `RESOLVE_ENABLED=false` hands `run_link_ingest` no client at all, which is what
+        # makes the switch a genuine skip rather than a pass that runs and discards its work.
+        async with Gateway(settings) as gateway, _resolve_client(settings) as tmdb_client:
             await run_link_ingest(
                 session_factory=_session_factory,
                 gateway=gateway,
@@ -147,6 +170,12 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
                 retrieval_max_zero_candidate_rate=settings.link_retrieval_max_zero_candidate_rate,
                 retrieval_health_min_stories=settings.link_retrieval_health_min_stories,
                 retrieval_saturation_warn_rate=settings.link_retrieval_saturation_warn_rate,
+                tmdb_client=tmdb_client,
+                resolve_thresholds=Thresholds(
+                    accept_floor=settings.resolve_accept_floor,
+                    accept_margin=settings.resolve_accept_margin,
+                ),
+                resolve_mentions_per_run=settings.resolve_mentions_per_run,
             )
     except Exception as e:
         log.exception("link ingest crashed")
