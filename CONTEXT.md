@@ -611,8 +611,12 @@ Implemented for attachments as `SWEEP_CREDIT_QUARANTINE_HOURS` (default 72, 0 di
 sweep's credit phase (NEU-1368): an `added` row is eligible only once the window has passed
 **and** the credit is still in `catalog.film_credit` under the same seed-grade role. Nothing is
 written while a row is held — there is no `pending` state anywhere, the rolling
-`SWEEP_EVENT_LOOKBACK_DAYS` window *is* the queue, which is why the hold must stay inside it
-(refused at boot by `validate_sweep_configuration`). Held rows are counted as **held** on the
+`SWEEP_EVENT_LOOKBACK_DAYS` window *is* the queue, which is why the hold must fit inside it *with
+room for the pass that observes it* (refused at boot by `validate_sweep_configuration`, NEU-1401).
+The configured number is the **nominal window**; the **effective hold** is how long a row is
+actually held, up to 48h longer, because eligibility is only ever checked at a sweep pass and a row
+that becomes eligible just after one waits for the next. The ceiling is therefore the window minus 48h
+— 120h at the default 7 days. Held rows are counted as **held** on the
 sweep detail line, apart from carded and already-carded. It is followed by the **sanity
 holds** (NEU-1370), which judge the person rather than the clock and do leave a row.
 _Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
