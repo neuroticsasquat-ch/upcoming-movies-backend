@@ -425,6 +425,12 @@ class Settings(BaseSettings):
     # reason the sweep has one: it is not a stage in the daily chain, so a poll that stopped
     # running would leave every other check green while the home-release beat went silent.
     healthcheck_providers_url: str | None = Field(default=None, alias="HEALTHCHECK_PROVIDERS_URL")
+    # `notify` is the M7 decision pass (D-31), scheduled after the daily chain rather than
+    # inside it: the chain publishes the events, and a decision pass that ran as a fifth stage
+    # would abort with it and mail nobody about the four stages that did succeed. Its own
+    # deadman for the same reason as the two above — and a sharper one, because this pass
+    # failing is silence for the *user*, not just for the catalogue.
+    healthcheck_notify_url: str | None = Field(default=None, alias="HEALTHCHECK_NOTIFY_URL")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

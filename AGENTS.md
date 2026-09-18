@@ -26,7 +26,7 @@ Production deploys are **not** triggered by `task` commands. The flow is:
 
 ### Coolify scheduled tasks
 
-Four slots run `python -m upmovies.pipeline_run <mode>` in the deployed container, each a separate
+Five slots run `python -m upmovies.pipeline_run <mode>` in the deployed container, each a separate
 process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 
 | Mode | Cadence | What it does |
@@ -35,6 +35,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll (NEU-1374) |
+| `notify` | daily, **after** `daily` | the M7 decision pass (D-31, NEU-1379) |
 
 **`providers` is a new slot and must be added in the Coolify UI** — nothing in the repo creates
 it, so merging this leaves the poll never running, with no failing check to say so. Put it beside
@@ -44,6 +45,20 @@ working set the sweep has already dropped — films *past* their theatrical rele
 `HEALTHCHECK_PROVIDERS_URL` in the same edit; unset, the pings are a silent no-op and a poll that
 stops running is invisible. The `PROVIDER_POLL_*` window is seeded in `docker-compose.prod.yml`
 and turned in the UI, per the gotcha below.
+
+**`notify` is a new slot and must be added in the Coolify UI**, on the same terms as
+`providers` above and with `HEALTHCHECK_NOTIFY_URL` set in the same edit. Two things are specific
+to it:
+
+- **Order matters.** It reads the events the daily chain publishes, so it has to run *after* that
+  chain, not beside it. It is deliberately not a fifth stage of the chain: the chain is fail-fast,
+  and a link-stage outage must not mean nobody hears about the release dates the tmdb stage did
+  card.
+- **The first run mails nobody, by design.** The window is "published since the last *successful*
+  notify run", and on a cold start there is no such run — so the first one establishes the
+  watermark and queues nothing rather than alerting on the entire back catalogue. Schedule it
+  before announcing anything to users, and expect the slot's first green tick to report
+  `cold start`.
 
 Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
 

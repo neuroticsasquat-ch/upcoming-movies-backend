@@ -229,6 +229,31 @@ async def last_finished_run_started_at(session: AsyncSession, kind: str) -> date
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def last_successful_run_started_at(session: AsyncSession, kind: str) -> datetime | None:
+    """When the most recent **succeeded** run of `kind` began, or None if none has.
+
+    The notify pass's watermark (D-31): it selects events published since this instant, so the
+    question it is really asking is "what has nobody decided about yet".
+
+    Succeeded — not merely finished, unlike `last_finished_run_started_at` above — and the two
+    are opposites for the same reason. That one measures a watermark its own pass *writes*
+    (`film.updated_at`), so pinning it to success lets one broken run freeze the catalogue past
+    it. This pass writes nothing the watermark reads: `news.event.created_at` is the publication
+    axis (ADR-0016) and only the daily chain moves it. A failed notify run therefore leaves its
+    window undecided, and reading any finished run would skip precisely the events it never got
+    to — silently, and for good. Re-reading a window a failed run partly decided costs nothing,
+    because `uq_notification_user_event_kind_channel` turns the second decision into a conflict
+    to ignore rather than a second mail.
+    """
+    stmt = (
+        select(IngestRun.started_at)
+        .where(IngestRun.kind == kind, IngestRun.status == "succeeded")
+        .order_by(IngestRun.started_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def mark_stale_runs_cancelled(session: AsyncSession, *, stale_after_minutes: int) -> int:
     """Cancel any run still `running` that has not been heard from inside the staleness
     window. Returns the number of runs cancelled. Clears runs orphaned by a crash, a

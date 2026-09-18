@@ -24,7 +24,13 @@ reads a working set the sweep has already dropped (films past their theatrical r
 no model calls, and carries its own deadman so a poll that stops running does not hide behind a
 green sweep.
 
-Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers}`.
+`run_notify` is the fifth slot: M7's decision pass (D-31), scheduled after the daily chain
+rather than inside it. It reads the events that chain published and writes `app.notification`;
+running it as a fifth stage would tie it to the chain's fail-fast rule, so a link-stage outage
+would mean nobody hears about the release dates the tmdb stage did card. It sends no mail — the
+senders are passes of their own — and carries its own deadman.
+
+Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify}`.
 """
 
 import asyncio
@@ -38,6 +44,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy import select
 
+from upmovies.app.services.notify_service import notify_detail, run_notify_pass
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun
@@ -408,6 +415,42 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
         await _finalize_failed(run_id, str(e))
 
 
+async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
+    """The M7 decision pass against one run row (D-31): decide what every user is owed about
+    the events published since the last successful notify run, and write `app.notification`.
+
+    Like the provider poll, one phase with nothing to sequence, and the same division of
+    labour: the phase does not finalize, because the status, the error and the detail line
+    belong to whoever opened the run (§6.2).
+
+    Sends no mail. This writes `queued` rows and stops; the senders are their own passes
+    (NEU-1380, NEU-1381), so a decision pass that crashes costs a delay rather than a
+    half-delivered mailing.
+    """
+    try:
+        decided = await run_notify_pass(
+            session_factory=_session_factory,
+            run_id=run_id,
+            today=date.today(),
+            excluded_statuses=settings.tmdb_excluded_statuses,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
+        # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
+        # has to be covered by the same net as the work it reports on.
+        async with SessionLocal() as s:
+            await finalize_run(
+                s,
+                run_id,
+                status="failed" if decided.aborted else "succeeded",
+                error=decided.abort_error,
+                detail=notify_detail(decided),
+            )
+            await s.commit()
+    except Exception as e:
+        log.exception("notify pass crashed")
+        await _finalize_failed(run_id, str(e))
+
+
 async def _run_tracked_stage(kind: str, runner: StageRunner, settings: Settings) -> str:
     """Open a run of `kind`, execute `runner` to completion (it finalizes its own run), and
     return the run's terminal status (`succeeded` / `failed` / `cancelled`)."""
@@ -545,6 +588,21 @@ async def run_providers(settings: Settings) -> bool:
     return True
 
 
+async def run_notify(settings: Settings) -> bool:
+    """Run the notification decision pass on its own run kind. Returns True iff it succeeded.
+    Pings the notify deadman check at start / success / failure."""
+    await _clear_stale_runs(settings)
+    await _ping(settings.healthcheck_notify_url, "/start")
+    status = await _run_tracked_stage("notify", lambda rid, s: run_notify_stage(rid, s), settings)
+    if status != "succeeded":
+        log.error("notify pass failed: ended %s", status)
+        await _ping(settings.healthcheck_notify_url, "/fail")
+        return False
+    log.info("notify pass succeeded")
+    await _ping(settings.healthcheck_notify_url)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "daily"
@@ -587,9 +645,11 @@ def main(argv: list[str] | None = None) -> int:
         ok = asyncio.run(run_sweep(settings))
     elif mode == "providers":
         ok = asyncio.run(run_providers(settings))
+    elif mode == "notify":
+        ok = asyncio.run(run_notify(settings))
     else:
         print(
-            f"unknown mode {mode!r}: expected 'daily', 'hourly', 'sweep' or 'providers'",
+            f"unknown mode {mode!r}: expected 'daily', 'hourly', 'sweep', 'providers' or 'notify'",
             file=sys.stderr,
         )
         return 2

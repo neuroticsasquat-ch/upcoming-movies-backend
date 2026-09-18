@@ -68,6 +68,7 @@ services:
       # reason the sweep gets its own: it is not a stage in any other chain, so a poll that
       # stopped running would be invisible in every deadman that does exist (NEU-1374).
       HEALTHCHECK_PROVIDERS_URL: "${HEALTHCHECK_PROVIDERS_URL:-}"
+      HEALTHCHECK_NOTIFY_URL: "${HEALTHCHECK_NOTIFY_URL:-}"
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
