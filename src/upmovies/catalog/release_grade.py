@@ -25,9 +25,17 @@ these buckets stay in `public.release` — they are a presentation concern; memb
 
 Widening this cut is how home-release dates reach the product at all: the film page, the
 calendar, `_region_visible` and the change history all read this module, so a US digital date
-becomes listable, carded and calendar-visible in one edit. There is **no backfill** — the first
-observation after deploy is a baseline, not a change (ADR-0014), so no film cards a digital date
-it already had.
+becomes listable, carded and calendar-visible in one edit.
+
+**Widening it does not backfill**, and the reason is not ADR-0014's baseline rule: that covers
+a film the catalog has never observed, and every film already in the catalog is observed.
+What holds instead is that `_rebuild_release_dates` stores **every** TMDB type in
+`catalog.film_release_date`, filtered by nothing — so a US digital date this cut newly admits
+is already sitting there, and `load_displayable_releases` reads it through the widened
+predicate on the *stored* side of the diff exactly as `displayable_from_details` reads it on
+the incoming side. Same date both sides, no change, no card. That unfiltered insert is
+load-bearing for this property: narrowing it to the displayable types would make the first
+ingest after any future widening card the whole catalog at once.
 
 **Why the primary date is not here.** `catalog.film.release_date` is TMDB's primary — the
 earliest release in *any* country of *any* type — so it is routinely a date this cut excludes.
