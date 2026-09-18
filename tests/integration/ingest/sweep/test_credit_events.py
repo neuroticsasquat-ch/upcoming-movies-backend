@@ -10,10 +10,14 @@ first day the expansion ran.
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+import httpx
+import respx
+from sqlalchemy import delete, select
 
 from tests.fixtures.catalog import add_credit, add_film
 from upmovies.catalog.models import FilmCredit, FilmCreditChange, Person
+from upmovies.ingest import credit_holds
+from upmovies.ingest.models import CreditHold
 from upmovies.ingest.sweep import credit_events, run_credit_attachment_events
 from upmovies.ingest.sweep.credit_events import (
     _card_detachment_group,
@@ -37,6 +41,7 @@ QUARANTINE_HOURS = 72
 # Old enough to have cleared a 72h hold, young enough to still be inside the 7-day window —
 # the band every quarantine test that expects a card has to sit in.
 AGED = NOW - timedelta(hours=QUARANTINE_HOURS + 1)
+BASE_URL = "https://api.themoviedb.org/3"
 
 
 async def _person(session, person_id: int, name: str) -> Person:
@@ -709,6 +714,473 @@ async def test_quarantine_zero_cards_immediately(session, session_factory, run_i
     result = await _run(session_factory, run_id, quarantine_hours=0)
 
     assert (result.events_created, result.held) == (1, 0)
+
+
+# ── Sanity holds (D-8, NEU-1370) ──────────────────────────────────────────
+
+
+SANITY = {"max_films_per_day": 20, "posthumous_years": 2, "min_age_years": 3}
+"""The shipped thresholds, passed explicitly: every test above runs with the checks off, which
+is the pre-D-8 behaviour the phase still has to have."""
+
+
+async def _sane(session_factory, run_id, **overrides):
+    """A pass with quarantine *and* the sanity checks on — how production runs it."""
+    return await _run(
+        session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, **{**SANITY, **overrides}
+    )
+
+
+def _person_payload(person_id: int, name: str, **overrides):
+    payload = {
+        "id": person_id,
+        "name": name,
+        "birthday": None,
+        "deathday": None,
+        "popularity": 12.5,
+        "profile_path": "/p.jpg",
+        "known_for_department": "Acting",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _mock_person(person_id: int, name: str, **overrides):
+    return respx.get(f"{BASE_URL}/person/{person_id}").mock(
+        return_value=httpx.Response(200, json=_person_payload(person_id, name, **overrides))
+    )
+
+
+async def _holds(session, **filters):
+    stmt = select(CreditHold).order_by(CreditHold.changed_at, CreditHold.film_id)
+    for column, value in filters.items():
+        stmt = stmt.where(getattr(CreditHold, column) == value)
+    return (
+        (await session.execute(stmt, execution_options={"populate_existing": True})).scalars().all()
+    )
+
+
+async def _burst(session, person, *, films: int, changed_at=AGED, attached: int | None = None):
+    """`films` attachments of one person on one day, the first `attached` of them still in
+    `catalog.film_credit`. Defaults to all of them still attached."""
+    made = []
+    for n in range(films):
+        film = await add_film(session, 100 + n)
+        await _attached(session, film, person, changed_at=changed_at)
+        if attached is None or n < attached:
+            await _still_attached(session, film, person)
+        made.append(film)
+    return made
+
+
+async def test_a_vandalism_burst_holds_every_row_with_a_reason(session, session_factory, run_id):
+    """The acceptance case: one person attached to 25 films in a day cards nothing, and every
+    withheld row says why."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25)
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert result.events_created == 0
+    assert result.holds_new == 25
+    holds = await _holds(session)
+    assert len(holds) == 25
+    assert {h.reason for h in holds} == {"burst"}
+    assert all(h.released_at is None and h.release_reason is None for h in holds)
+
+
+async def test_an_ordinary_attachment_is_untouched_by_the_checks(session, session_factory, run_id):
+    """The other half of the acceptance clause: a normal attachment still cards, and writes no
+    hold row at all."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert (result.events_created, result.holds_new) == (1, 0)
+    assert await _holds(session) == []
+
+
+async def test_a_burst_under_the_threshold_cards(session, session_factory, run_id):
+    """Nineteen against a threshold of twenty — the check is `>=`, and one below it is a
+    prolific day rather than an attack."""
+    person = await _person(session, 100, "Prolific Person")
+    await _burst(session, person, films=19)
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert result.holds_new == 0
+    assert result.events_created == 19
+
+
+async def test_a_burst_spread_over_two_days_is_two_days(session, session_factory, run_id):
+    """The bucket is the UTC observation day: thirteen and twelve clear the bar separately,
+    and neither reaches it."""
+    person = await _person(session, 100, "Busy Person")
+    await _burst(session, person, films=13, changed_at=AGED)
+    for n in range(12):
+        film = await add_film(session, 200 + n)
+        await _attached(session, film, person, changed_at=AGED - timedelta(days=1))
+        await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert result.holds_new == 0
+    assert result.events_created == 25
+
+
+async def test_the_burst_clears_when_tmdb_reverts_it_and_the_survivors_card(
+    session, session_factory, run_id
+):
+    """The full acceptance path. 25 held; TMDB then drops 20 of them from `film_credit`; the
+    next pass clears every hold and cards the five that are still real."""
+    person = await _person(session, 100, "Vandalised Person")
+    films = await _burst(session, person, films=25)
+    await session.commit()
+
+    first = await _sane(session_factory, run_id)
+    assert (first.holds_new, first.events_created) == (25, 0)
+
+    # TMDB reverts twenty of them: `film_credit` is delete-and-rebuilt, so they simply go.
+    await session.execute(
+        delete(FilmCredit).where(FilmCredit.film_id.in_([f.id for f in films[:20]]))
+    )
+    await session.commit()
+
+    second = await _sane(session_factory, run_id)
+
+    assert second.holds_cleared == 25
+    assert second.events_created == 5
+    # The twenty reverted ones are back in the backlog and stopped by quarantine's presence
+    # condition, which is where a change that was never true belongs.
+    assert second.held == 20
+    assert {h.release_reason for h in await _holds(session)} == {"cleared"}
+
+
+async def test_a_partly_reverted_burst_is_still_held_on_the_pass_it_is_seen(
+    session, session_factory, run_id
+):
+    """Detection reads the *recorded* count, not the live one. Eight of the twenty-five are
+    already gone by the time quarantine releases the rest, and the seventeen survivors must not
+    walk past a check whose whole subject is the run they came from."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25, attached=17)
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert result.events_created == 0
+    # Seventeen: the eight quarantine already dropped as reverted never reach the check.
+    assert (result.holds_new, result.held) == (17, 8)
+    assert {h.reason for h in await _holds(session)} == {"burst"}
+
+
+async def test_a_cleared_hold_is_never_reheld(session, session_factory, run_id):
+    """The seam between the two counts. Clearing reads the live count and detection reads the
+    recorded one, which is append-only — so without this the survivors of a reverted burst
+    would be released and re-held on every pass forever, and §3's "the survivors then card
+    normally" would never happen."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25, attached=17)
+    await session.commit()
+    await _sane(session_factory, run_id)
+
+    second = await _sane(session_factory, run_id)
+
+    assert second.holds_cleared == 17
+    assert second.holds_new == 0
+    assert second.events_created == 17
+    third = await _sane(session_factory, run_id)
+    assert (third.holds_new, third.holds_cleared) == (0, 0)
+
+
+async def test_turning_the_burst_check_off_releases_what_it_is_holding(
+    session, session_factory, run_id
+):
+    """A threshold of 0 is the check switched off, and a switched-off check cannot go on
+    withholding on a condition nothing will ever evaluate again."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25)
+    await session.commit()
+    await _sane(session_factory, run_id)
+
+    result = await _sane(session_factory, run_id, max_films_per_day=0)
+
+    assert result.holds_cleared == 25
+    assert result.events_created == 25
+
+
+async def test_a_held_attachment_is_not_carded_while_the_hold_is_open(
+    session, session_factory, run_id
+):
+    """The hold has to keep the row out of the *backlog*, not merely out of one group: a second
+    pass over the same window must not card it either."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25)
+    await session.commit()
+
+    await _sane(session_factory, run_id)
+    second = await _sane(session_factory, run_id)
+
+    assert (second.attachments_read, second.events_created) == (0, 0)
+    # Re-held rather than re-written: the grain is the observation.
+    assert (second.holds_new, second.holds_cleared) == (0, 0)
+    assert len(await _holds(session)) == 25
+
+
+async def test_a_hold_expires_when_its_change_leaves_the_window(session, session_factory, run_id):
+    """`deceased` and `implausible_age` never clear, so the window is what ends them — and an
+    expired hold never cards, because its change is no longer read."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25)
+    await session.commit()
+
+    await _sane(session_factory, run_id)
+
+    later = NOW + timedelta(days=LOOKBACK_DAYS)
+    result = await _sane(session_factory, run_id, now=later)
+
+    assert result.holds_expired == 25
+    assert result.events_created == 0
+    assert {h.release_reason for h in await _holds(session)} == {"expired"}
+
+
+@respx.mock
+async def test_a_credit_long_after_a_death_is_held(session, session_factory, run_id, tmdb_client):
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Long Departed")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    _mock_person(100, "Long Departed", deathday="2015-01-01")
+
+    result = await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert (result.events_created, result.holds_new) == (0, 1)
+    (hold,) = await _holds(session)
+    assert hold.reason == "deceased"
+
+
+@respx.mock
+async def test_a_posthumous_credit_inside_the_window_cards(
+    session, session_factory, run_id, tmdb_client
+):
+    """A film completed before the death, or archive footage, is an ordinary beat — the check
+    is for credits arriving *long* after."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Recently Departed")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    _mock_person(100, "Recently Departed", deathday=str((AGED - timedelta(days=365)).date()))
+
+    result = await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert (result.events_created, result.holds_new) == (1, 0)
+
+
+@respx.mock
+async def test_an_infant_billed_as_a_lead_is_held(session, session_factory, run_id, tmdb_client):
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "One Year Old")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    _mock_person(100, "One Year Old", birthday=str((AGED - timedelta(days=365)).date()))
+
+    result = await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert (result.events_created, result.holds_new) == (0, 1)
+    (hold,) = await _holds(session)
+    assert hold.reason == "implausible_age"
+
+
+@respx.mock
+async def test_a_child_actor_old_enough_still_cards(session, session_factory, run_id, tmdb_client):
+    """The bar is 3, not "a child": twelve-year-olds are cast, and holding them would be the
+    check costing more than the vandalism."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Twelve Year Old")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    _mock_person(100, "Twelve Year Old", birthday=str((AGED - timedelta(days=365 * 12)).date()))
+
+    result = await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert (result.events_created, result.holds_new) == (1, 0)
+
+
+@respx.mock
+async def test_person_details_are_fetched_once_and_only_for_people_about_to_card(
+    session, session_factory, run_id, tmdb_client
+):
+    """The cost clause. One request for the person who reaches the checks; none at all for the
+    one quarantine already withheld; and none again on the second pass."""
+    carding = await add_film(session, 1)
+    reverted = await add_film(session, 2)
+    carded_person = await _person(session, 100, "Carded Person")
+    held_person = await _person(session, 200, "Reverted Person")
+    await _attached(session, carding, carded_person, changed_at=AGED)
+    await _still_attached(session, carding, carded_person)
+    # No `film_credit` row: quarantine drops this one before the sanity checks ever see it.
+    await _attached(session, reverted, held_person, changed_at=AGED)
+    await session.commit()
+    carded_route = _mock_person(100, "Carded Person")
+    held_route = _mock_person(200, "Reverted Person")
+
+    await _sane(session_factory, run_id, client=tmdb_client)
+    await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert carded_route.call_count == 1
+    assert held_route.call_count == 0
+    person = await session.get(Person, 100, populate_existing=True)
+    assert person is not None and person.details_observed_at is not None
+
+
+@respx.mock
+async def test_a_person_tmdb_has_deleted_is_tombstoned_and_not_held(
+    session, session_factory, run_id, tmdb_client
+):
+    """A 404 is terminal, not an outage: there are no dates, so there is nothing to hold on."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Deleted Person")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    respx.get(f"{BASE_URL}/person/100").mock(return_value=httpx.Response(404, json={}))
+
+    result = await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert (result.events_created, result.holds_new) == (1, 0)
+    refreshed = await session.get(Person, 100, populate_existing=True)
+    assert refreshed is not None and refreshed.tmdb_missing_at is not None
+
+
+@respx.mock
+async def test_a_deleted_person_is_asked_about_once_and_not_once_a_pass(
+    session, session_factory, run_id, tmdb_client
+):
+    """A 404 is an answer, and it stamps `details_observed_at` like any other. Without that a
+    dead person id in the rolling window is re-requested on every pass for a week."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Deleted Person")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    route = respx.get(f"{BASE_URL}/person/100").mock(return_value=httpx.Response(404, json={}))
+
+    await _sane(session_factory, run_id, client=tmdb_client)
+    await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_tmdb_outage_costs_the_holds_and_not_the_pass(
+    session, session_factory, run_id, tmdb_client
+):
+    """The date checks are a filter over what would otherwise card, so failing to reach TMDB
+    must cost only the holds they would have placed."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Unreachable Person")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+    respx.get(f"{BASE_URL}/person/100").mock(side_effect=httpx.ConnectError("no route"))
+
+    result = await _sane(session_factory, run_id, client=tmdb_client)
+
+    assert (result.events_created, result.holds_new) == (1, 0)
+    # Nothing stamped, so the next pass asks again rather than trusting an absent date.
+    refreshed = await session.get(Person, 100, populate_existing=True)
+    assert refreshed is not None and refreshed.details_observed_at is None
+
+
+async def test_a_manually_released_hold_cards_on_the_next_pass(session, session_factory, run_id):
+    person = await _person(session, 100, "Vandalised Person")
+    films = await _burst(session, person, films=25)
+    await session.commit()
+    await _sane(session_factory, run_id)
+
+    released = next(h for h in await _holds(session) if h.film_id == films[0].id)
+    await credit_holds.release_hold(session, hold_id=released.id)
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert result.events_created == 1
+    (event,) = await _events(session, films[0])
+    assert event.event_type == "crew_attached"
+    # And it stays released: the check would otherwise re-hold it on every pass forever.
+    assert result.holds_new == 0
+    again = await _sane(session_factory, run_id)
+    assert again.holds_new == 0
+
+
+async def test_an_expired_hold_never_cards(session, session_factory, run_id):
+    person = await _person(session, 100, "Vandalised Person")
+    films = await _burst(session, person, films=25)
+    await session.commit()
+    await _sane(session_factory, run_id)
+
+    later = NOW + timedelta(days=LOOKBACK_DAYS)
+    await _sane(session_factory, run_id, now=later)
+    result = await _sane(session_factory, run_id, now=later)
+
+    assert result.events_created == 0
+    assert await _events(session, films[0]) == []
+
+
+async def test_a_hold_on_one_role_leaves_the_other_alone(session, session_factory, run_id):
+    """The hold is keyed on the role, so an actor-director held for one credit still cards the
+    other — which is why the backlog filters in Python rather than anti-joining on time."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Actor Director")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await _cast(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+    # Hold only the directing half, by hand, and on a reason that does not clear: a `burst`
+    # row would be released by `reconcile_holds` on this very pass, since one film is nowhere
+    # near the threshold.
+    session.add(
+        CreditHold(
+            film_id=film.id,
+            person_id=person.id,
+            credit_type="director",
+            changed_at=AGED,
+            reason="deceased",
+            held_at=NOW,
+        )
+    )
+    await session.commit()
+
+    result = await _sane(session_factory, run_id)
+
+    assert result.events_created == 1
+    (event,) = await _events(session, film)
+    assert event.event_type == "casting"
+
+
+async def test_the_checks_are_off_by_default(session, session_factory, run_id):
+    """Every threshold defaults to 0 and `client` to None, so a caller without a `Settings`
+    gets the pre-D-8 behaviour — 25 films in a day, all carded."""
+    person = await _person(session, 100, "Vandalised Person")
+    await _burst(session, person, films=25)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert result.holds_new == 0
+    assert result.events_created == 25
 
 
 # ── Detachment carding tests (NEU-1200) ───────────────────────────────────

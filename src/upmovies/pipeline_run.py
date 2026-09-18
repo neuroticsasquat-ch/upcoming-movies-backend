@@ -259,14 +259,27 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
         # separately, because the two read different tables and a failure in one says nothing
         # about the other. Last, for the same reason: `_rebuild_joins` writes
         # `film_credit_change` during refresh, so this pass's own attachments are in hand.
-        attached = await run_credit_attachment_events(
-            session_factory=_session_factory,
-            run_id=run_id,
-            now=now,
-            lookback_days=settings.sweep_event_lookback_days,
-            quarantine_hours=settings.sweep_credit_quarantine_hours,
-            failure_threshold=settings.ingest_consecutive_failure_threshold,
-        )
+        #
+        # The one carding phase that takes a TMDB client, and so the one inside a client of
+        # its own: the sanity holds (D-8) read `/person/{id}` for birth and death dates. It is
+        # a second `async with` rather than an extension of the one above because the phase
+        # order is load-bearing — this must run after `run_field_change_events`, which reads
+        # the changes refresh wrote — and the process-wide limiter means the two clients share
+        # one TMDB budget regardless (NEU-1399). Lazily, once per person, and only for people
+        # about to be carded, so most passes make no request here at all.
+        async with TMDBClient.from_settings(settings) as client:
+            attached = await run_credit_attachment_events(
+                session_factory=_session_factory,
+                run_id=run_id,
+                now=now,
+                lookback_days=settings.sweep_event_lookback_days,
+                quarantine_hours=settings.sweep_credit_quarantine_hours,
+                client=client,
+                max_films_per_day=settings.sweep_sanity_max_films_per_day,
+                posthumous_years=settings.sweep_sanity_posthumous_years,
+                min_age_years=settings.sweep_sanity_min_age_years,
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
         # The detachment half (NEU-1200), on the same terms and the same window as the
         # attachment half — and separately, because the two read the same table with
         # different filters and a failure in one says nothing about the other.

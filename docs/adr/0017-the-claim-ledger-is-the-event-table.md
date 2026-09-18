@@ -79,3 +79,31 @@ retraction inside the quarantine window is not supersession — it is the absenc
 - Genuine sequential changes (joined in March, left in June) publish as two events, the first
   marked superseded by the second. The window suppresses edits that were never true, and only
   those.
+
+## Amendment — 2026-09-18 (NEU-1370): `ingest.credit_hold` is a log, not a pending event
+
+D-8's sanity holds need something the quarantine gate above deliberately does not have: a
+persisted row per withheld attachment. That reads, at first glance, like the "persisted
+`pending` status" this ADR rejects. It is not, and the distinction is the one the rejection
+rests on.
+
+The rejected shape was a **`news.event` row that had not been published** — one `WHERE` clause
+away from every feed surface, and carrying a `created_at` that predated its own publication,
+which breaks the ADR-0016 axis. `ingest.credit_hold` is in the observation layer beside
+`ingest_run`: it holds `(film_id, person_id, credit_type, changed_at, reason)` — a pointer at a
+`catalog.film_credit_change` row and a sentence about why it was not carded — and no feed, no
+film page and no notification reads it. When a held change is finally carded, an ordinary event
+is written then, with `created_at` at that moment. The invariants stand: no event exists before
+its publication, and nothing is hidden on a surface.
+
+Why quarantine still needs no such row while these checks do: quarantine's two conditions are
+both properties of *now* and are re-derived from the rolling window on every pass, so the
+window genuinely is the queue. "This person is one of twenty-five attached today" and "this
+person died in 2011" are not recoverable from the attachment alone, and a `deceased` hold is
+exactly the kind a human has to be able to point at and override —
+`POST /admin/credit-holds/{id}/release`, which is why the row also has to be addressable.
+
+One consequence for the statement above that "the window suppresses edits that were never true,
+and only those": these checks withhold edits that *may* be true and look impossible, which is a
+weaker claim. That is why they hold rather than discard, and why every row has three ways out —
+the condition lifting, a human, or the change ageing out of the lookback window.

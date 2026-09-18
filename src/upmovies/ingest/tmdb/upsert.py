@@ -27,6 +27,7 @@ from upmovies.catalog.models import (
     SpokenLanguage,
 )
 from upmovies.catalog.slug import assign_slug
+from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
 from upmovies.ingest.tmdb.credit_history import (
     diff_seed_credits,
     load_seed_credits,
@@ -75,6 +76,55 @@ async def mark_person_missing(session: AsyncSession, person_id: int) -> None:
     await session.execute(
         update(Person).where(Person.id == person_id).values(tmdb_missing_at=datetime.now(UTC))
     )
+
+
+async def ensure_person_details(
+    session: AsyncSession, client: TMDBClient, person_id: int
+) -> Person | None:
+    """Make sure this person's `/person/{id}` fields are on their `catalog.person` row, fetching
+    them once if they are not. Returns the row, or None when we hold none. Caller commits.
+
+    **Lazy, and once.** The sanity holds (D-8, NEU-1370) need `birthday` and `deathday`, which
+    neither credits endpoint returns; backfilling them for every seed person would be tens of
+    thousands of requests for dates that decide nothing about almost all of them. So this is
+    called only for the people a credit event is about to name — one request per newly carded
+    person, never per seed person — and `details_observed_at` is what makes it once rather than
+    once per pass.
+
+    Never refreshed after the first fetch, deliberately: a birthday does not change, and a death
+    recorded upstream after we read the person is missed until someone clears the stamp by hand.
+    That is the cheap side of the trade — the alternative is a cadence over the whole person
+    table to catch an event that is rare and only ever *adds* a hold.
+
+    A 404 tombstones the person the way every other id-addressed fetch here does, and returns
+    None: TMDB has no such person, so there are no dates to decide anything on, and the caller
+    treats that as "no reason to hold" rather than as a failure. It **also stamps**
+    `details_observed_at`, because the question was asked and answered — without it a deleted
+    person id sitting in the rolling window would be re-requested on every pass for the whole
+    of `SWEEP_EVENT_LOOKBACK_DAYS`, which is the once-per-person guarantee gone. `tmdb_missing_at`
+    cannot stand in for it: the person upsert clears that on revival, and the two columns answer
+    different questions ("is this id live" against "have we asked for the dates").
+    """
+    person = await session.get(Person, person_id)
+    if person is None or person.details_observed_at is not None:
+        return person
+    try:
+        details = await client.person_details(person_id)
+    except TMDBNotFound:
+        await mark_person_missing(session, person_id)
+        person.details_observed_at = datetime.now(UTC)
+        await session.flush()
+        return None
+    person.birthday = details.birthday
+    person.deathday = details.deathday
+    # Refreshed rather than left alone: the response carries them, and writing the dates beside
+    # a `popularity` we have just been handed a fresher value for would be a choice to hold a
+    # stale one. `name` and the rest stay with the credits path, which sees them far more often.
+    person.popularity = details.popularity
+    person.profile_path = details.profile_path
+    person.details_observed_at = datetime.now(UTC)
+    await session.flush()
+    return person
 
 
 async def upsert_people(

@@ -293,6 +293,27 @@ class Person(Base):
     any film they are credited on is next read. The handle on the other side is a door someone
     else opens.
     """
+    birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    """TMDB's `birthday`, or NULL when TMDB holds none — which is most people (NEU-1370)."""
+    deathday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    """TMDB's `deathday`, or NULL when the person is living *or* TMDB simply has no date.
+
+    The two are not distinguishable here and must not be read as if they were: a NULL means
+    "no death date known", which is why the sanity check it feeds only ever *holds* on a
+    present date and never clears a credit on an absent one."""
+    details_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When `/person/{id}` was last read for this person — the three fields above come from
+    there and from nowhere else, and the credits endpoints the sweep otherwise calls do not
+    return them (NEU-1370).
+
+    Its real job is to be the *fetched-ness* flag: the fetch is lazy, once, only for people
+    about to be carded, so a person with a NULL `birthday` and a stamped
+    `details_observed_at` is one TMDB has no birthday for, not one nobody has asked about.
+    Without it the sanity checks would re-request every such person on every pass forever.
+    Never refreshed afterwards — a birthday does not change, and a death is rare enough to be
+    worth missing until someone refreshes by hand."""
 
 
 class FilmFieldChange(Base):

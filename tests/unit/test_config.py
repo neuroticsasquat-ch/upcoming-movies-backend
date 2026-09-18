@@ -629,3 +629,31 @@ def test_prod_compose_fallbacks_match_the_code_defaults(monkeypatch, env_name, f
     # Compared as the *field's* type, not as text: "0.10" and "0.1" are the same threshold,
     # and a test that insisted on the spelling would fail on a harmless reformat.
     assert type(expected)(_compose_fallback(env_name)) == expected
+
+
+def test_settings_has_sanity_hold_defaults(monkeypatch):
+    """The shipped D-8 thresholds. They live in code rather than only in Coolify because a
+    variable absent from the first deploy is one somebody has to add by hand."""
+    _set_required(monkeypatch)
+    settings = Settings()  # pyright: ignore[reportCallIssue]
+    assert settings.sweep_sanity_max_films_per_day == 20
+    assert settings.sweep_sanity_posthumous_years == 2
+    assert settings.sweep_sanity_min_age_years == 3
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "SWEEP_SANITY_MAX_FILMS_PER_DAY",
+        "SWEEP_SANITY_POSTHUMOUS_YEARS",
+        "SWEEP_SANITY_MIN_AGE_YEARS",
+    ],
+)
+def test_a_zero_sanity_threshold_fails_the_container_at_boot(monkeypatch, key):
+    """None of the three has a coherent zero — a burst bar of 0 holds every attachment ever
+    made, and a zero-year date bar holds every credit of everyone TMDB has a date for. Turning
+    one off is a code change, which is the right cost for removing a defacement check."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv(key, "0")
+    with pytest.raises(ValidationError):
+        Settings()  # pyright: ignore[reportCallIssue]

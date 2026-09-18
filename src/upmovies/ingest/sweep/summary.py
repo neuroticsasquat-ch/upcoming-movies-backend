@@ -33,6 +33,16 @@ is tuned right. The window being wider than the rolling lookback, the one tuning
 would silently cost every attachment, is refused at boot instead
 (`validate_sweep_configuration`).
 
+The holds clause (NEU-1370) is its own, beside the credits clause rather than inside it,
+because the two numbers are not the same kind. `held` merges quarantine's two reasons and is
+not a health signal; every hold counted here is a specific, reviewable claim — a burst, a
+death, an age — against a named person, and `new` climbing is worth looking at. The three
+counts are also the only place the *release* paths are visible: `cleared` says the condition
+lifted and those attachments carded on this same pass, while `expired` says a hold ran to the
+end of the rolling window and its beat is simply gone. A steady `0 new, 0 cleared, 0 expired`
+is the healthy state; `expired` rising without `new` rising is the shape of a threshold set
+too tight.
+
 The derivation clause (NEU-1352) reports the users it considered beside the items it wrote,
 because `0 items` is the healthy steady state — most sweeps qualify nothing new for anybody —
 and on its own it is indistinguishable from the pass selecting nobody at all, which is what a
@@ -114,6 +124,8 @@ def sweep_detail(
         f"{attached.attachments_read} attachments, "
         f"{attached.skipped} already carded, {attached.held} held, "
         f"{attached.failures} failed",
+        f"holds: {attached.holds_new} new, {attached.holds_cleared} cleared, "
+        f"{attached.holds_expired} expired",
         f"credit removals: {detached.events_created} carded from "
         f"{detached.detachments_read} detachments, "
         f"{detached.skipped} already carded, {detached.failures} failed",

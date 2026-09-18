@@ -291,3 +291,43 @@ def test_the_credits_clause_reports_what_quarantine_is_holding():
     )
 
     assert "credits: 2 carded from 40 attachments, 1 already carded, 37 held, 0 failed" in detail
+
+
+def test_reports_the_sanity_holds_apart_from_the_quarantine_count():
+    """`held` and `holds` are not the same kind of number (D-8): the first merges quarantine's
+    two reasons and is not a health signal, while every hold counted here is a reviewable claim
+    against a named person."""
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(
+            attachments_read=30,
+            held=4,
+            holds_new=25,
+            holds_cleared=1,
+            holds_expired=2,
+        ),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+        DerivationResult(),
+    )
+
+    assert "4 held" in detail
+    assert "holds: 25 new, 1 cleared, 2 expired" in detail
+
+
+def test_reports_a_quiet_holds_pass_as_zeroes_rather_than_dropping_the_clause():
+    """The steady state is all three at zero, and a clause that vanished when nothing happened
+    would make "no holds" indistinguishable from "this sweep predates holds"."""
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+        DerivationResult(),
+    )
+
+    assert "holds: 0 new, 0 cleared, 0 expired" in detail

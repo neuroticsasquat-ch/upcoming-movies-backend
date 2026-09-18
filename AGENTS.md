@@ -93,7 +93,7 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 
 - **`db:refresh` silently reverts migrations.** Restores catalog/news/ingest from prod but leaves `app` alone. Alembic version lives in `app`, so `alembic current` still reads head while tables are gone. Re-apply with `alembic stamp <prod's rev> && task migrate`.
 - **Coolify shadows compose fallbacks:** a `${NAME:-default}` in compose is a seed, not a runtime default. After first deploy, Coolify stores the value and edits to the fallback are silent no-ops in prod. Change the value in the Coolify UI and restart.
-- **Deploy checklist for tuned constants** (T, K, dormancy, `SWEEP_CREDIT_QUARANTINE_HOURS`, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
+- **Deploy checklist for tuned constants** (T, K, dormancy, `SWEEP_CREDIT_QUARANTINE_HOURS`, the three `SWEEP_SANITY_*`, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
 - **`SWEEP_CREDIT_QUARANTINE_HOURS` must stay under `SWEEP_EVENT_LOOKBACK_DAYS` (NEU-1368, ADR-0017 D-3).**
   In hours: 72 against 7 days = 168. The attachment hold has no queue table — the rolling lookback
   *is* the queue — so a hold at or past the window means every attachment ages out before it is
@@ -102,6 +102,18 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   task** (and its healthchecks.io deadman) within the hour rather than taking the site down.
   Raising the window means raising `SWEEP_EVENT_LOOKBACK_DAYS` *first*, in the same Coolify
   edit; both are seeded in `docker-compose.prod.yml`. `0` disables the hold and is exempt.
+- **The three `SWEEP_SANITY_*` refuse `0` (NEU-1370, ADR-0017 D-8).** `MAX_FILMS_PER_DAY=20`,
+  `POSTHUMOUS_YEARS=2`, `MIN_AGE_YEARS=3`, all `ge=1` in `config.py` — unlike the two gates
+  above, none has a coherent "off": a burst bar of 0 holds every attachment ever made, and a
+  zero-year date bar holds every credit of everyone TMDB has a date for. A `0` in the Coolify
+  UI therefore fails the **hourly task** at boot, not the site. Turning a check off is a code
+  change, deliberately.
+- **A held attachment is invisible on the feed but visible on `/admin/credit-holds`.** If a
+  real beat is missing, check the open holds before reaching for the sweep logs: a
+  `deceased` or `implausible_age` hold never clears on its own, and
+  `POST /admin/credit-holds/{id}/release` is the only way out other than the change ageing out
+  of `SWEEP_EVENT_LOOKBACK_DAYS`. The `holds:` clause on the sweep detail line carries the
+  per-pass counts.
 - **Rate limiter rollout is three deploys, in order (NEU-1344, spec §5).** `RATE_LIMIT_PUBLIC_ENABLED`
   ships `false` and must stay false until the SSR Worker signs its requests: the site is rendered on
   a Cloudflare Worker, so until then every anonymous visitor reaches the API from a handful of shared
