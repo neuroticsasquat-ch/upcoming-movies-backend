@@ -213,6 +213,7 @@ async def _cluster_stage_sequential(
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
+    story_confirm_days: int = 14,
     run_date: date,
 ) -> tuple[int, int, int, Usage, StageCounts]:
     # `cluster`, not `link` — the same run_link_ingest call that resolved the link stage above
@@ -237,6 +238,7 @@ async def _cluster_stage_sequential(
                     unresolved_tier=unresolved_tier,
                     dedup_days=dedup_days,
                     release_change_window_days=release_change_window_days,
+                    story_confirm_days=story_confirm_days,
                     run_date=run_date,
                     calls=calls,
                 )
@@ -297,6 +299,7 @@ async def run_link_ingest(
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
+    story_confirm_days: int = 14,
     source_gate_enabled: bool = False,
     source_judge_model: str = "claude-haiku-4-5",
     retrieval_threshold: float = DEFAULT_SCORE_THRESHOLD,
@@ -440,6 +443,7 @@ async def run_link_ingest(
         unresolved_tier=unresolved_tier,
         dedup_days=dedup_days,
         release_change_window_days=release_change_window_days,
+        story_confirm_days=story_confirm_days,
         run_date=run_date,
     )
     async with _owned_session(session_factory) as s:

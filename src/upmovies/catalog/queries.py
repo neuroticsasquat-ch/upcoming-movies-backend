@@ -7,7 +7,13 @@ from sqlalchemy import ColumnElement, and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange
-from upmovies.catalog.seed_grade import DIRECTOR_JOB, TOP_BILLED_ORDER, WRITER_JOBS
+from upmovies.catalog.seed_grade import (
+    DIRECTOR_JOB,
+    TOP_BILLED_ORDER,
+    WRITER_JOBS,
+    credit_role,
+    is_seed_grade,
+)
 
 # The one place `catalog` reads `news`. Dormancy is defined partly by what news did (or did
 # not) link, so the predicate cannot be expressed without `Story`; `news.models` imports
@@ -93,6 +99,48 @@ def seed_grade_credit_clause() -> ColumnElement[bool]:
             FilmCredit.credit_order < TOP_BILLED_ORDER,
         ),
     )
+
+
+async def present_seed_credits(
+    session: AsyncSession, *, film_ids: set[UUID]
+) -> dict[tuple[UUID, int, str], int | None]:
+    """Every `(film, person, seed-grade role)` that `catalog.film_credit` holds *right now*
+    for these films, mapped to that credit's billing order.
+
+    One query for a whole set of films rather than one per credit: every caller asks it of a
+    batch — the sweep's quarantine gate of an aged backlog, its burst check of the same rows,
+    the Tier-A short-circuit of one film's pending changes — and the rolling window makes that
+    the same rows on every pass for as long as a hold lasts.
+
+    Seed grade is re-derived here rather than assumed from the `film_credit_change` row that
+    recorded the attachment. `film_credit` is delete-and-rebuilt on every ingest, and a cast
+    member who has since slipped out of the top-5 billing no longer holds a seed-grade credit
+    — which is exactly how `credit_history` would diff them, as removed. Reading the same
+    predicate is what stops the callers disagreeing about what "still attached" means, which
+    is also why it lives here beside `seed_grade_credit_clause` rather than in any one of them.
+
+    Membership answers "is this credit still there"; the value answers ADR-0017 D-7's body
+    ordering. Both are properties of the same live row, so they are read together —
+    `film_credit_change` records no billing position of its own, and asking for it in a second
+    query would be asking twice.
+    """
+    if not film_ids:
+        return {}
+    stmt = select(
+        FilmCredit.film_id,
+        FilmCredit.person_id,
+        FilmCredit.credit_type,
+        FilmCredit.job,
+        FilmCredit.credit_order,
+    ).where(FilmCredit.film_id.in_(film_ids))
+    present: dict[tuple[UUID, int, str], int | None] = {}
+    for row in await session.execute(stmt):
+        if not is_seed_grade(row.credit_type, row.job, row.credit_order):
+            continue
+        role = credit_role(row.credit_type, row.job)
+        if role is not None:
+            present[(row.film_id, row.person_id, role)] = row.credit_order
+    return present
 
 
 def dormant_film_clause(*, today: date, dormancy_days: int) -> ColumnElement[bool]:

@@ -419,7 +419,7 @@ class CreditHold(Base):
     )
     credit_type: Mapped[str] = mapped_column(Text, nullable=False)
     """The seed-grade *role* the held credit carries — `director`, `writer` or `cast` — as
-    `ingest.sweep.credit_events.credit_role` derives it, not TMDB's `cast`/`crew` split.
+    `catalog.seed_grade.credit_role` derives it, not TMDB's `cast`/`crew` split.
 
     The role rather than the split because that is the grain the rest of the phase holds an
     attachment at: an actor-director attaching in both capacities on one day is two beats, and

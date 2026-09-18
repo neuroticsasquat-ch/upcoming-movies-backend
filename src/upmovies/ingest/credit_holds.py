@@ -13,6 +13,11 @@ Kept out of the sweep module because the direction of use is opposite: everythin
 `ingest.sweep` runs from a scheduled pass with a `session_factory` and owns its own
 transactions, while these two run inside a request against the session `deps.get_session`
 hands them, and the router commits.
+
+`open_hold_keys` is the exception, and is here rather than in the sweep for a different
+reason: *two* readers outside the sweep now have to honour an open hold — the sweep's own
+backlog loader and the Tier-A short-circuit (`news.credit_confirm`, NEU-1371) — and the
+short-circuit cannot import `ingest.sweep`, which imports it.
 """
 
 from dataclasses import dataclass
@@ -24,6 +29,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, Person
 from upmovies.ingest.models import RELEASE_MANUAL, CreditHold
+
+
+async def open_hold_keys(
+    session: AsyncSession, *, since: datetime
+) -> set[tuple[UUID, int, str, datetime]]:
+    """Every attachment an open hold is currently withholding, keyed the way the sweep's
+    backlog keys an attachment: `(film_id, person_id, role, changed_at)`.
+
+    `credit_hold.credit_type` stores the seed-grade *role*, not TMDB's `cast`/`crew` split,
+    which is what makes the two keys comparable without re-deriving anything.
+    """
+    stmt = select(
+        CreditHold.film_id, CreditHold.person_id, CreditHold.credit_type, CreditHold.changed_at
+    ).where(CreditHold.released_at.is_(None), CreditHold.changed_at >= since)
+    return {
+        (film_id, person_id, role, changed_at)
+        for film_id, person_id, role, changed_at in await session.execute(stmt)
+    }
 
 
 class HoldNotFound(Exception):

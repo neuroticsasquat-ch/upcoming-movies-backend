@@ -126,6 +126,11 @@ services:
       # 72h is a placeholder until the M5 spike reads the knee off `film_credit_change`;
       # retuning it is a Coolify change rather than a redeploy.
       SWEEP_CREDIT_QUARANTINE_HOURS: "${SWEEP_CREDIT_QUARANTINE_HOURS:-72}"
+      # Tier-A short-circuit (ADR-0017, D-5, NEU-1371): how far either direction will look to
+      # pair a trade story with a credit attachment, so a story that breaks a casting while
+      # the credit is quarantined publishes it instead of the sweep carding it again days
+      # later. Keep comfortably above SWEEP_CREDIT_QUARANTINE_HOURS; `0` disables it.
+      SWEEP_STORY_CONFIRM_DAYS: "${SWEEP_STORY_CONFIRM_DAYS:-14}"
       # Sanity holds (ADR-0017, D-8, NEU-1370). Where quarantine asks whether an edit
       # survived a window, these ask whether it is possible at all, and they judge the
       # *person*: how many films one person may be attached to in a day before the whole run

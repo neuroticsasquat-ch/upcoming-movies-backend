@@ -93,7 +93,7 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 
 - **`db:refresh` silently reverts migrations.** Restores catalog/news/ingest from prod but leaves `app` alone. Alembic version lives in `app`, so `alembic current` still reads head while tables are gone. Re-apply with `alembic stamp <prod's rev> && task migrate`.
 - **Coolify shadows compose fallbacks:** a `${NAME:-default}` in compose is a seed, not a runtime default. After first deploy, Coolify stores the value and edits to the fallback are silent no-ops in prod. Change the value in the Coolify UI and restart.
-- **Deploy checklist for tuned constants** (T, K, dormancy, `SWEEP_CREDIT_QUARANTINE_HOURS`, the three `SWEEP_SANITY_*`, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
+- **Deploy checklist for tuned constants** (T, K, dormancy, `SWEEP_CREDIT_QUARANTINE_HOURS`, `SWEEP_STORY_CONFIRM_DAYS`, the three `SWEEP_SANITY_*`, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
 - **`SWEEP_CREDIT_QUARANTINE_HOURS` must stay under `SWEEP_EVENT_LOOKBACK_DAYS` (NEU-1368, ADR-0017 D-3).**
   In hours: 72 against 7 days = 168. The attachment hold has no queue table — the rolling lookback
   *is* the queue — so a hold at or past the window means every attachment ages out before it is
