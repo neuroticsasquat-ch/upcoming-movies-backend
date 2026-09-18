@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -144,6 +145,40 @@ class CrewMemberOut(BaseModel):
     department: str | None
 
 
+class ProviderOut(BaseModel):
+    """One service carrying a film, as TMDB (sourcing JustWatch) names it."""
+
+    # TMDB's `provider_id` — JustWatch's id space. Exposed so a client can key its own logo
+    # cache on it; it is not a follow-graph entity and no route accepts it.
+    id: int
+    name: str
+    logo_path: str | None = None
+
+
+class WhereToWatchOut(BaseModel):
+    """The current US where-to-watch box (D-29) — a snapshot, never a history.
+
+    Bucketed by how a reader pays rather than by service, because that is the decision the box
+    answers: a subscription already covers `flatrate`, `rent` and `buy` cost money today. Each
+    bucket is always present, empty when nobody offers the film that way, so a client can render
+    one section without guarding three keys. The whole object is `None` when nobody carries the
+    film at all — see `FilmDetailResponse.where_to_watch`.
+
+    **`attribution` and `link` are terms, not decoration.** TMDB's terms for
+    `/movie/{id}/watch/providers` require crediting JustWatch wherever the data renders and
+    linking back to TMDB's own watch page. `attribution` is a `Literal`, so it is fixed at
+    "JustWatch" and cannot be set to anything else by a caller assembling this model; `link` is
+    nullable only because TMDB itself omits it for some regions.
+    """
+
+    region: str
+    flatrate: list[ProviderOut] = []
+    rent: list[ProviderOut] = []
+    buy: list[ProviderOut] = []
+    link: str | None = None
+    attribution: Literal["JustWatch"] = "JustWatch"
+
+
 class DayGroup(BaseModel):
     day: date
     heading: str
@@ -186,6 +221,11 @@ class FilmDetailResponse(BaseModel):
     alternative_titles: list[str] = []
     cast: list[CastMemberOut] = []
     crew: list[CrewMemberOut] = []
+    # `None` — not an empty box — when no poll has found the film anywhere (D-29). The two are
+    # different answers: an empty box would claim we looked and it is nowhere, which is only
+    # true for a film the providers poll actually reaches (D-27's scoped set is films past
+    # their theatrical date, plus anything followed or watchlisted).
+    where_to_watch: WhereToWatchOut | None = None
 
 
 class FeedItem(BaseModel):

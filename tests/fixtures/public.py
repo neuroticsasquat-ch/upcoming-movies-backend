@@ -11,6 +11,7 @@ from upmovies.catalog.models import (
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmAvailabilityCurrent,
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
@@ -19,6 +20,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
     ProductionCountry,
+    WatchProvider,
 )
 from upmovies.catalog.ref import film_ref
 from upmovies.main import app
@@ -363,3 +365,46 @@ def make_company(session: AsyncSession):
         return company
 
     return _make
+
+
+@pytest.fixture
+def add_availability(session: AsyncSession):
+    """Write one film's current where-to-watch rows, as a provider poll would have left them.
+
+    Takes `offers` as `(provider_id, provider_name, monetization_type)` triples and inserts them
+    in the order given, because that order is the one the box renders in: `_rebuild_current`
+    deletes and re-inserts a region wholesale in the order TMDB listed the services, so the
+    surrogate key carries JustWatch's own ranking. A test that wants to prove the ordering has
+    to be able to write rows out of alphabetical order.
+    """
+
+    async def _add(
+        *,
+        film: Film,
+        offers: list[tuple[int, str, str]],
+        region: str = "US",
+        link: str | None = "https://www.themoviedb.org/movie/1/watch",
+    ) -> None:
+        known = set((await session.execute(select(WatchProvider.id))).scalars().all())
+        for provider_id, name, _kind in offers:
+            if provider_id not in known:
+                session.add(
+                    WatchProvider(
+                        id=provider_id, name=name, logo_path=f"/provider{provider_id}.jpg"
+                    )
+                )
+                known.add(provider_id)
+        await session.flush()
+        for provider_id, _name, kind in offers:
+            session.add(
+                FilmAvailabilityCurrent(
+                    film_id=film.id,
+                    region=region,
+                    provider_id=provider_id,
+                    monetization_type=kind,
+                    link=link,
+                )
+            )
+        await session.commit()
+
+    return _add
