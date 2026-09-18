@@ -138,6 +138,25 @@ def make_person_search_hit(person_id: int, **overrides: Any) -> dict[str, Any]:
     return row
 
 
+def make_person_details(person_id: int, **overrides: Any) -> dict[str, Any]:
+    """A `/person/{id}` body — the only endpoint carrying `birthday` and `deathday`.
+
+    Both default to None, which is what TMDB holds for most people: the sanity holds (D-8)
+    and the resolver's age/alive feature (D-21) both read an absent date as saying nothing.
+    """
+    row: dict[str, Any] = {
+        "id": person_id,
+        "name": f"Person {person_id}",
+        "birthday": None,
+        "deathday": None,
+        "popularity": 12.5,
+        "profile_path": f"/profile{person_id}.jpg",
+        "known_for_department": "Acting",
+    }
+    row.update(overrides)
+    return row
+
+
 def make_person_search_page(
     *, results: list[dict[str, Any]], page: int = 1, total_pages: int = 1
 ) -> dict[str, Any]:

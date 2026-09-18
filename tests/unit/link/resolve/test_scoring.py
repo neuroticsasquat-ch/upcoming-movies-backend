@@ -6,19 +6,30 @@ prove — the cache, the merge into `features`, the counters — is in
 `tests/integration/link/resolve/test_pipeline.py`.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
+from upmovies.catalog.person_dates import DECEASED, IMPLAUSIBLE_AGE, years_before
 from upmovies.link.cluster import _VALID_TYPES
 from upmovies.link.resolve.candidates import Candidate, ChangeFact, CreditFact
 from upmovies.link.resolve.scoring import (
     ACCEPT_FLOOR,
+    ACCEPT_MARGIN,
     ATTACHMENT_EVENT_TYPES,
+    MIN_AGE_YEARS,
+    MIN_CREW_AGE_YEARS,
+    POSTHUMOUS_YEARS,
+    W_AGE,
+    W_CHANGE_STREAM,
+    W_CREDITED,
+    W_DEPARTMENT,
+    W_FILMOGRAPHY,
     W_NAME,
     Mention,
     Path,
     Thresholds,
+    age_plausibility,
     cap_confidence,
     department_agreement,
     name_match,
@@ -27,6 +38,7 @@ from upmovies.link.resolve.scoring import (
 )
 
 CHANGED_AT = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
+STORY_DATE = date(2026, 9, 15)
 
 
 def candidate(person_id: int, name: str, **overrides) -> Candidate:
@@ -409,3 +421,263 @@ def test_an_unlinked_mention_still_records_what_its_best_candidate_scored():
     assert decision.path is Path.UNLINKED
     assert decision.confidence > 0.0
     assert decision.features["candidate_count"] == 1
+
+
+# --- age/alive plausibility (D-21) ----------------------------------------------------
+
+
+def test_the_weights_still_sum_to_one_with_the_age_term_in_them():
+    """A perfect match corroborated every way scores exactly 1.0, which is what keeps the
+    score from needing a clamp from above — and the age term had to be paid for out of the
+    same 1.0 rather than added on top of it."""
+    assert (
+        W_NAME + W_CREDITED + W_CHANGE_STREAM + W_AGE + W_DEPARTMENT + W_FILMOGRAPHY
+    ) == pytest.approx(1.0)
+
+
+def test_the_floor_is_still_calibrated_against_the_name_alone():
+    """`ACCEPT_FLOOR` sits just under a normalized name match with nothing else behind it, so
+    rebalancing the corroborating features must not have moved what a lone name can do."""
+    assert ACCEPT_FLOOR < W_NAME * 0.95
+    lone = resolve_mention([candidate(1, "Chris  Evans")], mention=mention(), link_confidence=0.9)
+    assert lone.path is Path.ACCEPTED
+
+
+def test_a_long_dead_candidate_falls_below_the_floor():
+    """The posthumous namesake: TMDB knows one Chris Evans by that name and he died in 1998,
+    so a trade naming him this week is not naming him."""
+    dead = candidate(1, "Chris Evans", birthday=date(1920, 1, 1), deathday=date(1998, 3, 4))
+    decision = resolve_mention(
+        [dead], mention=mention(), link_confidence=0.9, story_date=STORY_DATE
+    )
+    assert decision.path is Path.UNLINKED
+    assert decision.ranked[0].score == pytest.approx(W_NAME - W_AGE)
+    features = decision.ranked[0].features
+    assert (features["age_plausibility"], features["age_reason"]) == (-1.0, DECEASED)
+    assert (features["birthday"], features["deathday"]) == ("1920-01-01", "1998-03-04")
+
+
+def test_a_candidate_implausibly_young_for_the_extracted_role_falls_below_the_floor():
+    """The other half of the feature: TMDB's name search happily returns the nine-year-old
+    who shares a director's name."""
+    child = candidate(1, "Chris Evans", birthday=date(2017, 5, 1))
+    directing = mention(role="Director", department="Directing")
+    decision = resolve_mention(
+        [child], mention=directing, link_confidence=0.9, story_date=STORY_DATE
+    )
+    assert decision.path is Path.UNLINKED
+    assert decision.ranked[0].features["age_reason"] == IMPLAUSIBLE_AGE
+
+
+def test_the_age_bar_is_the_one_the_extracted_role_implies():
+    """Infants really are cast, so the bar that catches a nine-year-old director cannot be
+    the bar applied to a performer — the role and the department are what tell them apart."""
+    child = candidate(1, "Chris Evans", birthday=date(2017, 5, 1))
+    assert MIN_AGE_YEARS < MIN_CREW_AGE_YEARS
+    performer = mention(role="Young Steve", department="Acting")
+    assert age_plausibility(performer, child, story_date=STORY_DATE).value == 1.0
+    assert age_plausibility(mention(role="Director"), child, story_date=STORY_DATE).value == -1.0
+    assert age_plausibility(mention(department="Sound"), child, story_date=STORY_DATE).value == -1.0
+
+
+def test_an_infant_is_implausible_for_any_role_at_all():
+    newborn = candidate(1, "Chris Evans", birthday=date(2026, 1, 1))
+    acting = mention(role="Baby Steve", department="Acting")
+    assert age_plausibility(acting, newborn, story_date=STORY_DATE).value == -1.0
+
+
+def test_a_living_plausible_candidate_still_accepts():
+    alive = candidate(1, "Chris Evans", birthday=date(1981, 6, 13))
+    decision = resolve_mention(
+        [alive], mention=mention(), link_confidence=0.99, story_date=STORY_DATE
+    )
+    assert decision.path is Path.ACCEPTED
+    assert decision.ranked[0].score == pytest.approx(W_NAME + W_AGE)
+    assert decision.ranked[0].features["age_plausibility"] == 1.0
+    assert decision.ranked[0].features["age_reason"] is None
+
+
+def test_a_candidate_with_no_dates_earns_neither_a_bonus_nor_a_penalty():
+    """Absence of evidence is not evidence, as with the other five features — and most people
+    TMDB holds have no birthday at all."""
+    undated = candidate(1, "Chris Evans")
+    [scored] = rank_candidates([undated], mention=mention(), story_date=STORY_DATE)
+    assert scored.features["age_plausibility"] == 0.0
+    assert scored.score == pytest.approx(W_NAME)
+
+
+def test_a_death_inside_the_posthumous_window_neither_penalizes_nor_corroborates():
+    """A film completed before the death, archive footage, a posthumous release — all
+    ordinary, and none of them a reason to call the candidate plausible either."""
+    recent = years_before(STORY_DATE, POSTHUMOUS_YEARS - 1)
+    departed = candidate(1, "Chris Evans", birthday=date(1950, 1, 1), deathday=recent)
+    [scored] = rank_candidates([departed], mention=mention(), story_date=STORY_DATE)
+    assert scored.features["age_plausibility"] == 0.0
+    assert scored.score == pytest.approx(W_NAME)
+
+
+def test_a_story_with_no_date_leaves_the_feature_silent():
+    """The story date is one of the feature's two inputs; without it there is no age to judge
+    and no death to be after."""
+    dead = candidate(1, "Chris Evans", deathday=date(1998, 3, 4))
+    decision = resolve_mention([dead], mention=mention(), link_confidence=0.9, story_date=None)
+    assert decision.path is Path.ACCEPTED
+    assert decision.ranked[0].features["age_plausibility"] == 0.0
+    assert decision.features["story_date"] is None
+
+
+def test_the_dead_namesake_loses_to_the_living_one_deterministically():
+    """The case the feature exists for. Two people TMDB knows by one name, both credited on
+    the film, scoring identically on every other feature — before this they could only route
+    to `tiebreak` and reach a model."""
+    dead = candidate(
+        1, "Chris Evans", credited=True, credits=(cast_credit(),), deathday=date(1998, 3, 4)
+    )
+    alive = candidate(
+        2, "Chris Evans", credited=True, credits=(cast_credit(),), birthday=date(1981, 6, 13)
+    )
+    decision = resolve_mention(
+        [dead, alive],
+        mention=mention(department="Acting"),
+        link_confidence=0.99,
+        story_date=STORY_DATE,
+    )
+    assert (decision.path, decision.person_id) == (Path.ACCEPTED, 2)
+    # Both sides of a ±1 feature, which is what makes the spread wide enough to clear the
+    # margin where a penalty alone would still have left the two inside it.
+    assert decision.features["margin"] >= ACCEPT_MARGIN
+    assert decision.features["story_date"] == "2026-09-15"
+
+
+def test_a_date_contradiction_never_overturns_a_credit_on_the_film():
+    """Being on the film is a harder fact than a date TMDB holds for a namesake — the same
+    reason a contradicted department does not overturn one. A posthumous credit inside a
+    couple of years is ordinary, and the sweep's own holds say so (D-8)."""
+    dead_but_credited = candidate(
+        1,
+        "Chris Evans",
+        credited=True,
+        in_change_stream=True,
+        credits=(cast_credit(),),
+        deathday=date(1998, 3, 4),
+    )
+    decision = resolve_mention(
+        [dead_but_credited],
+        mention=mention(department="Acting"),
+        link_confidence=0.99,
+        story_date=STORY_DATE,
+    )
+    assert decision.path is Path.ACCEPTED
+
+
+def test_a_death_after_the_story_ran_is_not_a_death_this_mention_cares_about():
+    """An archived story from before they died. Reading the dates against today would turn
+    every one of those into a contradiction."""
+    later = candidate(1, "Chris Evans", birthday=date(1962, 1, 1), deathday=date(2020, 6, 1))
+    old_story = date(2015, 4, 1)
+    assert age_plausibility(mention(), later, story_date=old_story).value == 1.0
+    assert age_plausibility(mention(), later, story_date=STORY_DATE).value == -1.0
+
+
+# --- the routing properties the weights exist to hold ---------------------------------
+#
+# Every one of these was true before the age feature was added and is *not* implied by the
+# weights summing to 1.0 — a rebalance that spends the wrong 0.05 breaks one of them silently,
+# which is exactly what happened once (see the weights' own comment). They are pinned here so
+# the next rebalance has to answer them.
+
+
+def test_a_date_contradiction_pulls_a_bare_name_match_under_the_floor():
+    """The floor is what this contradiction has to be able to reach, and `W_AGE` is sized for
+    it: a candidate whose only claim is the name, and who was dead when the story ran, is not
+    this person.
+
+    It is the *only* contradiction that reaches a candidate with nothing else going for it.
+    A department can only contradict a candidate whose departments are known, which means
+    credits on this film, which means `W_CREDITED` is already in their score — so that
+    weight is bounded by the separation property below instead of by the floor.
+    """
+    assert W_NAME - W_AGE < ACCEPT_FLOOR
+    dead = candidate(1, "Chris Evans", deathday=date(1998, 3, 4))
+    decision = resolve_mention(
+        [dead], mention=mention(), link_confidence=0.9, story_date=STORY_DATE
+    )
+    assert decision.path is Path.UNLINKED
+
+
+@pytest.mark.parametrize(
+    ("weight", "spread", "separates", "agreeing", "rival"),
+    [
+        (W_CREDITED, 1, True, {"credited": True, "credits": (cast_credit(),)}, {}),
+        (W_AGE, 2, True, {"birthday": date(1981, 6, 13)}, {"deathday": date(1998, 3, 4)}),
+        (W_CHANGE_STREAM, 1, False, {"in_change_stream": True}, {}),
+        (
+            W_FILMOGRAPHY,
+            1,
+            False,
+            {"filmography_tmdb_ids": (66,)},
+            {"filmography_tmdb_ids": (77,)},
+        ),
+    ],
+)
+def test_which_features_can_separate_two_namesakes_on_their_own(
+    weight: float, spread: int, separates: bool, agreeing, rival
+):
+    """The table a rebalance has to preserve, because it is what keeps the band at D-22's
+    ≤10% of mentions — and it is not implied by the weights summing to 1.0.
+
+    A contradiction-capable feature spreads a namesake pair by `2 × W` (it corroborates one
+    and penalizes the other); a plain bonus spreads them by `W`. `credited` and the two ±1
+    features clear `ACCEPT_MARGIN`; the change stream and filmography overlap never did,
+    before this feature or after it, and a pair that differs only there still reaches the
+    model. Shaving a weight from the first group into the second is the silent regression
+    this pins.
+    """
+    assert (spread * weight >= ACCEPT_MARGIN) is separates
+    decision = resolve_mention(
+        [candidate(1, "Chris Evans", **agreeing), candidate(2, "Chris Evans", **rival)],
+        mention=mention(),
+        link_confidence=0.99,
+        mentioned_tmdb_ids=frozenset({66}),
+        story_date=STORY_DATE,
+    )
+    if separates:
+        assert (decision.path, decision.person_id) == (Path.ACCEPTED, 1)
+    else:
+        assert (decision.path, decision.person_id) == (Path.TIEBREAK, None)
+
+
+def test_a_department_that_agrees_with_one_namesake_and_contradicts_the_other_decides():
+    """The case a halved `W_DEPARTMENT` broke: the spread is `2 × W_DEPARTMENT`, and it has to
+    clear the margin or the story telling us which department this person works in stops
+    being able to pick between two people who share a name."""
+    composer = candidate(
+        1,
+        "Ludwig Goransson",
+        credited=True,
+        credits=(crew_credit(job="Original Music Composer", department="Sound"),),
+    )
+    actor = candidate(2, "Ludwig Goransson", credited=True, credits=(cast_credit(),))
+    decision = resolve_mention(
+        [composer, actor],
+        mention=mention("Ludwig Goransson", department="Sound"),
+        link_confidence=0.99,
+    )
+    assert (decision.path, decision.person_id) == (Path.ACCEPTED, 1)
+
+
+def test_a_birthday_on_one_namesake_and_none_on_the_other_decides_nothing():
+    """`W_AGE` is under the margin on purpose. TMDB holding a birthday for one of two people
+    by the same name says something about TMDB's coverage, not about which of them a trade
+    just named — so it orders the shortlist and stops there."""
+    assert W_AGE < ACCEPT_MARGIN
+    documented = candidate(1, "Chris Evans", birthday=date(1981, 6, 13))
+    undocumented = candidate(2, "Chris Evans")
+    decision = resolve_mention(
+        [documented, undocumented],
+        mention=mention(),
+        link_confidence=0.99,
+        story_date=STORY_DATE,
+    )
+    assert decision.path is Path.TIEBREAK
+    assert decision.person_id is None

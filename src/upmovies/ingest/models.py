@@ -17,6 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from upmovies.catalog.person_dates import DECEASED, IMPLAUSIBLE_AGE
 from upmovies.db import Base
 
 
@@ -334,8 +335,12 @@ class RunRetrievalHealth(Base):
 
 
 HOLD_BURST = "burst"
-HOLD_DECEASED = "deceased"
-HOLD_IMPLAUSIBLE_AGE = "implausible_age"
+# The two date reasons are `catalog.person_dates`' own names rather than a second spelling of
+# them: that module decides both conditions, for this hold and for person resolution's scoring
+# feature (D-21), and a reason this table spelled differently from the rule that produces it
+# would be a hold whose `reason` column disagreed with why it was held.
+HOLD_DECEASED = DECEASED
+HOLD_IMPLAUSIBLE_AGE = IMPLAUSIBLE_AGE
 HOLD_REASONS = (HOLD_BURST, HOLD_DECEASED, HOLD_IMPLAUSIBLE_AGE)
 """Why a credit attachment is being withheld from carding (D-8, NEU-1370).
 

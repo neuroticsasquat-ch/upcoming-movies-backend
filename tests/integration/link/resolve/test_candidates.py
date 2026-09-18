@@ -6,7 +6,7 @@ credits count as a candidate, how far back the change stream reads, and that a p
 filmography comes back as TMDB ids.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import respx
@@ -312,3 +312,24 @@ async def test_anchored_tier_orders_by_strongest_attachment(session):
         ).candidates
 
     assert [c.person_id for c in candidates] == [52, 51, 50, 53]
+
+
+async def test_both_loaders_read_the_stored_birth_and_death_dates(session):
+    """The age/alive feature's free input (NEU-1400): a person some earlier pass already
+    fetched `/person/{id}` for costs this mention nothing, and both film-anchored sources have
+    to bring the dates along or the mention pays for them again."""
+    film = await add_film(session, 90)
+    await add_credit(session, film, 910, credit_type="crew", job="Director")
+    credited = await session.get(Person, 910)
+    assert credited is not None
+    credited.birthday = date(1962, 7, 3)
+    await _change(session, film, 911)
+    changed = await session.get(Person, 911)
+    assert changed is not None
+    changed.deathday = date(1998, 3, 4)
+    await session.flush()
+
+    [person] = await load_credited_people(session, film.id)
+    assert person.birthday == date(1962, 7, 3)
+    [moved] = await load_change_stream_people(session, film.id, since=NOW - timedelta(days=14))
+    assert moved.deathday == date(1998, 3, 4)

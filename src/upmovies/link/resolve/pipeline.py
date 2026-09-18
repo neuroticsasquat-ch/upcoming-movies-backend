@@ -10,7 +10,8 @@ Per mention, in order:
 1. **`news.resolution_cache` first** (D-24). The same trade naming the same person on the
    same film is the commonest shape a per-film feed produces, and every miss costs a TMDB
    request. A hit skips scoring entirely.
-2. Otherwise **gather** (`candidates.py`) and **score and route** (`scoring.py`).
+2. Otherwise **gather** (`candidates.py`), read `/person/{id}` for the candidates whose name
+   the story actually wrote (`_with_person_dates`), and **score and route** (`scoring.py`).
 3. When routing lands in the narrow band and a `resolve` completer was supplied, **ask the
    closed-set tiebreak** (`tiebreak.py`, D-22) and fold its answer in. This is the only step
    that reaches a model, and only ≤10% of mentions are meant to.
@@ -26,18 +27,48 @@ provider blip on the tiebreak call is the same class of thing and rests the same
 tiebreak *answer* that arrived and could not be used is a decision, not a blip, and leaves the
 deterministic route standing rather than buying another call every run (`_with_tiebreak`).
 
-**`RESOLVE_MENTIONS_PER_RUN` bounds the pass**, because each miss is one `/search/person`
-request and the backlog on the first run after deploy is every mention clustering has ever
-extracted. The remainder is not dropped — it is the next run's backlog, oldest first.
+**`RESOLVE_MENTIONS_PER_RUN` bounds the pass**, because each miss is TMDB requests and the
+backlog on the first run after deploy is every mention clustering has ever extracted. The
+remainder is not dropped — it is the next run's backlog, oldest first.
+
+The requests a miss costs are one `/search/person` for the name, plus one `/person/{id}` per
+candidate whose name matched — the age/alive feature's only input (NEU-1400).
+
+**The budget, since it is the reason this pass has a limit at all.** The bound is the number
+of *name-matching* candidates, not the cap of ten: a candidate whose name is not the story's
+scores zero whatever its dates say (the score multiplies through the name), and a shortlist is
+mostly the film's own director and top billing, who are not called what the story called this
+person. So the worst case is one mention's cap — ten, when TMDB returns ten people by one
+name, which is also the case the feature is worth the most on — and the ordinary case is the
+one or two people the name really could be. Against `RESOLVE_MENTIONS_PER_RUN` = 500 and
+TMDB's 40-per-10s window that is ~500-1,000 extra requests, 2-4 minutes, on a pass that
+already spends 500 searches; the theoretical ceiling of 5,000 would be ~21 minutes, on the
+first run after deploy only. `catalog.person.details_observed_at` makes each request permanent
+for anybody the catalog holds, so steady state is the genuinely new people a run's stories
+name — tens, not hundreds.
+
+The narrower option D-21's ticket costed — buying dates only inside the `ACCEPT_MARGIN` band —
+was **not** taken, and the difference is deliberate: the band is by definition two candidates
+who already tie, so it would never catch the *lone* long-dead candidate who has no rival to
+tie with, and accepting that person is the more expensive failure (a wrong `person_id` on a
+story, alerting the followers of somebody who died in 1998). Paying on the accepts is what
+buys that.
+
+A candidate the catalog has *never* held — the wrong namesake TMDB's search turned up — has
+nowhere to stamp, and is deliberately left that way rather than given a `catalog.person` row:
+that table is user-facing (person search, the onboarding grid), and filling it with people
+this pass rejected would make them followable. They are re-read on a later run instead, and
+`_dates` keeps it to once within one.
 """
 
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
+import httpx
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,20 +76,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film, Person
 from upmovies.ingest.runs import record_llm_calls, record_llm_usage, record_progress
 from upmovies.ingest.tmdb.client import TMDBClient
-from upmovies.ingest.tmdb.upsert import upsert_people
+from upmovies.ingest.tmdb.upsert import ensure_person_details, upsert_people
 from upmovies.link.linker import story_dek
 from upmovies.link.resolve.candidates import (
     CANDIDATE_CAP,
     CHANGE_STREAM_WINDOW_DAYS,
+    Candidate,
+    CandidateSet,
     gather_candidates,
 )
 from upmovies.link.resolve.scoring import (
+    NAME_MATCH_NONE,
     Decision,
     Mention,
     Path,
     ScoredCandidate,
     Thresholds,
     cap_confidence,
+    name_match,
     resolve_mention,
 )
 from upmovies.link.resolve.tiebreak import TiebreakQuestion, TiebreakReply, ask_tiebreak
@@ -77,6 +112,25 @@ DEFAULT_MENTIONS_PER_RUN = 500
 # the pipelines are called by tests and by the admin re-runner as well as by `pipeline_run`,
 # and a stage nobody's band reaches never spends it.
 DEFAULT_RESOLVE_MODEL = "claude-sonnet-4-6"
+
+
+@dataclass(frozen=True)
+class PersonDates:
+    """What `/person/{id}` said about one candidate's birth and death, or nothing.
+
+    A value rather than the `catalog.person` row it usually comes from, because it is cached
+    for the length of a pass and each mention works in its own session — an ORM object would
+    be handed across the session it was loaded in. Both NULL means "the dates cannot say",
+    which is what a failed fetch, a tombstoned id and a person TMDB holds no dates for all
+    amount to as far as scoring is concerned; the pass remembers that answer too, so an
+    endpoint failing does not cost one request per mention naming the same person.
+    """
+
+    birthday: date | None = None
+    deathday: date | None = None
+
+
+NO_DATES = PersonDates()
 
 
 @dataclass
@@ -175,6 +229,11 @@ async def run_resolution(
     """
     limits = thresholds or Thresholds()
     result = ResolutionResult()
+    # One pass's worth of person dates, keyed by TMDB id. A run's mentions repeat names —
+    # several stories about one casting is the shape a per-film feed produces — and the
+    # candidates a name yields repeat with them, so this is what keeps a candidate the catalog
+    # has no row to stamp from costing one `/person/{id}` per mention that names them.
+    dates: dict[int, PersonDates] = {}
     async with session_factory() as s:
         pending = await _pending_mention_ids(s, limit=limit)
     for mention_id in pending:
@@ -197,6 +256,7 @@ async def run_resolution(
                     gateway=gateway,
                     resolve_model=resolve_model,
                     calls=calls,
+                    dates=dates,
                 )
                 # The link run's counters are already a whole-run total across units — the
                 # link stage counts stories, the cluster stage films (`link/pipeline.py`) —
@@ -284,6 +344,7 @@ async def _resolve_one(
     gateway: StageGateway | None = None,
     resolve_model: str = DEFAULT_RESOLVE_MODEL,
     calls: CallLog | None = None,
+    dates: dict[int, PersonDates] | None = None,
 ) -> Path | None:
     """Resolve one mention and write its decision. Returns the route taken, or None when the
     mention is no longer resolvable — its story was rejected, or another pass got there
@@ -319,10 +380,17 @@ async def _resolve_one(
         cap=cap,
     )
     decision = resolve_mention(
-        gathered.candidates,
+        await _with_person_dates(
+            session,
+            client,
+            gathered=gathered,
+            mention=mention,
+            dates=dates if dates is not None else {},
+        ),
         mention=mention,
         link_confidence=story.link_confidence,
         mentioned_tmdb_ids=await _mentioned_tmdb_ids(session, mention.title_mentioned),
+        story_date=_story_date(story),
         search_empty=not gathered.search_hits,
         thresholds=thresholds,
     )
@@ -359,6 +427,96 @@ async def _resolve_one(
             now=now,
         )
     return decision.path
+
+
+async def _with_person_dates(
+    session: AsyncSession,
+    client: TMDBClient,
+    *,
+    gathered: CandidateSet,
+    mention: Mention,
+    dates: dict[int, PersonDates],
+) -> list[Candidate]:
+    """The gathered candidates with `birthday`/`deathday` attached to the ones whose name the
+    story actually wrote — the age/alive feature's input (D-21, NEU-1400).
+
+    **Gated on the name, because the score is.** `scoring` multiplies everything by the name
+    quality, so a candidate the name gate zeroes cannot be moved by any feature and its dates
+    would be a request spent on an answer that changes nothing. A mention's ten candidates are
+    mostly the film's own director and top billing, who are not called what the story called
+    this person; what is left is the one or two people the name really could be, which is also
+    the pair the feature exists to separate.
+
+    Here rather than in `candidates.py` because it needs both halves: the gate is
+    `scoring.name_match`, and that module holds no name comparison by design. This is the
+    seam between them, which is what `pipeline.py` is.
+    """
+    out: list[Candidate] = []
+    for candidate in gathered.candidates:
+        if name_match(mention.name_as_written, candidate) == NAME_MATCH_NONE:
+            out.append(candidate)
+            continue
+        found = dates.get(candidate.person_id)
+        if found is None:
+            found = await _read_person_dates(session, client, candidate.person_id)
+            dates[candidate.person_id] = found
+        if found == NO_DATES:
+            # Nothing to attach, so the candidate keeps whatever the catalog already gave it:
+            # "the dates cannot say" must not be able to *unsay* a stored date, which is what
+            # overwriting with a failed fetch's empty answer would do.
+            out.append(candidate)
+            continue
+        out.append(replace(candidate, birthday=found.birthday, deathday=found.deathday))
+    return out
+
+
+async def _read_person_dates(
+    session: AsyncSession, client: TMDBClient, person_id: int
+) -> PersonDates:
+    """One candidate's dates, from `catalog.person` if the catalog holds them and from
+    `/person/{id}` if it does not. Named apart from the sweep's own `_person_dates`, which
+    answers the neighbouring question with a `catalog.person` row (`ingest.sweep.
+    credit_events`).
+
+    Two paths because only one of them has somewhere to remember the answer.
+    `ensure_person_details` stamps `details_observed_at` and so is asked once *ever* for a
+    person the catalog holds — which is every candidate either film-anchored source produced,
+    both joining `catalog.person`, and every person a previous run accepted. A candidate only
+    TMDB's name search knows has no row, and is deliberately not given one: `catalog.person`
+    is read by the person search and the onboarding grid, so writing the namesakes this pass
+    rejects would put people with no upcoming credits in front of users. That one is read
+    straight off the client and remembered for the rest of the pass instead.
+
+    **A TMDB failure costs the feature and nothing else.** The dates are a *weight* on a
+    decision the other five features can still make, so an outage here demotes to "the dates
+    cannot say" rather than failing the mention — which would leave it in the backlog to be
+    re-gathered, at the price of the `/search/person` request that already succeeded. A 404 is
+    `ensure_person_details`' business on the stored path (it tombstones the id) and is the same
+    "cannot say" on the other.
+    """
+    try:
+        if await session.get(Person, person_id) is None:
+            details = await client.person_details(person_id)
+            return PersonDates(details.birthday, details.deathday)
+        person = await ensure_person_details(session, client, person_id)
+        if person is None:
+            return NO_DATES
+        return PersonDates(person.birthday, person.deathday)
+    except httpx.HTTPError:
+        log.warning("person %s details unavailable; age plausibility not scored", person_id)
+        return NO_DATES
+
+
+def _story_date(story: Story) -> date:
+    """The day the story ran, which the age feature reads its candidates against.
+
+    `published_at` when the feed carried one, and `fetched_at` when it did not: retrieval is
+    within a day or two of publication, and the feature's bar is stated in whole years, so the
+    fallback is well inside the precision it is read at. Leaving it None instead would silence
+    the feature on every story whose feed omitted a date, which is the one input it cannot do
+    without.
+    """
+    return (story.published_at or story.fetched_at).astimezone(UTC).date()
 
 
 async def _break_the_tie(

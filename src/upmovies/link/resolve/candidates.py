@@ -45,15 +45,21 @@ credits they hold on *this* film, whatever change rows named them, and their fil
 TMDB ids (from the search hit's `known_for` and from every catalog film they are credited on)
 so D-21's "filmography overlap with other titles named in the article" has something to
 overlap — plus those known-for titles as text, which is what D-22's closed-set shortlist shows
-a model. Birthday and deathday are listed in D-21's feature set and are deliberately absent
-here: neither `catalog.person` nor anything this repo fetches from TMDB holds them, so the
-age/alive plausibility feature has no input until a schema change supplies one. Inventing
-always-NULL columns for it here would only make the gap harder to see.
+a model.
+
+**Birthday and deathday ride along but are not fetched here** (NEU-1400). They are person
+facts like the rest, so the two loaders read them and `_candidate` merges them the same
+hit-wins-over-stored way — but `/search/person` does not carry them and neither does either
+credits endpoint, so the only source is the `/person/{id}` fetch `ingest.tmdb.upsert.
+ensure_person_details` makes. That fetch is per *candidate* rather than per mention, and
+whether a candidate is worth one at all turns on how well its name matched, which is a
+question this module is explicitly not the place to ask. `pipeline.py` asks it, between
+gathering and scoring, and attaches what comes back.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -108,6 +114,8 @@ class CatalogPerson:
     original_name: str | None = None
     known_for_department: str | None = None
     popularity: float | None = None
+    birthday: date | None = None
+    deathday: date | None = None
     credits: tuple[CreditFact, ...] = ()
     changes: tuple[ChangeFact, ...] = ()
 
@@ -146,6 +154,8 @@ class Candidate:
     from_search: bool
     credited: bool
     in_change_stream: bool
+    birthday: date | None = None
+    deathday: date | None = None
     credits: tuple[CreditFact, ...] = ()
     changes: tuple[ChangeFact, ...] = ()
     filmography_tmdb_ids: tuple[int, ...] = ()
@@ -277,6 +287,8 @@ async def load_credited_people(session: AsyncSession, film_id: UUID) -> list[Cat
             Person.original_name,
             Person.known_for_department,
             Person.popularity,
+            Person.birthday,
+            Person.deathday,
         )
         .join(Person, Person.id == FilmCredit.person_id)
         .where(FilmCredit.film_id == film_id)
@@ -317,6 +329,8 @@ async def load_change_stream_people(
             Person.original_name,
             Person.known_for_department,
             Person.popularity,
+            Person.birthday,
+            Person.deathday,
         )
         .join(Person, Person.id == FilmCreditChange.person_id)
         .where(FilmCreditChange.film_id == film_id, FilmCreditChange.changed_at >= since)
@@ -406,15 +420,21 @@ def _dedupe(values: Iterable[int]) -> list[int]:
 
 
 def _catalog_person(row: Row[Any]) -> CatalogPerson:
-    """The `catalog.person` half of a credit or change row. Both loaders select the same four
+    """The `catalog.person` half of a credit or change row. Both loaders select the same six
     person columns, and one spelling of that mapping keeps them from disagreeing about which
-    stored fact reaches the scorer."""
+    stored fact reaches the scorer.
+
+    The dates come from here when `catalog.person` already holds them — a person some earlier
+    pass fetched `/person/{id}` for — which is the difference between a request this mention
+    pays for and one it does not (`details_observed_at`, NEU-1370)."""
     return CatalogPerson(
         person_id=row.person_id,
         name=row.name,
         original_name=row.original_name,
         known_for_department=row.known_for_department,
         popularity=row.popularity,
+        birthday=row.birthday,
+        deathday=row.deathday,
     )
 
 
@@ -459,6 +479,11 @@ def _candidate(
         from_search=hit is not None,
         credited=credited is not None,
         in_change_stream=changed is not None,
+        # Stored only: `/search/person` returns no dates at all, so there is no fresher value
+        # for `_fresher` to prefer. A candidate the catalog has never held arrives with both
+        # NULL and is given them by `pipeline.py` if its name earns the fetch (NEU-1400).
+        birthday=stored.birthday if stored is not None else None,
+        deathday=stored.deathday if stored is not None else None,
         credits=credited.credits if credited is not None else (),
         changes=changed.changes if changed is not None else (),
         filmography_tmdb_ids=tuple(_dedupe([*known_for_ids, *catalog_filmography])),
