@@ -591,6 +591,73 @@ async def test_the_gate_holds_people_individually_within_one_observation(
     assert event.subject_key == ["zendaya"]
 
 
+async def test_a_credit_released_after_its_burst_carded_still_gets_its_card(
+    session, session_factory, run_id
+):
+    """The card is dated by whom it *names*, not by the whole group. A credit the presence
+    check held while the rest of its burst carded is released on a later pass into a group
+    whose latest `changed_at` is already taken — dating it by the group would find that card
+    and silently drop the one person still owed one."""
+    film = await add_film(session, 1)
+    held = await _person(session, 1, "Rebecca Ferguson")
+    carded = await _person(session, 2, "Zendaya")
+    await _cast(session, film, held, changed_at=NOW - timedelta(days=5))
+    await _cast(session, film, carded, changed_at=NOW - timedelta(days=4))
+    # Only Zendaya is live, so Rebecca is held on presence while Zendaya cards.
+    await _still_attached(session, film, carded, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+
+    first = await _quarantined(session_factory, run_id)
+
+    assert (first.events_created, first.held) == (1, 1)
+
+    # The next ingest restores her credit; the gate now releases the older attachment into a
+    # group whose latest change is the one already carded.
+    await _still_attached(session, film, held, credit_type="cast", job=None, credit_order=1)
+    await session.commit()
+
+    second = await _quarantined(session_factory, run_id)
+
+    assert second.events_created == 1
+    events = await _events(session, film)
+    assert {tuple(e.subject_key) for e in events} == {("zendaya",), ("rebecca ferguson",)}
+    # Dated at her own change, not at the group's latest — which Zendaya's card holds.
+    (hers,) = [e for e in events if e.subject_key == ["rebecca ferguson"]]
+    assert hers.occurred_at == NOW - timedelta(days=5)
+
+
+async def test_a_card_is_dated_by_the_people_it_names(session, session_factory, run_id):
+    """A burst whose latest member a trade story already carded dates its card at the latest
+    change it actually names — `occurred_at` is the beat's time, and the beat is the people
+    on the card."""
+    film = await add_film(session, 1)
+    fresh = await _person(session, 1, "Rebecca Ferguson")
+    already = await _person(session, 2, "Zendaya")
+    await _cast(session, film, fresh, changed_at=NOW - timedelta(days=5))
+    await _cast(session, film, already, changed_at=NOW - timedelta(days=4))
+    for person in (fresh, already):
+        await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    # A trade story carded Zendaya first — the Tier-A case `_uncarded_attachments` exists for.
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="casting",
+            confidence="confirmed",
+            provenance="story",
+            occurred_at=NOW - timedelta(days=6),
+            subject_key=["zendaya"],
+        )
+    )
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert result.events_created == 1
+    (catalog_event,) = [e for e in await _events(session, film) if e.provenance == "catalog"]
+    assert catalog_event.subject_key == ["rebecca ferguson"]
+    assert catalog_event.occurred_at == NOW - timedelta(days=5)
+
+
 async def test_a_burst_clearing_together_is_one_card_in_billing_order(
     session, session_factory, run_id
 ):

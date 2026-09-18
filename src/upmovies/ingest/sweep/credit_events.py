@@ -99,18 +99,33 @@ class AttachedCredit:
 
 @dataclass(frozen=True)
 class CreditGroup:
-    """The credits one sweep pass carded for one film and one event type, and the single
-    event they card as."""
+    """The attachments one sweep pass collapsed for one film and one event type, and the
+    single event they card as."""
 
     film_id: UUID
     event_type: str
-    changed_at: datetime
-    """The *latest* `changed_at` in the group, which the event stores as `occurred_at`
-    (D-7). The latest rather than the earliest because a burst is news when its last member
-    landed, and because a later pass that collapses a strictly larger burst then lands on a
-    strictly later timestamp — never colliding with the card the smaller burst already
-    wrote under `uq_event_catalog_change`."""
-    credits: tuple[CreditAttached, ...]
+    attachments: tuple[AttachedCredit, ...]
+    """In canonical order (`credit_order_key`) — strongest role first, then billing order.
+
+    The group holds the source rows rather than the rendered credits because `occurred_at`
+    has to be derived from *whichever of them the card ends up naming*: per-person
+    suppression runs after grouping, and a card dated by someone it does not name would be
+    both wrong on its face and able to consume a timestamp a later genuine burst needs.
+    """
+
+    @property
+    def changed_at(self) -> datetime:
+        """The *latest* `changed_at` in the group, which the event stores as `occurred_at`
+        (D-7). The latest rather than the earliest because a burst is news when its last
+        member landed, and because a pass that collapses a strictly larger burst then lands
+        on a strictly later timestamp — never colliding with the card the smaller burst
+        already wrote under `uq_event_catalog_change`."""
+        return max(a.changed_at for a in self.attachments)
+
+    @property
+    def credits(self) -> tuple[CreditAttached, ...]:
+        """The group as the renderer wants it, in the same canonical order."""
+        return tuple(as_credit(a) for a in self.attachments)
 
 
 @dataclass
@@ -170,6 +185,14 @@ class CreditDetachmentResult:
     abort_error: str | None = None
 
 
+def as_credit(attached: AttachedCredit) -> CreditAttached:
+    """The renderer's view of one attachment. `character` is never set: `film_credit_change`
+    does not record it."""
+    return CreditAttached(
+        role=attached.role, name=attached.name, credit_order=attached.credit_order
+    )
+
+
 def credit_role(credit_type: str, job: str | None) -> str | None:
     """The seed-grade role one credit-change row carries, or None when it carries none.
 
@@ -186,11 +209,17 @@ def credit_role(credit_type: str, job: str | None) -> str | None:
 def group_attachments(attachments: list[AttachedCredit]) -> list[CreditGroup]:
     """One group — and so one event — per (film, event type) in this pass. Pure.
 
-    Burst collapsing (D-7). The caller passes exactly the attachments that cleared quarantine
-    on *this* pass, so "the pass" needs no key of its own: everything handed in is by
-    construction one pass's worth. `changed_at` is therefore no longer part of the key — six
-    credits that landed over four days and came off hold together are one beat, and carding
-    them as four is the burst the quarantine window created.
+    Burst collapsing (D-7). The caller passes exactly the attachments this pass will card, so
+    "the pass" needs no key of its own: everything handed in is by construction one pass's
+    worth. `changed_at` is therefore no longer part of the key — credits that landed over
+    four days and came off hold together are one beat, and carding them as four is the burst
+    the quarantine window created.
+
+    With the gate disabled (`quarantine_hours=0`) "this pass" is the whole rolling window
+    rather than a quarantine release, so a first pass over a backlog collapses it into one
+    card. That follows from the key being the pass, which is what the M5 contract specifies;
+    it is not a second rule. Steady state is unaffected — each later pass carries one new
+    observation, and per-person suppression drops the rest.
 
     The group's `changed_at` is the **latest** in it, which is what the event stores as
     `occurred_at`. That keeps `uq_event_catalog_change` satisfiable (one timestamp per group)
@@ -205,24 +234,17 @@ def group_attachments(attachments: list[AttachedCredit]) -> list[CreditGroup]:
     order within the role — so the body reads and the `subject_key` stores top-billed first
     rather than in whichever order the history diff emitted.
     """
-    groups: dict[tuple[UUID, str], list[CreditAttached]] = {}
-    latest: dict[tuple[UUID, str], datetime] = {}
+    groups: dict[tuple[UUID, str], list[AttachedCredit]] = {}
     for attached in attachments:
         key = (attached.film_id, CREDIT_ROLE_EVENT_TYPES[attached.role])
-        groups.setdefault(key, []).append(
-            CreditAttached(
-                role=attached.role, name=attached.name, credit_order=attached.credit_order
-            )
-        )
-        latest[key] = max(attached.changed_at, latest.get(key, attached.changed_at))
+        groups.setdefault(key, []).append(attached)
     return [
         CreditGroup(
             film_id=film_id,
             event_type=event_type,
-            changed_at=latest[(film_id, event_type)],
-            credits=tuple(sorted(credits, key=credit_order_key)),
+            attachments=tuple(sorted(grouped, key=credit_order_key)),
         )
-        for (film_id, event_type), credits in groups.items()
+        for (film_id, event_type), grouped in groups.items()
     ]
 
 
@@ -406,10 +428,14 @@ async def _latest_credit_event_types(
     return latest
 
 
-async def _uncarded_credits(
-    session: AsyncSession, *, film_id: UUID, event_type: str, credits: tuple[CreditAttached, ...]
-) -> tuple[CreditAttached, ...]:
-    """The credits in a group that should still be carded for this beat.
+async def _uncarded_attachments(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    event_type: str,
+    attachments: tuple[AttachedCredit, ...],
+) -> tuple[AttachedCredit, ...]:
+    """The attachments in a group that should still be carded for this beat.
 
     Removal-aware (NEU-1200): for each person, look up the most recent event among
     their own attachment type and `credit_removed`. Suppress only if it's an attachment —
@@ -425,33 +451,45 @@ async def _uncarded_credits(
     already carded still cards the other two.
     """
     latest_types = await _latest_credit_event_types(session, film_id=film_id, event_type=event_type)
-    kept: list[CreditAttached] = []
-    for c in credits:
-        latest = latest_types.get(normalize_name(c.name))
+    kept: list[AttachedCredit] = []
+    for a in attachments:
+        latest = latest_types.get(normalize_name(a.name))
         if latest is None or latest == CREDIT_REMOVED_EVENT_TYPE:
-            kept.append(c)
+            kept.append(a)
     return tuple(kept)
 
 
 async def _card_group(session: AsyncSession, *, group: CreditGroup) -> bool:
     """Create the event and its deterministic summary for one group, or report that it was
     already carded. One transaction covers both writes, so an event can never reach the feed
-    without the summary row every read path inner-joins. Caller owns the commit."""
+    without the summary row every read path inner-joins. Caller owns the commit.
+
+    Per-person suppression runs **before** the already-carded check, and the card is dated by
+    what survives it. Under burst collapsing the group's latest `changed_at` usually belongs
+    to someone the card will not name — they were carded on an earlier pass, or by a trade
+    story — and dating the card by the whole group would both misdate it and let it collide
+    with a card that already holds that timestamp, silently dropping everyone still owed one.
+    """
+    attachments = await _uncarded_attachments(
+        session,
+        film_id=group.film_id,
+        event_type=group.event_type,
+        attachments=group.attachments,
+    )
+    if not attachments:
+        return False
+    occurred_at = max(a.changed_at for a in attachments)
     if await _already_carded(
-        session, film_id=group.film_id, event_type=group.event_type, changed_at=group.changed_at
+        session, film_id=group.film_id, event_type=group.event_type, changed_at=occurred_at
     ):
         return False
-    credits = await _uncarded_credits(
-        session, film_id=group.film_id, event_type=group.event_type, credits=group.credits
-    )
-    if not credits:
-        return False
+    credits = tuple(as_credit(a) for a in attachments)
     event = Event(
         film_id=group.film_id,
         event_type=group.event_type,
         confidence="rumored",
         provenance="catalog",
-        occurred_at=group.changed_at,
+        occurred_at=occurred_at,
         region=None,
         subject_key=[normalize_name(c.name) for c in credits],
     )

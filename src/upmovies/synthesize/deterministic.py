@@ -20,6 +20,7 @@ Callers own the transaction, in line with the rest of the ingest pipelines.
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import and_
@@ -204,7 +205,19 @@ def _join_names(names: list[str]) -> str:
 _UNBILLED = 1 << 30
 
 
-def credit_order_key(credit: CreditAttached) -> tuple[int, int]:
+class BilledCredit(Protocol):
+    """What `credit_order_key` needs of a credit. A protocol so the sweep can order its own
+    `AttachedCredit` rows by the same key without first converting them to `CreditAttached` —
+    the ordering has to be settled before the group knows which credits it will name."""
+
+    @property
+    def role(self) -> str: ...
+
+    @property
+    def credit_order(self) -> int | None: ...
+
+
+def credit_order_key(credit: BilledCredit) -> tuple[int, int]:
     """Canonical order for the credits of one group: strongest role first, then billing
     order within the role (D-7).
 
