@@ -73,14 +73,16 @@ class IngestRun(Base):
 
 
 class RunLLMUsage(Base):
-    """Per-stage LLM token usage + estimated dollar cost for one ingest run. A `link`-kind
-    run writes a `link` row and a `cluster` row; a `synthesize`-kind run writes a `summarize`
-    row. One row per (run, stage) — `record_llm_usage` UPSERTs on the unique constraint."""
+    """Per-stage LLM token usage + estimated dollar cost for one ingest run. A `link`-kind run
+    writes a `link` and a `cluster` row, plus a `source_judge` or `resolve` row on a run whose
+    band of unknown domains or ambiguous mentions was not empty; a `synthesize`-kind run writes
+    a `summarize` row. One row per (run, stage) — `record_llm_usage` UPSERTs on the unique
+    constraint."""
 
     __tablename__ = "run_llm_usage"
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('link', 'cluster', 'summarize', 'source_judge')",
+            "stage IN ('link', 'cluster', 'summarize', 'source_judge', 'resolve')",
             name="ck_run_llm_usage_stage",
         ),
         UniqueConstraint("run_id", "stage", name="uq_run_llm_usage_run_stage"),
@@ -124,7 +126,7 @@ class LLMCall(Base):
     __tablename__ = "llm_call"
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('link', 'cluster', 'summarize', 'source_judge')",
+            "stage IN ('link', 'cluster', 'summarize', 'source_judge', 'resolve')",
             name="ck_llm_call_stage",
         ),
         CheckConstraint("attempts >= 1", name="ck_llm_call_attempts"),

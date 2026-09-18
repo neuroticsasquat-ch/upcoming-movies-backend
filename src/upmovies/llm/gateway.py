@@ -2,13 +2,14 @@
 
 `run_link_stage` used to open a single `AnthropicClient` and pass it down, and that one
 instance backed **three** call sites — link, cluster and source_judge all run inside
-`run_link_ingest`. Per-stage providers cannot be threaded through one client instance, which
+`run_link_ingest` (as does `resolve`, which arrived after the gateway). Per-stage providers
+cannot be threaded through one client instance, which
 is the structural reason this module exists rather than a settings lookup at each call site
 (design §5.3). The two pipelines now take a gateway, and each stage resolves its own completer
 from it.
 
-Clients are pooled by **provider, not by stage**: the default configuration is four stages on
-Anthropic, and that must stay one connection pool rather than four. They are also built on
+Clients are pooled by **provider, not by stage**: the default configuration is every stage on
+Anthropic, and that must stay one connection pool rather than one per stage. They are also built on
 first use, so a stage nobody asks for costs nothing — a run with no unknown domains to judge
 needs no `source_judge` credential.
 
@@ -38,12 +39,19 @@ from upmovies.llm.registry import ANTHROPIC, DEEPINFRA, DEEPSEEK, PROVIDERS
 from upmovies.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
 from upmovies.llm.types import Completer
 
-# The four stages a provider can be configured for. Closed, and enforced as such further down
-# the line — `ingest.llm_call` and `run_llm_usage` both check-constrain `stage` to the same
-# four, so a fifth here would resolve a provider for calls no telemetry row could name.
-# (`ingest.runs.STAGE_KINDS` is a different, narrower list: it classifies the three stages the
-# total-failure guard reads counters for, and `source_judge` keeps none.)
-STAGES: tuple[str, ...] = ("link", "cluster", "source_judge", "summarize")
+# The stages a provider can be configured for. Closed, and enforced as such further down the
+# line — `ingest.llm_call` and `run_llm_usage` both check-constrain `stage` to the same set, so
+# a stage added here and not there would resolve a provider for calls no telemetry row could
+# name. (`ingest.runs.STAGE_KINDS` is a different, narrower list: it classifies the three
+# stages the total-failure guard reads counters for, and neither `source_judge` nor `resolve`
+# keeps any.)
+#
+# `resolve` is the closed-set person tiebreak (D-22), and it is the one stage that is *not*
+# reached for every unit of its pass: the resolution pass is deterministic Python, and only
+# the narrow band its scoring cannot separate is asked (D-21). A stage that answers ≤10% of
+# mentions still needs its own priced, credentialled `(provider, model)` — the lazy build
+# below is what keeps that from costing a deployment anything when the band stays empty.
+STAGES: tuple[str, ...] = ("link", "cluster", "source_judge", "summarize", "resolve")
 
 
 def stage_providers(settings: Settings) -> dict[str, str]:
@@ -57,6 +65,7 @@ def stage_providers(settings: Settings) -> dict[str, str]:
         "cluster": settings.cluster_provider,
         "source_judge": settings.source_judge_provider,
         "summarize": settings.summary_provider,
+        "resolve": settings.resolve_provider,
     }
 
 
@@ -74,6 +83,7 @@ def stage_models(settings: Settings) -> dict[str, str]:
         "cluster": settings.cluster_model,
         "source_judge": settings.source_judge_model,
         "summarize": settings.summary_model,
+        "resolve": settings.resolve_model,
     }
 
 
@@ -81,7 +91,7 @@ class MissingCredentialError(RuntimeError):
     """A stage is configured for a provider whose API key is unset.
 
     Raised rather than resolved to Anthropic. There is no cross-provider fallback anywhere in
-    the gateway (design §9): production is Anthropic for all four stages regardless under the
+    the gateway (design §9): production is Anthropic for every stage regardless under the
     capability-only exit criterion, so falling back buys nothing — while during an eval run it
     would silently attribute one provider's latency, cost and coverage to another, which is the
     one failure mode the numbers afterwards cannot reveal."""

@@ -284,6 +284,14 @@ class Settings(BaseSettings):
     # outage there is answered by turning it off for a day rather than by letting the pass
     # burn its budget on retries — the mentions keep until it is back on.
     resolve_enabled: bool = Field(default=True, alias="RESOLVE_ENABLED")
+    # The `resolve` gateway stage (D-22): the closed-set tiebreak the scoring pass routes its
+    # narrow band to. Sonnet rather than the Haiku the other three stages default to, on
+    # volume *and* on difficulty: D-22 targets ≤10% of mentions, and the band is by
+    # construction the case deterministic features could not separate — two people TMDB knows
+    # by the same name. That is the wrong-Chris-Evans failure M4 exists to make impossible,
+    # so it is the one stage where the cheaper model is the false economy.
+    resolve_model: str = Field(default="claude-sonnet-4-6", alias="RESOLVE_MODEL")
+    resolve_provider: Provider = Field(default="anthropic", alias="RESOLVE_PROVIDER")
     source_gate_enabled: bool = Field(default=True, alias="SOURCE_GATE_ENABLED")
     source_judge_model: str = Field(default="claude-haiku-4-5", alias="SOURCE_JUDGE_MODEL")
     source_judge_provider: Provider = Field(default="anthropic", alias="SOURCE_JUDGE_PROVIDER")

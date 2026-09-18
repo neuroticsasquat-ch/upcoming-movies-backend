@@ -11,14 +11,20 @@ Per mention, in order:
    same film is the commonest shape a per-film feed produces, and every miss costs a TMDB
    request. A hit skips scoring entirely.
 2. Otherwise **gather** (`candidates.py`) and **score and route** (`scoring.py`).
-3. **Persist** `person_id`, `confidence`, `path`, the features and the candidates, and stamp
+3. When routing lands in the narrow band and a `resolve` completer was supplied, **ask the
+   closed-set tiebreak** (`tiebreak.py`, D-22) and fold its answer in. This is the only step
+   that reaches a model, and only ≤10% of mentions are meant to.
+4. **Persist** `person_id`, `confidence`, `path`, the features and the candidates, and stamp
    `resolved_at` — which is what takes the mention out of this pass's backlog.
-4. On an accept, **write the cache** and make sure `catalog.person` holds the accepted id.
+5. On an accept, **write the cache** and make sure `catalog.person` holds the accepted id.
 
 **Failures are isolated per mention and the row is left untouched.** A mention whose
 `path` is still NULL is simply re-selected next run, which is the right resting state for a
 TMDB blip: nothing is lost by waiting, and half-writing a decision from a failed gather would
-put a wrong answer somewhere only a human re-reading `/admin/resolution` would ever catch.
+put a wrong answer somewhere only a human re-reading `/admin/resolution` would ever catch. A
+provider blip on the tiebreak call is the same class of thing and rests the same way — but a
+tiebreak *answer* that arrived and could not be used is a decision, not a blip, and leaves the
+deterministic route standing rather than buying another call every run (`_with_tiebreak`).
 
 **`RESOLVE_MENTIONS_PER_RUN` bounds the pass**, because each miss is one `/search/person`
 request and the backlog on the first run after deploy is every mention clustering has ever
@@ -27,8 +33,9 @@ extracted. The remainder is not dropped — it is the next run's backlog, oldest
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -36,9 +43,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, Person
-from upmovies.ingest.runs import record_progress
+from upmovies.ingest.runs import record_llm_calls, record_llm_usage, record_progress
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.upsert import upsert_people
+from upmovies.link.linker import story_dek
 from upmovies.link.resolve.candidates import (
     CANDIDATE_CAP,
     CHANGE_STREAM_WINDOW_DAYS,
@@ -53,6 +61,8 @@ from upmovies.link.resolve.scoring import (
     cap_confidence,
     resolve_mention,
 )
+from upmovies.link.resolve.tiebreak import TiebreakQuestion, TiebreakReply, ask_tiebreak
+from upmovies.llm.types import CallLog, Completer, StageGateway, Usage
 from upmovies.news.models import ResolutionCache, Story, StoryPerson
 from upmovies.news.source_quality import domain_for_story
 
@@ -62,6 +72,12 @@ SessionFactory = Callable[[], AsyncSession]
 
 DEFAULT_MENTIONS_PER_RUN = 500
 
+# Mirrors `RESOLVE_MODEL` in `config.py`, which carries the derivation. A default here rather
+# than a required argument for the same reason `run_link_ingest` defaults `source_judge_model`:
+# the pipelines are called by tests and by the admin re-runner as well as by `pipeline_run`,
+# and a stage nobody's band reaches never spends it.
+DEFAULT_RESOLVE_MODEL = "claude-sonnet-4-6"
+
 
 @dataclass
 class ResolutionResult:
@@ -70,6 +86,12 @@ class ResolutionResult:
     `cache_hits` counts mentions that took the cached answer rather than scoring, so it
     overlaps `accepted` deliberately: the two answer different questions — where mentions
     went, and how much of the pass was paid for in TMDB requests.
+
+    The four `tiebreak_*` counters overlap the routes for the same reason, and are what D-22's
+    "≤10% of mentions" is measured against: `tiebreak_asked` is how many mentions reached the
+    model at all, and the three below it are what came back. A mention the model named somebody
+    for stays on the `tiebreak` route — the decision was not deterministic and D-25 has a human
+    read it — so `tiebreak` alone cannot say how many of those were actually decided.
     """
 
     accepted: int = 0
@@ -78,6 +100,11 @@ class ResolutionResult:
     not_in_tmdb: int = 0
     cache_hits: int = 0
     failed: int = 0
+    tiebreak_asked: int = 0
+    tiebreak_decided: int = 0
+    tiebreak_declined: int = 0
+    tiebreak_rejected: int = 0
+    usage: Usage = field(default_factory=Usage)
 
     @property
     def resolved(self) -> int:
@@ -100,12 +127,22 @@ class ResolutionResult:
         printed on every quiet day is one the eye stops seeing."""
         if not self.resolved and not self.failed:
             return None
-        return (
+        line = (
             f"resolved {self.resolved} mentions "
             f"({self.accepted} accepted, {self.tiebreak} tiebreak, "
             f"{self.unlinked} unlinked, {self.not_in_tmdb} not in tmdb; "
             f"{self.cache_hits} cached, {self.failed} failed)"
         )
+        # Appended rather than folded into the parenthetical above: the band is empty on most
+        # runs, and a "0 asked" on every line is one the eye stops seeing — the same reason
+        # the link run's saturation note is a clause it only sometimes carries.
+        if self.tiebreak_asked:
+            line += (
+                f"; {self.tiebreak_asked} tiebreaks asked "
+                f"({self.tiebreak_decided} decided, {self.tiebreak_declined} none, "
+                f"{self.tiebreak_rejected} rejected)"
+            )
+        return line
 
 
 async def run_resolution(
@@ -118,15 +155,34 @@ async def run_resolution(
     now: datetime | None = None,
     window_days: int = CHANGE_STREAM_WINDOW_DAYS,
     cap: int = CANDIDATE_CAP,
+    gateway: StageGateway | None = None,
+    resolve_model: str = DEFAULT_RESOLVE_MODEL,
 ) -> ResolutionResult:
     """Resolve up to `limit` unresolved mentions, oldest first. Does not finalize the run —
     the `link` pipeline owns that row and this pass's counters are one clause of its detail
-    line."""
+    line.
+
+    The `gateway` is the `resolve` stage (D-22), and it is optional in the same way and for
+    the same reason the whole pass is optional to `run_link_ingest`: without one the narrow
+    band is written as the scoring pass routed it — `tiebreak`, nobody named — which is
+    exactly the resting state D-25's queue is for. Nothing else about the pass changes, so a
+    caller with no model to hand still gets every deterministic decision.
+
+    A gateway rather than a completer because the stage is resolved **where the band is**, not
+    here: most runs never ask a tiebreak, and `Gateway.for_stage` builds a client on first use,
+    so a pass whose names all separated on the arithmetic opens no connection pool and needs no
+    credential to have been configured for a provider it never reaches.
+    """
     limits = thresholds or Thresholds()
     result = ResolutionResult()
     async with session_factory() as s:
         pending = await _pending_mention_ids(s, limit=limit)
     for mention_id in pending:
+        # Owned by the loop rather than by `_resolve_one`, so a call that crashed the mention
+        # still becomes an `ingest.llm_call` row: the `finally` below writes whatever was
+        # recorded through its own session, which the failed mention's rollback cannot take
+        # with it (NEU-975, the same arrangement `source_stage` uses).
+        calls = CallLog()
         try:
             async with session_factory() as s:
                 path = await _resolve_one(
@@ -138,6 +194,9 @@ async def run_resolution(
                     now=now,
                     window_days=window_days,
                     cap=cap,
+                    gateway=gateway,
+                    resolve_model=resolve_model,
+                    calls=calls,
                 )
                 # The link run's counters are already a whole-run total across units — the
                 # link stage counts stories, the cluster stage films (`link/pipeline.py`) —
@@ -156,6 +215,33 @@ async def run_resolution(
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
             result.failed += 1
+        finally:
+            if calls.results and gateway is not None:
+                result.usage += calls.usage
+                async with session_factory() as s:
+                    await record_llm_calls(
+                        s,
+                        run_id,
+                        stage="resolve",
+                        provider=gateway.provider_for("resolve"),
+                        model=resolve_model,
+                        results=calls.results,
+                    )
+                    await s.commit()
+    if result.tiebreak_asked and gateway is not None:
+        # One aggregate row per (run, stage), written once the band is worked rather than per
+        # mention: `record_llm_usage` UPSERTs, so a per-mention write would be correct and
+        # would also be one round trip per ambiguous name for a number only the total means.
+        async with session_factory() as s:
+            await record_llm_usage(
+                s,
+                run_id,
+                stage="resolve",
+                provider=gateway.provider_for("resolve"),
+                model=resolve_model,
+                usage=result.usage,
+            )
+            await s.commit()
     if result.resolved or result.failed:
         log.info("resolution: %s", result.detail())
     return result
@@ -195,6 +281,9 @@ async def _resolve_one(
     now: datetime | None,
     window_days: int,
     cap: int,
+    gateway: StageGateway | None = None,
+    resolve_model: str = DEFAULT_RESOLVE_MODEL,
+    calls: CallLog | None = None,
 ) -> Path | None:
     """Resolve one mention and write its decision. Returns the route taken, or None when the
     mention is no longer resolvable — its story was rejected, or another pass got there
@@ -237,6 +326,18 @@ async def _resolve_one(
         search_empty=not gathered.search_hits,
         thresholds=thresholds,
     )
+    if decision.path is Path.TIEBREAK and gateway is not None:
+        decision = await _break_the_tie(
+            session,
+            client=gateway.for_stage("resolve"),
+            model=resolve_model,
+            story=story,
+            row=row,
+            mention=mention,
+            decision=decision,
+            result=result,
+            calls=calls if calls is not None else CallLog(),
+        )
     if decision.person_id is not None:
         # Before the row that references it: `story_person.person_id` is an FK into
         # `catalog.person`, and the candidate TMDB's name search just found is exactly the
@@ -258,6 +359,120 @@ async def _resolve_one(
             now=now,
         )
     return decision.path
+
+
+async def _break_the_tie(
+    session: AsyncSession,
+    *,
+    client: Completer,
+    model: str,
+    story: Story,
+    row: StoryPerson,
+    mention: Mention,
+    decision: Decision,
+    result: ResolutionResult,
+    calls: CallLog,
+) -> Decision:
+    """Ask the `resolve` stage which of this mention's shortlist the story named (D-22).
+
+    Called with the scored decision in hand rather than from a second pass over stored
+    `tiebreak` rows, because everything the question needs is here and nowhere else: the
+    shortlist the model is shown is the ranked `Candidate` objects, and `story_person.
+    candidates` keeps a log of them for a human, not the known-for titles and credit facts a
+    closed-set prompt is built from. A second pass would have to re-gather — one more TMDB
+    request per ambiguous name — to ask a question this one can already ask for free.
+
+    The film is read for its title: the shortlist is film-scoped end to end, and a model asked
+    to choose between two people without being told what they would be choosing them *for* is
+    being asked a different, harder question than the one the pipeline knows the answer to.
+    """
+    film = await session.get(Film, story.film_id)
+    if film is None:
+        raise ValueError(f"story {story.id} is linked to a film that is not in the catalog")
+    result.tiebreak_asked += 1
+    reply = await ask_tiebreak(
+        client=client,
+        model=model,
+        question=TiebreakQuestion(
+            film_title=film.title,
+            film_year=film.release_date.year if film.release_date else None,
+            story_title=story.title,
+            story_text=story_dek(story),
+            mention=mention,
+            evidence_span=row.evidence_span,
+        ),
+        options=[scored.candidate for scored in decision.ranked],
+        calls=calls,
+    )
+    return _with_tiebreak(
+        decision, reply, link_confidence=story.link_confidence, model=model, result=result
+    )
+
+
+def _with_tiebreak(
+    decision: Decision,
+    reply: TiebreakReply,
+    *,
+    link_confidence: float | None,
+    model: str,
+    result: ResolutionResult,
+) -> Decision:
+    """The scored decision, with the model's answer folded into it — three outcomes.
+
+    **An option keeps the `tiebreak` route and gains a person.** The mention is accepted in
+    every sense that matters downstream — `person_id` and `confidence` are written, and INV-6
+    still caps the second against the story's link — but `path` records how it was decided,
+    which is the whole of D-25: a resolution a model made inside the ambiguous band is the one
+    a human is meant to be able to find and check afterwards, and spelling it `accepted` would
+    bury it among the decisions arithmetic made on its own.
+
+    **"None" is `unlinked`**, the ordinary outcome for a mention nothing could be pinned to.
+
+    **A rejected answer changes nothing.** An out-of-list number or an unparseable reply
+    leaves the deterministic decision exactly as scoring wrote it — `tiebreak`, nobody named —
+    with what happened recorded in `features`. Coercing such a reply to its nearest plausible
+    option is the one thing the closed set exists to forbid (`tiebreak.py`), and re-asking is
+    not on offer either: the route is written, so the mention leaves the backlog and sits on
+    the queue a human works rather than buying another call every night forever.
+
+    The confidence on an accept is the **chosen** candidate's score, not the top-ranked one's:
+    the model may well have picked the runner-up, and reporting the winner's number for
+    somebody else's row would overstate a decision the arithmetic explicitly could not make.
+    """
+    asked: dict[str, Any] = {"asked": True, "model": model, "reason": reply.reason}
+    if reply.option is not None:
+        chosen = decision.ranked[reply.option - 1]
+        result.tiebreak_decided += 1
+        return replace(
+            decision,
+            person_id=chosen.person_id,
+            confidence=cap_confidence(chosen.score, link_confidence),
+            features={
+                **decision.features,
+                "tiebreak": {**asked, "answer": reply.option, "person_id": chosen.person_id},
+            },
+        )
+    if reply.answered_none:
+        result.tiebreak_declined += 1
+        return replace(
+            decision,
+            path=Path.UNLINKED,
+            person_id=None,
+            features={**decision.features, "tiebreak": {**asked, "answer": None}},
+        )
+    result.tiebreak_rejected += 1
+    return replace(
+        decision,
+        features={
+            **decision.features,
+            "tiebreak": {
+                **asked,
+                "answer": None,
+                "out_of_list": reply.out_of_list,
+                "unparseable": reply.unparseable,
+            },
+        },
+    )
 
 
 def _mention_from(row: StoryPerson) -> Mention:

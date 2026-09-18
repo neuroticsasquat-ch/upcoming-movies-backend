@@ -83,9 +83,10 @@ models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
   same `name=` in the model), and round-trips the head revision.
 - **Pipelines** take `(session_factory, run_id, …)`, commit per item, and always finalize their run —
   `failed` on crash — because `routers/ingest_admin.py` reuses the same runners.
-- **LLM gateway** resolves a provider per *stage* (link, cluster, summarize, source_judge), never per
-  model, and **never falls back** — answering one stage from another provider would misattribute cost
-  and latency.
+- **LLM gateway** resolves a provider per *stage* (link, cluster, summarize, source_judge, resolve),
+  never per model, and **never falls back** — answering one stage from another provider would
+  misattribute cost and latency. The set is closed: `ingest.llm_call` and `ingest.run_llm_usage`
+  check-constrain `stage` to the same list, so a new stage needs a migration too.
 - **Rate limiting** is one dependency, `Depends(rate_limit("<bucket>"))` (`app/rate_limit.py`):
   per-IP token buckets, in-process, keyed on `request.client.host` — which is the real caller only
   because both CMDs pass `--proxy-headers`. A request signed with `SSR_ORIGIN_SECRET` names its

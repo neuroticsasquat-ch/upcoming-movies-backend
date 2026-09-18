@@ -44,7 +44,8 @@ Facts, not scores, are what each candidate carries: the person row's own fields,
 credits they hold on *this* film, whatever change rows named them, and their filmography as
 TMDB ids (from the search hit's `known_for` and from every catalog film they are credited on)
 so D-21's "filmography overlap with other titles named in the article" has something to
-overlap. Birthday and deathday are listed in D-21's feature set and are deliberately absent
+overlap — plus those known-for titles as text, which is what D-22's closed-set shortlist shows
+a model. Birthday and deathday are listed in D-21's feature set and are deliberately absent
 here: neither `catalog.person` nor anything this repo fetches from TMDB holds them, so the
 age/alive plausibility feature has no input until a schema change supplies one. Inventing
 always-NULL columns for it here would only make the gap harder to see.
@@ -148,6 +149,7 @@ class Candidate:
     credits: tuple[CreditFact, ...] = ()
     changes: tuple[ChangeFact, ...] = ()
     filmography_tmdb_ids: tuple[int, ...] = ()
+    known_for_titles: tuple[str, ...] = ()
 
     @property
     def anchored(self) -> bool:
@@ -433,6 +435,9 @@ def _candidate(
     """
     stored = credited or changed
     known_for_ids = [title.id for title in hit.known_for] if hit is not None else []
+    known_for_titles = (
+        [t.display_title for t in hit.known_for if t.display_title] if hit is not None else []
+    )
     stored_name = stored.name if stored is not None else None
     return Candidate(
         # A candidate only exists because some source produced it, so one of these two is
@@ -457,6 +462,13 @@ def _candidate(
         credits=credited.credits if credited is not None else (),
         changes=changed.changes if changed is not None else (),
         filmography_tmdb_ids=tuple(_dedupe([*known_for_ids, *catalog_filmography])),
+        # Titles as well as ids, because the two are read by different consumers and neither
+        # can serve the other: the scorer overlaps ids (D-21), while D-22's closed-set prompt
+        # shows a human-readable "known for" line — a bare TMDB id tells a model nothing about
+        # which of two same-named people the article meant. Only the search hit carries them;
+        # a candidate the film's own credits produced is identified to the prompt by that
+        # credit, which is the sharper fact anyway.
+        known_for_titles=tuple(dict.fromkeys(known_for_titles)),
     )
 
 

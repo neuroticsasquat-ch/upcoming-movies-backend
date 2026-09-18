@@ -28,6 +28,14 @@ services:
       SOURCE_JUDGE_MODEL: "${SOURCE_JUDGE_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
       SUMMARY_PROVIDER: "${SUMMARY_PROVIDER:-deepinfra}"
       SUMMARY_MODEL: "${SUMMARY_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      # `resolve` is the second stage on the Pro tier, for the same asymmetry as `cluster`:
+      # it is only asked about mentions the deterministic scorer could not separate — two
+      # people TMDB knows by one name (D-22) — and getting that wrong is an alert about
+      # somebody who was never in the story. It answers ≤10% of mentions, so the tier costs
+      # little; routed here explicitly rather than left on the code default so the whole
+      # deployment stays on one provider and one credential.
+      RESOLVE_PROVIDER: "${RESOLVE_PROVIDER:-deepinfra}"
+      RESOLVE_MODEL: "${RESOLVE_MODEL:-deepseek-ai/DeepSeek-V4-Pro}"
       # Both providers in scope are reasoning models, and reasoning tokens count against the
       # reply ceiling while staying invisible in the returned text. The batch size of 20 was
       # derived from a worst-case *Haiku* reply (config.py), so it is the number most likely to
