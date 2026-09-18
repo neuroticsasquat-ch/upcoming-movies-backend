@@ -475,9 +475,10 @@ class FilmReleaseDateChange(Base):
     )
     iso_3166_1: Mapped[str] = mapped_column(Text, nullable=False)
     release_type: Mapped[int] = mapped_column(Integer, nullable=False)
-    """TMDB release `type`; always 2 (limited) or 3 (wide) — `THEATRICAL_RELEASE_TYPES`.
-    Together with `iso_3166_1` this is the *subject*: US limited and US wide are two subjects
-    on one film, and a distributor can move one without the other."""
+    """TMDB release `type`; one of the displayable ones — 2 (limited) or 3 (wide) in US or an
+    origin country, 4 (digital) or 5 (physical) in US only (`release_grade`, D-26).
+    Together with `iso_3166_1` this is the *subject*: US limited, US wide and US digital are
+    three subjects on one film, and a distributor can move one without the others."""
     previous_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     """NULL when the change is `set` — there was no prior date for this subject."""
     new_date: Mapped[date] = mapped_column(Date, nullable=False)

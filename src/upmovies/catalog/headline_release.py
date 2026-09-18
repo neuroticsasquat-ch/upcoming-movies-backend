@@ -7,8 +7,8 @@ the earliest release in any country of any type, and the film page never lists i
 `release_grade`). NEU-1121 already closed the same trap for release-date events.
 
 So the headline release is a **choice among the film's governing release dates** — one per
-`(country, release_type)` subject, earliest row in the subject, restricted to the displayable
-cut `release_grade` defines — not a new quantity:
+`(country, release_type)` subject, earliest row in the subject, restricted to the *theatrical*
+half of the cut `release_grade` defines (`THEATRICAL_RELEASE_TYPES`) — not a new quantity:
 
 1. the earliest **upcoming** governing date (`kind="upcoming"`), today counting as upcoming;
 2. failing that, the most recent **past** one (`kind="released"`) — a watchlist is partly a
@@ -17,6 +17,11 @@ cut `release_grade` defines — not a new quantity:
    the film page's own unlabelled fallback in `public.service.get_film` so the two surfaces
    never disagree. The caller is expected to mark it unconfirmed rather than pass it off as a
    listed date.
+
+**Theatrical only, on purpose**, even though the film page and the calendar now also list the
+US home release (D-26): "the one date this film leads with" is the opening, and a digital date
+three months later must not displace it. D-34's iCal feed wants a VEVENT for *each* of
+theatrical, digital and physical, which is a different question and asks it separately.
 
 The primary is the **last** resort rather than the first precisely because it is the date the
 page declines to show. A film with no displayable row and no primary date has no headline

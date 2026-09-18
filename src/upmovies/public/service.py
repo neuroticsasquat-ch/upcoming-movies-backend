@@ -40,6 +40,7 @@ from upmovies.catalog.release_grade import (
     PRIMARY_REGION,
     RELEASE_TYPE_BUCKETS,
     displayable_regions,
+    is_displayable_release,
 )
 from upmovies.config import get_settings
 from upmovies.news.models import Event, EventStory, EventSummary, Story
@@ -83,6 +84,22 @@ from upmovies.public.sources import cap_sources, outlet_label, source_url
 MIN_QUERY_LEN = 2
 
 CALENDAR_REGION = "US"  # single governing region for v1
+
+# Significance order for two calendar rows sharing a date: the theatrical arc first (a wide
+# opening is the bigger beat than a limited one), then the home release in the order it
+# happens. Ordering only — which types are *on* the calendar is `RELEASE_TYPE_BUCKETS`.
+_CALENDAR_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical")
+
+# A bucket nobody ranked sorts last rather than raising at import: a new displayable type is a
+# cosmetic ordering question, not a reason for the container to refuse to boot.
+_CALENDAR_TYPE_RANK: dict[int, int] = {
+    release_type: (
+        _CALENDAR_BUCKET_ORDER.index(bucket)
+        if bucket in _CALENDAR_BUCKET_ORDER
+        else len(_CALENDAR_BUCKET_ORDER)
+    )
+    for release_type, bucket in RELEASE_TYPE_BUCKETS.items()
+}
 
 _CREW_DEPARTMENT_ORDER = (
     "Directing",
@@ -581,7 +598,10 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         .all()
     )
 
-    # Surface only the theatrical arc (wide + limited); premiere/digital/physical/TV are dropped.
+    # Surface the theatrical arc (wide + limited) in any of those regions, plus the US home
+    # release (digital + physical); premiere and TV are dropped, and so is a home-release date
+    # in an origin country — `is_displayable_release` owns that asymmetry, which is why the
+    # membership test is the predicate rather than the label alone (D-26).
     release_dates = [
         ReleaseDateOut(
             country=row.iso_3166_1,
@@ -591,7 +611,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             certification=row.certification,
         )
         for row in release_date_rows
-        if (label := release_label_for_tmdb_type(row.release_type)) is not None
+        if is_displayable_release(
+            iso_3166_1=row.iso_3166_1,
+            release_type=row.release_type,
+            origin_country=film.origin_country,
+        )
+        and (label := release_label_for_tmdb_type(row.release_type)) is not None
     ]
 
     # If no displayable release dates remain after filtering but the film has a primary
@@ -1186,9 +1211,17 @@ async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[U
     return genres_by_film
 
 
+def _calendar_type_rank(release_type: ColumnElement[int]) -> ColumnElement[int]:
+    """`_CALENDAR_TYPE_RANK` as a SQL expression to sort by, ascending."""
+    return case(_CALENDAR_TYPE_RANK, value=release_type, else_=len(_CALENDAR_BUCKET_ORDER))
+
+
 async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (2, 3) — derived, never drifts
+    # (2, 3, 4, 5) — derived, never drifts. The region filter below is already US-only, which
+    # is exactly the cut the home-release types (4, 5) are displayable in, so widening the
+    # bucket map widens the calendar without a second region rule (D-26).
+    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)
 
     # Governing release date per (film, category): collapse to the earliest date for the
     # subject before applying the upcoming filter (NEU-1206).
@@ -1249,10 +1282,13 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
             .select_from(governing)
             .join(Film, Film.id == governing.c.film_id)
             .where(*visible, governing.c.governing_date.in_(select(window.c.d)))
-            # Within a date, wide (3) before limited (2) → release_type DESC.
+            # Within a date, the theatrical arc leads and the home release follows:
+            # wide, limited, digital, physical (`_CALENDAR_TYPE_RANK`). This used to be
+            # `release_type DESC`, which said the same thing while only 2 and 3 existed but
+            # would float physical (5) above wide (3) now that it does not.
             .order_by(
                 governing.c.governing_date.asc(),
-                governing.c.release_type.desc(),
+                _calendar_type_rank(governing.c.release_type),
                 nulls_last(Film.popularity.desc()),
                 Film.slug.asc(),
             )

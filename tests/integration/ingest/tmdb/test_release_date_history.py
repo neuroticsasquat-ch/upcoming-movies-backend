@@ -105,10 +105,50 @@ async def test_a_foreign_theatrical_date_is_never_recorded(session):
     assert await _changes(session, 1) == []
 
 
-async def test_a_non_theatrical_date_is_never_recorded(session):
-    """Premiere/digital/physical/TV are dropped by the page, so they raise no events either —
-    the primary date being one of these is how the old path cited invisible dates."""
+async def test_an_undisplayed_type_is_never_recorded(session):
+    """Premiere and TV are dropped by the page, so they raise no events either — the primary
+    date being one of these is how the old path cited invisible dates."""
     await upsert_film(session, _details(1, releases=[]))
+    await session.commit()
+
+    await upsert_film(session, _details(1, releases=[_release("US", 1, "2027-12-17")]))
+    await session.commit()
+
+    assert await _changes(session, 1) == []
+
+
+async def test_a_us_home_release_date_is_recorded(session):
+    """D-26: a US digital date is a displayable subject, so setting it is a real change."""
+    await upsert_film(session, _details(1, releases=[]))
+    await session.commit()
+
+    await upsert_film(session, _details(1, releases=[_release("US", 4, "2027-12-17")]))
+    await session.commit()
+
+    (change,) = await _changes(session, 1)
+    assert (change.iso_3166_1, change.release_type, change.change) == ("US", 4, "set")
+    assert change.new_date == date(2027, 12, 17)
+
+
+async def test_a_foreign_home_release_date_is_never_recorded(session):
+    """The home release is US-only even on a film of that origin, so a GB digital date is not
+    a subject and never cards."""
+    await upsert_film(session, _details(1, releases=[], origin=["GB"]))
+    await session.commit()
+
+    await upsert_film(
+        session, _details(1, releases=[_release("GB", 4, "2027-12-17")], origin=["GB"])
+    )
+    await session.commit()
+
+    assert await _changes(session, 1) == []
+
+
+async def test_a_home_release_date_already_in_the_catalog_is_not_a_change(session):
+    """No backfill (ADR-0014). `film_release_date` has stored every type all along, so the
+    first ingest after this cut widens sees the same US digital date on both sides of the
+    diff — the catalog does not card a date it has been holding."""
+    await upsert_film(session, _details(1, releases=[_release("US", 4, "2027-12-17")]))
     await session.commit()
 
     await upsert_film(session, _details(1, releases=[_release("US", 4, "2027-12-17")]))

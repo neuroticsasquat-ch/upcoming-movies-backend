@@ -28,6 +28,24 @@ def test_release_date_set_does_not_zero_pad_the_day():
     ) == ("US wide release date set to 2 August 2026.")
 
 
+def test_home_release_date_uses_the_same_template():
+    # D-26 widens the labels, not the phrasing — one template covers all four buckets.
+    assert render_summary(
+        ReleaseDateChanged(region="US", label="digital", new_date=date(2026, 10, 14))
+    ) == ("US digital release date set to 14 October 2026.")
+
+
+def test_home_release_date_moved_names_both_dates():
+    assert render_summary(
+        ReleaseDateChanged(
+            region="US",
+            label="physical",
+            new_date=date(2026, 12, 1),
+            previous_date=date(2026, 11, 3),
+        )
+    ) == ("US physical release date moved from 3 November 2026 to 1 December 2026.")
+
+
 def test_release_date_moved_names_both_dates():
     assert render_summary(
         ReleaseDateChanged(

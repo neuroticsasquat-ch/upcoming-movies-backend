@@ -54,7 +54,10 @@ class ReleaseDateChanged:
     region: str
     """ISO 3166-1 alpha-2, e.g. `US`."""
     label: str
-    """`limited` or `wide` — `public.release.RELEASE_BUCKET_LABELS` renders the display form."""
+    """`limited`, `wide`, `digital` or `physical` — `public.release.RELEASE_BUCKET_LABELS`
+    renders the display form. One template covers all four: "US digital release date set to
+    14 October 2026" needs no phrasing of its own, and a second one would be the drift this
+    module exists to prevent."""
     new_date: date
     previous_date: date | None = None
     """None when the date is newly *set* for this market; a date when it *moved*."""
