@@ -126,6 +126,19 @@ services:
       # 72h is a placeholder until the M5 spike reads the knee off `film_credit_change`;
       # retuning it is a Coolify change rather than a redeploy.
       SWEEP_CREDIT_QUARANTINE_HOURS: "${SWEEP_CREDIT_QUARANTINE_HOURS:-72}"
+      # Sanity holds (ADR-0017, D-8, NEU-1370). Where quarantine asks whether an edit
+      # survived a window, these ask whether it is possible at all, and they judge the
+      # *person*: how many films one person may be attached to in a day before the whole run
+      # is held as a burst; how long after a recorded death a credit is still ordinary; and
+      # the age below which a seed-grade credit is implausible on its face. All three are
+      # re-tunable from the Coolify UI, and all three refuse a 0 — unlike the two gates above
+      # none has a coherent "off", so turning a check off is a code change. The fallbacks
+      # repeat the code defaults deliberately: unset would pass an empty string and fail to
+      # boot. 20 / 2 / 3 are placeholders set from the shape of the attacks rather than from
+      # measurement; retune once M5 has holds in prod.
+      SWEEP_SANITY_MAX_FILMS_PER_DAY: "${SWEEP_SANITY_MAX_FILMS_PER_DAY:-20}"
+      SWEEP_SANITY_POSTHUMOUS_YEARS: "${SWEEP_SANITY_POSTHUMOUS_YEARS:-2}"
+      SWEEP_SANITY_MIN_AGE_YEARS: "${SWEEP_SANITY_MIN_AGE_YEARS:-3}"
       # Transactional mail (D-30, NEU-1338). Seeded at the code default `noop`, which records
       # and logs every send and transmits nothing, so this lands without a Resend account and
       # without changing what production does. Turning mail on is a Coolify change —

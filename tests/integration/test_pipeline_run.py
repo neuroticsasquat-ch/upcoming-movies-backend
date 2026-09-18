@@ -760,6 +760,30 @@ async def test_sweep_threads_quarantine_hours(session, monkeypatch):
     assert captured["credits"]["quarantine_hours"] == 72
 
 
+async def test_sweep_threads_the_sanity_thresholds_and_a_client(session, monkeypatch):
+    """NEU-1370: all three thresholds reach the credit phase, *and* a TMDB client does — the
+    two date checks are inert without one, so a client that never arrives would leave two
+    thirds of D-8 silently switched off."""
+    _, captured = _stub_phases(monkeypatch)
+    settings = get_settings().model_copy(
+        update={
+            "sweep_sanity_max_films_per_day": 20,
+            "sweep_sanity_posthumous_years": 2,
+            "sweep_sanity_min_age_years": 3,
+        }
+    )
+    run_id = await create_run(session, kind="sweep")
+    await session.commit()
+
+    await pipeline_run.run_sweep_stage(run_id, settings)
+
+    credits = captured["credits"]
+    assert credits["max_films_per_day"] == 20
+    assert credits["posthumous_years"] == 2
+    assert credits["min_age_years"] == 3
+    assert credits["client"] is not None
+
+
 async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkeypatch):
     """The refresh phase is the one the project silently fails without (§6.2), so an
     enumerate that gave up must not take it with it — the cost of trying is bounded by the

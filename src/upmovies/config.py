@@ -99,6 +99,34 @@ class Settings(BaseSettings):
         default=72, ge=0, alias="SWEEP_CREDIT_QUARANTINE_HOURS"
     )
 
+    # The three sanity holds (ADR-0017, D-8, NEU-1370). Where quarantine asks whether an edit
+    # survived, these ask whether it is possible at all, and they hold on the *person* rather
+    # than on the clock. All three are `ge=1`: unlike the two gates above, none has a coherent
+    # "0" — a burst threshold of zero would hold every attachment ever made, and a zero-year
+    # posthumous or age bar would hold every credit of everyone TMDB holds a date for. Turning
+    # one off is a code change, not a Coolify edit, which is the right cost for removing a
+    # defacement check.
+    #
+    # How many films one person may be attached to on one observation day before every one of
+    # those attachments is held as a burst. 20 is a placeholder set from the shape of the
+    # attack rather than from measurement: a real person reaching twenty *new* seed-grade
+    # credits inside a day is vanishingly rare, and one attachment run of a vandalised person
+    # id routinely passes it. Retune against `film_credit_change` once M5 has holds in prod.
+    sweep_sanity_max_films_per_day: int = Field(
+        default=20, ge=1, alias="SWEEP_SANITY_MAX_FILMS_PER_DAY"
+    )
+    # How long after a recorded death a credit is still ordinary. Completed films, archive
+    # footage and posthumous voice work all land inside a couple of years, so the check is for
+    # credits arriving long after — 2 years, which is comfortably past the release lag of a
+    # film that was already shooting.
+    sweep_sanity_posthumous_years: int = Field(
+        default=2, ge=1, alias="SWEEP_SANITY_POSTHUMOUS_YEARS"
+    )
+    # The age below which a seed-grade credit is implausible on its face. 3 rather than 5:
+    # infants really are cast, and a bar set where a genuine credit lives would hold real
+    # casting announcements to catch a vandal who could equally have typed 1 as 4.
+    sweep_sanity_min_age_years: int = Field(default=3, ge=1, alias="SWEEP_SANITY_MIN_AGE_YEARS")
+
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the
     # three tranche flags below so a rollback is one move and does not disturb the ramp.

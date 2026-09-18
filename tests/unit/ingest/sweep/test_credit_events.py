@@ -4,13 +4,15 @@ The rule with teeth here is the grouping: TMDB gains a whole top-billed cast bet
 ingests, and the difference between one card and five is entirely in this function.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from uuid import uuid4
 
 from upmovies.ingest.sweep.credit_events import (
     AttachedCredit,
     credit_role,
     group_attachments,
+    observation_day,
+    years_before,
 )
 from upmovies.synthesize.deterministic import CreditAttached
 
@@ -177,3 +179,28 @@ def test_the_same_person_twice_in_one_observation_is_named_once():
 
 def test_nothing_read_is_nothing_grouped():
     assert group_attachments([]) == []
+
+
+# ── Sanity-hold date arithmetic (D-8, NEU-1370) ───────────────────────────
+
+
+def test_years_before_moves_whole_years():
+    """Whole years, not `365 * n` days: both checks are stated in years and are read against
+    birthdays, so "under 3 at the time" has to mean what it means on a passport."""
+    assert years_before(date(2026, 9, 18), 3) == date(2023, 9, 18)
+    assert years_before(date(2026, 9, 18), 2) == date(2024, 9, 18)
+
+
+def test_years_before_lands_a_leap_day_on_the_28th():
+    """29 February has no counterpart in a common year, and `replace` raises rather than
+    guessing — so the guess is made here, in the direction that never *shortens* the bar."""
+    assert years_before(date(2024, 2, 29), 3) == date(2021, 2, 28)
+
+
+def test_the_observation_day_is_the_utc_day():
+    """The bucket the burst check counts in. A local boundary would split one editor's evening
+    across two days and merge two others' into one."""
+    assert observation_day(datetime(2026, 9, 18, 23, 30, tzinfo=UTC)) == date(2026, 9, 18)
+    assert observation_day(
+        datetime(2026, 9, 19, 1, 30, tzinfo=timezone(timedelta(hours=4)))
+    ) == date(2026, 9, 18)

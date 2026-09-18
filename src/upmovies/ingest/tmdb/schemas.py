@@ -349,3 +349,28 @@ class TMDBPersonSearchResponse(BaseModel):
     results: list[TMDBPersonSearchHit] = Field(default_factory=list)
     total_pages: int
     total_results: int
+
+
+class TMDBPersonDetails(BaseModel):
+    """A person as `/person/{id}` returns them — the only TMDB endpoint that carries birth and
+    death dates (NEU-1370).
+
+    Neither credits endpoint the sweep already calls returns them, which is the whole reason
+    this request exists; it is made lazily, once per person, and only for people a credit
+    event is about to name. The other four fields are the overlap with `catalog.person`, kept
+    so the one fetch refreshes what it has seen rather than writing dates beside a stale
+    `popularity` it just received a fresher value for.
+
+    `birthday`/`deathday` go through `OptionalDate` because TMDB answers `""` as readily as
+    `null` for a person it holds no date for, and a living person is indistinguishable here
+    from one whose death nobody has recorded — see `catalog.person.deathday`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    birthday: OptionalDate = None
+    deathday: OptionalDate = None
+    popularity: float | None = None
+    profile_path: str | None = None
+    known_for_department: str | None = None

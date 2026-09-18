@@ -613,9 +613,31 @@ sweep's credit phase (NEU-1368): an `added` row is eligible only once the window
 written while a row is held — there is no `pending` state anywhere, the rolling
 `SWEEP_EVENT_LOOKBACK_DAYS` window *is* the queue, which is why the hold must stay inside it
 (refused at boot by `validate_sweep_configuration`). Held rows are counted as **held** on the
-sweep detail line, apart from carded and already-carded.
+sweep detail line, apart from carded and already-carded. It is followed by the **sanity
+holds** (NEU-1370), which judge the person rather than the clock and do leave a row.
 _Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
 moderation.
+
+**Sanity hold**:
+A credit attachment the sweep withholds from carding because of something about the *person*
+rather than the clock — the check **quarantine** cannot make. Three reasons, and they are the
+closed set `ingest.credit_hold.reason` enforces: `burst` (this person has ≥
+`SWEEP_SANITY_MAX_FILMS_PER_DAY` still-attached seed-grade credits observed on one UTC day),
+`deceased` (the credit lands more than `SWEEP_SANITY_POSTHUMOUS_YEARS` after a recorded
+`deathday`), and `implausible_age` (the person is under `SWEEP_SANITY_MIN_AGE_YEARS` at the
+observation). It **holds, never discards**: a hold that turns out to be real still publishes.
+A row is *open* while `released_at IS NULL` and the backlog reads past it; it ends `cleared`
+(the condition lifted — only `burst` can, and its survivors card on that same pass),
+`manual` (an admin released it, and no check may hold that change again), or `expired` (the
+change aged out of `SWEEP_EVENT_LOOKBACK_DAYS`, so nothing cards). Birth and death dates are
+fetched from `/person/{id}` **lazily, once, only for people about to be carded**, and
+`catalog.person.details_observed_at` is what makes it once.
+**The `burst` hold reason is not the glossary's Burst below.** They are different concepts
+that the spec gives the same word: a *burst hold* is one person across many films in a day
+(vandalism), while a **Burst** is many credits on *one* film collapsed into one card (D-7).
+The first withholds cards; the second shapes them. Say "burst hold" when you mean the reason.
+_Avoid_: quarantine (that is the time-keyed gate this sits after), block, reject, flag,
+suppress (that is per-person removal-aware suppression), ban.
 
 **Burst**:
 Every credit attachment for one film and one event type that a single **sweep** pass cards

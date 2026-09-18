@@ -15,6 +15,7 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBDiscoverResponse,
     TMDBMovieDetails,
     TMDBMovieSummary,
+    TMDBPersonDetails,
     TMDBPersonMovieCredits,
     TMDBPersonSearchHit,
     TMDBPersonSearchResponse,
@@ -281,6 +282,20 @@ class TMDBClient:
         url = f"{self._base_url}/person/{person_id}/movie_credits"
         resp = await self._request("GET", url)
         return TMDBPersonMovieCredits.model_validate(resp.json())
+
+    async def person_details(self, person_id: int) -> TMDBPersonDetails:
+        """Fetch one person from `/person/{id}` — the only endpoint carrying `birthday` and
+        `deathday`, which the sanity holds are decided on (NEU-1370).
+
+        No `append_to_response`: the caller wants the person record and nothing hanging off
+        it, and the filmography it might otherwise append is the one thing the sweep already
+        reads through `person_movie_credits` on its own cadence.
+
+        A 404 raises `TMDBNotFound` like every other id-addressed method here, so the caller
+        can tombstone the person rather than count an outage."""
+        url = f"{self._base_url}/person/{person_id}"
+        resp = await self._request("GET", url)
+        return TMDBPersonDetails.model_validate(resp.json())
 
     # --- v3 user authorization and the account lists (D-16) ---------------------------------
     #
