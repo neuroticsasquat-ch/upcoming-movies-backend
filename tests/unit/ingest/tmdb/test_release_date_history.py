@@ -33,10 +33,23 @@ class TestDisplayableCut:
         # Cliffhanger: origin US, only release row is German. The page shows nothing.
         assert not is_displayable_release(iso_3166_1="DE", release_type=3, origin_country=["US"])
 
-    def test_non_theatrical_types_are_not_displayable(self):
-        for non_theatrical in (1, 4, 5, 6):  # premiere, digital, physical, TV
+    def test_premiere_and_tv_are_not_displayable(self):
+        for undisplayed in (1, 6):  # premiere, TV
             assert not is_displayable_release(
-                iso_3166_1="US", release_type=non_theatrical, origin_country=["US"]
+                iso_3166_1="US", release_type=undisplayed, origin_country=["US"]
+            )
+
+    def test_us_home_release_is_displayable(self):
+        # D-26: digital (4) and physical (5) join the cut, US only.
+        for home in (4, 5):
+            assert is_displayable_release(iso_3166_1="US", release_type=home, origin_country=["GB"])
+
+    def test_origin_country_home_release_is_not_displayable(self):
+        # The asymmetry the theatrical arc does not have: a GB digital date on a GB film is
+        # still not the answer to "when can I watch this at home?" for a US audience.
+        for home in (4, 5):
+            assert not is_displayable_release(
+                iso_3166_1="GB", release_type=home, origin_country=["GB"]
             )
 
     def test_us_is_always_in_the_region_set(self):
@@ -114,10 +127,11 @@ class TestFromRows:
         from upmovies.ingest.tmdb.release_date_history import displayable_from_rows
 
         rows = [
-            ("DE", 3, datetime(2027, 6, 1, tzinfo=UTC)),
-            ("US", 4, datetime(2027, 6, 1, tzinfo=UTC)),
+            ("DE", 3, datetime(2027, 6, 1, tzinfo=UTC)),  # foreign theatrical
+            ("US", 1, datetime(2027, 6, 1, tzinfo=UTC)),  # premiere
+            ("GB", 4, datetime(2027, 6, 1, tzinfo=UTC)),  # home release outside US
         ]
-        assert displayable_from_rows(rows, origin_country=["US"]) == []
+        assert displayable_from_rows(rows, origin_country=["US", "GB"]) == []
 
 
 class TestGoverningReleaseDate:

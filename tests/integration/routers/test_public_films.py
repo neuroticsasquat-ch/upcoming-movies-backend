@@ -248,11 +248,11 @@ async def test_detail_excludes_other_events(client, make_film, add_event):
 # ── release_dates projection tests ───────────────────────────────────────────
 
 
-async def test_detail_exposes_theatrical_release_dates(
+async def test_detail_exposes_displayable_release_dates(
     client, make_film, add_event, add_release_date
 ):
-    """Only theatrical-arc dates (limited + wide) surface, labeled like the calendar;
-    premiere (1) and digital (4) are dropped."""
+    """The theatrical arc (limited + wide) and the US home release (digital + physical)
+    surface, labeled like the calendar; premiere (1) and TV (6) are dropped (D-26)."""
     film = await make_film(slug="rd-us-2026", title="US Dates Film")
     await add_event(film=film, summary="Event.")
     await add_release_date(
@@ -278,16 +278,29 @@ async def test_detail_exposes_theatrical_release_dates(
     await add_release_date(
         film=film,
         iso_3166_1="US",
-        release_type=4,  # digital — excluded
+        release_type=6,  # TV — excluded
+        release_date=datetime(2026, 6, 2, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=4,  # digital
         release_date=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=5,  # physical
+        release_date=datetime(2026, 9, 15, tzinfo=UTC),
     )
 
     r = await client.get("/films/rd-us-2026")
     assert r.status_code == 200
     body = r.json()
     rds = body["release_dates"]
-    assert len(rds) == 2
-    # ordered by release_date asc: limited (June 10) before wide (July 17)
+    assert len(rds) == 4
+    # ordered by release_type asc, which for one market reads as the release arc itself:
+    # limited (June 10), wide (July 17), digital (Aug 1), physical (Sept 15)
     assert rds[0]["date"].startswith("2026-06-10")
     assert rds[0]["release_type"] == 2
     assert rds[0]["type_label"] == "Limited"
@@ -296,6 +309,43 @@ async def test_detail_exposes_theatrical_release_dates(
     assert rds[1]["release_type"] == 3
     assert rds[1]["type_label"] == "Wide"
     assert rds[1]["certification"] == "PG-13"
+    assert rds[2]["date"].startswith("2026-08-01")
+    assert rds[2]["release_type"] == 4
+    assert rds[2]["type_label"] == "Digital"
+    assert rds[3]["date"].startswith("2026-09-15")
+    assert rds[3]["release_type"] == 5
+    assert rds[3]["type_label"] == "Physical"
+
+
+async def test_detail_drops_an_origin_country_home_release_date(
+    client, make_film, add_event, add_release_date, session
+):
+    """The home release is US-only (D-26): a GB digital date on a GB film is not "when can I
+    watch this at home?", while the GB *theatrical* date beside it is the film's own market."""
+    film = await make_film(slug="rd-gb-home-2026", title="Home Abroad")
+    film.origin_country = ["GB"]
+    session.add(film)
+    await session.commit()
+    await session.refresh(film)
+
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="GB",
+        release_type=3,
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="GB",
+        release_type=4,  # GB digital — excluded
+        release_date=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    r = await client.get("/films/rd-gb-home-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    assert [(rd["country"], rd["release_type"]) for rd in rds] == [("GB", 3)]
 
 
 async def test_detail_excludes_non_home_region_dates(

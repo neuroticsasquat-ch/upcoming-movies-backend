@@ -400,6 +400,10 @@ async def _rebuild_release_dates(
     if not details.release_dates or not details.release_dates.results:
         return
 
+    # Every type TMDB returns, filtered by nothing but a missing date. Narrowing this to the
+    # displayable cut would look like a saving and would cost the no-backfill property
+    # `catalog.release_grade` documents: a type admitted by a later widening has to already be
+    # stored, or its first ingest reads it as a date newly *set* and cards the whole catalog.
     rows = [
         {
             "film_id": film_id,
