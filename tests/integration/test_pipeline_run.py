@@ -747,6 +747,19 @@ async def test_sweep_threads_dwell_days(session, monkeypatch):
     assert captured["credit removals"]["dwell_days"] == 3
 
 
+async def test_sweep_threads_quarantine_hours(session, monkeypatch):
+    """NEU-1368: the credit attachment phase receives the configured quarantine window. The
+    runner defaults it to 0 — no hold — so a value that never arrives is invisible."""
+    _, captured = _stub_phases(monkeypatch)
+    settings = get_settings().model_copy(update={"sweep_credit_quarantine_hours": 72})
+    run_id = await create_run(session, kind="sweep")
+    await session.commit()
+
+    await pipeline_run.run_sweep_stage(run_id, settings)
+
+    assert captured["credits"]["quarantine_hours"] == 72
+
+
 async def test_sweep_stage_refreshes_even_when_enumerate_aborted(session, monkeypatch):
     """The refresh phase is the one the project silently fails without (§6.2), so an
     enumerate that gave up must not take it with it — the cost of trying is bounded by the

@@ -93,7 +93,15 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 
 - **`db:refresh` silently reverts migrations.** Restores catalog/news/ingest from prod but leaves `app` alone. Alembic version lives in `app`, so `alembic current` still reads head while tables are gone. Re-apply with `alembic stamp <prod's rev> && task migrate`.
 - **Coolify shadows compose fallbacks:** a `${NAME:-default}` in compose is a seed, not a runtime default. After first deploy, Coolify stores the value and edits to the fallback are silent no-ops in prod. Change the value in the Coolify UI and restart.
-- **Deploy checklist for tuned constants** (T, K, dormancy, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
+- **Deploy checklist for tuned constants** (T, K, dormancy, `SWEEP_CREDIT_QUARANTINE_HOURS`, etc.): change code default → change `docker-compose.prod.yml` → edit Coolify UI → verify with `printenv` on the running container.
+- **`SWEEP_CREDIT_QUARANTINE_HOURS` must stay under `SWEEP_EVENT_LOOKBACK_DAYS` (NEU-1368, ADR-0017 D-3).**
+  In hours: 72 against 7 days = 168. The attachment hold has no queue table — the rolling lookback
+  *is* the queue — so a hold at or past the window means every attachment ages out before it is
+  eligible and the credit half quietly stops carding. `validate_sweep_configuration` refuses the
+  boot for that reason — in `pipeline_run` only, not the API, so a bad value fails the **hourly
+  task** (and its healthchecks.io deadman) within the hour rather than taking the site down.
+  Raising the window means raising `SWEEP_EVENT_LOOKBACK_DAYS` *first*, in the same Coolify
+  edit; both are seeded in `docker-compose.prod.yml`. `0` disables the hold and is exempt.
 - **Rate limiter rollout is three deploys, in order (NEU-1344, spec §5).** `RATE_LIMIT_PUBLIC_ENABLED`
   ships `false` and must stay false until the SSR Worker signs its requests: the site is rendered on
   a Cloudflare Worker, so until then every anonymous visitor reaches the API from a handful of shared

@@ -459,7 +459,10 @@ wherever the vocabulary is enumerated (`ck_event_type`, the arc's `_EVENT_STAGE`
 because a director attaching to a film no trade has written about is the beat the whole expansion
 exists for. A re-attachment after a **credit detachment event** is carded rather than suppressed
 — the suppression check is removal-aware, so a person whose latest card is a removal re-enters
-the timeline on the next attachment.
+the timeline on the next attachment. It is held by **quarantine** before it cards at all
+(`SWEEP_CREDIT_QUARANTINE_HOURS`, NEU-1368): the attachment-side mirror of the forward-dwell
+gate on the detachment event, and the reason a reverted edit now publishes nothing rather than
+publishing and being superseded.
 _Avoid_: casting event (that is one of the two types, not the pair), crew change, credit diff
 (that is the history row it reads).
 
@@ -604,6 +607,13 @@ that were never true — vandalism, misfiles — **not** real-world churn: an ac
 in March and leaving in June is two beats and both publish. It is keyed in time, from the
 observation, and its length is set from the survival curve of real changes, not guessed. The
 live cast list is never held: **state mirrors TMDB immediately**; only *events* wait.
+Implemented for attachments as `SWEEP_CREDIT_QUARANTINE_HOURS` (default 72, 0 disables) in the
+sweep's credit phase (NEU-1368): an `added` row is eligible only once the window has passed
+**and** the credit is still in `catalog.film_credit` under the same seed-grade role. Nothing is
+written while a row is held — there is no `pending` state anywhere, the rolling
+`SWEEP_EVENT_LOOKBACK_DAYS` window *is* the queue, which is why the hold must stay inside it
+(refused at boot by `validate_sweep_configuration`). Held rows are counted as **held** on the
+sweep detail line, apart from carded and already-carded.
 _Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
 moderation.
 

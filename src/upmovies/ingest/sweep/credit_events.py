@@ -22,6 +22,15 @@ and three cards about one beat, and `uq_event_catalog_change` enforces the same 
 structurally: one catalog event per film, type and timestamp. Detachments share the same
 grouping discipline — one `credit_removed` card per (film, changed_at).
 
+**An attachment is quarantined before it cards** (ADR-0017, D-3). A `change='added'` row is
+eligible only once it has survived `SWEEP_CREDIT_QUARANTINE_HOURS` *and* the credit is still
+in `catalog.film_credit` under the same seed-grade role. TMDB is community-edited, and the
+edit this suppresses is the one that was never true — vandalism reverted within the hour,
+a misfiled credit — which under immediate carding published a beat and then needed a
+correction card to take it back. Nothing is written while a row is held: the rolling window
+*is* the queue, re-read and re-judged on every pass, which is why the hold has to stay inside
+it. The live cast list is never held — state mirrors TMDB immediately, only events wait.
+
 **A removal card supersedes the attachment card it corrects** (ADR-0017, D-2). Carding a
 `credit_removed` event marks, for each person it names, their most recent published
 attachment card (`crew_attached`/`casting`, any provenance, occurred before the removal)
@@ -44,8 +53,8 @@ from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import FilmCreditChange, Person
-from upmovies.catalog.seed_grade import crew_role
+from upmovies.catalog.models import FilmCredit, FilmCreditChange, Person
+from upmovies.catalog.seed_grade import crew_role, is_seed_grade
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
@@ -98,6 +107,17 @@ class CreditEventResult:
     skipped: int = 0
     """Groups that were already carded — by an earlier pass over the same rolling window, or
     by a trade story that reported the attachment first. The steady state, not a problem."""
+    held: int = 0
+    """Attachments the quarantine gate withheld this pass (D-3): still inside the window, or
+    already gone from `catalog.film_credit` and so never true. Not a failure and not a skip —
+    a held row is re-read on every pass until it either cards or falls out of the rolling
+    window.
+
+    The two reasons are deliberately one number, and it is therefore not a health signal: a
+    reverted row is withheld on every pass until it ages out, so in steady state it dominates
+    the count, and a high `held` reads as quarantine doing its job rather than as a window set
+    too long. Splitting them is `ingest.credit_hold`'s job (D-8), which logs a reason per held
+    item and is where a per-reason count belongs."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -216,6 +236,94 @@ async def load_attachment_backlog(
     return attached
 
 
+async def _present_seed_roles(
+    session: AsyncSession, *, film_ids: set[UUID]
+) -> set[tuple[UUID, int, str]]:
+    """Every `(film, person, seed-grade role)` that `catalog.film_credit` holds *right now*
+    for these films. One query for the whole backlog rather than one per attachment: the
+    quarantine gate asks this of every aged row, and the rolling window makes that the same
+    rows on every pass for as long as the hold lasts.
+
+    Seed grade is re-derived here rather than assumed from the change row that recorded the
+    attachment. `film_credit` is delete-and-rebuilt on every ingest, and a cast member who has
+    since slipped out of the top-5 billing no longer holds a seed-grade credit — which is
+    exactly how `credit_history` would diff them, as removed. Reading the same predicate is
+    what stops the two disagreeing about what "still attached" means.
+    """
+    if not film_ids:
+        return set()
+    stmt = select(
+        FilmCredit.film_id,
+        FilmCredit.person_id,
+        FilmCredit.credit_type,
+        FilmCredit.job,
+        FilmCredit.credit_order,
+    ).where(FilmCredit.film_id.in_(film_ids))
+    present: set[tuple[UUID, int, str]] = set()
+    for row in await session.execute(stmt):
+        if not is_seed_grade(row.credit_type, row.job, row.credit_order):
+            continue
+        role = credit_role(row.credit_type, row.job)
+        if role is not None:
+            present.add((row.film_id, row.person_id, role))
+    return present
+
+
+async def quarantine_attachments(
+    session: AsyncSession,
+    *,
+    attachments: list[AttachedCredit],
+    now: datetime,
+    quarantine_hours: int,
+) -> tuple[list[AttachedCredit], list[AttachedCredit]]:
+    """Split the backlog into the attachments eligible to card and the ones still held
+    (ADR-0017, D-3). Returns `(eligible, held)`.
+
+    Two conditions, both required. An attachment is eligible only once
+    `changed_at + quarantine_hours <= now` — the window is fully observed — **and** the credit
+    is still in `catalog.film_credit` under the same seed-grade role. The second is what makes
+    this a quarantine rather than a delay: an edit reverted inside the window is not a beat
+    that happened late, it is a beat that never happened, and it must publish nothing at all.
+
+    Both conditions are re-evaluated from scratch on every pass, because both are properties
+    of *now* rather than of the row. No `pending` state is written anywhere: the rolling
+    window is the queue, which is why the hold must stay inside it
+    (`validate_sweep_configuration`).
+
+    This is the attachment-side generalisation of NEU-1205's forward-dwell gate, and the two
+    are deliberately not one function. The removal gate asks whether the person came *back*
+    within the window, reading raw history because a flap's re-attachment is never carded;
+    this one asks whether they are *still here*, reading live state. Same shape, opposite
+    sources.
+
+    `0` disables both conditions together, reverting to immediate carding — the setting is one
+    switch, and holding a credit for no time while still requiring it to be present would be a
+    third behaviour nobody asked for.
+
+    A reverted attachment counts as held rather than as its own outcome. It will be re-read
+    and re-held on every pass until it falls out of the rolling window, which is the correct
+    end state — there is no card to write and nothing to remember.
+    """
+    if quarantine_hours <= 0 or not attachments:
+        return attachments, []
+    hold = timedelta(hours=quarantine_hours)
+    aged: list[AttachedCredit] = []
+    held: list[AttachedCredit] = []
+    for attached in attachments:
+        # `<=`, so an attachment lands the pass it turns eligible rather than the one after.
+        (aged if attached.changed_at + hold <= now else held).append(attached)
+    if not aged:
+        return [], held
+    present = await _present_seed_roles(session, film_ids={a.film_id for a in aged})
+    eligible: list[AttachedCredit] = []
+    for attached in aged:
+        if (attached.film_id, attached.person_id, attached.role) in present:
+            eligible.append(attached)
+        else:
+            held.append(attached)
+    return eligible, held
+
+
 async def _already_carded(
     session: AsyncSession, *, film_id: UUID, event_type: str, changed_at: datetime
 ) -> bool:
@@ -320,23 +428,42 @@ async def run_credit_attachment_events(
     run_id: UUID,
     now: datetime,
     lookback_days: int,
+    quarantine_hours: int = 0,
     failure_threshold: int = 10,
 ) -> CreditEventResult:
-    """Card every seed-grade credit attachment TMDB recorded in the window."""
+    """Card every seed-grade credit attachment TMDB recorded in the window, less the ones
+    quarantine is still holding.
+
+    `quarantine_hours` defaults to 0 — no hold — rather than to the setting's 72, the same way
+    the detachment phase's `dwell_days` does: the caller that has a `Settings` passes the
+    tuned value, and every other caller gets the pre-D-3 behaviour it was written against.
+    """
     result = CreditEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
     heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
     async with owned_session(session_factory) as s:
-        attachments = await load_attachment_backlog(s, since=since)
-    result.attachments_read = len(attachments)
+        backlog = await load_attachment_backlog(s, since=since)
+        # Same session as the load: the quarantine gate reads live `film_credit` state
+        # against the backlog it just read, and a second session could straddle a refresh
+        # that rebuilt those rows mid-check.
+        attachments, held = await quarantine_attachments(
+            s, attachments=backlog, now=now, quarantine_hours=quarantine_hours
+        )
+    # The whole backlog, not what survived the gate: "read 40, carded 2, held 37" is the
+    # shape that says the phase is working, and netting the held rows out of the read count
+    # would make a quarantine that holds everything look like an empty window.
+    result.attachments_read = len(backlog)
+    result.held = len(held)
     groups = group_attachments(attachments)
     log.info(
-        "credit events: %d attachments in %d groups since %s",
+        "credit events: %d attachments in %d groups since %s (%d held, quarantine %dh)",
         result.attachments_read,
         len(groups),
         since.isoformat(),
+        result.held,
+        quarantine_hours,
     )
 
     for group in groups:
@@ -373,9 +500,10 @@ async def run_credit_attachment_events(
             result.skipped += 1
 
     log.info(
-        "credit events: %d created, %d already carded, %d failed",
+        "credit events: %d created, %d already carded, %d held, %d failed",
         result.events_created,
         result.skipped,
+        result.held,
         result.failures,
     )
     return result

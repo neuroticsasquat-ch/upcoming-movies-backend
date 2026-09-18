@@ -19,6 +19,20 @@ what the open tranche let in and what stopped the rest, and a bare total leaves 
 is still closed" and "they were all below the corroboration threshold" — one an env change
 away from each other — indistinguishable (NEU-1086).
 
+The credits clause reports **held** (NEU-1368) apart from both carded and already-carded,
+because quarantine (D-3) makes "nothing carded" ambiguous: a pass that read an empty window
+and a pass that withheld everything it read are otherwise the same line. It counts attachment
+*rows*, not groups, unlike the counters either side of it — a held row has no group, because
+grouping happens after the gate.
+
+Read it against `attachments_read`, not on its own, and **not** as a health signal. It merges
+the two reasons a row is withheld — still inside the window, and already reverted — and in
+steady state the second dominates, which is the feature working rather than a fault. What it
+answers is "did the gate see this backlog at all"; what it cannot answer is whether the window
+is tuned right. The window being wider than the rolling lookback, the one tuning fault that
+would silently cost every attachment, is refused at boot instead
+(`validate_sweep_configuration`).
+
 The derivation clause (NEU-1352) reports the users it considered beside the items it wrote,
 because `0 items` is the healthy steady state — most sweeps qualify nothing new for anybody —
 and on its own it is indistinguishable from the pass selecting nobody at all, which is what a
@@ -98,7 +112,8 @@ def sweep_detail(
         f"{carded.skipped} already carded, {carded.failures} failed",
         f"credits: {attached.events_created} carded from "
         f"{attached.attachments_read} attachments, "
-        f"{attached.skipped} already carded, {attached.failures} failed",
+        f"{attached.skipped} already carded, {attached.held} held, "
+        f"{attached.failures} failed",
         f"credit removals: {detached.events_created} carded from "
         f"{detached.detachments_read} detachments, "
         f"{detached.skipped} already carded, {detached.failures} failed",

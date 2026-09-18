@@ -54,6 +54,7 @@ from upmovies.ingest.sweep import (
     run_sweep_refresh,
     run_watchlist_derivation,
     sweep_detail,
+    validate_sweep_configuration,
 )
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
@@ -263,6 +264,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             run_id=run_id,
             now=now,
             lookback_days=settings.sweep_event_lookback_days,
+            quarantine_hours=settings.sweep_credit_quarantine_hours,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
         # The detachment half (NEU-1200), on the same terms and the same window as the
@@ -486,6 +488,18 @@ def main(argv: list[str] | None = None) -> int:
     if mode != "sweep":
         validate_stage_configuration(settings)
         validate_mail_configuration(settings)
+    # Unconditional, and so deliberately outside the exemption above: this one is the sweep's
+    # *own* configuration (NEU-1368). The exemption exists so an unrelated LLM or mail typo
+    # cannot fail the one mode that is kept out of the daily chain's shared failure modes —
+    # it is not a general licence for the sweep to start unchecked, and a quarantine window
+    # wider than the rolling lookback is a sweep that silently stops carding attachments.
+    #
+    # Here and **not** in the app's lifespan, unlike the three guards above it. The API never
+    # runs the sweep, so refusing its boot over this would trade the website for a batch
+    # setting it does not read. This process is the one that pays, and `hourly` runs it every
+    # hour — so a bad Coolify value surfaces within the hour as a failed task and a
+    # healthchecks.io `/fail`, which is the alerting path, with the site still up.
+    validate_sweep_configuration(settings)
     if mode == "daily":
         ok = asyncio.run(run_daily(settings))
     elif mode == "hourly":

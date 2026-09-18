@@ -12,8 +12,8 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from tests.fixtures.catalog import add_film
-from upmovies.catalog.models import FilmCreditChange, Person
+from tests.fixtures.catalog import add_credit, add_film
+from upmovies.catalog.models import FilmCredit, FilmCreditChange, Person
 from upmovies.ingest.sweep import credit_events, run_credit_attachment_events
 from upmovies.ingest.sweep.credit_events import (
     _card_detachment_group,
@@ -33,6 +33,10 @@ from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL, TEMPLATE_VERS
 NOW = datetime(2026, 8, 10, 2, 0, tzinfo=UTC)
 YESTERDAY = NOW - timedelta(days=1)
 LOOKBACK_DAYS = 7
+QUARANTINE_HOURS = 72
+# Old enough to have cleared a 72h hold, young enough to still be inside the 7-day window —
+# the band every quarantine test that expects a card has to sit in.
+AGED = NOW - timedelta(hours=QUARANTINE_HOURS + 1)
 
 
 async def _person(session, person_id: int, name: str) -> Person:
@@ -103,6 +107,20 @@ async def _events(session, film):
         (
             await session.execute(
                 select(Event).where(Event.film_id == film.id).order_by(Event.event_type),
+                execution_options={"populate_existing": True},
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _credits(session, film):
+    """The live cast/crew list — `catalog.film_credit` as the app would render it."""
+    return (
+        (
+            await session.execute(
+                select(FilmCredit).where(FilmCredit.film_id == film.id),
                 execution_options={"populate_existing": True},
             )
         )
@@ -394,6 +412,171 @@ async def test_consecutive_failures_abort_the_phase(session, session_factory, ru
     assert result.failures == 1
     # The abort happens inside the exception handler, before events_created is incremented.
     assert result.events_created == 0
+
+
+# ── Attachment quarantine (NEU-1368, ADR-0017 D-3) ─────────────────────────
+
+
+async def _still_attached(
+    session, film, person, *, credit_type="crew", job: str | None = "Director", credit_order=None
+):
+    """Put the credit in `catalog.film_credit` — the live-state half of the gate. A test that
+    omits this is asserting the *reverted* case, not merely leaving setup out.
+
+    `credit_order` is load-bearing for a cast row and meaningless for a crew one: seed grade
+    for cast *is* the top-5 billing, so a cast credit written without one is not present as
+    far as this gate is concerned.
+    """
+    await add_credit(
+        session,
+        film,
+        person.id,
+        credit_type=credit_type,
+        job=job,
+        credit_order=credit_order,
+    )
+
+
+async def _quarantined(session_factory, run_id, **overrides):
+    return await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, **overrides)
+
+
+async def test_an_attachment_inside_the_window_is_held_rather_than_carded(
+    session, session_factory, run_id
+):
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert await _events(session, film) == []
+    # Read, not carded, not skipped: the row is still in play and will be re-judged next pass.
+    assert (result.attachments_read, result.held) == (1, 1)
+    assert (result.events_created, result.skipped) == (0, 0)
+
+
+async def test_an_attachment_reverted_inside_the_window_never_cards(
+    session, session_factory, run_id
+):
+    """D-3's whole point, and the project-level acceptance clause: added and reverted inside
+    the window produces zero events *and* a correct live cast list throughout. The credit row
+    is deliberately absent — that is what the revert looks like once the next ingest rebuilds
+    `film_credit` — and the attachment has aged past the hold, so only presence is stopping
+    it."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person, changed_at=AGED)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert await _events(session, film) == []
+    assert (result.attachments_read, result.held, result.events_created) == (1, 1, 0)
+    # The state half is untouched: quarantine holds *events*, never the live cast list.
+    assert await _credits(session, film) == []
+
+
+async def test_an_attachment_that_survives_the_window_cards_once(session, session_factory, run_id):
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert (result.events_created, result.held) == (1, 0)
+    (event,) = await _events(session, film)
+    # The beat keeps the time it *happened*, not the time the hold released it — the
+    # publication axis is `created_at` (ADR-0016), and this is the other one.
+    assert event.occurred_at == AGED
+    assert event.subject_key == ["denis villeneuve"]
+
+    # And only once: the rolling window re-reads it on the next pass.
+    again = await _quarantined(session_factory, run_id)
+    assert (again.events_created, again.skipped, again.held) == (0, 1, 0)
+    assert len(await _events(session, film)) == 1
+
+
+async def test_the_hold_releases_the_pass_the_window_closes(session, session_factory, run_id):
+    """Exactly at the boundary, not the pass after it: the gate is `changed_at + N <= now`."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person, changed_at=NOW - timedelta(hours=QUARANTINE_HOURS))
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert result.events_created == 1
+
+
+async def test_a_credit_present_in_another_role_is_still_held(session, session_factory, run_id):
+    """Presence is scoped to the seed-grade role the attachment recorded. A performer whose
+    directing credit was reverted is still in the cast, and the cast row must not release the
+    directing beat — the mirror of the removal gate's role scoping (NEU-1205)."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Greta Gerwig")
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert (result.events_created, result.held) == (0, 1)
+
+
+async def test_a_cast_credit_below_the_seed_grade_does_not_release_the_hold(
+    session, session_factory, run_id
+):
+    """`film_credit` is delete-and-rebuilt, so a performer who has slipped out of the top-5
+    billing holds a row that is no longer seed grade — which is exactly how the credit-history
+    diff would read them, as removed. The gate reads the same predicate."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Zendaya")
+    await _cast(session, film, person, changed_at=AGED)
+    await add_credit(session, film, person.id, credit_type="cast", job=None, credit_order=9)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert (result.events_created, result.held) == (0, 1)
+
+
+async def test_the_gate_holds_people_individually_within_one_observation(
+    session, session_factory, run_id
+):
+    """One reverted name must not take the rest of its group down with it — the same
+    discipline removal-aware suppression already applies per person."""
+    film = await add_film(session, 1)
+    stayed = await _person(session, 1, "Zendaya")
+    reverted = await _person(session, 2, "Rebecca Ferguson")
+    await _cast(session, film, stayed, changed_at=AGED)
+    await _cast(session, film, reverted, changed_at=AGED)
+    await _still_attached(session, film, stayed, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+
+    result = await _quarantined(session_factory, run_id)
+
+    assert (result.attachments_read, result.held, result.events_created) == (2, 1, 1)
+    (event,) = await _events(session, film)
+    assert event.subject_key == ["zendaya"]
+
+
+async def test_quarantine_zero_cards_immediately(session, session_factory, run_id):
+    """0 disables *both* conditions, reverting to pre-D-3 behaviour — note there is no
+    `film_credit` row here at all, and it cards anyway."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _attached(session, film, person)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=0)
+
+    assert (result.events_created, result.held) == (1, 0)
 
 
 # ── Detachment carding tests (NEU-1200) ───────────────────────────────────

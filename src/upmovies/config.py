@@ -81,6 +81,23 @@ class Settings(BaseSettings):
     # SWEEP_EVENT_LOOKBACK_DAYS so a held removal is still in the rolling window when it becomes
     # eligible; the backfill backstops a mis-tuned N above the lookback. Re-verify against prod.
     sweep_credit_dwell_days: int = Field(default=3, ge=0, alias="SWEEP_CREDIT_DWELL_DAYS")
+    # How long a credit *attachment* must age before it is eligible to card (ADR-0017, D-3).
+    # The generalisation of the dwell gate above to the other direction: an added credit cards
+    # only once it has survived the window *and* is still attached, so an edit that was never
+    # true — vandalism, a misfile — publishes nothing at all rather than publishing and being
+    # corrected. 0 disables the hold (reverts to immediate carding). Hours rather than days
+    # because the window is set from a survival curve that turns over inside a day, and the
+    # difference between 48 and 72 is a tuning step this must be able to express.
+    #
+    # Must be < SWEEP_EVENT_LOOKBACK_DAYS (in hours) so a held attachment is still in the
+    # rolling window when it becomes eligible — and unlike the dwell gate, which the removal
+    # backfill backstops, nothing recovers an attachment that ages out unheld. That is why
+    # this constraint is *enforced* at boot (`ingest.sweep.validate_sweep_configuration`)
+    # rather than only documented. Default 72h until the M5 spike (D-4) reads the knee off
+    # `film_credit_change`; re-verify against prod.
+    sweep_credit_quarantine_hours: int = Field(
+        default=72, ge=0, alias="SWEEP_CREDIT_QUARANTINE_HOURS"
+    )
 
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the

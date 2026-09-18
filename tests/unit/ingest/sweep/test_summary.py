@@ -121,7 +121,7 @@ def test_reports_what_the_credit_phase_carded():
         DerivationResult(),
     )
 
-    assert "credits: 3 carded from 12 attachments, 9 already carded, 1 failed" in detail
+    assert "credits: 3 carded from 12 attachments, 9 already carded, 0 held, 1 failed" in detail
 
 
 def test_names_the_credit_phase_when_it_aborts():
@@ -275,3 +275,19 @@ def test_names_the_derivation_phase_when_it_aborts():
     )
 
     assert "watchlist aborted: aborted after 10 consecutive failures" in detail
+
+
+def test_the_credits_clause_reports_what_quarantine_is_holding():
+    """NEU-1368. A held row and a window that read nothing both card zero events, so the
+    count is the only thing on the line that tells the two apart."""
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(attachments_read=40, events_created=2, skipped=1, held=37),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+        DerivationResult(),
+    )
+
+    assert "credits: 2 carded from 40 attachments, 1 already carded, 37 held, 0 failed" in detail
