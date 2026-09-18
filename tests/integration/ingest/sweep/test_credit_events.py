@@ -15,6 +15,7 @@ import respx
 from sqlalchemy import delete, select
 
 from tests.fixtures.catalog import add_credit, add_film
+from tests.fixtures.tmdb import make_person_details
 from upmovies.catalog.models import FilmCredit, FilmCreditChange, Person
 from upmovies.ingest import credit_holds
 from upmovies.ingest.models import CreditHold
@@ -732,17 +733,7 @@ async def _sane(session_factory, run_id, **overrides):
 
 
 def _person_payload(person_id: int, name: str, **overrides):
-    payload = {
-        "id": person_id,
-        "name": name,
-        "birthday": None,
-        "deathday": None,
-        "popularity": 12.5,
-        "profile_path": "/p.jpg",
-        "known_for_department": "Acting",
-    }
-    payload.update(overrides)
-    return payload
+    return make_person_details(person_id, name=name, profile_path="/p.jpg", **overrides)
 
 
 def _mock_person(person_id: int, name: str, **overrides):

@@ -1,6 +1,6 @@
 """The pure half of candidate generation: union, de-duplication, provenance flags, cap."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from tests.fixtures.tmdb import make_person_search_hit
 from upmovies.ingest.tmdb.schemas import TMDBPersonSearchHit
@@ -386,3 +386,14 @@ def test_a_person_who_directed_and_acted_ranks_by_the_stronger_credit():
         change_stream=[],
     )
     assert ids(candidates) == [2, 1]
+
+
+def test_the_stored_dates_ride_along_with_the_other_person_facts():
+    """`/search/person` carries no birthday or deathday, so a candidate the catalog holds
+    arrives with whatever `catalog.person` has and a search-only one arrives with neither —
+    `pipeline.py` is what buys the missing ones (NEU-1400)."""
+    dated = credited_person(1, birthday=date(1981, 6, 13), deathday=date(2020, 6, 1))
+    candidates = build_candidates(search_hits=[hit(1), hit(2)], credited=[dated], change_stream=[])
+    by_id = {c.person_id: c for c in candidates}
+    assert (by_id[1].birthday, by_id[1].deathday) == (date(1981, 6, 13), date(2020, 6, 1))
+    assert (by_id[2].birthday, by_id[2].deathday) == (None, None)

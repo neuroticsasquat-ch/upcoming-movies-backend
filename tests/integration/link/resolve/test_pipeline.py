@@ -6,7 +6,7 @@ neither a database nor a network. What only a database can prove is here.
 """
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.gateway import StubGateway
-from tests.fixtures.tmdb import make_person_search_hit
+from tests.fixtures.tmdb import make_person_details, make_person_search_hit
 from upmovies.catalog.models import Person
 from upmovies.ingest.models import IngestRun, LLMCall, RunLLMUsage
 from upmovies.ingest.runs import create_run
@@ -49,7 +49,24 @@ def _client() -> TMDBClient:
     )
 
 
-def _search(query: str, hits: list[dict]) -> None:
+def _person(person_id: int, **details) -> respx.Route:
+    """Mock `/person/{id}`, which the pass reads for every candidate whose name matched — the
+    age/alive feature's only input (NEU-1400)."""
+    return respx.get(f"{BASE}/person/{person_id}").mock(
+        return_value=httpx.Response(200, json=make_person_details(person_id, **details))
+    )
+
+
+def _search(query: str, hits: list[dict], *, dates: dict[int, dict] | None = None) -> None:
+    """Mock this mention's `/search/person`, and a `/person/{id}` for each of its hits.
+
+    The details route comes with the search because the two are one mention's cost: a hit
+    whose name matches is read for its dates, and a hit whose name does not is not. `dates`
+    gives a `birthday`/`deathday` to the ids that have one; everybody else answers with
+    neither, which is what TMDB holds for most people.
+    """
+    for hit in hits:
+        _person(hit["id"], **(dates or {}).get(hit["id"], {}))
     respx.get(f"{BASE}/search/person", params={"query": query, "page": 1}).mock(
         return_value=httpx.Response(
             200, json={"page": 1, "results": hits, "total_pages": 1, "total_results": len(hits)}
@@ -716,3 +733,160 @@ async def test_a_link_run_with_no_tmdb_client_resolves_nothing_and_keeps_its_det
     assert "resolved" not in (run.detail or "")
     mention = (await session.execute(select(StoryPerson))).scalars().one()
     assert mention.path is None
+
+
+# --- age/alive plausibility: the dates a mention pays for (D-21, NEU-1400) --------
+
+
+@respx.mock
+async def test_the_dead_namesake_is_separated_from_the_living_one_without_a_model(
+    session_factory, session
+):
+    """The case the feature exists for, end to end: two people TMDB knows by one name, one of
+    whom died in 1998. Before the dates reached scoring this was the band — identical scores,
+    nobody named, a closed-set call to settle it."""
+    film = await add_film(session, 40)
+    story = await _story(session, film, slug="dead-namesake", published_at=NOW)
+    mention = await _mention(session, story, "Chris Evans")
+    await session.commit()
+    _search(
+        "Chris Evans",
+        [
+            make_person_search_hit(710, name="Chris Evans", popularity=90.0),
+            make_person_search_hit(711, name="Chris Evans", popularity=1.0),
+        ],
+        dates={710: {"deathday": "1998-03-04"}, 711: {"birthday": "1981-06-13"}},
+    )
+
+    result = await _resolve(session_factory, session)
+
+    assert (result.accepted, result.tiebreak) == (1, 0)
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (711, "accepted")
+    logged = {c["person_id"]: c["features"] for c in _logged_candidates(mention)}
+    assert (logged[710]["age_plausibility"], logged[710]["age_reason"]) == (-1.0, "deceased")
+    assert logged[710]["deathday"] == "1998-03-04"
+    assert (logged[711]["age_plausibility"], logged[711]["birthday"]) == (1.0, "1981-06-13")
+    assert _features(mention)["resolution"]["story_date"] == "2026-09-17"
+
+
+@respx.mock
+async def test_the_dates_are_judged_against_the_story_date_not_today(session_factory, session):
+    """A story from before the death names a living person. Reading the dates against the
+    clock instead would turn every archived story about them into a contradiction."""
+    film = await add_film(session, 41)
+    story = await _story(
+        session,
+        film,
+        slug="old-story",
+        published_at=datetime(2015, 4, 1, tzinfo=UTC),
+    )
+    mention = await _mention(session, story, "Chris Evans")
+    await session.commit()
+    _search(
+        "Chris Evans",
+        [make_person_search_hit(712, name="Chris Evans")],
+        dates={712: {"birthday": "1962-01-01", "deathday": "2020-06-01"}},
+    )
+
+    await _resolve(session_factory, session)
+
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (712, "accepted")
+    [logged] = _logged_candidates(mention)
+    # Alive on the day, and the birthday says plausibly so — a death five years later is not
+    # this story's business.
+    assert (logged["features"]["age_reason"], logged["features"]["age_plausibility"]) == (None, 1.0)
+
+
+@respx.mock
+async def test_only_the_candidates_whose_name_matched_are_read_for_their_dates(
+    session_factory, session
+):
+    """The name gate is the request budget. A candidate the name multiplier has already
+    zeroed cannot be moved by any feature, so its dates would buy nothing — and a film's own
+    director and top billing are most of a shortlist."""
+    film = await add_film(session, 42)
+    await add_credit(session, film, 720, credit_type="crew", job="Director")
+    story = await _story(session, film, slug="name-gate", published_at=NOW)
+    await _mention(session, story, "Chris Evans")
+    await session.commit()
+    director = _person(720)
+    _search("Chris Evans", [make_person_search_hit(721, name="Chris Evans")])
+
+    await _resolve(session_factory, session)
+
+    assert not director.called
+
+
+@respx.mock
+async def test_a_candidate_the_catalog_holds_is_read_once_and_stamped(session_factory, session):
+    """`details_observed_at` is the cross-run cache, and it is the reason this feature's cost
+    decays: the second story naming a person the catalog holds pays nothing."""
+    film = await add_film(session, 43)
+    await add_credit(session, film, 730, credit_type="crew", job="Director")
+    person = await session.get(Person, 730)
+    assert person is not None
+    person.name = "Chris Evans"
+    first = await _story(session, film, slug="stamped-one", published_at=NOW)
+    await _mention(session, first, "Chris Evans")
+    second = await _story(session, film, slug="stamped-two", published_at=NOW)
+    await _mention(session, second, "Chris Evans")
+    await session.commit()
+    route = _person(730, name="Chris Evans", birthday="1981-06-13")
+    _search("Chris Evans", [])
+
+    await _resolve(session_factory, session)
+
+    assert route.call_count == 1
+    await session.refresh(person)
+    assert person.birthday == date(1981, 6, 13)
+    assert person.details_observed_at is not None
+
+
+@respx.mock
+async def test_a_namesake_the_pass_rejected_is_not_written_to_the_catalog(session_factory, session):
+    """`catalog.person` is user-facing — the person search and the onboarding grid read it —
+    so a wrong Chris Evans the name search turned up must not become followable just because
+    this pass looked up his dates."""
+    film = await add_film(session, 44)
+    story = await _story(session, film, slug="no-stub-rows", published_at=NOW)
+    mention = await _mention(session, story, "Chris Evans")
+    await session.commit()
+    _search(
+        "Chris Evans",
+        [
+            make_person_search_hit(740, name="Chris Evans", popularity=90.0),
+            make_person_search_hit(741, name="Chris Evans", popularity=1.0),
+        ],
+        dates={740: {"deathday": "1998-03-04"}, 741: {"birthday": "1981-06-13"}},
+    )
+
+    await _resolve(session_factory, session)
+
+    await session.refresh(mention)
+    assert mention.person_id == 741
+    # The accepted candidate went through the shared upsert; the rejected one did not.
+    assert await session.get(Person, 741) is not None
+    assert await session.get(Person, 740) is None
+
+
+@respx.mock
+async def test_a_details_outage_costs_the_feature_and_not_the_mention(session_factory, session):
+    """The dates are a weight on a decision the other five features can still make, so an
+    unreachable `/person/{id}` demotes to "the dates cannot say" — failing the mention would
+    throw away the `/search/person` request that did succeed."""
+    film = await add_film(session, 45)
+    story = await _story(session, film, slug="details-outage", published_at=NOW)
+    mention = await _mention(session, story, "Chris Evans")
+    await session.commit()
+    respx.get(f"{BASE}/person/750").mock(return_value=httpx.Response(503))
+    _search("Chris Evans", [make_person_search_hit(750, name="Chris Evans")])
+
+    result = await _resolve(session_factory, session)
+
+    assert (result.accepted, result.failed) == (1, 0)
+    await session.refresh(mention)
+    assert (mention.person_id, mention.path) == (750, "accepted")
+    [logged] = _logged_candidates(mention)
+    assert logged["features"]["age_plausibility"] == 0.0

@@ -71,11 +71,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import FilmCredit, FilmCreditChange, Person
+from upmovies.catalog.person_dates import date_contradiction
 from upmovies.catalog.seed_grade import crew_role, is_seed_grade
 from upmovies.ingest.models import (
     HOLD_BURST,
-    HOLD_DECEASED,
-    HOLD_IMPLAUSIBLE_AGE,
     RELEASE_CLEARED,
     RELEASE_EXPIRED,
     RELEASE_MANUAL,
@@ -466,19 +465,6 @@ def observation_day(changed_at: datetime) -> date:
     return changed_at.astimezone(UTC).date()
 
 
-def years_before(day: date, years: int) -> date:
-    """`day` moved back a whole number of years, 29 February landing on the 28th.
-
-    Whole years rather than `365 * years` days because both checks are stated in years and are
-    read by humans against birthdays: "under 3 at the time" has to mean the same thing as it
-    does on a passport, leap days included.
-    """
-    try:
-        return day.replace(year=day.year - years)
-    except ValueError:
-        return day.replace(year=day.year - years, day=28)
-
-
 @dataclass(frozen=True)
 class BurstCount:
     """How many distinct films one `(person, UTC day)` reached, counted the two ways the burst
@@ -678,28 +664,18 @@ def _date_hold(
 ) -> str | None:
     """The reason this person's dates disqualify a credit observed on `changed_on`, or None.
 
-    Both tests are one-sided on purpose: a NULL date never holds anything. `catalog.person`
-    cannot tell "no death recorded" from "alive", and most people have no birthday there at
-    all, so reading an absent date as evidence would hold the credits of everyone TMDB is
-    simply thin on.
-
-    A posthumous credit inside `posthumous_years` is ordinary — a film completed before the
-    death, archive footage, a voice recorded years earlier — so the check is for credits that
-    arrive long after, which is the shape vandalism and misfiles take.
+    The rule itself is `catalog.person_dates`, which person resolution scores the same
+    candidate facts against (D-21, NEU-1400); this side only names the hold reasons it
+    returns. `ingest.models`' `HOLD_*` values and that module's are the same two strings, and
+    `tests/unit/catalog/test_person_dates.py` pins them together.
     """
-    if (
-        posthumous_years > 0
-        and person.deathday is not None
-        and person.deathday < years_before(changed_on, posthumous_years)
-    ):
-        return HOLD_DECEASED
-    if (
-        min_age_years > 0
-        and person.birthday is not None
-        and person.birthday > years_before(changed_on, min_age_years)
-    ):
-        return HOLD_IMPLAUSIBLE_AGE
-    return None
+    return date_contradiction(
+        birthday=person.birthday,
+        deathday=person.deathday,
+        on=changed_on,
+        posthumous_years=posthumous_years,
+        min_age_years=min_age_years,
+    )
 
 
 async def _person_dates(session: AsyncSession, client: TMDBClient, person_id: int) -> Person | None:

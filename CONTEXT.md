@@ -630,8 +630,10 @@ A row is *open* while `released_at IS NULL` and the backlog reads past it; it en
 (the condition lifted — only `burst` can, and its survivors card on that same pass),
 `manual` (an admin released it, and no check may hold that change again), or `expired` (the
 change aged out of `SWEEP_EVENT_LOOKBACK_DAYS`, so nothing cards). Birth and death dates are
-fetched from `/person/{id}` **lazily, once, only for people about to be carded**, and
-`catalog.person.details_observed_at` is what makes it once.
+fetched from `/person/{id}` **lazily, once per person**, and
+`catalog.person.details_observed_at` is what makes it once. This hold was the first consumer
+and asks only for people about to be carded; **resolution** is the second (NEU-1400), and asks
+for the candidates whose name a story matched, whether they ever card or not.
 **The `burst` hold reason is not the glossary's Burst below.** They are different concepts
 that the spec gives the same word: a *burst hold* is one person across many films in a day
 (vandalism), while a **Burst** is many credits on *one* film collapsed into one card (D-7).
