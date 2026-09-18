@@ -70,9 +70,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import FilmCredit, FilmCreditChange, Person
+from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.catalog.person_dates import date_contradiction
-from upmovies.catalog.seed_grade import crew_role, is_seed_grade
+from upmovies.catalog.queries import present_seed_credits
+from upmovies.catalog.seed_grade import credit_role
+from upmovies.ingest.credit_holds import open_hold_keys
 from upmovies.ingest.models import (
     HOLD_BURST,
     RELEASE_CLEARED,
@@ -91,6 +93,7 @@ from upmovies.news.catalog_events import (
     CREDIT_REMOVED_EVENT_TYPE,
     CREDIT_ROLE_EVENT_TYPES,
 )
+from upmovies.news.credit_confirm import stamp_prior_story_cards
 from upmovies.news.models import Event
 from upmovies.news.subject_key import normalize_name
 from upmovies.synthesize.deterministic import (
@@ -183,6 +186,15 @@ class CreditEventResult:
     holds_expired: int = 0
     """Open holds whose change aged out of the rolling window before anything released them.
     Nothing cards: the change is past `SWEEP_EVENT_LOOKBACK_DAYS` and is no longer read."""
+    story_published: int = 0
+    """Pending attachments this pass retired because a trade story had already carded them
+    (NEU-1371, D-5) — the backward half of the Tier-A short-circuit.
+
+    Its own number rather than part of `skipped`, which counts *groups* this pass declined to
+    card. These rows never reach a group: they are stamped before the backlog is read and
+    drop out of it, so without a count of their own they would leave no trace at all —
+    `attachments_read` would simply be smaller than the window holds, which is exactly how a
+    short-circuit that started matching too eagerly would hide."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -226,19 +238,6 @@ def as_credit(attached: AttachedCredit) -> CreditAttached:
     return CreditAttached(
         role=attached.role, name=attached.name, credit_order=attached.credit_order
     )
-
-
-def credit_role(credit_type: str, job: str | None) -> str | None:
-    """The seed-grade role one credit-change row carries, or None when it carries none.
-
-    Reads the same predicate the history was written against (`catalog.seed_grade`), so a
-    role this returns is always one the summary templates have a clause for.
-    """
-    if credit_type == "cast":
-        return "cast"
-    if credit_type == "crew":
-        return crew_role(job)
-    return None
 
 
 def group_attachments(attachments: list[AttachedCredit]) -> list[CreditGroup]:
@@ -296,6 +295,12 @@ async def load_attachment_backlog(
     documents: a watermark would advance past attachments a *failed* sweep never carded,
     losing them permanently, and the re-read is free because a carded group is skipped.
 
+    Attachments a story already published are read past (NEU-1371, D-5): a `carded_by_event_id`
+    is a card, so the row has nothing left to card. Dropping them *here*, rather than teaching
+    the suppression check about them, is what keeps `_uncarded_credits` on its own-type rule —
+    a story about a director attaching is carded `casting` and would never be found by a
+    `crew_attached` group's lookup, so the only reliable place to know is the row itself.
+
     Attachments under an **open** sanity hold are read past (D-8). They are still in the
     window and are still re-judged every pass — by `reconcile_holds`, which runs before this
     and releases what has stopped applying — but a held row must reach neither the quarantine
@@ -304,7 +309,7 @@ async def load_attachment_backlog(
     day; an `expired` one is not, and needs no filtering, because its change is older than
     `since`.
     """
-    excluded = await _open_hold_keys(session, since=since)
+    excluded = await open_hold_keys(session, since=since)
     stmt = (
         select(
             FilmCreditChange.film_id,
@@ -315,7 +320,11 @@ async def load_attachment_backlog(
             Person.name,
         )
         .join(Person, Person.id == FilmCreditChange.person_id)
-        .where(FilmCreditChange.change == CREDIT_ADDED, FilmCreditChange.changed_at >= since)
+        .where(
+            FilmCreditChange.change == CREDIT_ADDED,
+            FilmCreditChange.changed_at >= since,
+            FilmCreditChange.carded_by_event_id.is_(None),
+        )
         .order_by(FilmCreditChange.changed_at, FilmCreditChange.id)
     )
     attached: list[AttachedCredit] = []
@@ -339,45 +348,6 @@ async def load_attachment_backlog(
             )
         )
     return attached
-
-
-async def _present_seed_credits(
-    session: AsyncSession, *, film_ids: set[UUID]
-) -> dict[tuple[UUID, int, str], int | None]:
-    """Every `(film, person, seed-grade role)` that `catalog.film_credit` holds *right now*
-    for these films, mapped to that credit's billing order. One query for the whole backlog
-    rather than one per attachment: the quarantine gate asks this of every aged row, and the
-    rolling window makes that the same rows on every pass for as long as the hold lasts. The
-    burst check's `present` count (D-8) reads it too, which is what makes "still attached" mean
-    one thing across both gates.
-
-    Seed grade is re-derived here rather than assumed from the change row that recorded the
-    attachment. `film_credit` is delete-and-rebuilt on every ingest, and a cast member who has
-    since slipped out of the top-5 billing no longer holds a seed-grade credit — which is
-    exactly how `credit_history` would diff them, as removed. Reading the same predicate is
-    what stops the two disagreeing about what "still attached" means.
-
-    Membership answers the gate; the value answers D-7's body ordering. Both are properties of
-    the same live row, so they are read together — `film_credit_change` records no billing
-    position of its own, and asking for it in a second query would be asking twice.
-    """
-    if not film_ids:
-        return {}
-    stmt = select(
-        FilmCredit.film_id,
-        FilmCredit.person_id,
-        FilmCredit.credit_type,
-        FilmCredit.job,
-        FilmCredit.credit_order,
-    ).where(FilmCredit.film_id.in_(film_ids))
-    present: dict[tuple[UUID, int, str], int | None] = {}
-    for row in await session.execute(stmt):
-        if not is_seed_grade(row.credit_type, row.job, row.credit_order):
-            continue
-        role = credit_role(row.credit_type, row.job)
-        if role is not None:
-            present[(row.film_id, row.person_id, role)] = row.credit_order
-    return present
 
 
 async def quarantine_attachments(
@@ -431,7 +401,7 @@ async def quarantine_attachments(
         (aged if attached.changed_at + hold <= now else held).append(attached)
     if not aged:
         return [], held
-    present = await _present_seed_credits(session, film_ids={a.film_id for a in aged})
+    present = await present_seed_credits(session, film_ids={a.film_id for a in aged})
     eligible: list[AttachedCredit] = []
     for attached in aged:
         key = (attached.film_id, attached.person_id, attached.role)
@@ -523,26 +493,13 @@ async def _burst_counts(
             continue
         candidates.setdefault(key, set()).add((row.film_id, role))
         film_ids.add(row.film_id)
-    present = await _present_seed_credits(session, film_ids=film_ids)
+    present = await present_seed_credits(session, film_ids=film_ids)
     return {
         key: BurstCount(
             recorded=len({film_id for film_id, _role in pairs}),
             present=len({film_id for film_id, role in pairs if (film_id, key[0], role) in present}),
         )
         for key, pairs in candidates.items()
-    }
-
-
-async def _open_hold_keys(
-    session: AsyncSession, *, since: datetime
-) -> set[tuple[UUID, int, str, datetime]]:
-    """Every attachment an open hold is currently withholding, as the backlog's own key."""
-    stmt = select(
-        CreditHold.film_id, CreditHold.person_id, CreditHold.credit_type, CreditHold.changed_at
-    ).where(CreditHold.released_at.is_(None), CreditHold.changed_at >= since)
-    return {
-        (film_id, person_id, role, changed_at)
-        for film_id, person_id, role, changed_at in await session.execute(stmt)
     }
 
 
@@ -950,6 +907,7 @@ async def run_credit_attachment_events(
     now: datetime,
     lookback_days: int,
     quarantine_hours: int = 0,
+    story_confirm_days: int = 0,
     client: TMDBClient | None = None,
     max_films_per_day: int = 0,
     posthumous_years: int = 0,
@@ -983,6 +941,14 @@ async def run_credit_attachment_events(
     result.holds_expired = reconciled.expired
 
     async with owned_session(session_factory) as s:
+        # Before the backlog is read, because stamping is what takes a row *out* of it
+        # (NEU-1371, D-5). The trades routinely scoop TMDB, so the story card for a credit
+        # commonly exists days before the credit does — and by then the cluster stage has
+        # finished with that story and will never look at this film again, which is why the
+        # backward direction has to live here rather than there.
+        result.story_published = await stamp_prior_story_cards(
+            s, since=since, within_days=story_confirm_days
+        )
         backlog = await load_attachment_backlog(s, since=since)
         # Same session as the load: the quarantine gate reads live `film_credit` state
         # against the backlog it just read, and a second session could straddle a refresh
@@ -1017,7 +983,8 @@ async def run_credit_attachment_events(
     groups = group_attachments(attachments)
     log.info(
         "credit events: %d attachments in %d groups since %s "
-        "(%d held, quarantine %dh; holds %d new, %d cleared, %d expired)",
+        "(%d held, quarantine %dh; holds %d new, %d cleared, %d expired; "
+        "%d already carded by a story)",
         result.attachments_read,
         len(groups),
         since.isoformat(),
@@ -1026,6 +993,7 @@ async def run_credit_attachment_events(
         result.holds_new,
         result.holds_cleared,
         result.holds_expired,
+        result.story_published,
     )
 
     for group in groups:
@@ -1062,11 +1030,13 @@ async def run_credit_attachment_events(
             result.skipped += 1
 
     log.info(
-        "credit events: %d created, %d already carded, %d held, %d newly on hold, %d failed",
+        "credit events: %d created, %d already carded, %d held, %d newly on hold, "
+        "%d published by a story, %d failed",
         result.events_created,
         result.skipped,
         result.held,
         result.holds_new,
+        result.story_published,
         result.failures,
     )
     return result

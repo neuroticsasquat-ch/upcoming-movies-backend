@@ -388,6 +388,7 @@ class FilmCreditChange(Base):
     __tablename__ = "film_credit_change"
     __table_args__ = (
         Index("ix_catalog_film_credit_change_lookup", "film_id", "changed_at"),
+        Index("ix_catalog_film_credit_change_carded_by", "carded_by_event_id"),
         {"schema": "catalog"},
     )
 
@@ -408,6 +409,32 @@ class FilmCreditChange(Base):
     changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    carded_by_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_film_credit_change_carded_by"),
+        nullable=True,
+    )
+    """The event that published this attachment, when one has (NEU-1371, D-5). NULL is the
+    ordinary state: most rows are carded by the sweep, which stamps nothing.
+
+    Set only by the Tier-A short-circuit (`news.credit_confirm`), in both directions — the
+    cluster stage stamps a pending change a new story card names, and the sweep loader stamps
+    a pending change that finds an earlier story card. A stamped row is **published already**
+    and is never carded by the sweep: `load_attachment_backlog` drops it, which is what stops
+    a quarantined credit surfacing days later as a duplicate of the story that broke it
+    (INV-4).
+
+    It also answers *who had it first*, which is why it records the event rather than a bare
+    boolean. A row pointing at a **story**-provenance card is a trade scoop: the trades ran the
+    beat and TMDB caught up. A row pointing at a **catalog**-provenance card — one a story
+    later attached to, via ADR-0014 promotion — is a TMDB scoop: the catalog had it first and
+    the trades corroborated. Neither reading loses the change's own `changed_at`, which stays
+    on this row, so "we had it first" stays provable against the card's `occurred_at`. M4/M7
+    read it this way; nothing displays it yet.
+
+    `ON DELETE SET NULL` rather than CASCADE, for the reason `event.superseded_by` uses it:
+    losing the card must not delete the history of the attachment it published.
+    """
 
 
 class FilmReleaseDateChange(Base):

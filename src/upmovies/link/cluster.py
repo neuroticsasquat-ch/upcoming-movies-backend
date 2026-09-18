@@ -22,6 +22,7 @@ from upmovies.news.catalog_events import (
     CREDIT_EVENT_TYPES,
     ONCE_PER_FILM_EVENT_TYPES,
 )
+from upmovies.news.credit_confirm import stamp_story_confirmed_changes
 from upmovies.news.models import Event, EventStory, Story, StoryPerson
 from upmovies.news.source_quality import (
     best_tier,
@@ -643,6 +644,7 @@ async def apply_cluster_decisions(
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
+    story_confirm_days: int = 14,
 ) -> ClusterResult:
     """Write half: re-load events/stories from the plan, parse the LLM JSON, and
     create/attach events. The caller owns the session/commit."""
@@ -890,6 +892,20 @@ async def apply_cluster_decisions(
                     dedup_targets[etype] = event
                 if etype == "casting" and new_cast:
                     recorded_cast.update(new_cast)
+        if event.event_type in CREDIT_EVENT_TYPES:
+            # INV-4, D-5. This is a trade story on a credit beat, so any of this film's
+            # quarantined attachments it names publish *as this card* instead of surfacing as
+            # a second card once their hold expires. Every path reaching here has an event
+            # with an id — created and flushed, attached, deduped or promoted — and the stamp
+            # is the same for all of them: the card the story landed on is the card that
+            # published the change, whichever provenance it carries.
+            await stamp_story_confirmed_changes(
+                session,
+                film_id=plan.film_id,
+                event=event,
+                now=now,
+                within_days=story_confirm_days,
+            )
         _log_decision(
             plan.film_id,
             llm=llm_intent,
@@ -982,6 +998,7 @@ async def cluster_film_events(
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
+    story_confirm_days: int = 14,
     run_date: date,
     calls: CallLog,
 ) -> ClusterResult:
@@ -1006,6 +1023,7 @@ async def cluster_film_events(
             unresolved_tier=unresolved_tier,
             dedup_days=dedup_days,
             release_change_window_days=release_change_window_days,
+            story_confirm_days=story_confirm_days,
         )
     except ClusterParseError:
         calls.set_parse_ok(False)

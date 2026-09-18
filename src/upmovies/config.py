@@ -99,6 +99,24 @@ class Settings(BaseSettings):
         default=72, ge=0, alias="SWEEP_CREDIT_QUARANTINE_HOURS"
     )
 
+    # How far back the Tier-A short-circuit will look to pair a trade story with a credit
+    # attachment (ADR-0017, D-5; NEU-1371). Read from both ends: the cluster stage publishes a
+    # film's pending attachments no older than this when a story card names the person, and the
+    # sweep loader retires a pending attachment that finds a story card no older than this
+    # before it. `0` disables the short-circuit in both directions, which restores the
+    # pre-NEU-1371 duplicate.
+    #
+    # It must comfortably exceed SWEEP_CREDIT_QUARANTINE_HOURS, because the whole point is to
+    # catch a story that lands while the attachment is still held: a window shorter than the
+    # hold would let a change clear quarantine and card beside the story that already reported
+    # it. 14 days is the 72h default plus generous slack, which is what buys the tolerance —
+    # the trades commonly run a casting story days before or after TMDB records the credit.
+    #
+    # Not enforced at boot, unlike the quarantine/lookback pair: mis-tuning this publishes a
+    # duplicate card, which is visible on the feed and fixable forward, where a hold outliving
+    # its window silently publishes nothing at all and is not.
+    sweep_story_confirm_days: int = Field(default=14, ge=0, alias="SWEEP_STORY_CONFIRM_DAYS")
+
     # The three sanity holds (ADR-0017, D-8, NEU-1370). Where quarantine asks whether an edit
     # survived, these ask whether it is possible at all, and they hold on the *person* rather
     # than on the clock. All three are `ge=1`: unlike the two gates above, none has a coherent

@@ -1944,3 +1944,284 @@ async def test_two_departures_sharing_one_card_do_not_reach_an_older_card(
         "published",
         None,
     )
+
+
+# ── Tier-A short-circuit, sweep side (NEU-1371, ADR-0017 D-5) ──────────────
+
+
+STORY_CONFIRM_DAYS = 14
+
+
+async def _story_card(
+    session, film, *, names, occurred_at, event_type="casting", provenance="story"
+):
+    """A published card naming `names`. The trades' half of the short-circuit: what the
+    cluster stage leaves behind after a story about a casting is clustered."""
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="rumored",
+        provenance=provenance,
+        occurred_at=occurred_at,
+        region=None,
+        subject_key=list(names),
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def _short_circuited(session_factory, run_id, **overrides):
+    return await _run(
+        session_factory,
+        run_id,
+        quarantine_hours=QUARANTINE_HOURS,
+        story_confirm_days=STORY_CONFIRM_DAYS,
+        **overrides,
+    )
+
+
+async def _change(session, film, person):
+    return (
+        await session.execute(
+            select(FilmCreditChange).where(
+                FilmCreditChange.film_id == film.id,
+                FilmCreditChange.person_id == person.id,
+                FilmCreditChange.change == CREDIT_ADDED,
+            ),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+
+
+async def test_a_credit_the_trades_broke_first_is_published_by_that_card(
+    session, session_factory, run_id
+):
+    """The backward half of INV-4: story day 0, credit in TMDB day 2. The change is stamped
+    at load time and cards nothing — exactly one card exists, the one the trades ran."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Zendaya")
+    card = await _story_card(session, film, names=["zendaya"], occurred_at=NOW - timedelta(days=5))
+    await _cast(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+
+    result = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id == card.id
+    # Dropped before the backlog is read, so it is not a held row and not a skipped group.
+    assert (result.story_published, result.attachments_read, result.held) == (1, 0, 0)
+    assert result.events_created == 0
+    assert [e.id for e in await _events(session, film)] == [card.id]
+
+
+async def test_a_director_story_publishes_a_crew_attached_change(session, session_factory, run_id):
+    """The type-scoping trap. The LLM has no `crew_attached` in its vocabulary, so a story
+    about a director attaching is carded `casting` — and a `crew_attached` group would never
+    find it by type. Matching on *who* is what closes this."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    card = await _story_card(
+        session, film, names=["denis villeneuve"], occurred_at=NOW - timedelta(days=5)
+    )
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id == card.id
+    assert result.story_published == 1
+    assert [e.id for e in await _events(session, film)] == [card.id]
+
+
+async def test_a_story_about_someone_else_leaves_the_change_alone(session, session_factory, run_id):
+    """Per-person, not per-film: a film gains cast repeatedly, and one story is never
+    confirmation of every credit TMDB has pending on it."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _story_card(session, film, names=["zendaya"], occurred_at=NOW - timedelta(days=5))
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id is None
+    assert (result.story_published, result.events_created) == (0, 1)
+    (card,) = await _by_type(session, film, "crew_attached")
+    assert card.provenance == "catalog"
+
+
+async def test_a_story_older_than_the_window_does_not_publish_the_change(
+    session, session_factory, run_id
+):
+    """A card from long before the credit landed was reporting something else — a previous
+    attachment, or a rumour TMDB has only now caught up to by coincidence."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _story_card(
+        session,
+        film,
+        names=["denis villeneuve"],
+        occurred_at=AGED - timedelta(days=STORY_CONFIRM_DAYS + 1),
+    )
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id is None
+    assert (result.story_published, result.events_created) == (0, 1)
+
+
+async def test_a_catalog_card_does_not_publish_a_pending_change(session, session_factory, run_id):
+    """Only *story* cards short-circuit. A catalog card naming the person is the sweep's own
+    earlier work, and letting it retire a later attachment would silently swallow a second,
+    genuine credit — which is what the phase's own suppression is for."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _story_card(
+        session,
+        film,
+        names=["denis villeneuve"],
+        occurred_at=NOW - timedelta(days=5),
+        provenance="catalog",
+        event_type="crew_attached",
+    )
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id is None
+    assert result.story_published == 0
+
+
+async def test_a_published_change_is_never_read_again(session, session_factory, run_id):
+    """The stamp is the whole suppression: once written, the row leaves the backlog for good
+    and is counted once, not on every pass for as long as the window holds it."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Zendaya")
+    await _story_card(session, film, names=["zendaya"], occurred_at=NOW - timedelta(days=5))
+    await _cast(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+
+    first = await _short_circuited(session_factory, run_id)
+    second = await _short_circuited(session_factory, run_id)
+
+    assert (first.story_published, second.story_published) == (1, 0)
+    assert (second.attachments_read, second.events_created, second.skipped) == (0, 0, 0)
+    assert len(await _events(session, film)) == 1
+
+
+async def test_zero_disables_the_short_circuit(session, session_factory, run_id):
+    """`0` restores the pre-NEU-1371 behaviour: the story card and the catalog card both
+    exist. Kept as a switch because it is the rollback, and because it is what every caller
+    with no `Settings` gets."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    await _story_card(
+        session, film, names=["denis villeneuve"], occurred_at=NOW - timedelta(days=5)
+    )
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    await session.commit()
+
+    result = await _run(
+        session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, story_confirm_days=0
+    )
+
+    assert (await _change(session, film, person)).carded_by_event_id is None
+    assert (result.story_published, result.events_created) == (0, 1)
+    assert len(await _events(session, film)) == 2
+
+
+async def test_a_published_credit_that_is_later_removed_still_cards_the_removal(
+    session, session_factory, run_id
+):
+    """The detachment half is unaffected (NEU-1200/1205): the removal gate asks for a prior
+    *visible* attachment card of any provenance, and the story card is one. It supersedes
+    that card, per NEU-1347."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Zendaya")
+    card = await _story_card(session, film, names=["zendaya"], occurred_at=NOW - timedelta(days=5))
+    await _cast(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+    await _short_circuited(session_factory, run_id)
+
+    # TMDB drops the credit again. The live row goes with it, the way a rebuild leaves it.
+    await session.execute(delete(FilmCredit).where(FilmCredit.film_id == film.id))
+    await _cast(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    await _run_detachment(session_factory, run_id)
+
+    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    assert removal.subject_key == ["zendaya"]
+    published = await session.get(Event, card.id, populate_existing=True)
+    assert published is not None
+    assert (published.status, published.superseded_by) == ("superseded", removal.id)
+
+
+async def test_a_held_change_is_not_published_by_a_story_until_the_hold_lifts(
+    session, session_factory, run_id
+):
+    """The short-circuit honours D-8. A held row is one a human or a condition still has to
+    decide about, and the stamp is permanent — retiring it here would leave `reconcile_holds`
+    expiring a hold over a change that could no longer card whatever was decided. Deferring
+    costs nothing: the release puts the row back in front of the same story card."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Denis Villeneuve")
+    card = await _story_card(
+        session, film, names=["denis villeneuve"], occurred_at=NOW - timedelta(days=5)
+    )
+    await _attached(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person)
+    hold = CreditHold(
+        film_id=film.id,
+        person_id=person.id,
+        credit_type="director",
+        changed_at=AGED,
+        reason="deceased",
+        held_at=NOW,
+    )
+    session.add(hold)
+    await session.commit()
+
+    held_pass = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id is None
+    assert (held_pass.story_published, held_pass.events_created) == (0, 0)
+
+    # An admin looks at it and lets it through. The story card is still the publication.
+    await credit_holds.release_hold(session, hold_id=hold.id)
+    await session.commit()
+    released_pass = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id == card.id
+    assert (released_pass.story_published, released_pass.events_created) == (1, 0)
+    assert [e.id for e in await _events(session, film)] == [card.id]
+
+
+async def test_the_earliest_story_card_is_the_one_that_published_the_change(
+    session, session_factory, run_id
+):
+    """Which card is stamped is the "we had it first" answer (§5), so it must be the scoop —
+    the trade that broke the beat — not the rest of the trades repeating it days later."""
+    film = await add_film(session, 1)
+    person = await _person(session, 100, "Zendaya")
+    scoop = await _story_card(session, film, names=["zendaya"], occurred_at=NOW - timedelta(days=6))
+    await _story_card(session, film, names=["zendaya"], occurred_at=NOW - timedelta(days=1))
+    await _cast(session, film, person, changed_at=AGED)
+    await _still_attached(session, film, person, credit_type="cast", job=None, credit_order=0)
+    await session.commit()
+
+    result = await _short_circuited(session_factory, run_id)
+
+    assert (await _change(session, film, person)).carded_by_event_id == scoop.id
+    assert result.story_published == 1

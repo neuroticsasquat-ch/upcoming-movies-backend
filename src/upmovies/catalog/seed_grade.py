@@ -56,6 +56,22 @@ def crew_role(job: str | None) -> str | None:
     return None
 
 
+def credit_role(credit_type: str, job: str | None) -> str | None:
+    """The seed-grade role one `(credit_type, job)` pair carries, or None when it carries none.
+
+    `crew_role` widened to cover cast, which carries its grade in billing rather than in a job
+    title. It lives here beside the predicate it reads for the reason the module exists: the
+    sweep derives a role from a `film_credit_change` row, the short-circuit derives one from a
+    live `film_credit` row, and a role the two spelled differently would be a credit one of
+    them could not match to the other.
+    """
+    if credit_type == "cast":
+        return "cast"
+    if credit_type == "crew":
+        return crew_role(job)
+    return None
+
+
 def is_top_billed(credit_order: int | None) -> bool:
     """Whether a cast billing position is top-5. An unbilled entry (`order` absent) is not —
     TMDB leaves it off the long tail, which is exactly what the cut is meant to exclude."""
