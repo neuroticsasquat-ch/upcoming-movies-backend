@@ -22,6 +22,7 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBRequestToken,
     TMDBSearchResponse,
     TMDBSessionResponse,
+    TMDBWatchProviders,
 )
 from upmovies.logging_config import redact_api_key
 
@@ -296,6 +297,24 @@ class TMDBClient:
         url = f"{self._base_url}/person/{person_id}"
         resp = await self._request("GET", url)
         return TMDBPersonDetails.model_validate(resp.json())
+
+    async def watch_providers(self, tmdb_id: int) -> TMDBWatchProviders:
+        """Who is carrying a film right now, per region, from `/movie/{id}/watch/providers` —
+        the provider poll's one request per film (D-27).
+
+        No `append_to_response`: this hangs off `/movie/{id}`, but the poll set is not the
+        refresh set — a film 40 days past its US theatrical date is due a provider read on a
+        cadence of its own and almost never due a metadata refresh on the same pass — so
+        appending it would tie the two together and cost a full detail payload per poll.
+
+        A 404 raises `TMDBNotFound` like every other id-addressed method here, so the caller
+        can dispose of a deleted film rather than count an outage. Note what TMDB does *not*
+        404 on: a film nobody carries answers 200 with an empty `results`, which is the
+        ordinary case for an unreleased film and means "no offers", not "no film".
+        """
+        url = f"{self._base_url}/movie/{tmdb_id}/watch/providers"
+        resp = await self._request("GET", url)
+        return TMDBWatchProviders.model_validate(resp.json())
 
     # --- v3 user authorization and the account lists (D-16) ---------------------------------
     #

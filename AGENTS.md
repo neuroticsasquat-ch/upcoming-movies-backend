@@ -24,6 +24,27 @@ Production deploys are **not** triggered by `task` commands. The flow is:
 
    (Exact container access may vary by Coolify setup; use the Coolify UI or host SSH as needed.)
 
+### Coolify scheduled tasks
+
+Four slots run `python -m upmovies.pipeline_run <mode>` in the deployed container, each a separate
+process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
+
+| Mode | Cadence | What it does |
+|---|---|---|
+| `hourly` | hourly | the light feeds pass (`per_film=false`) |
+| `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
+| `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
+| `providers` | daily, next to the sweep | the D-27 watch-provider poll (NEU-1374) |
+
+**`providers` is a new slot and must be added in the Coolify UI** — nothing in the repo creates
+it, so merging this leaves the poll never running, with no failing check to say so. Put it beside
+the sweep rather than inside the daily chain: it shares the sweep's reasons for staying out (a
+TMDB hiccup in a long catalog pass must not abort feeds, link and synthesize), and it reads a
+working set the sweep has already dropped — films *past* their theatrical release. Set
+`HEALTHCHECK_PROVIDERS_URL` in the same edit; unset, the pings are a silent no-op and a poll that
+stops running is invisible. The `PROVIDER_POLL_*` window is seeded in `docker-compose.prod.yml`
+and turned in the UI, per the gotcha below.
+
 Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
 
 ## Commands

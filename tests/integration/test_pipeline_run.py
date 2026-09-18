@@ -11,6 +11,7 @@ from upmovies import pipeline_run
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
+from upmovies.ingest.providers import ProvidersResult
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.sweep import (
     AdmissionTranches,
@@ -1007,3 +1008,147 @@ async def test_sweep_stage_fails_the_run_when_the_derivation_phase_aborted(sessi
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "watchlist phase" in row.error
+
+
+# --- the watch-provider poll (D-27) --------------------------------------------
+
+
+def _stub_poll(monkeypatch, result: ProvidersResult | None = None) -> dict:
+    """Replace the poll phase with a fake that records its kwargs and returns `result`."""
+    captured: dict = {}
+
+    async def fake_poll(**kwargs):
+        captured.update(kwargs)
+        return result if result is not None else ProvidersResult(selected=2, polled=2)
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_provider_poll", fake_poll)
+    return captured
+
+
+async def test_providers_stage_finalizes_the_run_with_its_detail_line(session, monkeypatch):
+    """The phase does not finalize — the status, the error and the detail line belong to
+    whoever opened the run, the same division of labour the sweep uses."""
+    _stub_poll(
+        monkeypatch,
+        ProvidersResult(selected=9, polled=8, offers=31, first_seen=2, missing=1),
+    )
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "succeeded"
+    assert row.error is None
+    assert row.detail == ("providers: 8/9 polled, 31 offers, 2 first seen, 1 missing, 0 failed")
+
+
+async def test_providers_stage_passes_the_poll_window_from_settings(session, monkeypatch):
+    captured = _stub_poll(monkeypatch)
+    settings = get_settings().model_copy(
+        update={"provider_poll_min_age_days": 7, "provider_poll_max_age_days": 120}
+    )
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, settings)
+
+    assert (captured["min_age_days"], captured["max_age_days"]) == (7, 120)
+
+
+async def test_providers_stage_fails_the_run_when_the_poll_aborted(session, monkeypatch):
+    _stub_poll(
+        monkeypatch,
+        ProvidersResult(selected=9, polled=3, aborted=True, abort_error="aborted after 10"),
+    )
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error == "aborted after 10"
+
+
+async def test_providers_stage_marks_run_failed_on_crash(session, monkeypatch):
+    async def boom(**kwargs):
+        raise RuntimeError("simulated provider poll crash")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_provider_poll", boom)
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, get_settings())  # must not raise
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "simulated provider poll crash" in row.error
+
+
+async def test_run_providers_opens_its_own_run_kind_and_pings_its_own_deadman(session, monkeypatch):
+    """Its own kind and its own check: a poll that stopped running is invisible in every
+    deadman that already exists, because it is a stage in no other chain."""
+    kinds: list[str] = []
+    pings: list[tuple[str | None, str]] = []
+
+    async def fake_stage(run_id, settings, *args, **kwargs):
+        async with pipeline_run.SessionLocal() as s:
+            kinds.append(
+                (await s.execute(select(IngestRun.kind).where(IngestRun.id == run_id))).scalar_one()
+            )
+            await finalize_run(s, run_id, status="succeeded")
+            await s.commit()
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append((base_url, suffix))
+
+    monkeypatch.setattr(pipeline_run, "run_providers_stage", fake_stage)
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+    settings = get_settings().model_copy(
+        update={"healthcheck_providers_url": "https://hc/providers"}
+    )
+
+    ok = await pipeline_run.run_providers(settings)
+
+    assert ok is True
+    assert kinds == ["providers"]
+    assert pings == [
+        ("https://hc/providers", "/start"),
+        ("https://hc/providers", ""),
+    ]
+
+
+def test_main_runs_the_providers_arm(monkeypatch):
+    """`python -m upmovies.pipeline_run providers` — the fourth Coolify slot (D-27)."""
+    settings = get_settings().model_copy(update=DEFAULT_ROUTING)
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the providers arm must not run the daily chain")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", must_not_run)
+    monkeypatch.setattr("upmovies.pipeline_run.run_providers", _stub_daily(ok=True))
+    assert pipeline_run.main(["providers"]) == 0
+    monkeypatch.setattr("upmovies.pipeline_run.run_providers", _stub_daily(ok=False))
+    assert pipeline_run.main(["providers"]) == 1
+
+
+def test_main_runs_the_providers_arm_on_an_unroutable_llm_configuration(monkeypatch):
+    """The poll is TMDB reads and catalog writes end to end, so it joins the sweep in the
+    exemption: failing it on someone else's routing typo would surface only as deadman
+    silence on a slot that reaches no model."""
+    settings = get_settings().model_copy(
+        update={
+            **DEFAULT_ROUTING,
+            "summary_provider": "deepseek",
+            "summary_model": "deepseek-v4-flash",
+            "deepseek_api_key": None,
+            "mail_provider": "resend",
+            "resend_api_key": None,
+        }
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+    monkeypatch.setattr("upmovies.pipeline_run.run_providers", _stub_daily(ok=True))
+
+    assert pipeline_run.main(["providers"]) == 0

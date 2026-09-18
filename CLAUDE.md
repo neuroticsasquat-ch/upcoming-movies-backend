@@ -54,11 +54,12 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
   `validate_mail_configuration(settings)` and `validate_rate_limit_configuration(settings)`,
   cancels runs orphaned by a crash, and opens the one process-wide `MailGateway` that
   `deps.get_mailer` hands to routes.
-- **`python -m upmovies.pipeline_run {daily|hourly|sweep}`** — the Coolify scheduled tasks, a
+- **`python -m upmovies.pipeline_run {daily|hourly|sweep|providers}`** — the Coolify scheduled tasks, a
   *separate process* that re-runs the stage and mail validation (not the rate-limit one — it
   serves no HTTP). `daily` = tmdb → feeds(per-film) →
   link → synthesize, sequential and fail-fast; `hourly` = light feeds pass; `sweep` runs on its own
-  slot ~2h ahead of daily and is deliberately **not** in the daily chain (ADR-0013). Each pings a
+  slot ~2h ahead of daily and is deliberately **not** in the daily chain (ADR-0013); `providers`
+  is the D-27 watch-provider poll, on a fourth slot for the same reasons. Each pings a
   healthchecks.io deadman (`/start`, base, `/fail`).
 
 ### Layout (`src/upmovies/`)
