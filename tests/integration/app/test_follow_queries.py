@@ -1,4 +1,4 @@
-"""`app.follow_queries.followed_film_ids` (D-11) run *outside* a request.
+"""`app.follow_queries`' filter builders (D-11) run *outside* a request.
 
 `tests/integration/routers/test_timeline.py` covers what the filter selects; this file covers
 the property the route can never show — that it is a standalone query builder. NEU-1379's notify
@@ -11,7 +11,7 @@ from datetime import date
 import pytest
 from sqlalchemy import select
 
-from upmovies.app.follow_queries import followed_film_ids
+from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
 from upmovies.app.models import Follow, User
 
 TODAY = date(2026, 9, 17)
@@ -89,3 +89,38 @@ async def test_a_non_numeric_entity_id_is_skipped_rather_than_failing_the_query(
 
     rows = (await session.execute(_filter(user.id))).scalars().all()
     assert list(rows) == [followed.id]
+
+
+async def test_the_event_filter_executes_on_its_own(
+    session, user, make_film, make_person, add_event
+):
+    """`events_naming_followed_people` is a builder on the same terms as the film filter — the
+    notify pass (NEU-1379) asks both questions of every user at once, out of any request."""
+    from upmovies.news.models import EventStory, StoryPerson
+
+    film = await make_film(slug="uncredited", title="Uncredited")
+    await make_person(id=525, name="C. Nolan")
+    named = await add_event(
+        film=film, summary="names them", sources=({"url": "https://deadline.com/a"},)
+    )
+    plain = await add_event(
+        film=film, summary="names nobody", sources=({"url": "https://deadline.com/b"},)
+    )
+    for event, path in ((named, "accepted"), (plain, "unlinked")):
+        story_id = await session.scalar(
+            select(EventStory.story_id).where(EventStory.event_id == event.id)
+        )
+        session.add(
+            StoryPerson(
+                story_id=story_id,
+                person_id=525,
+                name_as_written="C. Nolan",
+                path=path,
+                prompt_version="1",
+            )
+        )
+    session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
+    await session.commit()
+
+    rows = (await session.execute(events_naming_followed_people(user.id))).scalars().all()
+    assert list(rows) == [named.id]

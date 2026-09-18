@@ -18,14 +18,13 @@ The four branches are D-11's, one per `follow.entity_type`:
 - **franchise** — `film.collection_id`.
 - **title** — the film itself.
 
-**Seam for M4 (NEU-1365).** D-11's second half — events that *name* a resolved followed person
-on a film they hold no credit on — does not belong in this function, and not because it is
-unwritten: it selects **events**, not films. A person named in a story about a film they are not
-credited on makes *that event* timeline-worthy, not every event the film has ever had. NEU-1365
-therefore adds `events_naming_followed_people(user_id)` beside this — an event-level predicate,
-OR-ed into the timeline's event scope rather than into this OR — and `get_feed_grouped` grows
-the event-filter parameter to carry it, in the same shape as the film filter it already takes.
-Widening this function to cover it instead would silently pull in the film's whole history.
+**D-11's second half is a second builder, not a fifth branch (NEU-1365).** Events that *name* a
+resolved followed person on a film they hold no credit on select **events**, not films: a person
+named in a story about a film they are not credited on makes *that event* timeline-worthy, not
+every event the film has ever had. So it lives in `events_naming_followed_people` below, an
+event-level predicate the timeline OR-s against this filter rather than into this OR, and
+`get_feed_grouped` carries it in its own parameter beside the film one. Widening `followed_film_ids`
+to cover it would silently pull in the film's whole history.
 """
 
 from datetime import date
@@ -37,6 +36,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from upmovies.app.models import Follow
 from upmovies.catalog.models import Film, FilmCredit, FilmProductionCompany
 from upmovies.catalog.queries import in_play_clause, seed_grade_credit_clause
+from upmovies.news.models import RESOLVED_MENTION_PATHS, EventStory, StoryPerson
 
 
 def followed_tmdb_ids(
@@ -125,5 +125,42 @@ def followed_film_ids(
                 Film.id.in_(followed_film_uuids(user_id)),
             )
         )
+        .correlate(None)
+    )
+
+
+def events_naming_followed_people(user_id: UUID) -> Select[tuple[UUID]]:
+    """`SELECT event.id` for every event whose stories name a *resolved* person this user follows
+    — D-11's second half (NEU-1365).
+
+    Written to be used as `Event.id.in_(events_naming_followed_people(user_id))`, OR-ed against
+    `followed_film_ids` rather than folded into it, for the reason the module docstring gives:
+    this narrows *events*, and the film it happens to hang off has no other claim on the timeline.
+
+    **`RESOLVED_MENTION_PATHS` is the cut: `accepted` and `tiebreak` match, `unlinked` and
+    `not_in_tmdb` never do (D-25).** A tiebreak
+    the resolve stage decided keeps its route precisely so a human can find it again (D-22), and
+    it names a person, so it belongs on the timeline as much as an accept does. One nobody was
+    named in carries `person_id` NULL and drops out of the `IN` on its own — which is why the
+    path filter needs no null guard beside it, and why the two cannot be collapsed into "has a
+    `person_id`": an `unlinked` row written with a candidate id would then match.
+
+    **No in-play term**, unlike the credit branch. That cut exists because a credit reaches a
+    whole filmography and the back catalogue would flood the timeline; a mention reaches exactly
+    one event, published now, so there is nothing to flood with — and an event about a released
+    film that names a followed person is news about them either way. Event and film visibility
+    stay the feed's, applied by the query this is dropped into.
+
+    `correlate(None)` for the reason `followed_film_ids` gives: the timeline's enclosing query
+    reaches `news.event_story` through the news-backed EXISTS, and this subquery's meaning must
+    not depend on the query it is dropped into.
+    """
+    resolved_mentions = select(StoryPerson.story_id).where(
+        StoryPerson.path.in_(RESOLVED_MENTION_PATHS),
+        StoryPerson.person_id.in_(followed_tmdb_ids(user_id, "person")),
+    )
+    return (
+        select(EventStory.event_id)
+        .where(EventStory.story_id.in_(resolved_mentions))
         .correlate(None)
     )

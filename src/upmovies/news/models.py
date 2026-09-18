@@ -295,6 +295,13 @@ class StoryPerson(Base):
     )
 
 
+# The two `story_person.path` values that name somebody a follow can match (D-25) — beside the
+# constraint that spells the whole vocabulary, rather than in the resolver that writes it, so the
+# timeline's filter (`app.follow_queries.events_naming_followed_people`) can read the rule without
+# importing the scoring pass and, with it, the TMDB client onto a public read path.
+RESOLVED_MENTION_PATHS = ("accepted", "tiebreak")
+
+
 class ResolutionCache(Base):
     """A name-to-person decision, remembered per (source domain, name as written, film) so the
     same trade naming the same person on the same film is not re-resolved every run (D-24).
