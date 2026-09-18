@@ -2,6 +2,12 @@
 dated `/discover/movie` roster cannot reach (spec §3, §6)."""
 
 from upmovies.ingest.sweep.admission import AdmissionTranches as AdmissionTranches
+from upmovies.ingest.sweep.configuration import (
+    SweepConfigurationError as SweepConfigurationError,
+)
+from upmovies.ingest.sweep.configuration import (
+    validate_sweep_configuration as validate_sweep_configuration,
+)
 from upmovies.ingest.sweep.credit_events import AttachedCredit as AttachedCredit
 from upmovies.ingest.sweep.credit_events import (
     CreditDetachmentResult as CreditDetachmentResult,
@@ -10,6 +16,9 @@ from upmovies.ingest.sweep.credit_events import CreditEventResult as CreditEvent
 from upmovies.ingest.sweep.credit_events import CreditGroup as CreditGroup
 from upmovies.ingest.sweep.credit_events import credit_role as credit_role
 from upmovies.ingest.sweep.credit_events import group_attachments as group_attachments
+from upmovies.ingest.sweep.credit_events import (
+    quarantine_attachments as quarantine_attachments,
+)
 from upmovies.ingest.sweep.credit_events import (
     run_credit_attachment_events as run_credit_attachment_events,
 )

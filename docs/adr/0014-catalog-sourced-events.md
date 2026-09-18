@@ -107,6 +107,22 @@ this needs no special path.
 > **forward-only**: already-carded removals (including the reported Maya Boyd 4-card chain) are
 > grandfathered, not destructively cleaned. See the spec at
 > `docs/specs/NEU-1205-dampen-credit-oscillation.md`.
+>
+> **Note — 2026-09-18 (NEU-1368).** This gate is now one half of a symmetric pair, and the
+> other half is specified in **ADR-0017** (the claim ledger), not here. D-3 there generalises
+> the dwell hold to *attachments*: an `added` row cards only once
+> `changed_at + SWEEP_CREDIT_QUARANTINE_HOURS <= now` **and** the credit is still in
+> `catalog.film_credit` under the same seed-grade role — so a TMDB edit that was reverted
+> inside the window publishes nothing at all, rather than publishing and then being corrected
+> by a `credit_removed` card. Read the two together: this gate asks whether the person came
+> *back* within the window and reads raw `film_credit_change`, while the attachment gate asks
+> whether they are *still here* and reads live state. **Consequence for this amendment's
+> transient-invariant argument:** it narrows. The window in which the latest carded event
+> disagrees with TMDB now opens only for a departure that has already been carded as an
+> attachment, because a flap's *attachment* half no longer cards either. The two settings are
+> independent and both default on (3 days, 72 hours); the attachment one additionally refuses
+> the boot when it is not under `SWEEP_EVENT_LOOKBACK_DAYS`, which this one, backstopped by
+> `scripts/backfill_credit_removals.py`, still only documents.
 
 > **Amendment — 2026-08-29 (NEU-1206).** The release-date half is refined: a subject
 > `(iso_3166_1, release_type)` can carry **multiple** `catalog.film_release_date` rows (TMDB has

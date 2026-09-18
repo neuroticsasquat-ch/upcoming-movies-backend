@@ -109,6 +109,23 @@ services:
       # would pass an empty string and fail to boot. Must be < SWEEP_EVENT_LOOKBACK_DAYS so a
       # held removal is still in the rolling window when it becomes eligible.
       SWEEP_CREDIT_DWELL_DAYS: "${SWEEP_CREDIT_DWELL_DAYS:-3}"
+      # The rolling window both carding phases re-read their backlog from (ADR-0014). Seeded
+      # here as of NEU-1368, which is what made it operationally load-bearing: the quarantine
+      # below is refused at boot unless it fits inside this, so raising the hold means raising
+      # this first — and a variable absent from the file at first deploy is one somebody has
+      # to add to Coolify by hand, per the gotcha above.
+      SWEEP_EVENT_LOOKBACK_DAYS: "${SWEEP_EVENT_LOOKBACK_DAYS:-7}"
+      # Attachment quarantine (ADR-0017, D-3, NEU-1368). The other direction of the gate
+      # above: an added credit cards only once it has survived this window and is still in
+      # `catalog.film_credit`, so a TMDB edit that was never true publishes nothing rather
+      # than publishing and needing a correction. 0 disables and reverts to immediate carding.
+      # The fallback repeats the code default deliberately: unset would pass an empty string
+      # and fail to boot. Must be < SWEEP_EVENT_LOOKBACK_DAYS in hours (7 days = 168) — unlike
+      # the dwell gate that constraint is *enforced*, and a value at or above it refuses the
+      # boot, because nothing re-reads an attachment that ages out of the window unheld.
+      # 72h is a placeholder until the M5 spike reads the knee off `film_credit_change`;
+      # retuning it is a Coolify change rather than a redeploy.
+      SWEEP_CREDIT_QUARANTINE_HOURS: "${SWEEP_CREDIT_QUARANTINE_HOURS:-72}"
       # Transactional mail (D-30, NEU-1338). Seeded at the code default `noop`, which records
       # and logs every send and transmits nothing, so this lands without a Resend account and
       # without changing what production does. Turning mail on is a Coolify change —
