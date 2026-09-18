@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.follow_queries import followed_film_ids
+from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
 from upmovies.catalog.models import (
     Collection,
     Film,
@@ -811,22 +811,46 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
     return FeedResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
+def _feed_scope(
+    film_filter: Select[tuple[UUID]] | None, event_filter: Select[tuple[UUID]] | None
+) -> tuple[ColumnElement[bool], ...]:
+    """`get_feed_grouped`'s narrowing as a WHERE-clause tuple: empty for the unfiltered feed,
+    and the **OR** of the two filters when both are given (NEU-1365).
+
+    OR and not AND: the two answer the same question of different grains — the timeline wants
+    every event on a film the user follows *plus* every event naming a person they follow on a
+    film they do not (D-11) — so intersecting them would return only the mentions that landed on
+    an already-followed film, which is the one case neither filter was added for.
+
+    Phrased on `Event.film_id` rather than `Film.id` so one clause serves every query that has to
+    agree: the day queries join `Film`, the event fetch does not, and a film that reached the page
+    on one named event would otherwise ship its whole day.
+    """
+    terms: list[ColumnElement[bool]] = []
+    if film_filter is not None:
+        terms.append(Event.film_id.in_(film_filter))
+    if event_filter is not None:
+        terms.append(Event.id.in_(event_filter))
+    return (or_(*terms),) if terms else ()
+
+
 async def get_feed_grouped(
     session: AsyncSession,
     *,
     limit: int,
     offset: int,
     film_filter: Select[tuple[UUID]] | None = None,
+    event_filter: Select[tuple[UUID]] | None = None,
 ) -> FeedDayResponse:
-    """The grouped feed — and, given a `film_filter`, any narrowing of it (NEU-1351).
+    """The grouped feed — and, given either filter, any narrowing of it (NEU-1351, NEU-1365).
 
-    `film_filter` is a `SELECT film.id` the caller composes; the timeline passes the films its
-    user follows (`app.follow_queries.followed_film_ids`). It narrows the *film* scope only, and
-    so applies identically to the day count, the day window and the film-day rows — which is
-    what makes a filtered page the same DTO with fewer rows in it, day pagination and all, rather
-    than a second query to keep in step with this one. NEU-1365's event-level branch (D-11's
-    "events naming a resolved followed person") arrives as a second, event-scoped parameter
-    beside this one; see `app.follow_queries`.
+    `film_filter` is a `SELECT film.id` and `event_filter` a `SELECT event.id`, both composed by
+    the caller; the timeline passes the films its user follows and the events naming the people
+    they follow (`app.follow_queries`). Together they narrow the *event* scope — see `_feed_scope`
+    for why that is an OR — and that one scope applies identically to the day count, the day
+    window, the film-day rows and the events fetched for them. Which is what makes a filtered page
+    the same DTO with fewer rows in it, day pagination and all, rather than a second query to keep
+    in step with this one.
     """
     # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
     # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
@@ -837,7 +861,7 @@ async def get_feed_grouped(
     # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
     visible = (Film.slug.is_not(None), visible_events(), _region_visible())
-    scoped = (Film.id.in_(film_filter),) if film_filter is not None else ()
+    scoped = _feed_scope(film_filter, event_filter)
 
     distinct_days = (
         select(day.label("day"))
@@ -900,6 +924,10 @@ async def get_feed_grouped(
                 Event.film_id.in_({r.film_id for r in rows}),
                 cast(func.timezone("UTC", Event.created_at), Date).in_({r.day for r in rows}),
                 visible_events(),
+                # The same scope as the rows above, not just their (film, day) keys: a film that
+                # reached the page on one event naming a followed person ships that event, not
+                # every event it happened to have that day (NEU-1365).
+                *scoped,
             )
             .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
@@ -990,7 +1018,16 @@ async def get_feed_grouped(
 async def get_timeline(
     session: AsyncSession, *, user_id: UUID, limit: int, offset: int
 ) -> FeedDayResponse:
-    """The grouped feed restricted to the films this user follows (D-11, D-12).
+    """The grouped feed restricted to what this user's follows reach (D-11, D-12).
+
+    Two filters, OR-ed by `get_feed_grouped`, because D-11 has two halves: the films the user
+    follows, and the events that *name* a person they follow on a film that person holds no credit
+    on (NEU-1365). The second is event-grained on purpose — such a mention makes its own event
+    timeline-worthy and says nothing about the rest of the film's history. Which is the one way a
+    timeline row is not its feed row: a film-day reached by a mention alone carries that event and
+    not the film's others, so `event_count`, `event_types` and `top_event_type` can read lower here
+    than on `/feed` for the same film and day. The shape and the ordering are the feed's; the
+    contents are what this user follows.
 
     Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
     and the feed are the same product surface — same DTO, same `created_at` day grouping, same
@@ -1013,6 +1050,7 @@ async def get_timeline(
             today=datetime.now(UTC).date(),
             excluded_statuses=settings.tmdb_excluded_statuses,
         ),
+        event_filter=events_naming_followed_people(user_id),
     )
 
 
