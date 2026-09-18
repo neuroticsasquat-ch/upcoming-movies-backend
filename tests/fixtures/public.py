@@ -173,6 +173,7 @@ def add_event(session: AsyncSession):
         summary_model: str = "claude-haiku-4-5",
         status: str = "published",
         superseded_by: UUID | None = None,
+        subject_key: list[str] | None = None,
     ) -> Event:
         event = Event(
             film_id=film.id,
@@ -183,6 +184,7 @@ def add_event(session: AsyncSession):
             provenance=provenance,
             status=status,
             superseded_by=superseded_by,
+            subject_key=subject_key,
         )
         if created_at is not None:
             event.created_at = created_at

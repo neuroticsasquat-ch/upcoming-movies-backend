@@ -5,7 +5,7 @@ This lives in `catalog` for the reason `seed_grade` does — there is more than 
 they must not drift. Three ask this question today:
 
 - `public.service` renders the film page's "Release dates" section from it;
-- `public.service._region_visible` decides whether a `release_date` event reaches a surface;
+- `news.visibility.region_visible` decides whether a `release_date` event reaches a surface;
 - `ingest.tmdb.release_date_history` decides which changes are worth recording at all (NEU-1121).
 
 Before this module the first two already disagreed: the page built its region set from
@@ -24,7 +24,7 @@ apart means parsing free-text `note`. TV (6) is nobody's release date. The displ
 these buckets stay in `public.release` — they are a presentation concern; membership is not.
 
 Widening this cut is how home-release dates reach the product at all: the film page, the
-calendar, `_region_visible` and the change history all read this module, so a US digital date
+calendar, `region_visible` and the change history all read this module, so a US digital date
 becomes listable, carded and calendar-visible in one edit.
 
 **Widening it does not backfill**, and the reason is not ADR-0014's baseline rule: that covers

@@ -31,6 +31,7 @@ async def make_user(session: AsyncSession):
         display_name: str = "Test User",
         is_admin: bool = False,
         entitled_until: datetime | None = None,
+        email_verified_at: datetime | None = None,
     ) -> User:
         user = User(
             email=email,
@@ -38,6 +39,7 @@ async def make_user(session: AsyncSession):
             display_name=display_name,
             is_admin=is_admin,
             entitled_until=entitled_until,
+            email_verified_at=email_verified_at,
         )
         session.add(user)
         await session.commit()

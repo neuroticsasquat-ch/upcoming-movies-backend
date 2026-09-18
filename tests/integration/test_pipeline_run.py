@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
 from upmovies import pipeline_run
+from upmovies.app.services.notify_service import NotifyResult
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
@@ -1154,3 +1155,141 @@ def test_main_runs_the_providers_arm_on_an_unroutable_llm_configuration(monkeypa
     monkeypatch.setattr("upmovies.pipeline_run.run_providers", _stub_daily(ok=True))
 
     assert pipeline_run.main(["providers"]) == 0
+
+
+# --- notify: M7's decision pass on the fifth slot (NEU-1379, D-31) ---
+
+
+def _stub_notify(monkeypatch, result: NotifyResult | None = None) -> dict:
+    """Replace the pass itself. What `run_notify_stage` owes is the run row, not the decisions
+    — those are `tests/integration/app/test_notify_pass.py`'s subject."""
+    captured: dict = {}
+
+    async def fake_pass(**kwargs):
+        captured.update(kwargs)
+        return result if result is not None else NotifyResult()
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_notify_pass", fake_pass)
+    return captured
+
+
+async def test_notify_stage_finalizes_the_run_with_its_detail_line(session, monkeypatch):
+    _stub_notify(
+        monkeypatch,
+        NotifyResult(users_considered=3, events_considered=7, alerts_queued=2, digests_queued=4),
+    )
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "succeeded"
+    assert row.error is None
+    assert row.detail == "notify: 7 events, 3 users, 2 alerts, 4 digests, 0 suppressed, 0 failed"
+
+
+async def test_notify_stage_passes_the_excluded_statuses_from_settings(session, monkeypatch):
+    """The follow filter's in-play term reads them, so a pass run with the wrong set would
+    quietly change whose timeline the digest covers."""
+    captured = _stub_notify(monkeypatch)
+    settings = get_settings().model_copy(update={"tmdb_excluded_statuses_raw": "Canceled"})
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, settings)
+
+    assert captured["excluded_statuses"] == frozenset({"Canceled"})
+
+
+async def test_notify_stage_fails_the_run_when_the_pass_aborted(session, monkeypatch):
+    _stub_notify(
+        monkeypatch, NotifyResult(failures=10, aborted=True, abort_error="aborted after 10")
+    )
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error == "aborted after 10"
+
+
+async def test_notify_stage_marks_run_failed_on_crash(session, monkeypatch):
+    """A crashed pass must leave a `failed` run, because that run's `started_at` is the next
+    one's watermark — a crash recorded as success would skip the window it never decided."""
+
+    async def boom(**kwargs):
+        raise RuntimeError("simulated notify crash")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_notify_pass", boom)
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, get_settings())  # must not raise
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "simulated notify crash" in row.error
+
+
+async def test_run_notify_opens_its_own_run_kind_and_pings_its_own_deadman(session, monkeypatch):
+    """Its own kind because the kind *is* the watermark, and its own check because this pass
+    failing is silence for the user rather than for the catalogue."""
+    kinds: list[str] = []
+    pings: list[tuple[str | None, str]] = []
+
+    async def fake_stage(run_id, settings, *args, **kwargs):
+        async with pipeline_run.SessionLocal() as s:
+            kinds.append(
+                (await s.execute(select(IngestRun.kind).where(IngestRun.id == run_id))).scalar_one()
+            )
+            await finalize_run(s, run_id, status="succeeded")
+            await s.commit()
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append((base_url, suffix))
+
+    monkeypatch.setattr(pipeline_run, "run_notify_stage", fake_stage)
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+    settings = get_settings().model_copy(update={"healthcheck_notify_url": "https://hc/notify"})
+
+    ok = await pipeline_run.run_notify(settings)
+
+    assert ok is True
+    assert kinds == ["notify"]
+    assert pings == [("https://hc/notify", "/start"), ("https://hc/notify", "")]
+
+
+def test_main_runs_the_notify_arm(monkeypatch):
+    """`python -m upmovies.pipeline_run notify` — the fifth Coolify slot (D-31)."""
+    settings = get_settings().model_copy(update=DEFAULT_ROUTING)
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the notify arm must not run the daily chain")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", must_not_run)
+    monkeypatch.setattr("upmovies.pipeline_run.run_notify", _stub_daily(ok=True))
+    assert pipeline_run.main(["notify"]) == 0
+    monkeypatch.setattr("upmovies.pipeline_run.run_notify", _stub_daily(ok=False))
+    assert pipeline_run.main(["notify"]) == 1
+
+
+def test_main_refuses_the_notify_arm_without_mail_configuration(monkeypatch):
+    """Deliberately *not* exempt, unlike the sweep and the poll. The queue this pass fills is
+    mail, and discovering a missing `RESEND_API_KEY` in the sender is discovering it one slot
+    too late."""
+    settings = get_settings().model_copy(
+        update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the notify arm must not start on an unusable mail configuration")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_notify", must_not_run)
+
+    with pytest.raises(MailConfigurationError):
+        pipeline_run.main(["notify"])

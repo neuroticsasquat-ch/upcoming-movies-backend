@@ -29,7 +29,7 @@ class IngestRun(Base):
     __tablename__ = "ingest_run"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('tmdb', 'feeds', 'link', 'synthesize', 'sweep', 'providers')",
+            "kind IN ('tmdb', 'feeds', 'link', 'synthesize', 'sweep', 'providers', 'notify')",
             name="ck_ingest_run_kind",
         ),
         CheckConstraint(
