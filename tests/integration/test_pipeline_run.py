@@ -1030,7 +1030,7 @@ async def test_providers_stage_finalizes_the_run_with_its_detail_line(session, m
     whoever opened the run, the same division of labour the sweep uses."""
     _stub_poll(
         monkeypatch,
-        ProvidersResult(selected=9, polled=8, offers=31, first_seen=2, missing=1),
+        ProvidersResult(selected=9, polled=8, offers=31, first_seen=2, cards=1, missing=1),
     )
     run_id = await create_run(session, kind="providers")
     await session.commit()
@@ -1040,7 +1040,9 @@ async def test_providers_stage_finalizes_the_run_with_its_detail_line(session, m
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
     assert row.error is None
-    assert row.detail == ("providers: 8/9 polled, 31 offers, 2 first seen, 1 missing, 0 failed")
+    assert row.detail == (
+        "providers: 8/9 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed"
+    )
 
 
 async def test_providers_stage_passes_the_poll_window_from_settings(session, monkeypatch):

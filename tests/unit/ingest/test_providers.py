@@ -63,10 +63,21 @@ def test_a_region_tmdb_holds_nothing_for_flattens_to_no_offers():
 
 def test_detail_reports_first_seen_apart_from_offers():
     line = providers_detail(
-        ProvidersResult(selected=10, polled=9, offers=31, first_seen=2, missing=1, failures=0)
+        ProvidersResult(
+            selected=10, polled=9, offers=31, first_seen=2, cards=1, missing=1, failures=0
+        )
     )
 
-    assert line == "providers: 9/10 polled, 31 offers, 2 first seen, 1 missing, 0 failed"
+    assert line == "providers: 9/10 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed"
+
+
+def test_detail_reports_cards_apart_from_first_seen():
+    """The gap between the two is the churn the product swallows (D-28): a film that moved
+    service inserts a ledger row and cards nothing, and the line has to show both numbers for
+    that to be readable rather than look like a lost card."""
+    line = providers_detail(ProvidersResult(selected=1, polled=1, offers=1, first_seen=1))
+
+    assert "1 first seen, 0 carded" in line
 
 
 def test_detail_says_so_when_the_poll_gave_up():

@@ -31,6 +31,10 @@ _EVENT_STAGE: dict[str, str] = {
     "production_wrap": "wrapped",
     "release_date": "dated",
     "trailer": "trailer",
+    # The film is watchable at home (D-28) — the last beat its arc has, and above the
+    # `release_date` card that announced the date. On a day that carries both, availability is
+    # the thing a reader can act on, so it leads.
+    "now_available": "released",
 }
 
 

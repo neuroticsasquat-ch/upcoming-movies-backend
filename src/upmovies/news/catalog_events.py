@@ -48,3 +48,12 @@ CREDIT_REMOVED_EVENT_TYPE = "credit_removed"
 # field-change types: a film's date may move repeatedly, so it is the only one of those
 # matched on *when* rather than on existence.
 CATALOG_EVENT_TYPES = ONCE_PER_FILM_EVENT_TYPES | {"release_date"} | CREDIT_EVENT_TYPES
+
+# The type the watch-provider poll raises the first time a film is observed under a monetization
+# type (D-28). Registered in `ck_event_type` and in `public.arc._EVENT_STAGE`, and deliberately
+# absent from every set below it: `CATALOG_EVENT_TYPES` (and so
+# `link.cluster._catalog_dedup_target`), `link.cluster._VALID_TYPES` and `_STALE_EVENT_TYPES`.
+# The LLM has no such type in its vocabulary and cannot emit one, so there is no story-borne
+# card for a poll to dedup against and no stale-stage rule to apply — unlike `crew_attached`,
+# which the model reaches under another name. The poll's own ledger is the whole dedup rule.
+NOW_AVAILABLE_EVENT_TYPE = "now_available"

@@ -11,9 +11,9 @@ Two contracts this module exists to hold:
 - **`model` is a sentinel, never a real model id.** No call is made, and `ingest.llm_call` /
   `ingest.run_llm_usage` are the system's cost ledger — a row naming a real model there would
   price tokens that were never spent.
-- **The wording lives in one place.** Three trigger sites (release date, status, credits) write
-  these bodies; §5.4's phrasing must not be copy-pasted across them, and `prompt_version` must
-  move when the phrasing does.
+- **The wording lives in one place.** Four trigger sites (release date, status, credits, and
+  the watch-provider poll) write these bodies; §5.4's phrasing must not be copy-pasted across
+  them, and `prompt_version` must move when the phrasing does.
 
 Callers own the transaction, in line with the rest of the ingest pipelines.
 """
@@ -26,6 +26,7 @@ from uuid import UUID
 from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.catalog.models import MONETIZATION_TYPES
 from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.news.models import EventSummary
 from upmovies.synthesize.store import upsert_summary
@@ -37,7 +38,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-4"
+TEMPLATE_VERSION = "deterministic-5"
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,35 @@ class CreditsDetached:
     credits: tuple[CreditDetached, ...]
 
 
+@dataclass(frozen=True)
+class AvailableOn:
+    """One monetization type a film was newly observed under, and the services carrying it.
+
+    `providers` are display names in the order the poll observed them — TMDB's own ordering
+    within the monetization list, which is the order the where-to-watch box renders too.
+    """
+
+    monetization_type: str  # "flatrate" | "rent" | "buy"
+    providers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NowAvailable:
+    """Every monetization type one observation of a film first saw, as one body (D-28).
+
+    Grouped for the reason `ReleaseDatesChanged` and `CreditsAttached` are:
+    `uq_event_catalog_change` allows one catalog event per film, type and timestamp, and a
+    title reaching the home market routinely turns up to rent *and* to buy in the same poll.
+    The card carries a `US:rent`-style `subject_key` token per type, so the per-type grain
+    D-28 cards on survives in the one place a consumer of the card needs it.
+
+    Only the group is a `CatalogChange`: unlike a release-date move, no caller ever holds a
+    single type on its own — the poll always hands over whatever one observation newly saw.
+    """
+
+    offers: tuple[AvailableOn, ...]
+
+
 CatalogChange = (
     ReleaseDateChanged
     | ReleaseDatesChanged
@@ -146,6 +176,7 @@ CatalogChange = (
     | CreditsAttached
     | CreditDetached
     | CreditsDetached
+    | NowAvailable
 )
 
 # Keyed on TMDB's `status` values. An unknown status still gets a body (see `_render_status`) —
@@ -304,6 +335,41 @@ def _render_detachments(change: CreditsDetached) -> str:
     )
 
 
+# Keyed on the monetization types the poll stores (`catalog.models.MONETIZATION_TYPES`), which
+# a CHECK constraint holds the ledger to — so unlike a TMDB status an unrecognised key here is a
+# bug in the caller, not new data from upstream, and `_render_now_available` raises on it.
+# "Now streaming" rather than "Now available to stream": it is what the beat is called, and the
+# card sits under the film's own title so the title is not named again.
+_AVAILABILITY_BODIES = {
+    "flatrate": "Now streaming on {providers}.",
+    "rent": "Available to rent on {providers}.",
+    "buy": "Available to buy on {providers}.",
+}
+
+
+def _render_now_available(change: NowAvailable) -> str:
+    """One clause per monetization type, in the order the where-to-watch box lists them (D-29)
+    rather than in whichever order the poll's payload emitted — a card that first saw a film to
+    rent and to stream reads the same way whatever TMDB put first.
+
+    Services are named with `_join_names`, the same clause-joiner the credit bodies use: this
+    module exists to keep one phrasing, and a second way of writing a list of names is the
+    drift it is here to prevent."""
+    unknown = [
+        o.monetization_type
+        for o in change.offers
+        if o.monetization_type not in _AVAILABILITY_BODIES
+    ]
+    if unknown:
+        raise ValueError(f"unknown monetization type: {unknown[0]!r}")
+    by_type = {o.monetization_type: o for o in change.offers}
+    return " ".join(
+        _AVAILABILITY_BODIES[kind].format(providers=_join_names(list(by_type[kind].providers)))
+        for kind in MONETIZATION_TYPES
+        if kind in by_type
+    )
+
+
 def render_summary(change: CatalogChange) -> str:
     """The user-facing body for one catalog change. Pure — no DB, no clock."""
     match change:
@@ -321,6 +387,8 @@ def render_summary(change: CatalogChange) -> str:
             return _render_detachments(CreditsDetached(credits=(change,)))
         case CreditsDetached():
             return _render_detachments(change)
+        case NowAvailable():
+            return _render_now_available(change)
 
 
 async def write_deterministic_summary(

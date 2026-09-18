@@ -86,3 +86,11 @@ def test_ordered_event_types_leads_with_the_most_significant_type():
 
 def test_ordered_event_types_empty():
     assert ordered_event_types([]) == []
+
+
+def test_now_available_outranks_the_date_that_promised_it():
+    """A film landing at home is the beat of its day (D-28): a `now_available` card leads over
+    the `release_date` card that announced the date, and over anything else a film past its
+    theatrical run can still raise."""
+    assert most_significant_event_type(["release_date", "now_available"]) == "now_available"
+    assert most_significant_event_type(["trailer", "now_available"]) == "now_available"
