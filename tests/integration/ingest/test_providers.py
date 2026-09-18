@@ -20,7 +20,7 @@ import respx
 from sqlalchemy import select
 
 from tests.fixtures.catalog import add_film
-from tests.fixtures.tmdb import make_watch_providers
+from tests.fixtures.tmdb import make_provider, make_watch_providers
 from upmovies.app.models import Follow, WatchlistItem
 from upmovies.catalog.models import (
     AvailabilityFirstSeen,
@@ -33,6 +33,7 @@ from upmovies.ingest import runs
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.providers import run_provider_poll
 from upmovies.ingest.tmdb.client import TMDBClient
+from upmovies.news.models import Event, EventSummary
 
 BASE_URL = "https://api.themoviedb.org/3"
 TODAY = date(2026, 9, 17)
@@ -599,3 +600,177 @@ async def test_progress_is_recorded_against_the_run(session, session_factory, tm
     run = await session.get(IngestRun, run_id, populate_existing=True)
     assert run.items_processed == 1
     assert run.last_progress_at is not None
+
+
+# --- now_available cards (D-28) -------------------------------------------------
+
+
+NOW = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+LATER = NOW + timedelta(days=1)
+
+
+def _named(region_block: dict[str, list[tuple[int, str]]], *, link: str = "https://x/watch"):
+    """A providers payload whose services carry real names, so a card's body can be read."""
+    block: dict = {"link": link}
+    for field, entries in region_block.items():
+        block[field] = [make_provider(pid, provider_name=name) for pid, name in entries]
+    return {"US": block}
+
+
+async def _cards(session, film: Film) -> list[Event]:
+    rows = await session.execute(
+        select(Event)
+        .where(Event.film_id == film.id, Event.event_type == "now_available")
+        .order_by(Event.occurred_at, Event.id)
+    )
+    return list(rows.scalars())
+
+
+async def _body(session, event: Event) -> str:
+    summary = await session.get(EventSummary, event.id)
+    assert summary is not None
+    return summary.summary
+
+
+@respx.mock
+async def test_a_first_flatrate_observation_cards_now_available(
+    session, session_factory, tmdb_client, run_id
+):
+    film = await _add_released_film(session, 501)
+    await session.commit()
+    respx.get(f"{BASE_URL}/movie/501/watch/providers").mock(
+        return_value=httpx.Response(
+            200, json=make_watch_providers(501, regions=_named({"flatrate": [(8, "Netflix")]}))
+        )
+    )
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    (card,) = await _cards(session, film)
+    assert card.confidence == "confirmed"
+    assert card.provenance == "catalog"
+    assert card.region == "US"
+    assert card.subject_key == ["US:flatrate"]
+    # The ledger row's own stamp, not the run's: the card dates to when the film landed.
+    assert card.occurred_at == NOW
+    assert await _body(session, card) == "Now streaming on Netflix."
+    assert result.cards == 1
+
+
+@respx.mock
+async def test_a_move_between_services_cards_nothing(session, session_factory, tmdb_client, run_id):
+    """Netflix → Hulu writes a new ledger row — Hulu has never carried this film — and still
+    cards nothing: the *type* was first seen long ago, and churn is a non-goal (D-28)."""
+    film = await _add_released_film(session, 502)
+    await session.commit()
+    route = respx.get(f"{BASE_URL}/movie/502/watch/providers").mock(
+        return_value=httpx.Response(
+            200, json=make_watch_providers(502, regions=_named({"flatrate": [(8, "Netflix")]}))
+        )
+    )
+    await _run(session_factory, tmdb_client, run_id, now=NOW)
+    route.mock(
+        return_value=httpx.Response(
+            200, json=make_watch_providers(502, regions=_named({"flatrate": [(15, "Hulu")]}))
+        )
+    )
+
+    result = await _run(session_factory, tmdb_client, run_id, now=LATER)
+
+    assert result.first_seen == 1
+    assert result.cards == 0
+    assert [c.subject_key for c in await _cards(session, film)] == [["US:flatrate"]]
+
+
+@respx.mock
+async def test_a_first_rent_observation_cards_its_own_event(
+    session, session_factory, tmdb_client, run_id
+):
+    film = await _add_released_film(session, 503)
+    await session.commit()
+    route = respx.get(f"{BASE_URL}/movie/503/watch/providers").mock(
+        return_value=httpx.Response(
+            200, json=make_watch_providers(503, regions=_named({"flatrate": [(8, "Netflix")]}))
+        )
+    )
+    await _run(session_factory, tmdb_client, run_id, now=NOW)
+    route.mock(
+        return_value=httpx.Response(
+            200,
+            json=make_watch_providers(
+                503,
+                regions=_named(
+                    {
+                        "flatrate": [(8, "Netflix")],
+                        "rent": [(2, "Apple TV"), (10, "Prime Video")],
+                    }
+                ),
+            ),
+        )
+    )
+
+    result = await _run(session_factory, tmdb_client, run_id, now=LATER)
+
+    assert result.cards == 1
+    first, second = await _cards(session, film)
+    assert first.subject_key == ["US:flatrate"]
+    assert second.subject_key == ["US:rent"]
+    assert second.occurred_at == LATER
+    assert await _body(session, second) == "Available to rent on Apple TV and Prime Video."
+
+
+@respx.mock
+async def test_types_first_seen_in_one_observation_share_a_card(
+    session, session_factory, tmdb_client, run_id
+):
+    """`uq_event_catalog_change` permits one catalog event per (film, type, timestamp), so a
+    film that turns up under two monetization types in a single poll is one beat, carrying a
+    token per type — the same rule that makes a US limited and US wide date move one card."""
+    film = await _add_released_film(session, 504)
+    await session.commit()
+    respx.get(f"{BASE_URL}/movie/504/watch/providers").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_watch_providers(
+                504,
+                regions=_named({"rent": [(2, "Apple TV")], "flatrate": [(8, "Netflix")]}),
+            ),
+        )
+    )
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert result.cards == 1
+    (card,) = await _cards(session, film)
+    assert card.subject_key == ["US:flatrate", "US:rent"]
+    assert await _body(session, card) == (
+        "Now streaming on Netflix. Available to rent on Apple TV."
+    )
+
+
+@respx.mock
+async def test_a_second_poll_of_an_unchanged_film_cards_nothing(
+    session, session_factory, tmdb_client, run_id
+):
+    film = await _add_released_film(session, 505)
+    await session.commit()
+    _mock_providers(505, flatrate=[8])
+    await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    result = await _run(session_factory, tmdb_client, run_id, now=LATER)
+
+    assert result.first_seen == 0
+    assert result.cards == 0
+    assert len(await _cards(session, film)) == 1
+
+
+@respx.mock
+async def test_a_film_nobody_carries_cards_nothing(session, session_factory, tmdb_client, run_id):
+    film = await _add_released_film(session, 506)
+    await session.commit()
+    _mock_providers(506)
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert result.cards == 0
+    assert await _cards(session, film) == []

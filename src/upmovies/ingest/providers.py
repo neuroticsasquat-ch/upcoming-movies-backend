@@ -30,9 +30,17 @@ alone would never poll it.
 **Insert-only ledger, delete-and-rebuild snapshot.** Each poll writes new
 `availability_first_seen` rows for offers it has never seen before and rebuilds
 `film_availability_current` for the region wholesale. The first is what `now_available` cards
-off (D-28) — *not here*: this ticket inserts the rows, the next one cards them. The second is
-what the where-to-watch box renders (D-29). Nothing tracks churn: a provider dropping a film
-removes a current row and leaves the ledger untouched.
+off (D-28); the second is what the where-to-watch box renders (D-29). Nothing tracks churn: a
+provider dropping a film removes a current row and leaves the ledger untouched.
+
+**The card is per monetization type, not per provider or per row** (D-28). A new ledger row is
+necessary but not sufficient: Netflix handing a film to Hulu writes a row — Hulu has never
+carried it — and must card nothing, because the *type* was first seen months ago and
+service-to-service churn is the thing this product does not report. So the trigger is the set
+of types this film had no ledger row under before the insert, read in the same transaction as
+the insert itself. Everything downstream follows from that: the body names the services on the
+rows that made the type new, `occurred_at` is their `first_seen_at`, and a re-poll of an
+unchanged film finds no new type and writes nothing.
 """
 
 import logging
@@ -61,6 +69,13 @@ from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
 from upmovies.ingest.tmdb.schemas import TMDBWatchProviderRegion
 from upmovies.ingest.tmdb.upsert import mark_film_missing
+from upmovies.news.catalog_events import NOW_AVAILABLE_EVENT_TYPE
+from upmovies.news.models import Event
+from upmovies.synthesize.deterministic import (
+    AvailableOn,
+    NowAvailable,
+    write_deterministic_summary,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,9 +113,12 @@ class ProvidersResult:
     offers: int = 0
     """Current offers observed across every film — the size of the rebuilt snapshot."""
     first_seen: int = 0
-    """Rows newly inserted into the ledger. In steady state this is near zero and each one is a
-    `now_available` card the next ticket will emit (D-28), which is why it is reported apart
-    from `offers` rather than folded into it."""
+    """Rows newly inserted into the ledger. In steady state this is near zero, which is why it
+    is reported apart from `offers` rather than folded into it."""
+    cards: int = 0
+    """`now_available` events raised (D-28). Never more than one per film per poll and always
+    at most `first_seen`, and the gap between the two is the churn this product declines to
+    report: a film moving from one service to another inserts a row and cards nothing."""
     missing: int = 0
     """Films TMDB answered 404 for, and this pass tombstoned. Reported apart from `failures`
     for the reason the refresh phase reports it apart: a failure is a reason to worry about
@@ -247,20 +265,46 @@ async def _upsert_providers(session: AsyncSession, offers: list[Offer]) -> None:
     )
 
 
+async def _ledger_types(session: AsyncSession, *, film_id: UUID, region_code: str) -> set[str]:
+    """The monetization types this film already has a ledger row under, in this region.
+
+    Read *before* the insert, in the insert's own transaction, because it is the only way to
+    tell a genuinely new type from a new provider under an old one once `ON CONFLICT DO
+    NOTHING` has folded the two together.
+
+    **What makes the read-then-write safe is the schedule, not a lock.** One Coolify slot runs
+    this poll, so in practice it is the table's only writer; nothing here enforces that, and two
+    overlapping runs would each read `known_types` empty for one film and card it twice. The
+    structural backstop the release-date path leans on does not reach this case either: those
+    two cards would carry each run's own `datetime.now(UTC)`, and `uq_event_catalog_change` keys
+    on `occurred_at`, so it would let both through. Worth a lock if a second slot is ever added
+    — not worth one for a poll that is scheduled once a day.
+    """
+    rows = await session.execute(
+        select(AvailabilityFirstSeen.monetization_type)
+        .where(
+            AvailabilityFirstSeen.film_id == film_id,
+            AvailabilityFirstSeen.region == region_code,
+        )
+        .distinct()
+    )
+    return set(rows.scalars())
+
+
 async def _insert_first_seen(
     session: AsyncSession, *, film_id: UUID, region_code: str, offers: list[Offer], now: datetime
-) -> int:
-    """Insert the ledger rows this poll has not seen before; return how many were new. Caller
-    commits.
+) -> list[Offer]:
+    """Insert the ledger rows this poll has not seen before; return the offers that were new,
+    in the order they were observed. Caller commits.
 
     `ON CONFLICT DO NOTHING` over the natural key is the whole insert-only rule (D-27): the
     second sighting of an offer writes nothing, so `first_seen_at` keeps saying *first*. The
-    count comes from `RETURNING`, which yields only rows the statement actually inserted — so
-    it is exactly the set `now_available` will card off (D-28), with no read-then-write race to
-    lose a row to.
+    new set comes from `RETURNING`, which yields only rows the statement actually inserted — so
+    it is exactly what `now_available` cards off (D-28), with no read-then-write race to lose a
+    row to.
     """
     if not offers:
-        return 0
+        return []
     stmt = insert(AvailabilityFirstSeen).values(
         [
             {
@@ -276,9 +320,73 @@ async def _insert_first_seen(
     rows = await session.execute(
         stmt.on_conflict_do_nothing(
             index_elements=["film_id", "region", "provider_id", "monetization_type"]
-        ).returning(AvailabilityFirstSeen.id)
+        ).returning(AvailabilityFirstSeen.provider_id, AvailabilityFirstSeen.monetization_type)
     )
-    return len(rows.scalars().all())
+    inserted = set(rows.all())
+    return [o for o in offers if (o.provider_id, o.monetization_type) in inserted]
+
+
+async def _card_now_available(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    region_code: str,
+    new_offers: list[Offer],
+    known_types: set[str],
+    first_seen_at: datetime,
+) -> bool:
+    """Raise the one `now_available` event this film's newly first-seen offers are owed, if
+    any (D-28). Returns whether an event was written. Caller owns the commit.
+
+    One event, not one per type: `uq_event_catalog_change` permits a single catalog event per
+    (film, type, timestamp), and every row this poll inserted for this film shares
+    `first_seen_at` — so a title turning up to rent and to buy in one observation is one card
+    carrying a `US:rent`-style token per type, exactly as a US limited and US wide date moving
+    together are (`sweep.release_events`). The per-type grain D-28 cards on lives in
+    `subject_key`, and the insert-only rule lives in `known_types`.
+
+    The event and its summary are written together, so an event never reaches the feed without
+    the summary row every read path inner-joins.
+    """
+    new_types = [
+        kind
+        for kind in MONETIZATION_FIELDS
+        if kind not in known_types and any(o.monetization_type == kind for o in new_offers)
+    ]
+    if not new_types:
+        return False
+    event = Event(
+        film_id=film_id,
+        event_type=NOW_AVAILABLE_EVENT_TYPE,
+        # TMDB is the system of record for who is carrying a film, the same standing the field
+        # phase gives a status change — there is nothing here for a trade story to corroborate.
+        confidence="confirmed",
+        provenance="catalog",
+        # When the film landed, not when the poll ran: a pass that catches up on a backlog after
+        # an outage still dates each card to the observation that produced it.
+        occurred_at=first_seen_at,
+        region=region_code,
+        subject_key=[f"{region_code}:{kind}" for kind in new_types],
+    )
+    session.add(event)
+    await session.flush()
+    await write_deterministic_summary(
+        session,
+        event_id=event.id,
+        change=NowAvailable(
+            offers=tuple(
+                AvailableOn(
+                    monetization_type=kind,
+                    providers=tuple(
+                        o.provider_name for o in new_offers if o.monetization_type == kind
+                    ),
+                )
+                for kind in new_types
+            )
+        ),
+        source_updated_at=event.updated_at,
+    )
+    return True
 
 
 async def _rebuild_current(
@@ -352,18 +460,31 @@ async def run_provider_poll(
             payload = await client.watch_providers(target.tmdb_id)
             region = payload.results.get(region_code)
             offers = offers_for_region(region)
+            # Stamped per film rather than once for the whole pass: a poll runs for as long as
+            # the set takes, and `first_seen_at` is the ledger's only payload — it is what D-28
+            # reports as when the film landed, and what the card's `occurred_at` becomes, so it
+            # has to say when this film was seen, not when the run began. `now` pins it for
+            # tests.
+            seen_at = now if now is not None else datetime.now(UTC)
             async with owned_session(session_factory) as s:
                 await _upsert_providers(s, offers)
-                first_seen = await _insert_first_seen(
+                known_types = await _ledger_types(
+                    s, film_id=target.film_id, region_code=region_code
+                )
+                new_offers = await _insert_first_seen(
                     s,
                     film_id=target.film_id,
                     region_code=region_code,
                     offers=offers,
-                    # Stamped per film rather than once for the whole pass: a poll runs for as
-                    # long as the set takes, and `first_seen_at` is the ledger's only payload —
-                    # it is what D-28 reports as when the film landed, so it has to say when
-                    # this film was seen, not when the run began. `now` pins it for tests.
-                    now=now if now is not None else datetime.now(UTC),
+                    now=seen_at,
+                )
+                carded = await _card_now_available(
+                    s,
+                    film_id=target.film_id,
+                    region_code=region_code,
+                    new_offers=new_offers,
+                    known_types=known_types,
+                    first_seen_at=seen_at,
                 )
                 await _rebuild_current(
                     s,
@@ -376,7 +497,8 @@ async def run_provider_poll(
                 await s.commit()
             result.polled += 1
             result.offers += len(offers)
-            result.first_seen += first_seen
+            result.first_seen += len(new_offers)
+            result.cards += 1 if carded else 0
             guard.succeeded()
             if i % log_every == 0:
                 log.info("providers: %d/%d films", i, len(targets))
@@ -404,10 +526,11 @@ async def run_provider_poll(
             break
 
     log.info(
-        "providers: %d polled, %d offers, %d first seen, %d missing, %d failed",
+        "providers: %d polled, %d offers, %d first seen, %d carded, %d missing, %d failed",
         result.polled,
         result.offers,
         result.first_seen,
+        result.cards,
         result.missing,
         result.failures,
     )
@@ -417,15 +540,18 @@ async def run_provider_poll(
 def providers_detail(result: ProvidersResult) -> str:
     """The run's `ingest_run.detail` line.
 
-    `first seen` is the number worth reading: it is the beat the milestone exists to deliver
+    `carded` is the number worth reading: it is the beat the milestone exists to deliver
     (D-28), and in steady state a healthy poll reports a handful against thousands of offers.
+    It sits beside `first seen` rather than replacing it because the two answer different
+    questions — a gap between them is churn the product deliberately swallowed, and a `first
+    seen` that climbs while `carded` stays flat is exactly what a healthy catalogue looks like.
     `missing` sits apart from `failed` here for the same reason it does on the sweep's line —
     one is catalog hygiene, the other is an outage.
     """
     line = (
         f"providers: {result.polled}/{result.selected} polled, "
         f"{result.offers} offers, {result.first_seen} first seen, "
-        f"{result.missing} missing, {result.failures} failed"
+        f"{result.cards} carded, {result.missing} missing, {result.failures} failed"
     )
     if result.aborted:
         line += f"; providers aborted: {result.abort_error}"

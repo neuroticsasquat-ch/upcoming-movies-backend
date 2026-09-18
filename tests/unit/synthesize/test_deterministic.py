@@ -5,10 +5,12 @@ import pytest
 from upmovies.synthesize.deterministic import (
     DETERMINISTIC_MODEL,
     TEMPLATE_VERSION,
+    AvailableOn,
     CreditAttached,
     CreditDetached,
     CreditsAttached,
     CreditsDetached,
+    NowAvailable,
     ReleaseDateChanged,
     ReleaseDatesChanged,
     StatusChanged,
@@ -219,7 +221,7 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "deterministic-4"
+    assert TEMPLATE_VERSION == "deterministic-5"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────
@@ -306,3 +308,47 @@ def test_detached_one_credit_renders_as_singular():
 def test_unknown_role_rejected_in_detachment():
     with pytest.raises(ValueError, match="producer"):
         render_summary(CreditsDetached(credits=(CreditDetached(role="producer", name="M P"),)))
+
+
+# ── Now-available summary tests (NEU-1375, D-28) ─────────────────────────
+
+
+def test_flatrate_reads_as_streaming():
+    assert render_summary(
+        NowAvailable(offers=(AvailableOn(monetization_type="flatrate", providers=("Netflix",)),))
+    ) == ("Now streaming on Netflix.")
+
+
+def test_rent_names_every_provider_carrying_it():
+    assert render_summary(
+        NowAvailable(
+            offers=(AvailableOn(monetization_type="rent", providers=("Apple TV", "Prime Video")),)
+        )
+    ) == ("Available to rent on Apple TV and Prime Video.")
+
+
+def test_buy_has_a_clause_of_its_own():
+    assert render_summary(
+        NowAvailable(offers=(AvailableOn(monetization_type="buy", providers=("Apple TV",)),))
+    ) == ("Available to buy on Apple TV.")
+
+
+def test_several_types_first_seen_together_read_in_box_order():
+    """One observation that first sees a film under rent *and* flatrate is one card, and the
+    clauses read in the order the where-to-watch box lists them (D-29) rather than in whichever
+    order the poll's payload happened to emit."""
+    assert render_summary(
+        NowAvailable(
+            offers=(
+                AvailableOn(monetization_type="buy", providers=("Apple TV",)),
+                AvailableOn(monetization_type="flatrate", providers=("Netflix", "Hulu")),
+            )
+        )
+    ) == ("Now streaming on Netflix and Hulu. Available to buy on Apple TV.")
+
+
+def test_an_unknown_monetization_type_is_rejected():
+    with pytest.raises(ValueError, match="ads"):
+        render_summary(
+            NowAvailable(offers=(AvailableOn(monetization_type="ads", providers=("Tubi",)),))
+        )
