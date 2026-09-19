@@ -9,6 +9,7 @@ from sqlalchemy import select
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
 from upmovies import pipeline_run
 from upmovies.app.services.alert_sender import AlertSendResult
+from upmovies.app.services.digest_sender import DigestSendResult
 from upmovies.app.services.notify_service import NotifyResult
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
@@ -1367,3 +1368,193 @@ def test_main_refuses_the_notify_arm_without_mail_configuration(monkeypatch):
 
     with pytest.raises(MailConfigurationError):
         pipeline_run.main(["notify"])
+
+
+# --- digest: M7's digest sender, one slot per cadence (NEU-1381, D-33) ---
+
+
+def _stub_digest_send(monkeypatch, result: DigestSendResult | None = None) -> dict:
+    """Replace the pass itself. What `run_digest_stage` owes is the run row; what the mail
+    carries is `tests/integration/app/test_digest_sender.py`'s subject."""
+    captured: dict = {}
+
+    async def fake_send(**kwargs):
+        captured.update(kwargs)
+        return result if result is not None else DigestSendResult(cadence=kwargs["cadence"])
+
+    monkeypatch.setattr("upmovies.pipeline_run.send_digests", fake_send)
+    return captured
+
+
+async def test_digest_stage_finalizes_the_run_with_its_detail_line(session, monkeypatch):
+    captured = _stub_digest_send(
+        monkeypatch,
+        DigestSendResult(cadence="weekly", users_considered=3, mails_sent=2, sent=5, slate_dates=4),
+    )
+    run_id = await create_run(session, kind="digest")
+    await session.commit()
+
+    await pipeline_run.run_digest_stage(run_id, get_settings(), "weekly")
+
+    assert captured["run_id"] == run_id
+    assert captured["cadence"] == "weekly"
+    assert captured["mailer"] is not None
+    row = await _run_row(session, run_id)
+    assert row.status == "succeeded"
+    assert row.error is None
+    assert row.detail == (
+        "digest weekly: 2 mails to 3 users, 5 sent, 0 failed, 0 suppressed, 0 gated, "
+        "4 slate dates, 0 lost"
+    )
+
+
+async def test_digest_stage_fails_the_run_when_the_pass_aborted(session, monkeypatch):
+    _stub_digest_send(
+        monkeypatch,
+        DigestSendResult(cadence="daily", aborted=True, abort_error="digest send aborted after 10"),
+    )
+    run_id = await create_run(session, kind="digest")
+    await session.commit()
+
+    await pipeline_run.run_digest_stage(run_id, get_settings(), "daily")
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error == "digest send aborted after 10"
+
+
+async def test_digest_stage_marks_run_failed_on_crash(session, monkeypatch):
+    async def boom(**kwargs):
+        raise RuntimeError("simulated digest crash")
+
+    monkeypatch.setattr("upmovies.pipeline_run.send_digests", boom)
+    run_id = await create_run(session, kind="digest")
+    await session.commit()
+
+    await pipeline_run.run_digest_stage(run_id, get_settings(), "weekly")  # must not raise
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error and "simulated digest crash" in row.error
+
+
+@pytest.mark.parametrize(
+    ("cadence", "url_field"),
+    [("daily", "healthcheck_digest_daily_url"), ("weekly", "healthcheck_digest_weekly_url")],
+)
+async def test_run_digest_opens_its_own_run_kind_and_pings_the_cadence_s_deadman(
+    session, monkeypatch, cadence, url_field
+):
+    """One run kind for both cadences, and one deadman *per* cadence — a healthchecks.io check
+    has one schedule, so the daily and the weekly slot cannot share it."""
+    kinds: list[str] = []
+    cadences: list[str] = []
+    pings: list[tuple[str | None, str]] = []
+
+    async def fake_stage(run_id, settings, cadence):
+        cadences.append(cadence)
+        async with pipeline_run.SessionLocal() as s:
+            kinds.append(
+                (await s.execute(select(IngestRun.kind).where(IngestRun.id == run_id))).scalar_one()
+            )
+            await finalize_run(s, run_id, status="succeeded")
+            await s.commit()
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append((base_url, suffix))
+
+    monkeypatch.setattr(pipeline_run, "run_digest_stage", fake_stage)
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+    settings = get_settings().model_copy(
+        update={
+            "healthcheck_digest_daily_url": "https://hc/digest-daily",
+            "healthcheck_digest_weekly_url": "https://hc/digest-weekly",
+        }
+    )
+
+    ok = await pipeline_run.run_digest(settings, cadence)
+
+    assert ok is True
+    assert kinds == ["digest"]
+    assert cadences == [cadence]
+    expected = f"https://hc/digest-{cadence}"
+    assert pings == [(expected, "/start"), (expected, "")]
+
+
+async def test_run_digest_pings_fail_on_failure(session, monkeypatch):
+    pings: list[tuple[str | None, str]] = []
+
+    async def fake_stage(run_id, settings, cadence):
+        async with pipeline_run.SessionLocal() as s:
+            await finalize_run(s, run_id, status="failed", error="boom")
+            await s.commit()
+
+    async def fake_ping(base_url, suffix=""):
+        pings.append((base_url, suffix))
+
+    monkeypatch.setattr(pipeline_run, "run_digest_stage", fake_stage)
+    monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
+    settings = get_settings().model_copy(
+        update={"healthcheck_digest_weekly_url": "https://hc/digest-weekly"}
+    )
+
+    ok = await pipeline_run.run_digest(settings, "weekly")
+
+    assert ok is False
+    assert pings == [("https://hc/digest-weekly", "/start"), ("https://hc/digest-weekly", "/fail")]
+
+
+def test_main_runs_the_digest_arm_with_its_cadence(monkeypatch):
+    """`python -m upmovies.pipeline_run digest {daily|weekly}` — the sixth and seventh slots."""
+    settings = get_settings().model_copy(update=DEFAULT_ROUTING)
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+    ran: list[str] = []
+
+    def stub(*, ok: bool):
+        async def _run(settings, cadence):
+            ran.append(cadence)
+            return ok
+
+        return _run
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the digest arm must not run the daily chain")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_daily", must_not_run)
+    monkeypatch.setattr("upmovies.pipeline_run.run_digest", stub(ok=True))
+    assert pipeline_run.main(["digest", "daily"]) == 0
+    assert pipeline_run.main(["digest", "weekly"]) == 0
+    monkeypatch.setattr("upmovies.pipeline_run.run_digest", stub(ok=False))
+    assert pipeline_run.main(["digest", "weekly"]) == 1
+    assert ran == ["daily", "weekly", "weekly"]
+
+
+@pytest.mark.parametrize("argv", [["digest"], ["digest", "off"], ["digest", "hourly"]])
+def test_main_refuses_a_digest_without_a_real_cadence(monkeypatch, capsys, argv):
+    """A usage error, answered before any configuration is validated or any run opened."""
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("a digest with no cadence must not start")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_digest", must_not_run)
+    monkeypatch.setattr("upmovies.pipeline_run.validate_stage_configuration", must_not_run)
+
+    assert pipeline_run.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "daily" in err and "weekly" in err
+
+
+def test_main_refuses_the_digest_arm_without_mail_configuration(monkeypatch):
+    """Not exempt, for the notify slot's reason: this slot exists to send mail."""
+    settings = get_settings().model_copy(
+        update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
+    )
+    monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the digest arm must not start on an unusable mail configuration")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_digest", must_not_run)
+
+    with pytest.raises(MailConfigurationError):
+        pipeline_run.main(["digest", "weekly"])

@@ -74,6 +74,11 @@ services:
       # stopped running would be invisible in every deadman that does exist (NEU-1374).
       HEALTHCHECK_PROVIDERS_URL: "${HEALTHCHECK_PROVIDERS_URL:-}"
       HEALTHCHECK_NOTIFY_URL: "${HEALTHCHECK_NOTIFY_URL:-}"
+      # The M7 digest sender runs `digest daily` and `digest weekly` on two slots, one per
+      # cadence, and each gets its own check: a healthchecks.io check has one schedule, so a
+      # daily check cannot also expect the weekly ping (D-33, NEU-1381).
+      HEALTHCHECK_DIGEST_DAILY_URL: "${HEALTHCHECK_DIGEST_DAILY_URL:-}"
+      HEALTHCHECK_DIGEST_WEEKLY_URL: "${HEALTHCHECK_DIGEST_WEEKLY_URL:-}"
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail

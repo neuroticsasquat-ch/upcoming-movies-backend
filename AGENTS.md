@@ -26,7 +26,7 @@ Production deploys are **not** triggered by `task` commands. The flow is:
 
 ### Coolify scheduled tasks
 
-Five slots run `python -m upmovies.pipeline_run <mode>` in the deployed container, each a separate
+Seven slots run `python -m upmovies.pipeline_run <mode>` in the deployed container, each a separate
 process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 
 | Mode | Cadence | What it does |
@@ -36,6 +36,8 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll (NEU-1374) |
 | `notify` | daily, **after** `daily` | the M7 decision pass, then the alert send (D-31, NEU-1379/1380) |
+| `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user (D-33, NEU-1381) |
+| `digest weekly` | weekly, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
 
 **`providers` is a new slot and must be added in the Coolify UI** — nothing in the repo creates
 it, so merging this leaves the poll never running, with no failing check to say so. Put it beside
@@ -76,6 +78,23 @@ to it:
   is bounded by `INGEST_CONSECUTIVE_FAILURE_THRESHOLD`: that many consecutive refusals abort the
   send and fail the run, so a dead provider costs that many users rather than the whole backlog,
   and the deadman goes red instead of green.
+
+**`digest daily` and `digest weekly` are two more slots to add in the Coolify UI** (NEU-1381),
+with `HEALTHCHECK_DIGEST_DAILY_URL` and `HEALTHCHECK_DIGEST_WEEKLY_URL` set in the same edit —
+two checks, because a healthchecks.io check has one schedule. They share the `notify` slot's
+mail prerequisites (`MAIL_PROVIDER`, `MAIL_FROM`, `PUBLIC_BASE_URL`, `TMDB_IMAGE_BASE`, the
+frontend `/settings` route) and its `failed`-is-terminal rule. Specific to them:
+
+- **Run them after `notify`, on the same day.** The digest mails the `digest` rows the
+  decision pass queued; a slot that runs before it mails yesterday's. The weekly slot's day is
+  the product's "your slate" day — pick one and keep it, since the mail says "the next 30
+  days" and a moved slot shifts what that window means.
+- **Nothing here has a watermark.** The backlog is the `queued` rows, so a failed run leaves
+  exactly what did not go out for the next slot, and a first run is not a cold start — it
+  mails whatever the notify pass has queued since it was turned on.
+- **`digest_cadence = off` rows accumulate.** The decision pass keeps queueing for a user who
+  has turned the digest off, and neither slot reads them; switching back to `weekly` gets
+  everything since in one mail. Nothing prunes that backlog.
 
 Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
 

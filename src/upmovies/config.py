@@ -431,6 +431,16 @@ class Settings(BaseSettings):
     # deadman for the same reason as the two above — and a sharper one, because this pass
     # failing is silence for the *user*, not just for the catalogue.
     healthcheck_notify_url: str | None = Field(default=None, alias="HEALTHCHECK_NOTIFY_URL")
+    # `digest daily` and `digest weekly` are the M7 digest sender (D-33) on two slots — one per
+    # cadence, because a healthchecks.io check has one schedule and a daily check cannot also
+    # expect a weekly ping. Each carries its own deadman for the notify slot's reason: the
+    # failure this reports is silence for the user.
+    healthcheck_digest_daily_url: str | None = Field(
+        default=None, alias="HEALTHCHECK_DIGEST_DAILY_URL"
+    )
+    healthcheck_digest_weekly_url: str | None = Field(
+        default=None, alias="HEALTHCHECK_DIGEST_WEEKLY_URL"
+    )
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
