@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
 from upmovies import pipeline_run
+from upmovies.app.services.alert_sender import AlertSendResult
 from upmovies.app.services.notify_service import NotifyResult
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
@@ -1173,6 +1174,18 @@ def _stub_notify(monkeypatch, result: NotifyResult | None = None) -> dict:
     return captured
 
 
+def _stub_alert_send(monkeypatch, result: AlertSendResult | None = None) -> dict:
+    """Replace the send pass. Same division as `_stub_notify`: this file owns the run row."""
+    captured: dict = {}
+
+    async def fake_send(**kwargs):
+        captured.update(kwargs)
+        return result if result is not None else AlertSendResult()
+
+    monkeypatch.setattr("upmovies.pipeline_run.send_queued_alerts", fake_send)
+    return captured
+
+
 async def test_notify_stage_finalizes_the_run_with_its_detail_line(session, monkeypatch):
     _stub_notify(
         monkeypatch,
@@ -1186,7 +1199,10 @@ async def test_notify_stage_finalizes_the_run_with_its_detail_line(session, monk
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
     assert row.error is None
-    assert row.detail == "notify: 7 events, 3 users, 2 alerts, 4 digests, 0 suppressed, 0 failed"
+    assert row.detail == (
+        "notify: 7 events, 3 users, 2 alerts, 4 digests, 0 suppressed, 0 failed; "
+        "alerts: 0 mails to 0 users, 0 sent, 0 failed, 0 suppressed, 0 lost"
+    )
 
 
 async def test_notify_stage_passes_the_excluded_statuses_from_settings(session, monkeypatch):
@@ -1214,6 +1230,64 @@ async def test_notify_stage_fails_the_run_when_the_pass_aborted(session, monkeyp
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error == "aborted after 10"
+
+
+async def test_notify_stage_sends_the_alerts_the_decision_pass_queued(session, monkeypatch):
+    """The two phases under one run row (NEU-1380). What is asserted here is the *sequencing* —
+    that the send pass runs, with the run id and a gateway — not what it mails, which is
+    `tests/integration/app/test_alert_sender.py`'s subject."""
+    _stub_notify(monkeypatch, NotifyResult(alerts_queued=2))
+    captured = _stub_alert_send(
+        monkeypatch, AlertSendResult(users_considered=1, mails_sent=1, sent=2)
+    )
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, get_settings())
+
+    assert captured["run_id"] == run_id
+    assert captured["mailer"] is not None
+    row = await _run_row(session, run_id)
+    assert row.status == "succeeded"
+    assert row.detail is not None
+    assert row.detail.endswith("alerts: 1 mails to 1 users, 2 sent, 0 failed, 0 suppressed, 0 lost")
+
+
+async def test_notify_stage_sends_nothing_when_the_decision_pass_aborted(session, monkeypatch):
+    """Consecutive failures deciding is not a state to start mailing out of; the rows already
+    written stay `queued` for the next run."""
+    _stub_notify(monkeypatch, NotifyResult(aborted=True, abort_error="aborted after 10"))
+
+    async def must_not_run(**kwargs):
+        raise AssertionError("an aborted decision pass must not reach the sender")
+
+    monkeypatch.setattr("upmovies.pipeline_run.send_queued_alerts", must_not_run)
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+
+
+async def test_notify_stage_fails_the_run_when_the_send_pass_aborted(session, monkeypatch):
+    """A mail provider that is down fails the run — `send_queued_alerts` aborts on consecutive
+    provider refusals — so the watermark does not advance past a window whose alerts never went
+    out, and the deadman says so. That the refusals really do reach the guard is
+    `tests/integration/app/test_alert_sender.py`'s subject; this asserts the run row."""
+    _stub_notify(monkeypatch)
+    _stub_alert_send(
+        monkeypatch, AlertSendResult(aborted=True, abort_error="alert send aborted after 10")
+    )
+    run_id = await create_run(session, kind="notify")
+    await session.commit()
+
+    await pipeline_run.run_notify_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error == "alert send aborted after 10"
 
 
 async def test_notify_stage_marks_run_failed_on_crash(session, monkeypatch):

@@ -27,8 +27,9 @@ green sweep.
 `run_notify` is the fifth slot: M7's decision pass (D-31), scheduled after the daily chain
 rather than inside it. It reads the events that chain published and writes `app.notification`;
 running it as a fifth stage would tie it to the chain's fail-fast rule, so a link-stage outage
-would mean nobody hears about the release dates the tmdb stage did card. It sends no mail — the
-senders are passes of their own — and carries its own deadman.
+would mean nobody hears about the release dates the tmdb stage did card. Deciding and sending
+are two passes under one run row: the decision pass writes `queued` rows, then the alert sender
+mails them (NEU-1380). It carries its own deadman.
 
 Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify}`.
 """
@@ -44,6 +45,7 @@ from uuid import UUID
 import httpx
 from sqlalchemy import select
 
+from upmovies.app.services.alert_sender import alert_send_detail, send_queued_alerts
 from upmovies.app.services.notify_service import notify_detail, run_notify_pass
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
@@ -75,7 +77,7 @@ from upmovies.link.pipeline import run_link_ingest
 from upmovies.link.resolve.scoring import Thresholds
 from upmovies.llm import Gateway, validate_stage_configuration
 from upmovies.logging_config import configure_logging
-from upmovies.mail import validate_mail_configuration
+from upmovies.mail import MailGateway, validate_mail_configuration
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
@@ -416,16 +418,22 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
 
 
 async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
-    """The M7 decision pass against one run row (D-31): decide what every user is owed about
-    the events published since the last successful notify run, and write `app.notification`.
+    """The M7 notify slot against one run row (D-31): decide what every user is owed about the
+    events published since the last successful notify run, then mail the alerts.
 
-    Like the provider poll, one phase with nothing to sequence, and the same division of
-    labour: the phase does not finalize, because the status, the error and the detail line
-    belong to whoever opened the run (§6.2).
+    Two phases, sequenced here rather than folded into one pass. The decision pass writes
+    `queued` rows and commits them; the alert sender (NEU-1380) reads that queue — *all* of it,
+    including anything a previous run left behind — and marks each row `sent`, `failed` or
+    `suppressed`. Splitting them is what makes a provider outage cost a delay rather than a
+    half-delivered mailing: the decisions are already durable, so the next run sends exactly
+    what did not go out.
 
-    Sends no mail. This writes `queued` rows and stops; the senders are their own passes
-    (NEU-1380, NEU-1381), so a decision pass that crashes costs a delay rather than a
-    half-delivered mailing.
+    **An aborted decision pass sends nothing.** Aborting means a run of consecutive failures
+    deciding, which is not a state to start mailing out of; the rows already written stay
+    `queued` for the next run, which is the same path a failed send takes.
+
+    Like the provider poll, the same division of labour: neither phase finalizes, because the
+    status, the error and the detail line belong to whoever opened the run (§6.2).
     """
     try:
         decided = await run_notify_pass(
@@ -435,15 +443,31 @@ async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
             excluded_statuses=settings.tmdb_excluded_statuses,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
+        detail = notify_detail(decided)
+        sent = None
+        if not decided.aborted:
+            # One gateway for the whole pass, closed when it ends: the transport is built on
+            # the first send and pooled across every batch, so a night's alerts cost one
+            # connection rather than one per user.
+            async with MailGateway(settings) as mailer:
+                sent = await send_queued_alerts(
+                    session_factory=_session_factory,
+                    run_id=run_id,
+                    mailer=mailer,
+                    settings=settings,
+                    failure_threshold=settings.ingest_consecutive_failure_threshold,
+                )
+            detail = f"{detail}; {alert_send_detail(sent)}"
+        aborted = decided.aborted or (sent is not None and sent.aborted)
         # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
         # has to be covered by the same net as the work it reports on.
         async with SessionLocal() as s:
             await finalize_run(
                 s,
                 run_id,
-                status="failed" if decided.aborted else "succeeded",
-                error=decided.abort_error,
-                detail=notify_detail(decided),
+                status="failed" if aborted else "succeeded",
+                error=decided.abort_error or (sent.abort_error if sent else None),
+                detail=detail,
             )
             await s.commit()
     except Exception as e:
@@ -618,10 +642,10 @@ def main(argv: list[str] | None = None) -> int:
     # the daily chain to avoid, and it would surface only as deadman silence.
     # The mail configuration rides on the same guard, and inherits that exemption for the
     # same reason: those modes are deliberately outside the daily chain's shared failure modes
-    # (§6.1), and failing one on a setting it never reads would put it back inside them. No
-    # mode sends mail *today* — the check is here because M7's notify and digest passes are
-    # `pipeline_run` modes, and they should find the guard already in place rather than
-    # discover a missing RESEND_API_KEY partway through a digest run.
+    # (§6.1), and failing one on a setting it never reads would put it back inside them.
+    # `notify` *does* send mail (NEU-1380) and is deliberately not exempt: discovering a
+    # missing RESEND_API_KEY at boot is a task that does not start, where discovering it
+    # partway through is a backlog half-converted into `failed` rows.
     if mode not in _NO_MODEL_CALL_MODES:
         validate_stage_configuration(settings)
         validate_mail_configuration(settings)

@@ -60,8 +60,9 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
   link → synthesize, sequential and fail-fast; `hourly` = light feeds pass; `sweep` runs on its own
   slot ~2h ahead of daily and is deliberately **not** in the daily chain (ADR-0013); `providers`
   is the D-27 watch-provider poll, on a fourth slot for the same reasons; `notify` is M7's
-  decision pass (D-31), scheduled *after* the daily chain because it reads what that chain
-  published. Each pings a healthchecks.io deadman (`/start`, base, `/fail`).
+  decision pass (D-31) *and* the alert send that follows it in the same run, scheduled after the
+  daily chain because it reads what that chain published — the one scheduled task that mails
+  users. Each pings a healthchecks.io deadman (`/start`, base, `/fail`).
 
 ### Layout (`src/upmovies/`)
 
