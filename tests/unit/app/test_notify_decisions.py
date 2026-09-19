@@ -87,11 +87,12 @@ def test_the_detail_line_reports_suppression_beside_the_queued_kinds():
             users_considered=4,
             events_considered=9,
             alerts_queued=2,
+            push_alerts_queued=1,
             digests_queued=5,
             suppressed=3,
         )
     )
-    assert line == "notify: 9 events, 4 users, 2 alerts, 5 digests, 3 suppressed, 0 failed"
+    assert line == "notify: 9 events, 4 users, 2 alerts, 1 push, 5 digests, 3 suppressed, 0 failed"
 
 
 def test_an_aborted_pass_says_so_on_the_same_line():

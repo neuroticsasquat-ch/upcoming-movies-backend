@@ -535,3 +535,55 @@ class Notification(Base):
     # by a person looking at a row that did not go out, and the provider's own message is the
     # most useful thing to put in front of them.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PushSubscription(Base):
+    """One browser's Web Push registration, as the Push API handed it to the client (D-36).
+
+    Keyed on `endpoint` rather than on the user: the endpoint *is* the push service's name for
+    one browser profile on one device, so it is the natural identity here — and a user with a
+    laptop, a phone and a work profile holds three rows, all of which are owed the same alert.
+    The unique constraint is what makes re-subscribing idempotent: a browser that re-registers
+    after a service-worker update sends the same endpoint back and updates its keys in place
+    instead of accumulating a row per visit.
+
+    That uniqueness is deliberately global rather than per user. One browser profile is one
+    endpoint, and a shared machine where a second account subscribes must *move* the row rather
+    than duplicate it — two rows would push both users' alerts to whoever is currently signed
+    in, which is the one failure mode a notification cannot be taken back from
+    (`push_subscription_repo.upsert`).
+
+    `p256dh` and `auth` are the subscription's public key and auth secret: the payload is
+    encrypted to them, so a row without both is undeliverable and neither is nullable. They are
+    the client's own material, not a credential of ours — what signs the request is `VAPID_*`.
+
+    **Revocation does not delete rows** (D-40). A lapsed subscriber's browser stays registered
+    and simply receives nothing, because the decision pass suppresses them upstream — so a
+    renewed grant resumes on the subscription already installed. The only thing that deletes a
+    row is the push service itself answering 404/410 (`push_sender`), which is the one
+    authoritative statement that the endpoint is gone, or the user unsubscribing.
+    """
+
+    __tablename__ = "push_subscription"
+    __table_args__ = (
+        # The sender's read: every subscription belonging to the user it is about to push to.
+        Index("ix_push_subscription_user_id", "user_id"),
+        {"schema": "app"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
+    auth: Mapped[str] = mapped_column(Text, nullable=False)
+    # What the browser called itself when it subscribed, for the settings screen's "Chrome on
+    # Pixel 8" line and for an operator reading a row that keeps failing. Nullable because it
+    # is the request's `User-Agent` header, which a client is free not to send.
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

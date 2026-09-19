@@ -381,3 +381,51 @@ class UserSettingsUpdateRequest(BaseModel):
     optional fields when they exist."""
 
     digest_cadence: DigestCadence
+
+
+# --- web push (M7, D-36) ----------------------------------------------------------------------
+
+
+class PushSubscriptionKeys(BaseModel):
+    """The encryption material the browser generated for one subscription.
+
+    Nested rather than flattened because this is the shape `PushSubscription.toJSON()` produces
+    in the browser: the client posts what the Push API handed it, unmodified, and a route that
+    demanded a re-shaped body would be asking every caller to do the same rearranging."""
+
+    p256dh: str = Field(min_length=1, max_length=256)
+    auth: str = Field(min_length=1, max_length=256)
+
+
+class PushSubscribeRequest(BaseModel):
+    """`POST /me/push` — one browser registering for notifications (D-36).
+
+    `expirationTime`, the third member of the browser's JSON, is deliberately not modelled and
+    not stored: it is null in every current implementation, and a column nothing writes is a
+    field the sender would eventually be tempted to trust."""
+
+    # Bounded, because it is stored: a push endpoint is a URL the *service* mints, around 200
+    # characters today, and nothing legitimate approaches this ceiling.
+    endpoint: str = Field(min_length=1, max_length=2048)
+    keys: PushSubscriptionKeys
+
+
+class PushUnsubscribeRequest(BaseModel):
+    """`DELETE /me/push` — the endpoint the browser has just torn down.
+
+    A body rather than a query string, for the same reason the subscribe route takes one: the
+    endpoint is the browser's, it is long, and it has no business in a URL an access log keeps.
+    """
+
+    endpoint: str = Field(min_length=1, max_length=2048)
+
+
+class VapidPublicKeyOut(BaseModel):
+    """`GET /me/push/vapid-public-key` — what the browser passes to
+    `pushManager.subscribe({applicationServerKey})` (D-36).
+
+    Served rather than built into the frontend bundle because it is a property of the
+    deployment: staging and production hold different keypairs, and a bundle carrying one of
+    them would subscribe every staging browser to production's endpoints."""
+
+    public_key: str

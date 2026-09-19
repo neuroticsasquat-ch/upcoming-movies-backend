@@ -13,6 +13,14 @@ produces timeline rows, so the digest branch reads the follow graph through
 and watchlists a film gets both rows: an alert and a digest line are different deliveries of
 the same news, not duplicates of one (`app.models.Notification`).
 
+**Push is a second channel on the alert branch, not a third branch** (D-36). A user with a
+`push_subscription` row gets the same whitelisted events queued twice, `channel = 'email'` and
+`channel = 'push'`, which is what `channel` is doing in the unique key. Same whitelist, same
+window, same suppression — the push rows are derived from the alert branch's own event list
+rather than selected again, so the two cannot come to different answers about what is worth
+interrupting somebody for. The digest has no push half: it is a long read of everything a
+follow reached, and that is a mail.
+
 **Suppression is a row, not an absence** — and this is the checkpoint most easily missed
 (D-39). The pass decides for unverified (D-31) and unentitled (D-37) users exactly as it does
 for anyone else, then writes `status = suppressed` instead of `queued`. Skipping them silently
@@ -41,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
-from upmovies.app.models import Follow, Notification, User, WatchlistItem
+from upmovies.app.models import Follow, Notification, PushSubscription, User, WatchlistItem
 from upmovies.app.verification import verified_user_clause
 from upmovies.catalog.models import Film
 from upmovies.ingest.runs import last_successful_run_started_at, record_progress
@@ -61,6 +69,13 @@ ALWAYS_ON_ALERT_TYPES = frozenset({"release_date", "trailer"})
 A date assigned or moved and a new trailer are *why* the film is on the list."""
 
 NOW_AVAILABLE_EVENT_TYPE = "now_available"
+
+EMAIL_CHANNEL = "email"
+PUSH_CHANNEL = "push"
+
+Decision = tuple[UUID, str, str]
+"""One row this pass may write: `(event_id, kind, channel)` — the unique key minus the user,
+which every decision in a batch shares."""
 
 PUSH_WHITELIST = tuple(sorted(ALWAYS_ON_ALERT_TYPES | {NOW_AVAILABLE_EVENT_TYPE}))
 """D-32 in full. Everything outside it is digest material; nothing `unconfirmed` is in it at
@@ -89,6 +104,12 @@ class NotifyResult:
     events_considered: int = 0
     alerts_queued: int = 0
     digests_queued: int = 0
+    push_alerts_queued: int = 0
+    """`channel = 'push'` alert rows, for the subset of users who have registered a browser
+    (D-36). Counted apart from `alerts_queued` rather than folded into it because the two are
+    different deliveries with different failure modes — a mail that bounces and a push service
+    that has forgotten the endpoint — and an operator reading a run needs to see which half
+    moved."""
     suppressed: int = 0
     """Rows written for a user who may not be mailed — unverified (D-31) or unentitled (D-39).
     Counted apart from the queued kinds because a number that climbs here while the others stay
@@ -109,6 +130,19 @@ class Recipient:
     deliverable: bool
     """Verified *and* entitled. The two suppress by the same rule and in the same place (D-39),
     so they are one answer here rather than two flags a caller could combine differently."""
+    has_push: bool = False
+    """Whether this user has a `push_subscription` row (D-36).
+
+    A second channel, not a second decision: the push branch queues the *same* alert events
+    the email branch does, so the whitelist and the suppression rules are inherited rather than
+    restated. It is read here, beside `deliverable`, because a user with no registered browser
+    must get no `push` row at all — a queued delivery nothing can make would sit in the backlog
+    being retried every night.
+
+    Note what it deliberately does not consider: whether the grant is live. A lapsed
+    subscriber keeps their subscription rows (D-40), so `has_push` stays true and the push row
+    is written `suppressed` beside the email one — which is the auditable "we decided not to
+    notify you" D-39 asks for, rather than a silence that looks like nobody ever looked."""
 
     @property
     def status(self) -> str:
@@ -197,6 +231,7 @@ async def load_recipients(session: AsyncSession) -> list[Recipient]:
         select(
             User.id,
             and_(entitled_user_clause(), verified_user_clause()).label("deliverable"),
+            exists().where(PushSubscription.user_id == User.id).label("has_push"),
         )
         .where(
             or_(
@@ -206,7 +241,10 @@ async def load_recipients(session: AsyncSession) -> list[Recipient]:
         )
         .order_by(User.created_at, User.id)
     )
-    return [Recipient(user_id=row.id, deliverable=row.deliverable) for row in rows]
+    return [
+        Recipient(user_id=row.id, deliverable=row.deliverable, has_push=row.has_push)
+        for row in rows
+    ]
 
 
 async def alert_event_ids(session: AsyncSession, *, user_id: UUID, since: datetime) -> list[UUID]:
@@ -275,18 +313,20 @@ async def digest_event_ids(
 
 
 async def queue_decisions(
-    session: AsyncSession, *, recipient: Recipient, decisions: Sequence[tuple[UUID, str]]
-) -> list[str]:
-    """Write one decision per `(event_id, kind)` and return the kinds actually written.
+    session: AsyncSession, *, recipient: Recipient, decisions: Sequence[Decision]
+) -> list[Decision]:
+    """Write one row per `(event_id, kind, channel)` and return the decisions actually written.
 
     `ON CONFLICT DO NOTHING` against `uq_notification_user_event_kind_channel` is what makes a
     re-run free, and `RETURNING` is what makes the counts honest: a second pass over the same
     window reports nothing queued because nothing was, rather than because the pass declined to
     look.
 
-    `channel = 'email'` throughout. Push is the same queue with a second channel, and it ships
-    last (D-36) — a `push` row written before a `push_subscription` table exists would be a
-    delivery nobody can make."""
+    The channel is carried on each decision rather than fixed here (D-36): the same alert is
+    owed by mail and, for a user with a registered browser, by push — different deliveries of
+    one piece of news, which is what `channel` is doing in the unique key at all. The
+    `event_id` is returned alongside so a caller could group by event; the counters only read
+    the kind and the channel."""
     if not decisions:
         return []
     rows = await session.execute(
@@ -297,16 +337,16 @@ async def queue_decisions(
                     "user_id": recipient.user_id,
                     "event_id": event_id,
                     "kind": kind,
-                    "channel": "email",
+                    "channel": channel,
                     "status": recipient.status,
                 }
-                for event_id, kind in decisions
+                for event_id, kind, channel in decisions
             ]
         )
         .on_conflict_do_nothing(index_elements=["user_id", "event_id", "kind", "channel"])
-        .returning(Notification.kind)
+        .returning(Notification.event_id, Notification.kind, Notification.channel)
     )
-    return list(rows.scalars().all())
+    return [(row.event_id, row.kind, row.channel) for row in rows]
 
 
 async def decide_for_user(
@@ -316,8 +356,13 @@ async def decide_for_user(
     since: datetime,
     today: date,
     excluded_statuses: frozenset[str],
-) -> list[str]:
-    """Both branches for one user, written in one statement. Returns the kinds written."""
+) -> list[Decision]:
+    """Both branches for one user, written in one statement. Returns the decisions written.
+
+    The alert branch produces two rows per event for a user with a registered browser (D-36):
+    the same event, the same `alert` kind, once per channel. Deliberately derived from the one
+    list rather than queried twice — "the push whitelist" is D-32's list, and a push branch
+    that selected its own events would be free to drift from the mail that accompanies it."""
     alerts = await alert_event_ids(session, user_id=recipient.user_id, since=since)
     digests = await digest_event_ids(
         session,
@@ -326,8 +371,12 @@ async def decide_for_user(
         today=today,
         excluded_statuses=excluded_statuses,
     )
-    decisions = [(event_id, "alert") for event_id in alerts]
-    decisions += [(event_id, "digest") for event_id in digests]
+    decisions: list[Decision] = [(event_id, "alert", EMAIL_CHANNEL) for event_id in alerts]
+    if recipient.has_push:
+        decisions += [(event_id, "alert", PUSH_CHANNEL) for event_id in alerts]
+    # No digest by push, by design: the digest is a long read of everything a follow reached,
+    # which is a mail. A notification is one beat on a lock screen.
+    decisions += [(event_id, "digest", EMAIL_CHANNEL) for event_id in digests]
     return await queue_decisions(session, recipient=recipient, decisions=decisions)
 
 
@@ -407,14 +456,20 @@ async def run_notify_pass(
             continue
         guard.succeeded()
         if recipient.deliverable:
-            result.alerts_queued += written.count("alert")
-            result.digests_queued += written.count("digest")
+            for _, kind, channel in written:
+                if kind == "digest":
+                    result.digests_queued += 1
+                elif channel == PUSH_CHANNEL:
+                    result.push_alerts_queued += 1
+                else:
+                    result.alerts_queued += 1
         else:
             result.suppressed += len(written)
 
     log.info(
-        "notify: %d alerts, %d digests, %d suppressed, %d failed",
+        "notify: %d alerts, %d push, %d digests, %d suppressed, %d failed",
         result.alerts_queued,
+        result.push_alerts_queued,
         result.digests_queued,
         result.suppressed,
         result.failures,
@@ -433,7 +488,8 @@ def notify_detail(result: NotifyResult) -> str:
         return "notify: cold start — watermark established, nothing queued"
     line = (
         f"notify: {result.events_considered} events, {result.users_considered} users, "
-        f"{result.alerts_queued} alerts, {result.digests_queued} digests, "
+        f"{result.alerts_queued} alerts, {result.push_alerts_queued} push, "
+        f"{result.digests_queued} digests, "
         f"{result.suppressed} suppressed, {result.failures} failed"
     )
     if result.aborted:

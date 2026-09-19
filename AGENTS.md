@@ -35,7 +35,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
-| `notify` | daily, **after** `daily` | the M7 decision pass, then the alert send (D-31, NEU-1379/1380) |
+| `notify` | daily, **after** `daily` | the M7 decision pass, then the mail and push sends (D-31, NEU-1379/1380/1387) |
 | `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user (D-33, NEU-1381) |
 | `digest weekly` | weekly, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
 
@@ -87,6 +87,25 @@ to it:
   alert mail carries a settings link as its unsubscribe control, and until that route exists the
   link is a 404 — an opt-out a reader cannot take is worse than one that is not offered. The
   slot's other prerequisites are code; this one is another repo's.
+- **The slot also sends the push half (NEU-1387, D-36), and that needs `VAPID_*`.** The
+  decision pass queues a second `alert` row with `channel = 'push'` for every user who has
+  registered a browser, and the push sender delivers them at the end of the same run — so
+  `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT` have to be real before the first
+  subscriber exists. Generate the pair **once** (`vapid --gen` plus `vapid
+  --applicationServerKey` in the container) and put it in the Coolify UI: changing either key
+  invalidates every subscription taken out under the old one, and the browsers will not know
+  until they stop receiving anything. Until the keys are set, `/me/push` answers 503
+  `push_unavailable` and nobody can subscribe, which is the state to be in.
+  - **Once one subscription exists, a run with the keys missing skips the push send and
+    fails** (`pipeline_run.push_configuration_problem`): the night's mail still goes out, the
+    push rows stay `queued` for the run after the fix, and the detail line reads `push: not
+    sent — …` with the deadman red. The API is deliberately *not* subject to this check, on
+    the same grounds as `validate_sweep_configuration`: it never sends a push, so refusing its
+    boot would trade the website for a setting it does not read. It refuses to take new
+    subscriptions instead (503 `push_unavailable`).
+  - **The mail and push halves are independent, in both directions.** Resend refusing mail
+    does not stop the pushes and a broken keypair does not stop the mail; either failing
+    fails the run.
 - **A `failed` notification row is terminal.** The sender reads only `queued` rows and the
   decision pass will not re-queue them, so alerts lost to a provider refusal need a hand-written
   re-queue (`UPDATE app.notification SET status = 'queued' WHERE …`) to go out. The blast radius
