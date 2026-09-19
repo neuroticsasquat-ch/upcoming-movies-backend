@@ -208,3 +208,27 @@ def make_watch_providers(
         if ids:
             block[field] = [make_provider(pid) for pid in ids]
     return {"id": tmdb_id, "results": {region: block}}
+
+
+def make_video(key: str, **overrides: Any) -> dict[str, Any]:
+    """One entry in a `/movie/{id}/videos` result list — a YouTube trailer by default."""
+    row: dict[str, Any] = {
+        "id": f"tmdb-{key}",
+        "iso_639_1": "en",
+        "iso_3166_1": "US",
+        "key": key,
+        "name": "Official Trailer",
+        "site": "YouTube",
+        "size": 1080,
+        "type": "Trailer",
+        "official": True,
+        "published_at": "2026-09-01T15:00:00.000Z",
+    }
+    row.update(overrides)
+    return row
+
+
+def make_videos(tmdb_id: int, videos: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """A `/movie/{id}/videos` payload. No videos yields an empty `results` — TMDB's 200 for a
+    film with nothing to watch yet, which is the ordinary answer for an unreleased title."""
+    return {"id": tmdb_id, "results": videos or []}

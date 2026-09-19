@@ -1782,3 +1782,58 @@ async def test_detail_where_to_watch_link_is_null_when_the_poll_stored_none(
 
     assert box["link"] is None
     assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
+
+
+# --- the trailer card's video key (D-35) ---------------------------------------
+
+
+async def test_film_detail_carries_the_trailer_video_key(client, make_film, add_event):
+    """The key the poll recorded rides on the card so the page can embed a player
+    (NEU-1386), rather than the client having to go back to TMDB for it."""
+    film = await make_film(slug="odyssey-key", title="The Odyssey")
+    await add_event(
+        film=film,
+        event_type="trailer",
+        provenance="catalog",
+        subject_key=["youtube:abc123"],
+        summary="A new trailer is out.",
+    )
+
+    body = (await client.get(f"/films/{ref(film)}")).json()
+
+    (event,) = _events_for_type(body, "trailer")
+    assert event["video_key"] == "abc123"
+
+
+async def test_film_detail_leaves_video_key_null_on_a_story_born_trailer(
+    client, make_film, add_event
+):
+    """The outlets reported a trailer; we hold no video, so there is nothing to embed and the
+    card falls back to its sources."""
+    film = await make_film(slug="odyssey-no-key", title="The Odyssey")
+    await add_event(film=film, event_type="trailer", summary="Outlets ran the trailer.")
+
+    body = (await client.get(f"/films/{ref(film)}")).json()
+
+    (event,) = _events_for_type(body, "trailer")
+    assert event["video_key"] is None
+
+
+async def test_film_detail_does_not_read_another_cards_subject_key_as_a_video(
+    client, make_film, add_event
+):
+    """`subject_key` is one column shared by every event type — a `now_available` card's
+    `US:rent` tokens and a casting card's names must never surface as a video id."""
+    film = await make_film(slug="odyssey-other-subjects", title="The Odyssey")
+    await add_event(
+        film=film,
+        event_type="now_available",
+        provenance="catalog",
+        subject_key=["US:rent"],
+        summary="Available to rent on Apple TV.",
+    )
+    await add_event(film=film, event_type="casting", subject_key=["Gal Gadot"])
+
+    body = (await client.get(f"/films/{ref(film)}")).json()
+
+    assert {e["video_key"] for e in _flatten_events(body)} == {None}

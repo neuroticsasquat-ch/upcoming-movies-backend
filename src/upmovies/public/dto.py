@@ -33,6 +33,11 @@ class EventOut(BaseModel):
     # than dropping it.
     status: str
     superseded_by: UUID | None
+    # The YouTube key of the trailer this card is about, for a card that embeds a player
+    # (D-35). Set only on a `trailer` event the video poll raised from a video it can name;
+    # None on every other event, and on a story-born trailer card, where the outlets reported
+    # a trailer but we hold no video to play.
+    video_key: str | None
     sources: list[SourceOut]
 
 

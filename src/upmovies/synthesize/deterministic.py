@@ -11,9 +11,9 @@ Two contracts this module exists to hold:
 - **`model` is a sentinel, never a real model id.** No call is made, and `ingest.llm_call` /
   `ingest.run_llm_usage` are the system's cost ledger — a row naming a real model there would
   price tokens that were never spent.
-- **The wording lives in one place.** Four trigger sites (release date, status, credits, and
-  the watch-provider poll) write these bodies; §5.4's phrasing must not be copy-pasted across
-  them, and `prompt_version` must move when the phrasing does.
+- **The wording lives in one place.** Five trigger sites (release date, status, credits, the
+  watch-provider poll and the video poll) write these bodies; §5.4's phrasing must not be
+  copy-pasted across them, and `prompt_version` must move when the phrasing does.
 
 Callers own the transaction, in line with the rest of the ingest pipelines.
 """
@@ -38,7 +38,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-6"
+TEMPLATE_VERSION = "deterministic-7"
 
 
 @dataclass(frozen=True)
@@ -168,6 +168,23 @@ class NowAvailable:
     offers: tuple[AvailableOn, ...]
 
 
+@dataclass(frozen=True)
+class TrailerReleased:
+    """A film's first sighting of a new YouTube trailer (D-35).
+
+    Carries nothing, and that is the decision rather than an omission. The two things a reader
+    might expect in the body are both wrong here: TMDB's video `name` is editor-entered free
+    text ("Official Trailer", "TRAILER #2 (HD) 4K", the occasional stray caption), so rendering
+    it would put unreviewed strings on the feed; and the YouTube key belongs on the event, not
+    in prose — it rides in `Event.subject_key` and surfaces as `EventOut.video_key`, which is
+    what the film page embeds a player from (NEU-1386).
+
+    So the body says the one thing the poll actually knows, and the card's value is the video
+    beside it. A marker rather than a bare string constant because `render_summary` dispatches
+    on the change type, and a change with no data is still a change.
+    """
+
+
 CatalogChange = (
     ReleaseDateChanged
     | ReleaseDatesChanged
@@ -177,6 +194,7 @@ CatalogChange = (
     | CreditDetached
     | CreditsDetached
     | NowAvailable
+    | TrailerReleased
 )
 
 # Keyed on TMDB's `status` values. An unknown status still gets a body (see `_render_status`) —
@@ -378,6 +396,12 @@ def _render_now_available(change: NowAvailable) -> str:
     )
 
 
+# The trailer card's whole body (D-35). "A new trailer" rather than "the trailer": a film
+# trailers more than once, the poll cannot tell the first from the third, and `alert_sender`
+# already labels the beat "New trailer" — one phrasing, in the two places it renders.
+_TRAILER_BODY = "A new trailer is out."
+
+
 def render_summary(change: CatalogChange) -> str:
     """The user-facing body for one catalog change. Pure — no DB, no clock."""
     match change:
@@ -397,6 +421,8 @@ def render_summary(change: CatalogChange) -> str:
             return _render_detachments(change)
         case NowAvailable():
             return _render_now_available(change)
+        case TrailerReleased():
+            return _TRAILER_BODY
 
 
 async def write_deterministic_summary(

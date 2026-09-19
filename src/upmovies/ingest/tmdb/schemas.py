@@ -425,3 +425,49 @@ class TMDBWatchProviders(BaseModel):
 
     id: int
     results: dict[str, TMDBWatchProviderRegion] = Field(default_factory=dict)
+
+
+# --- /movie/{id}/videos (D-35) -----------------------------------------------------------
+#
+# TMDB holds every promo asset a film has here — teasers, clips, featurettes, behind-the-scenes
+# — from several hosting sites. Only YouTube entries of type `Trailer` card (D-35); the rest are
+# still stored, because the ledger's job is to tell a video already seen from a new one whatever
+# its type, and a teaser promoted to `Trailer` by a TMDB editor must not read as a new video.
+
+
+class TMDBVideo(BaseModel):
+    """One video TMDB holds for a film.
+
+    `key` is the id *on `site`* — a YouTube watch id, not a TMDB one — which is why
+    `catalog.film_video` is keyed on (film, site, key) rather than on the opaque `id` TMDB also
+    returns here. The embed the film page renders (NEU-1386) is built from `key`, so it is the
+    one field with no tolerable default.
+
+    `published_at` is when the video went up on the hosting site, and is what a trailer card's
+    `occurred_at` becomes — so a poll catching up after an outage still dates the card to when
+    the trailer actually landed rather than to when we noticed. TMDB does omit it on older
+    rows, hence optional; `OptionalDatetime` because it comes back as `""` rather than null.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    key: str
+    site: str
+    type: str = ""
+    name: str = ""
+    official: bool | None = None
+    published_at: OptionalDatetime = None
+
+
+class TMDBVideos(BaseModel):
+    """The whole `/movie/{id}/videos` payload.
+
+    Unfiltered on the way in for the same reason `TMDBWatchProviders` parses every region: the
+    endpoint answers with the lot in one response, there is no narrowing request to save, and
+    the cut down to "YouTube trailers" is the caller's rule rather than the wire format's."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    results: list[TMDBVideo] = Field(default_factory=list)

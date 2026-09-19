@@ -1034,3 +1034,48 @@ async def test_grouped_events_carry_status_superseded_by_and_occurred_at(
 
     assert events["credit_removed"]["status"] == "published"
     assert events["credit_removed"]["superseded_by"] is None
+
+
+async def test_a_news_backed_trailer_row_carries_the_video_key(client, make_film, add_event):
+    """The grouped feed builds its events through a second `EventOut` call site, so the key
+    has to be read there too (D-35).
+
+    Through a *news-backed* row because that is the only kind that ships event bodies at all:
+    a TMDB row is section titles only (NEU-1208), so the poll's own card reaches a reader with
+    a `video_key` on the film page rather than here. The row is news-backed as soon as a trade
+    story clusters onto the card the poll raised, which leaves it `provenance='catalog'` — the
+    event was still *born* from the video — and that is the shape pinned here.
+    """
+    film = await make_film(slug="trailer-row-2026", title="A Film")
+    await add_event(
+        film=film,
+        event_type="trailer",
+        provenance="catalog",
+        subject_key=["youtube:abc123"],
+        summary="A new trailer is out.",
+        created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/trailer"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+
+    assert item["news_backed"] is True
+    assert [e["video_key"] for e in item["events"]] == ["abc123"]
+
+
+async def test_a_news_backed_card_that_is_not_a_trailer_has_no_video_key(
+    client, make_film, add_event
+):
+    film = await make_film(slug="casting-row-2026", title="A Film")
+    await add_event(
+        film=film,
+        event_type="casting",
+        subject_key=["Gal Gadot"],
+        summary="Casting announced.",
+        created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/casting"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+
+    assert [e["video_key"] for e in item["events"]] == [None]
