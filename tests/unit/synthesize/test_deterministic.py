@@ -19,6 +19,7 @@ from upmovies.synthesize.deterministic import (
 
 
 def test_release_date_set_names_the_market_and_the_new_date():
+    # A first date is never a slip (D-1403.1): it has nothing to be later than.
     assert render_summary(
         ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14))
     ) == ("US wide release date set to 14 August 2026.")
@@ -37,7 +38,8 @@ def test_home_release_date_uses_the_same_template():
     ) == ("US digital release date set to 14 October 2026.")
 
 
-def test_home_release_date_moved_names_both_dates():
+def test_home_release_date_slip_uses_the_same_verb():
+    # D-1403.4: one template for every bucket, so a physical slip reads as a wide one does.
     assert render_summary(
         ReleaseDateChanged(
             region="US",
@@ -45,10 +47,11 @@ def test_home_release_date_moved_names_both_dates():
             new_date=date(2026, 12, 1),
             previous_date=date(2026, 11, 3),
         )
-    ) == ("US physical release date moved from 3 November 2026 to 1 December 2026.")
+    ) == ("US physical release date slipped from 3 November 2026 to 1 December 2026.")
 
 
-def test_release_date_moved_names_both_dates():
+def test_release_date_slip_names_both_dates():
+    # D-1403.1: a strictly later date is a slip, and the verb is the only string that moves.
     assert render_summary(
         ReleaseDateChanged(
             region="US",
@@ -56,7 +59,7 @@ def test_release_date_moved_names_both_dates():
             previous_date=date(2026, 8, 14),
             new_date=date(2026, 10, 2),
         )
-    ) == ("US limited release date moved from 14 August 2026 to 2 October 2026.")
+    ) == ("US limited release date slipped from 14 August 2026 to 2 October 2026.")
 
 
 def test_two_markets_moving_together_share_one_body():
@@ -75,7 +78,7 @@ def test_two_markets_moving_together_share_one_body():
             )
         )
     ) == (
-        "US wide release date moved from 17 December 2027 to 15 January 2028. "
+        "US wide release date slipped from 17 December 2027 to 15 January 2028. "
         "GB limited release date set to 8 January 2028."
     )
 
@@ -83,6 +86,72 @@ def test_two_markets_moving_together_share_one_body():
 def test_a_one_market_group_renders_as_the_single_change_does():
     single = ReleaseDateChanged(region="US", label="wide", new_date=date(2026, 8, 14))
     assert render_summary(ReleaseDatesChanged(changes=(single,))) == render_summary(single)
+
+
+def test_an_earlier_date_is_not_a_slip():
+    # D-1403.1 keeps the direction-neutral verb for the earlier case: "moved up" is a US
+    # idiom, and the reader has both dates.
+    assert render_summary(
+        ReleaseDateChanged(
+            region="US",
+            label="wide",
+            previous_date=date(2026, 10, 2),
+            new_date=date(2026, 8, 14),
+        )
+    ) == ("US wide release date moved from 2 October 2026 to 14 August 2026.")
+
+
+def test_a_mixed_group_flags_only_the_clauses_that_slipped():
+    # D-1403.2: "later" is judged per clause, in diff order — a group-level "delayed" would
+    # be a lie about the market that moved earlier.
+    assert render_summary(
+        ReleaseDatesChanged(
+            changes=(
+                ReleaseDateChanged(
+                    region="US",
+                    label="wide",
+                    previous_date=date(2027, 12, 17),
+                    new_date=date(2028, 1, 15),
+                ),
+                ReleaseDateChanged(
+                    region="US",
+                    label="digital",
+                    previous_date=date(2028, 3, 1),
+                    new_date=date(2028, 2, 15),
+                ),
+                ReleaseDateChanged(region="GB", label="limited", new_date=date(2028, 1, 8)),
+            )
+        )
+    ) == (
+        "US wide release date slipped from 17 December 2027 to 15 January 2028. "
+        "US digital release date moved from 1 March 2028 to 15 February 2028. "
+        "GB limited release date set to 8 January 2028."
+    )
+
+
+def test_a_slip_in_another_region_uses_the_same_verb():
+    # D-1403.4: no per-region phrasing.
+    assert render_summary(
+        ReleaseDateChanged(
+            region="GB",
+            label="limited",
+            previous_date=date(2026, 8, 14),
+            new_date=date(2026, 8, 21),
+        )
+    ) == ("GB limited release date slipped from 14 August 2026 to 21 August 2026.")
+
+
+def test_an_equal_date_renders_as_moved():
+    # D-1403.3: strictly later. The sweep never sends an equal pair, but the renderer stays
+    # total rather than guarding — "moved" is at least not a lie.
+    assert render_summary(
+        ReleaseDateChanged(
+            region="US",
+            label="wide",
+            previous_date=date(2026, 8, 14),
+            new_date=date(2026, 8, 14),
+        )
+    ) == ("US wide release date moved from 14 August 2026 to 14 August 2026.")
 
 
 @pytest.mark.parametrize(
@@ -221,7 +290,7 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "deterministic-5"
+    assert TEMPLATE_VERSION == "deterministic-6"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────

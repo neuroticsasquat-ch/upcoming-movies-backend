@@ -12,7 +12,7 @@ from upmovies.mail import MailError, render
 DUNE = {
     "title": "Dune: Part Three",
     "beat": "Release date",
-    "summary": "US wide release date moved from 1 May 2026 to 18 December 2026.",
+    "summary": "US wide release date slipped from 1 May 2026 to 18 December 2026.",
     "film_url": "https://app.example.com/film/1234-dune-part-three",
     "poster_url": "https://image.tmdb.org/t/p/w154/dune.jpg",
 }
