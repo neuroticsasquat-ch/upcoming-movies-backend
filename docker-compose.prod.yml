@@ -51,6 +51,11 @@ services:
       # https://backlotter.com in the deploy environment (unset = empty string overrides the
       # code default; the fallback below prevents silent misconfiguration).
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://backlotter.com}"
+      # TMDB's image CDN, without a size segment — the base the *mail* builds absolute poster
+      # URLs from (NEU-1380), and it must agree with the frontend's VITE_TMDB_IMAGE_BASE. Here
+      # for the Coolify reason the mail block below gives: a variable absent from the file at
+      # first deploy is one somebody has to add by hand later.
+      TMDB_IMAGE_BASE: "${TMDB_IMAGE_BASE:-https://image.tmdb.org/t/p}"
       COOKIE_DOMAIN: "${COOKIE_DOMAIN}"
       COOKIE_SAMESITE: "lax"
       ENVIRONMENT: "production"

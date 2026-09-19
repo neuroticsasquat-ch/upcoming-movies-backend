@@ -35,7 +35,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll (NEU-1374) |
-| `notify` | daily, **after** `daily` | the M7 decision pass (D-31, NEU-1379) |
+| `notify` | daily, **after** `daily` | the M7 decision pass, then the alert send (D-31, NEU-1379/1380) |
 
 **`providers` is a new slot and must be added in the Coolify UI** — nothing in the repo creates
 it, so merging this leaves the poll never running, with no failing check to say so. Put it beside
@@ -59,6 +59,23 @@ to it:
   watermark and queues nothing rather than alerting on the entire back catalogue. Schedule it
   before announcing anything to users, and expect the slot's first green tick to report
   `cold start`.
+- **This slot is the one that sends mail** (NEU-1380). It decides, then mails every `queued`
+  alert in the same run, so `MAIL_PROVIDER=resend` plus its key and `MAIL_FROM` have to be real
+  before the slot is turned on — with the default `noop` provider the pass runs green and
+  transmits nothing, which is exactly what a staging environment wants and exactly what
+  production must not be left on. `PUBLIC_BASE_URL` and `TMDB_IMAGE_BASE` are load-bearing here
+  too: a mail carries absolute links and absolute image URLs, with no page around them to
+  resolve a relative path against.
+- **Do not turn the slot on before the frontend `/settings` page is mounted (NEU-1382).** Every
+  alert mail carries a settings link as its unsubscribe control, and until that route exists the
+  link is a 404 — an opt-out a reader cannot take is worse than one that is not offered. The
+  slot's other prerequisites are code; this one is another repo's.
+- **A `failed` notification row is terminal.** The sender reads only `queued` rows and the
+  decision pass will not re-queue them, so alerts lost to a provider refusal need a hand-written
+  re-queue (`UPDATE app.notification SET status = 'queued' WHERE …`) to go out. The blast radius
+  is bounded by `INGEST_CONSECUTIVE_FAILURE_THRESHOLD`: that many consecutive refusals abort the
+  send and fail the run, so a dead provider costs that many users rather than the whole backlog,
+  and the deadman goes red instead of green.
 
 Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
 

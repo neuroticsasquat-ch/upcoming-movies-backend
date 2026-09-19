@@ -1,0 +1,20 @@
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+{% if items | length == 1 %}
+Something moved on a film you are watching.
+{% else %}
+{{ items | length }} films on your watchlist moved.
+{% endif %}
+
+{% for item in items %}
+{{ item.title }} — {{ item.beat }}
+{{ item.summary }}
+{{ item.film_url }}
+
+{% endfor %}
+You are getting this because these films are on your {{ product_name }} watchlist. Choose
+which films and which updates you hear about — or stop them altogether — here:
+
+{{ settings_url }}
+
+— {{ product_name }}

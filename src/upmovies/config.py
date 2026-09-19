@@ -438,6 +438,11 @@ class Settings(BaseSettings):
         default="https://app.upmovies.localhost", alias="CORS_ALLOWED_ORIGINS"
     )
     public_base_url: str = Field(default="http://localhost:5173", alias="PUBLIC_BASE_URL")
+    # Where TMDB's image CDN serves poster paths from, without a size segment. The frontend
+    # builds its own URLs from `VITE_TMDB_IMAGE_BASE` and this is the same value; the backend
+    # needs its own because a *mail* carries absolute image URLs — there is no page around the
+    # `<img>` to resolve a relative path against, and no JS to build one at render time.
+    tmdb_image_base: str = Field(default="https://image.tmdb.org/t/p", alias="TMDB_IMAGE_BASE")
 
     session_cookie_name: str = Field(default="upmovies_session", alias="SESSION_COOKIE_NAME")
     csrf_cookie_name: str = Field(default="csrf_token", alias="CSRF_COOKIE_NAME")
