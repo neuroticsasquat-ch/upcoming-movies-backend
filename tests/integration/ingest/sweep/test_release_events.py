@@ -124,7 +124,7 @@ async def test_a_moved_date_names_both_dates_and_the_market(session, session_fac
     (event,) = await _events(session, film)
     summary = await _summary(session, event)
     assert summary.summary == (
-        "US limited release date moved from 14 August 2026 to 4 December 2026."
+        "US limited release date slipped from 14 August 2026 to 4 December 2026."
     )
     assert event.subject_key == ["US:limited"]
 

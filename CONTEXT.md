@@ -347,6 +347,17 @@ displayable row and no primary date has none.
 _Avoid_: next release date (wrong for a released film), release date (ambiguous between the
 primary scalar and the per-row TMDB value), US date (origin-country dates qualify too).
 
+**Slip**:
+A release-date move whose new date is strictly later than the previous one, judged per
+`(region, bucket)` clause — never per card, since one observation can slip US wide while
+moving US digital earlier. It is the standout beat of the **push whitelist** and it is flagged
+in the deterministic body itself ("release date slipped from … to …" against "moved from … to
+…" for an earlier date), because the alert mail renders that body verbatim and a second
+derivation in the mail would drift from the card (NEU-1403). A first date for a market is
+never a slip: it has nothing to be later than.
+_Avoid_: delay (fine in prose, not the term), pushed back, postponed, moved (that is the
+direction-neutral verb the copy reserves for an earlier date).
+
 **Title parenthetical**:
 The bracketed run after a film's title on a public surface. Composed of up to three elements —
 **production countries**, director (prefixed `Dir: `), and release year — in that order, joined

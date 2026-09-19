@@ -38,7 +38,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-5"
+TEMPLATE_VERSION = "deterministic-6"
 
 
 @dataclass(frozen=True)
@@ -206,12 +206,20 @@ def _format_date(value: date) -> str:
 def _render_release_date(change: ReleaseDateChanged) -> str:
     """One market's clause. `previous_date is None` is a first date for that market, which has
     no "moved from" to render — the same distinction the old unqualified pair encoded as two
-    types."""
+    types.
+
+    A move whose new date is *strictly later* is a **slip** and swaps the verb (D-32,
+    NEU-1403): "slipped from … to …" against the direction-neutral "moved from … to …" for an
+    earlier date. Decided here, per clause, and nowhere else — the alert mail renders this
+    body verbatim, so a second derivation of direction in the sender would be free to drift
+    from the card. An equal pair should never arrive (the sweep only sets `previous_date` on a
+    `moved` row) and renders as "moved" rather than raising: the renderer stays total."""
     market = f"{change.region} {change.label}"
     if change.previous_date is None:
         return f"{market} release date set to {_format_date(change.new_date)}."
+    verb = "slipped" if change.new_date > change.previous_date else "moved"
     return (
-        f"{market} release date moved from {_format_date(change.previous_date)} "
+        f"{market} release date {verb} from {_format_date(change.previous_date)} "
         f"to {_format_date(change.new_date)}."
     )
 
