@@ -57,3 +57,53 @@ CATALOG_EVENT_TYPES = ONCE_PER_FILM_EVENT_TYPES | {"release_date"} | CREDIT_EVEN
 # card for a poll to dedup against and no stale-stage rule to apply — unlike `crew_attached`,
 # which the model reaches under another name. The poll's own ledger is the whole dedup rule.
 NOW_AVAILABLE_EVENT_TYPE = "now_available"
+
+
+# --- The trailer half (D-35) ---------------------------------------------------------------
+#
+# Unlike `now_available`, `trailer` is *not* a type the catalog path invented: the LLM has had
+# it in `link.cluster._VALID_TYPES` since the story path shipped, and it is one of
+# `_SINGULAR_BEAT_TYPES` — so a trade story about the same trailer joins the card this poll
+# raised through that rule, with no entry here. It is deliberately kept out of
+# `CATALOG_EVENT_TYPES` for the same reason: `_catalog_dedup_target` exists for beats the model
+# reaches under another name or at another time, and a trailer is neither.
+
+TRAILER_EVENT_TYPE = "trailer"
+
+# The one hosting site whose videos card, matched case-insensitively against TMDB's `site`.
+# Narrow because the beat is "there is a trailer you can watch", and the card carries a single
+# key that the film page embeds as a YouTube player (NEU-1386) — a Vimeo key in that field
+# would render an empty box.
+TRAILER_SITE = "youtube"
+
+# The one TMDB video `type` that is this beat. `Teaser` is deliberately excluded: it is a
+# different promise to a reader, and a film that teases and then trailers would card twice for
+# what the product calls one moment.
+TRAILER_VIDEO_TYPE = "trailer"
+
+_VIDEO_SUBJECT_PREFIX = f"{TRAILER_SITE}:"
+
+
+def video_subject_key(key: str) -> list[str]:
+    """The `Event.subject_key` a trailer card carries: one `youtube:<key>` token.
+
+    Prefixed the way `now_available`'s `US:rent` tokens are, so a bare id can never be mistaken
+    for a person's name on a casting card — `subject_key` is one column shared by every event
+    type, and the prefix is what keeps the namespaces apart.
+    """
+    return [f"{_VIDEO_SUBJECT_PREFIX}{key}"]
+
+
+def video_key_of(event_type: str, subject_key: list[str] | None) -> str | None:
+    """The YouTube key a trailer card carries, for `EventOut.video_key` — or None.
+
+    None for every event that is not a catalog-born trailer card, which is most of them: a
+    story-born `trailer` event has no video behind it at all, only the outlets that reported
+    one, so the film page has nothing to embed and must fall back to the card's sources.
+    """
+    if event_type != TRAILER_EVENT_TYPE or not subject_key:
+        return None
+    for token in subject_key:
+        if token.startswith(_VIDEO_SUBJECT_PREFIX):
+            return token[len(_VIDEO_SUBJECT_PREFIX) :]
+    return None

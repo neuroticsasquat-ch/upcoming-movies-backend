@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -13,6 +13,8 @@ from tests.fixtures.tmdb import (
     make_person_movie_credits,
     make_person_search_hit,
     make_person_search_page,
+    make_video,
+    make_videos,
     make_watch_providers,
 )
 from upmovies.config import Settings
@@ -897,3 +899,58 @@ async def test_watch_providers_raises_tmdb_not_found_on_404():
     async with _client() as c:
         with pytest.raises(TMDBNotFound):
             await c.watch_providers(9999)
+
+
+# --- /movie/{id}/videos (D-35) -------------------------------------------------
+
+
+@respx.mock
+async def test_movie_videos_parses_the_fields_the_ledger_stores():
+    respx.get(f"{BASE_URL}/movie/560/videos").mock(
+        return_value=httpx.Response(200, json=make_videos(560, [make_video("abc123")]))
+    )
+    async with _client() as c:
+        payload = await c.movie_videos(560)
+
+    (video,) = payload.results
+    assert (video.key, video.site, video.type) == ("abc123", "YouTube", "Trailer")
+    assert video.published_at == datetime(2026, 9, 1, 15, 0, tzinfo=UTC)
+
+
+@respx.mock
+async def test_movie_videos_reads_a_film_with_nothing_to_watch_as_empty_results():
+    """A 200 with an empty list — the ordinary answer for an unannounced title, and the reason
+    the poll's scoped set can include films years from release without erroring."""
+    respx.get(f"{BASE_URL}/movie/561/videos").mock(
+        return_value=httpx.Response(200, json=make_videos(561))
+    )
+    async with _client() as c:
+        payload = await c.movie_videos(561)
+
+    assert payload.results == []
+
+
+@respx.mock
+async def test_movie_videos_keeps_types_it_does_not_card():
+    """The cut down to YouTube trailers is the caller's rule, not the wire format's: the ledger
+    stores every video so a relabelled teaser is not mistaken for a new one."""
+    respx.get(f"{BASE_URL}/movie/562/videos").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_videos(562, [make_video("t", type="Teaser"), make_video("c", type="Clip")]),
+        )
+    )
+    async with _client() as c:
+        payload = await c.movie_videos(562)
+
+    assert [v.type for v in payload.results] == ["Teaser", "Clip"]
+
+
+@respx.mock
+async def test_movie_videos_raises_tmdb_not_found_on_404():
+    """Same contract as every other id-addressed method: the poll tombstones a deleted film
+    rather than counting it as an outage."""
+    respx.get(f"{BASE_URL}/movie/9998/videos").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.movie_videos(9998)

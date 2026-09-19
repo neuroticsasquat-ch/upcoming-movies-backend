@@ -14,6 +14,7 @@ from upmovies.synthesize.deterministic import (
     ReleaseDateChanged,
     ReleaseDatesChanged,
     StatusChanged,
+    TrailerReleased,
     render_summary,
 )
 
@@ -290,7 +291,7 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "deterministic-6"
+    assert TEMPLATE_VERSION == "deterministic-7"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────
@@ -421,3 +422,19 @@ def test_an_unknown_monetization_type_is_rejected():
         render_summary(
             NowAvailable(offers=(AvailableOn(monetization_type="ads", providers=("Tubi",)),))
         )
+
+
+# --- trailers (D-35) -----------------------------------------------------------
+
+
+def test_a_trailer_card_says_a_new_trailer_is_out():
+    assert render_summary(TrailerReleased()) == "A new trailer is out."
+
+
+def test_the_trailer_body_does_not_name_the_film_or_the_video():
+    """The card sits under the film's own title, and TMDB's video `name` is editor-entered
+    free text — the key rides on the event instead, as `EventOut.video_key` (NEU-1386)."""
+    body = render_summary(TrailerReleased())
+
+    assert "trailer" in body.lower()
+    assert body.count(".") == 1

@@ -22,7 +22,9 @@ failure) drives alerting.
 `run_providers` is a fourth slot on the same terms as the sweep: the D-27 watch-provider poll
 reads a working set the sweep has already dropped (films past their theatrical release), makes
 no model calls, and carries its own deadman so a poll that stops running does not hide behind a
-green sweep.
+green sweep. It runs **two** phases over that one working set — providers (D-27/D-28) and then
+videos (D-35) — because the video poll wants the same selection query on the same cadence, and
+a second run kind for it would open a second row saying the same thing about the same films.
 
 `run_notify` is the fifth slot: M7's decision pass (D-31), scheduled after the daily chain
 rather than inside it. It reads the events that chain published and writes `app.notification`;
@@ -87,6 +89,7 @@ from upmovies.ingest.sweep import (
 )
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.service import run_tmdb_ingest
+from upmovies.ingest.videos import run_video_poll, videos_detail
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.link.resolve.scoring import Thresholds
 from upmovies.llm import Gateway, validate_stage_configuration
@@ -397,33 +400,60 @@ async def _finalize_sweep(
 
 
 async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
-    """The watch-provider poll against one run row (D-27): read the scoped set, write the
-    first-seen ledger and the current-availability snapshot, then the run's terminal status.
+    """The daily catalog poll against one run row: the watch-provider pass (D-27) and then the
+    video pass (D-35) over the same scoped set, then the run's terminal status.
 
-    One phase, so unlike the sweep there is nothing to sequence — but the same division of
-    labour: the phase does not finalize, because the status, the error and the detail line
-    belong to whoever opened the run (§6.2).
+    Two phases, sequenced here the way the sweep's are, and *not* folded into one loop over the
+    films: each carries its own abort guard, so a TMDB outage on one endpoint costs that
+    endpoint's pass and leaves the other's work committed. Sequential rather than concurrent
+    because they share this process's one TMDB window (NEU-1399) — overlapping them would buy
+    no throughput and would interleave two films' writes under one run.
+
+    Videos runs second deliberately: the provider pass tombstones the ids TMDB has deleted, and
+    `load_poll_set` drops a tombstoned film, so the second pass does not re-ask for them.
+
+    Neither phase finalizes — the status, the error and the detail line belong to whoever
+    opened the run (§6.2). The run fails if *either* phase aborted, and reports both clauses
+    whatever happened, so a green providers pass never hides a video pass that gave up.
+
+    Note that both phases call `record_progress` against the one run row, so this run's
+    `items_processed` counts *reads* rather than films — roughly twice the size of the working
+    set. That is what the counter is for (it is the heartbeat's liveness signal, and each read
+    is a unit of work that can fail on its own); the per-phase totals are on the detail line.
     """
     try:
         async with TMDBClient.from_settings(settings) as client:
+            # One `today` for both phases, read once: a run that straddles midnight must not
+            # select two different working sets and report them as one pass.
+            today = date.today()
             polled = await run_provider_poll(
                 session_factory=_session_factory,
                 client=client,
                 run_id=run_id,
-                today=date.today(),
+                today=today,
+                min_age_days=settings.provider_poll_min_age_days,
+                max_age_days=settings.provider_poll_max_age_days,
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
+            videos = await run_video_poll(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                today=today,
                 min_age_days=settings.provider_poll_min_age_days,
                 max_age_days=settings.provider_poll_max_age_days,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )
         # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
         # has to be covered by the same net as the work it reports on.
+        aborted = polled.aborted or videos.aborted
         async with SessionLocal() as s:
             await finalize_run(
                 s,
                 run_id,
-                status="failed" if polled.aborted else "succeeded",
-                error=polled.abort_error,
-                detail=providers_detail(polled),
+                status="failed" if aborted else "succeeded",
+                error=polled.abort_error or videos.abort_error,
+                detail="; ".join((providers_detail(polled), videos_detail(videos))),
             )
             await s.commit()
     except Exception as e:

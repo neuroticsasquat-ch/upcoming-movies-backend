@@ -48,6 +48,7 @@ from upmovies.catalog.release_grade import (
     is_displayable_release,
 )
 from upmovies.config import get_settings
+from upmovies.news.catalog_events import video_key_of
 from upmovies.news.models import Event, EventStory, EventSummary, Story
 from upmovies.news.visibility import region_visible, visible_events
 from upmovies.public.arc import (
@@ -601,6 +602,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             provenance=event.provenance,
             status=event.status,
             superseded_by=event.superseded_by,
+            video_key=video_key_of(event.event_type, event.subject_key),
             sources=[
                 SourceOut(
                     url=source_url(story),
@@ -1004,6 +1006,7 @@ async def get_feed_grouped(
                 Event.superseded_by,
                 Event.created_at,
                 Event.occurred_at,
+                Event.subject_key,
                 cast(func.timezone("UTC", Event.created_at), Date).label("event_day"),
                 EventSummary.summary,
                 EventSummary.edited_at,
@@ -1056,6 +1059,7 @@ async def get_feed_grouped(
                 provenance=e.provenance,
                 status=e.status,
                 superseded_by=e.superseded_by,
+                video_key=video_key_of(e.event_type, e.subject_key),
                 sources=[
                     SourceOut(
                         url=source_url(story),

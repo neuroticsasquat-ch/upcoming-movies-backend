@@ -22,6 +22,7 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBRequestToken,
     TMDBSearchResponse,
     TMDBSessionResponse,
+    TMDBVideos,
     TMDBWatchProviders,
 )
 from upmovies.logging_config import redact_api_key
@@ -315,6 +316,24 @@ class TMDBClient:
         url = f"{self._base_url}/movie/{tmdb_id}/watch/providers"
         resp = await self._request("GET", url)
         return TMDBWatchProviders.model_validate(resp.json())
+
+    async def movie_videos(self, tmdb_id: int) -> TMDBVideos:
+        """Every promo video TMDB holds for a film, from `/movie/{id}/videos` — the video
+        poll's one request per film (D-35).
+
+        No `append_to_response`, for `watch_providers`' reason: the poll set is not the
+        refresh set, so hanging this off `/movie/{id}` would tie a cheap daily read to a full
+        detail payload. No `language` either, which leaves TMDB's own default — the answer is
+        the film's English-language videos, which is the cut a US-facing product wants and the
+        same cut the rest of this client takes.
+
+        A 404 raises `TMDBNotFound` like every other id-addressed method here. A film with no
+        videos is a 200 with an empty `results`, which is the ordinary answer for an
+        unannounced title and means "nothing yet", not "no film".
+        """
+        url = f"{self._base_url}/movie/{tmdb_id}/videos"
+        resp = await self._request("GET", url)
+        return TMDBVideos.model_validate(resp.json())
 
     # --- v3 user authorization and the account lists (D-16) ---------------------------------
     #

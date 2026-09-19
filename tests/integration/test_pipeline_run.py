@@ -26,6 +26,7 @@ from upmovies.ingest.sweep import (
     RefreshResult,
     ReleaseEventResult,
 )
+from upmovies.ingest.videos import VideosResult
 from upmovies.link.pipeline import run_link_ingest
 from upmovies.llm import StageConfigurationError
 from upmovies.mail import MailConfigurationError
@@ -1013,27 +1014,38 @@ async def test_sweep_stage_fails_the_run_when_the_derivation_phase_aborted(sessi
     assert row.error and "watchlist phase" in row.error
 
 
-# --- the watch-provider poll (D-27) --------------------------------------------
+# --- the watch-provider poll (D-27) and the video poll (D-35) ------------------
 
 
-def _stub_poll(monkeypatch, result: ProvidersResult | None = None) -> dict:
-    """Replace the poll phase with a fake that records its kwargs and returns `result`."""
+def _stub_poll(
+    monkeypatch,
+    result: ProvidersResult | None = None,
+    videos: VideosResult | None = None,
+) -> dict:
+    """Replace both phases with fakes that record their kwargs and return the given results."""
     captured: dict = {}
 
     async def fake_poll(**kwargs):
         captured.update(kwargs)
         return result if result is not None else ProvidersResult(selected=2, polled=2)
 
+    async def fake_videos(**kwargs):
+        captured.update({f"videos_{k}": v for k, v in kwargs.items()})
+        return videos if videos is not None else VideosResult(selected=2, polled=2)
+
     monkeypatch.setattr("upmovies.pipeline_run.run_provider_poll", fake_poll)
+    monkeypatch.setattr("upmovies.pipeline_run.run_video_poll", fake_videos)
     return captured
 
 
-async def test_providers_stage_finalizes_the_run_with_its_detail_line(session, monkeypatch):
-    """The phase does not finalize — the status, the error and the detail line belong to
-    whoever opened the run, the same division of labour the sweep uses."""
+async def test_providers_stage_finalizes_the_run_with_both_detail_lines(session, monkeypatch):
+    """Neither phase finalizes — the status, the error and the detail line belong to whoever
+    opened the run, the same division of labour the sweep uses. Both clauses are reported so a
+    green providers pass cannot hide a video pass that gave up."""
     _stub_poll(
         monkeypatch,
         ProvidersResult(selected=9, polled=8, offers=31, first_seen=2, cards=1, missing=1),
+        VideosResult(selected=9, polled=9, videos=22, recorded=3, baselined=1, cards=2),
     )
     run_id = await create_run(session, kind="providers")
     await session.commit()
@@ -1044,7 +1056,8 @@ async def test_providers_stage_finalizes_the_run_with_its_detail_line(session, m
     assert row.status == "succeeded"
     assert row.error is None
     assert row.detail == (
-        "providers: 8/9 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed"
+        "providers: 8/9 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed; "
+        "videos: 9/9 polled, 22 videos, 3 recorded, 1 baselined, 2 carded, 0 missing, 0 failed"
     )
 
 
@@ -1061,6 +1074,23 @@ async def test_providers_stage_passes_the_poll_window_from_settings(session, mon
     assert (captured["min_age_days"], captured["max_age_days"]) == (7, 120)
 
 
+async def test_both_phases_select_from_the_same_window_and_the_same_day(session, monkeypatch):
+    """One working set, read twice. A run straddling midnight must not poll providers over
+    yesterday's films and videos over today's and report them as one pass."""
+    captured = _stub_poll(monkeypatch)
+    settings = get_settings().model_copy(
+        update={"provider_poll_min_age_days": 7, "provider_poll_max_age_days": 120}
+    )
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, settings)
+
+    assert captured["videos_today"] == captured["today"]
+    assert (captured["videos_min_age_days"], captured["videos_max_age_days"]) == (7, 120)
+    assert captured["videos_run_id"] == captured["run_id"] == run_id
+
+
 async def test_providers_stage_fails_the_run_when_the_poll_aborted(session, monkeypatch):
     _stub_poll(
         monkeypatch,
@@ -1074,6 +1104,24 @@ async def test_providers_stage_fails_the_run_when_the_poll_aborted(session, monk
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error == "aborted after 10"
+
+
+async def test_providers_stage_fails_the_run_when_the_video_poll_aborted(session, monkeypatch):
+    """The video pass is the second half of the same slot, and its deadman is the run's — a
+    poll that gave up has to turn the check red rather than ride a green providers pass."""
+    _stub_poll(
+        monkeypatch,
+        videos=VideosResult(selected=9, polled=3, aborted=True, abort_error="videos gave up"),
+    )
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error == "videos gave up"
+    assert row.detail and "videos aborted: videos gave up" in row.detail
 
 
 async def test_providers_stage_marks_run_failed_on_crash(session, monkeypatch):

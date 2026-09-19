@@ -85,6 +85,19 @@ class Film(Base):
     swallow the first date it is ever given — the single most valuable beat this project's
     undated population can produce. Ingest bookkeeping, so it joins the denylist too.
     """
+    videos_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When the catalog first held an observation of this film's videos — NULL until it has.
+
+    `credits_observed_at` for the promo reel (D-35), and needed for the same reason
+    `release_dates_observed_at` is, at its sharpest: the video poll's scoped set deliberately
+    includes in-play films somebody follows, *because* trailers precede a theatrical date by
+    months — so the ordinary first read of a followed film returns no videos at all. Inferring
+    "never looked" from "holds nothing" would re-baseline that film on every poll and swallow
+    the teaser it eventually gets, which is the single beat the poll exists to catch. Ingest
+    bookkeeping rather than a fact about the film, so it joins `FILM_FIELD_CHANGE_DENYLIST`.
+    """
     tmdb_missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     """When TMDB was last confirmed to have no entry at this film's id — NULL while it is live.
 
@@ -616,6 +629,63 @@ class FilmAvailabilityCurrent(Base):
     link: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class FilmVideo(Base):
+    """One promo video TMDB holds for a film, as the video poll last saw it (D-35).
+
+    **Insert-only, and the whole dedup rule.** A row means "this film has been observed with
+    this video before", which is what makes a `trailer` card fire once: the poll inserts with
+    `ON CONFLICT DO NOTHING` over (film, site, key) and cards off what the statement actually
+    inserted. Nothing here is ever deleted — unlike `film_availability_current`, this is not a
+    snapshot, and a trailer pulled from YouTube must not read as new when it comes back.
+
+    Keyed on `(film_id, site, key)` rather than on TMDB's own opaque video `id` because `key`
+    is what the embed is built from (NEU-1386) and what the card carries: two TMDB rows for one
+    YouTube key are one video, and a card per TMDB id would run the same trailer twice.
+
+    Every video is stored, not just the trailers that card. The type is TMDB editors' to
+    change, and a teaser relabelled `Trailer` months later is not a new video — storing only
+    trailers would make it look like one.
+    """
+
+    __tablename__ = "film_video"
+    __table_args__ = (
+        UniqueConstraint("film_id", "site", "key", name="uq_film_video"),
+        # The poll reads a film's videos before inserting, and the film page will read them to
+        # render the embed. Both ask by film, which the unique constraint's index leads with —
+        # this is that index under a name the planner reaches either way.
+        Index("ix_catalog_film_video_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    site: Mapped[str] = mapped_column(Text, nullable=False)
+    """The hosting site, verbatim from TMDB (`YouTube`, `Vimeo`, …). Not constrained: TMDB may
+    add one, and a CHECK here would fail a whole film's poll over a video nothing cards off."""
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    """The video's id *on `site`* — a YouTube watch id, not a TMDB one."""
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    """`Trailer`, `Teaser`, `Clip`, `Featurette`, … — TMDB's own vocabulary, stored verbatim
+    for the reason `site` is: only `Trailer` cards, and the rest earn their place by being
+    remembered rather than by being understood."""
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    """TMDB's title for the video ("Official Trailer"). Editor-entered free text, so it is
+    recorded but deliberately not rendered into a card body."""
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When the video went up on the hosting site — the trailer card's `occurred_at`. Nullable
+    because TMDB omits it on older rows; a video without one cannot be dated and so does not
+    card (the poll still records it, so it never cards later either)."""
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    """When *this* poll first saw the video, as against when it was published. The two differ
+    by the age of the backlog on a film's baseline read, and by up to a day after that."""
+
+
 # --- Film column-change history trigger -------------------------------------
 # Volatile columns TMDB churns on nearly every ingest — excluded so the history
 # table records only semantic changes (release_date, status, title, runtime, ...).
@@ -631,6 +701,7 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "updated_at",
     "credits_observed_at",
     "release_dates_observed_at",
+    "videos_observed_at",
     "tmdb_missing_at",
 )
 

@@ -34,7 +34,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `hourly` | hourly | the light feeds pass (`per_film=false`) |
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
-| `providers` | daily, next to the sweep | the D-27 watch-provider poll (NEU-1374) |
+| `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
 | `notify` | daily, **after** `daily` | the M7 decision pass, then the alert send (D-31, NEU-1379/1380) |
 | `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user (D-33, NEU-1381) |
 | `digest weekly` | weekly, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
@@ -47,6 +47,21 @@ working set the sweep has already dropped — films *past* their theatrical rele
 `HEALTHCHECK_PROVIDERS_URL` in the same edit; unset, the pings are a silent no-op and a poll that
 stops running is invisible. The `PROVIDER_POLL_*` window is seeded in `docker-compose.prod.yml`
 and turned in the UI, per the gotcha below.
+
+**The `providers` slot runs two passes, not one (NEU-1385).** The watch-provider poll and
+then the video poll, over the same scoped set and under the same run row and deadman — so
+there is no second slot to create and no new environment variable, and `ingest_run.detail`
+carries a `videos:` clause beside the `providers:` one. Two consequences worth knowing:
+
+- **It doubles the slot's TMDB traffic**, one extra request per film in the set, and the two
+  passes share this process's one outbound window (see the rate-limiter gotcha below), so the
+  slot takes roughly twice as long as it did. Watch the deadman's grace period after merging.
+- **The first run after deploy cards nothing and that is correct.** Every film's first video
+  read is its baseline (ADR-0014) — it records whatever TMDB already holds and stays silent,
+  so a catalogue with years of trailers behind it does not empty itself onto the feed. Expect
+  a large `recorded` with `0 carded` and a `baselined` that matches the number polled; real
+  trailer cards start on the second run. `film.videos_observed_at` is the marker, and it is
+  deliberately never reset.
 
 **`notify` is a new slot and must be added in the Coolify UI**, on the same terms as
 `providers` above and with `HEALTHCHECK_NOTIFY_URL` set in the same edit. Two things are specific
