@@ -568,6 +568,24 @@ class Settings(BaseSettings):
     # key. Mail copy as well as policy, so `email_change_service` passes it into the context.
     email_change_token_ttl_hours: int = Field(default=1, ge=1, alias="EMAIL_CHANGE_TOKEN_TTL_HOURS")
 
+    # Web Push (D-36). The VAPID keypair identifies *this deployment* to every push service —
+    # the public key is handed to the browser at subscribe time and baked into the endpoint it
+    # gets back, and the private key signs each send. Changing either invalidates every
+    # subscription taken out under the old pair, so these are generated once per deployment and
+    # kept: rotating them is a re-subscribe for every user, not a config edit.
+    #
+    # All three optional and empty by default, like the mail credential above and for the same
+    # reason — a deploy that is not doing push must still boot. What makes optional safe here
+    # is `push.validate_push_configuration`, which refuses the boot only once a
+    # `push_subscription` row exists: by then a browser is waiting for notifications that an
+    # unconfigured process cannot send, and silence is the failure nobody reports.
+    vapid_public_key: str = Field(default="", alias="VAPID_PUBLIC_KEY")
+    vapid_private_key: str = Field(default="", alias="VAPID_PRIVATE_KEY")
+    # Who to contact about this deployment's pushes, as a `mailto:` or `https:` URL. Part of
+    # the VAPID claim rather than decoration: a push service with a misbehaving sender uses it
+    # before it starts rejecting, and some of them refuse a claim without it outright.
+    vapid_subject: str = Field(default="", alias="VAPID_SUBJECT")
+
     @property
     def cors_allowed_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins_raw.split(",") if o.strip()]

@@ -12,8 +12,12 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select, update
 
-from upmovies.app.models import Follow, Notification, WatchlistItem
-from upmovies.app.services.notify_service import NotifyResult, run_notify_pass
+from upmovies.app.models import Follow, Notification, PushSubscription, WatchlistItem
+from upmovies.app.services.notify_service import (
+    NotifyResult,
+    notify_detail,
+    run_notify_pass,
+)
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.news.models import Story, StoryPerson
@@ -549,3 +553,152 @@ async def test_a_film_with_no_slug_is_never_queued(
 
     assert (await run_pass()).alerts_queued == 0
     assert await _rows(session) == []
+
+
+# --- the push channel (D-36) ----------------------------------------------------------------
+
+
+async def _register_push(session, *, user_id: UUID, endpoint: str = "https://push.test/ep") -> None:
+    session.add(PushSubscription(user_id=user_id, endpoint=endpoint, p256dh="key", auth="secret"))
+    await session.commit()
+
+
+def _by_channel(rows: list[Notification]) -> dict[str, Notification]:
+    return {row.channel: row for row in rows}
+
+
+async def test_a_registered_browser_earns_a_push_row_beside_the_mail(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """D-36's whole contract on this side: the same event, the same `alert` kind, twice — once
+    per channel. Not a second decision, so the push row carries the same status."""
+    await seed_watermark()
+    user = await subscriber()
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    event = await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.push_alerts_queued, result.digests_queued) == (1, 1, 0)
+    rows = _by_channel(await _rows(session))
+    assert set(rows) == {"email", "push"}
+    for row in rows.values():
+        assert (row.event_id, row.kind, row.status) == (event.id, "alert", "queued")
+
+
+async def test_a_user_with_no_subscription_gets_no_push_row(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """The one that must not regress: a `push` row for a user with nowhere to send it would sit
+    in the backlog being retried every night."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="trailer", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.push_alerts_queued) == (1, 0)
+    assert [row.channel for row in await _rows(session)] == ["email"]
+
+
+async def test_a_digest_is_never_queued_by_push(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """A follow produces timeline material, and the timeline is a mail. Only the alert branch
+    has a push half."""
+    await seed_watermark()
+    user = await subscriber()
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="casting", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.digests_queued, result.push_alerts_queued) == (1, 0)
+    assert [(row.kind, row.channel) for row in await _rows(session)] == [("digest", "email")]
+
+
+async def test_a_beat_outside_the_whitelist_queues_no_push_either(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """The push branch inherits D-32 rather than restating it."""
+    await seed_watermark()
+    user = await subscriber()
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="casting", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.push_alerts_queued) == (0, 0)
+    assert await _rows(session) == []
+
+
+async def test_an_unentitled_subscriber_is_suppressed_on_the_push_row_too(
+    session, session_factory, make_user, make_film, add_event, seed_watermark, run_pass
+):
+    """D-39 against D-40: the lapsed subscriber keeps their registration, so the push row is
+    written — and written `suppressed`, so the browser hears nothing and the decision is on the
+    record."""
+    await seed_watermark()
+    user = await make_user(email="lapsed@example.com", email_verified_at=VERIFIED)
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.push_alerts_queued, result.suppressed) == (0, 0, 2)
+    rows = _by_channel(await _rows(session))
+    assert set(rows) == {"email", "push"}
+    assert {row.status for row in rows.values()} == {"suppressed"}
+    # And the registration survived the pass (D-40).
+    assert (await session.execute(select(PushSubscription))).scalars().all() != []
+
+
+async def test_a_second_pass_over_the_same_window_re_queues_no_push_row(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    seed_watermark,
+    run_pass,
+    move_watermark,
+):
+    """`channel` is in the unique key, so the push row de-duplicates on the same terms the mail
+    does."""
+    await seed_watermark()
+    user = await subscriber()
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    first = await run_pass()
+    await move_watermark(WATERMARK)
+    second = await run_pass()
+
+    assert (first.alerts_queued, first.push_alerts_queued) == (1, 1)
+    assert (second.alerts_queued, second.push_alerts_queued) == (0, 0)
+    assert len(await _rows(session)) == 2
+
+
+async def test_the_detail_line_reports_the_push_count(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    await seed_watermark()
+    user = await subscriber()
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await _watchlist(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    assert "1 alerts, 1 push" in notify_detail(await run_pass())
