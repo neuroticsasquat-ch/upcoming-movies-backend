@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#f6f6f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1a1a1a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:8px;">
+      <tr>
+        <td style="padding:32px;">
+          <p style="margin:0 0 24px;font-size:16px;">
+            Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+          </p>
+          {% if slate %}
+          <h2 style="margin:0 0 4px;font-size:18px;font-weight:600;">Your slate</h2>
+          <p style="margin:0 0 16px;font-size:14px;color:#555555;">The next {{ slate_window_days }} days on your watchlist.</p>
+          {% for day in slate %}
+          <p style="margin:0 0 8px;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#777777;">{{ day.heading }}</p>
+          {% for item in day.entries %}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+            <tr>
+              {% if item.poster_url %}
+              <td width="62" valign="top" style="padding:0 12px 0 0;">
+                <a href="{{ item.film_url }}"><img src="{{ item.poster_url }}" width="62" alt="" style="display:block;width:62px;height:auto;border:0;border-radius:4px;"></a>
+              </td>
+              {% endif %}
+              <td valign="top">
+                <p style="margin:0 0 4px;font-size:16px;font-weight:600;line-height:1.3;">
+                  <a href="{{ item.film_url }}" style="color:#1a1a1a;text-decoration:none;">{{ item.title }}</a>
+                </p>
+                <p style="margin:0;font-size:14px;color:#555555;">{{ item.release_label }}</p>
+              </td>
+            </tr>
+          </table>
+          {% endfor %}
+          {% endfor %}
+          {% endif %}
+          {% if days %}
+          <h2 style="margin:{% if slate %}16px{% else %}0{% endif %} 0 16px;font-size:18px;font-weight:600;">New on your timeline</h2>
+          {% for day in days %}
+          <p style="margin:0 0 8px;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#777777;">{{ day.heading }}</p>
+          {% for film in day.films %}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+            <tr>
+              {% if film.poster_url %}
+              <td width="62" valign="top" style="padding:0 12px 0 0;">
+                <a href="{{ film.film_url }}"><img src="{{ film.poster_url }}" width="62" alt="" style="display:block;width:62px;height:auto;border:0;border-radius:4px;"></a>
+              </td>
+              {% endif %}
+              <td valign="top">
+                <p style="margin:0 0 6px;font-size:16px;font-weight:600;line-height:1.3;">
+                  <a href="{{ film.film_url }}" style="color:#1a1a1a;text-decoration:none;">{{ film.title }}</a>
+                </p>
+                {% for event in film.events %}
+                <p style="margin:0 0 6px;font-size:14px;line-height:1.5;"><strong>{{ event.beat }}.</strong> {{ event.summary }}</p>
+                {% endfor %}
+                <p style="margin:0;font-size:14px;">
+                  <a href="{{ film.film_url }}" style="color:#1a56db;">See the film page</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+          {% endfor %}
+          {% endfor %}
+          {% endif %}
+          <p style="margin:8px 0 0;font-size:14px;line-height:1.5;color:#555555;">
+            You are getting this {{ cadence }} digest because you follow people, companies,
+            franchises and films on {{ product_name }}, and because films on your watchlist have
+            dates coming up.
+            <a href="{{ settings_url }}" style="color:#1a56db;">Change how often it arrives</a> — or stop it.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

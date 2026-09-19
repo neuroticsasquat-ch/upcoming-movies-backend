@@ -31,7 +31,14 @@ would mean nobody hears about the release dates the tmdb stage did card. Decidin
 are two passes under one run row: the decision pass writes `queued` rows, then the alert sender
 mails them (NEU-1380). It carries its own deadman.
 
-Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify}`.
+`run_digest` is the sixth and seventh: M7's digest sender (D-33), on one slot per cadence.
+It reads the `queued` digest rows the notify pass wrote for every user on that cadence and
+mails one digest each — weekly, with the "your slate" section in front. Two slots rather
+than one arm with a day-of-week check because a Coolify schedule is the cadence, and a
+healthchecks.io check has one schedule: each cadence pings its own deadman.
+
+Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify|digest
+{daily|weekly}}`.
 """
 
 import asyncio
@@ -46,6 +53,13 @@ import httpx
 from sqlalchemy import select
 
 from upmovies.app.services.alert_sender import alert_send_detail, send_queued_alerts
+from upmovies.app.services.digest_sender import (
+    DIGEST_RUN_KIND,
+    SEND_CADENCES,
+    DigestCadence,
+    digest_detail,
+    send_digests,
+)
 from upmovies.app.services.notify_service import notify_detail, run_notify_pass
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
@@ -475,6 +489,42 @@ async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
         await _finalize_failed(run_id, str(e))
 
 
+async def run_digest_stage(run_id: UUID, settings: Settings, cadence: DigestCadence) -> None:
+    """The M7 digest slot for one cadence against one run row (D-33): mail every user on that
+    cadence their queued digest rows — and, weekly, their slate.
+
+    One phase, and no watermark: the backlog is the `queued` rows themselves, so a failed run
+    leaves exactly what did not go out for the next slot. The same division of labour as the
+    notify slot — the pass does not finalize, because the status, the error and the detail
+    line belong to whoever opened the run (§6.2).
+    """
+    try:
+        async with MailGateway(settings) as mailer:
+            sent = await send_digests(
+                session_factory=_session_factory,
+                run_id=run_id,
+                cadence=cadence,
+                today=date.today(),
+                mailer=mailer,
+                settings=settings,
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
+        # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
+        # has to be covered by the same net as the work it reports on.
+        async with SessionLocal() as s:
+            await finalize_run(
+                s,
+                run_id,
+                status="failed" if sent.aborted else "succeeded",
+                error=sent.abort_error,
+                detail=digest_detail(sent),
+            )
+            await s.commit()
+    except Exception as e:
+        log.exception("digest pass crashed")
+        await _finalize_failed(run_id, str(e))
+
+
 async def _run_tracked_stage(kind: str, runner: StageRunner, settings: Settings) -> str:
     """Open a run of `kind`, execute `runner` to completion (it finalizes its own run), and
     return the run's terminal status (`succeeded` / `failed` / `cancelled`)."""
@@ -506,7 +556,7 @@ async def _ping(base_url: str | None, suffix: str = "") -> None:
 # The modes that reach no model and send no mail, and so are exempted from the LLM-routing and
 # mail guards in `main` — see the comment there. Membership is a property of what a mode *does*,
 # not of its schedule: `providers` joins the sweep because the D-27 poll is TMDB reads and
-# catalog writes end to end (NEU-1374). M7's `notify` and `digest` will not join it.
+# catalog writes end to end (NEU-1374). M7's `notify` and `digest` do not join it: both mail.
 _NO_MODEL_CALL_MODES = frozenset({"sweep", "providers"})
 
 # Daily chain: TMDB refresh → per-film feed pass → LLM link/cluster → summarize. `feeds`
@@ -627,9 +677,45 @@ async def run_notify(settings: Settings) -> bool:
     return True
 
 
+def _digest_deadman(settings: Settings, cadence: DigestCadence) -> str | None:
+    if cadence == "daily":
+        return settings.healthcheck_digest_daily_url
+    return settings.healthcheck_digest_weekly_url
+
+
+async def run_digest(settings: Settings, cadence: DigestCadence) -> bool:
+    """Run the digest sender for one cadence on its own run kind. Returns True iff it
+    succeeded. Pings that cadence's deadman check at start / success / failure."""
+    deadman = _digest_deadman(settings, cadence)
+    await _clear_stale_runs(settings)
+    await _ping(deadman, "/start")
+    status = await _run_tracked_stage(
+        DIGEST_RUN_KIND, lambda rid, s: run_digest_stage(rid, s, cadence), settings
+    )
+    if status != "succeeded":
+        log.error("%s digest failed: ended %s", cadence, status)
+        await _ping(deadman, "/fail")
+        return False
+    log.info("%s digest succeeded", cadence)
+    await _ping(deadman)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "daily"
+    # The one mode with an argument, checked before any validation runs: a typo here is a
+    # usage error, not a configuration one, and should say so without touching the database.
+    cadence: DigestCadence | None = None
+    if mode == "digest":
+        given = argv[1] if len(argv) > 1 else None
+        if given not in SEND_CADENCES:
+            print(
+                f"digest needs a cadence: expected 'daily' or 'weekly', got {given!r}",
+                file=sys.stderr,
+            )
+            return 2
+        cadence = given
     settings = get_settings()
     configure_logging(settings.log_level)
     # The same guard the app's lifespan runs, for the process that actually pays for the
@@ -671,9 +757,13 @@ def main(argv: list[str] | None = None) -> int:
         ok = asyncio.run(run_providers(settings))
     elif mode == "notify":
         ok = asyncio.run(run_notify(settings))
+    elif mode == "digest":
+        assert cadence is not None  # checked above, before validation
+        ok = asyncio.run(run_digest(settings, cadence))
     else:
         print(
-            f"unknown mode {mode!r}: expected 'daily', 'hourly', 'sweep', 'providers' or 'notify'",
+            f"unknown mode {mode!r}: expected 'daily', 'hourly', 'sweep', 'providers', 'notify' "
+            f"or 'digest'",
             file=sys.stderr,
         )
         return 2
