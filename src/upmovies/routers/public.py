@@ -16,6 +16,7 @@ from upmovies.public.dto import (
     PersonSearchResponse,
     PopularPeopleResponse,
 )
+from upmovies.public.ical import render_calendar
 from upmovies.public.sitemap import render_sitemap
 
 router = APIRouter(tags=["public"])
@@ -139,6 +140,39 @@ async def get_calendar(
     session: AsyncSession = Depends(get_session),
 ) -> CalendarResponse:
     return await service.get_calendar(session, limit=limit, offset=offset)
+
+
+# `{token}.ics` rather than a query parameter: a calendar client is handed one URL and asked to
+# poll it forever, and the `.ics` suffix is what several of them use to decide the URL is a
+# calendar at all before they have seen a response header.
+@router.get("/calendar/{token}.ics", dependencies=[_public_limit])
+async def get_calendar_feed(
+    token: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """The subscriber's watchlist release dates as an iCalendar feed (D-34).
+
+    No cookie and no `require_entitled()`: the token *is* the credential, so the gate is applied
+    to the token's owner inside the query, and every way of not having a feed — unknown token,
+    rotated token, unentitled owner — answers **404**. Not 403: this caller is unauthenticated,
+    and a distinguishable refusal would confirm to someone holding a guessed URL that it names a
+    real account (D-39). A lapsed subscriber's client therefore keeps the subscription and simply
+    stops receiving events, and a renewed grant resumes it on the same URL (D-40).
+
+    `private` in `Cache-Control` because the URL's whole content is one person's watchlist: a
+    shared cache holding it would serve one subscriber's films to another. An hour of freshness
+    is more than a release date needs — clients poll on their own schedule anyway, and the
+    ceiling on how stale this can be is the daily ingest.
+    """
+    events = await service.get_ical_feed(session, token=token)
+    if events is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="calendar not found")
+    settings = get_settings()
+    return Response(
+        content=render_calendar(events, base_url=settings.public_base_url),
+        media_type="text/calendar; charset=utf-8",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/sitemap.xml")

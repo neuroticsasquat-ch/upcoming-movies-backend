@@ -38,6 +38,10 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "respx>=0.23.1",
+    # Third-party RFC 5545 parser, test-only: it validates the hand-rolled writer in
+    # `public/ical.py` (D-34). Deliberately not a runtime dependency — the writer is ~60 lines
+    # and a parser checking its own author's reading of the spec would validate nothing.
+    "icalendar>=6.1.0",
     "ruff>=0.16.2",
     "pyright>=1.1.411",
     "httpx>=0.28.1",

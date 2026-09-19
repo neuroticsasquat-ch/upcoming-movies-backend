@@ -202,6 +202,15 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   **and** as the Wrangler secret of the same name, then deploy the frontend. (3) Only then set
   `RATE_LIMIT_PUBLIC_ENABLED=true` in the Coolify UI and restart. Both are Coolify UI changes, not
   compose edits — the fallbacks in `docker-compose.prod.yml` are seeds, per the gotcha above.
+- **Turning the public bucket on meters the calendar feed too (NEU-1383).**
+  `GET /calendar/{token}.ics` sits in the `public` bucket, and unlike every other route in it the
+  callers are not browsers: a subscribed feed is fetched by Google Calendar, Apple and Outlook on
+  their own schedules, from *their* shared egress pools rather than the subscriber's device. So
+  one bucket can hold many users' calendar clients, and `SSR_ORIGIN_SECRET` does not help — those
+  fetchers do not go through the SSR Worker and cannot sign anything. Inert while
+  `RATE_LIMIT_PUBLIC_ENABLED=false` (step 3 of the rollout above); when that step comes, check
+  `RATE_LIMIT_PUBLIC_*` against how many subscribers a single calendar provider may be polling
+  for before assuming the browser-shaped numbers fit.
 - **The outbound TMDB rate limiter is per process, not per deployment (NEU-1399).** Clients
   built with `TMDBClient.from_settings(settings)` share one `RateLimiter`, so the API process's
   concurrent consumers — a Letterboxd import per upload (`routers/imports.py`), the

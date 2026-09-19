@@ -1,6 +1,6 @@
 import unicodedata
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -19,7 +19,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
+from upmovies.app.models import User, UserSettings, WatchlistItem
 from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     Collection,
@@ -31,6 +33,7 @@ from upmovies.catalog.models import (
     FilmProductionCompany,
     FilmProductionCountry,
     FilmReleaseDate,
+    FilmReleaseDateChange,
     Genre,
     Person,
     ProductionCompany,
@@ -82,12 +85,18 @@ from upmovies.public.dto import (
     SourceOut,
     WhereToWatchOut,
 )
+from upmovies.public.ical import CalendarFeedEvent
 from upmovies.public.release import release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 MIN_QUERY_LEN = 2
 
 CALENDAR_REGION = "US"  # single governing region for v1
+
+ICAL_PAST_WINDOW_DAYS = 365
+"""How far back `get_ical_feed` publishes. Not a setting: it is a property of what a calendar is
+for, not an operational knob, and a deploy that shortened it would silently delete events from
+every subscriber's calendar."""
 
 # Significance order for two calendar rows sharing a date: the theatrical arc first (a wide
 # opening is the bigger beat than a limited one), then the home release in the order it
@@ -1370,3 +1379,139 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         for row in rows
     ]
     return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_ical_feed(
+    session: AsyncSession, *, token: str
+) -> tuple[CalendarFeedEvent, ...] | None:
+    """The subscriber's calendar feed events, or None when there is no feed to serve (D-34).
+
+    `None` covers three cases on purpose — no such token, a token that has been rotated away,
+    and a token whose owner is not entitled — because the route answers all three with 404 and
+    the caller is unauthenticated. Telling them apart is the whole risk D-39 names: a 403 for
+    the third case would confirm to a stranger holding a guessed URL that the token is real.
+    Folding the entitlement rule into the lookup, rather than checking it after, is what makes
+    that indistinguishability structural instead of a `raise` somebody can reorder.
+
+    `entitled_user_clause()` rather than `is_entitled()` over a loaded row: the gate is being
+    applied to the *token's owner*, who is not the request's user — there is no request user at
+    all here — so the request-time dependency cannot reach this, and the SQL predicate is the
+    one spelling of the rule that does not need a `User` in hand (D-39).
+
+    What the feed holds, and why it is not the public calendar's query with a user filter bolted
+    on:
+
+    - **Watchlist rows only.** A follow produces timeline rows and nothing else (D-13); the
+      watchlist is the surface that is allowed to reach out to the user, and a calendar the user
+      subscribed to is that. Derived items count — the follow graph put them there on the user's
+      behalf, and a derived item is exactly the one they would otherwise miss.
+    - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
+      user has on their own watchlist is not noise to them — the same reasoning
+      `digest_sender.load_slate` records for the slate.
+    - **No upcoming-only filter**, unlike `get_calendar` — but a bounded reach backwards. A
+      subscribed feed is the client's whole view of this calendar: a client re-fetching it drops
+      every event the feed stopped publishing, so filtering to future dates would quietly erase
+      each release from the user's calendar the day after it happened. Everything future is
+      therefore published in full, and the past is cut at `ICAL_PAST_WINDOW_DAYS`. The cut is
+      what keeps the document bounded by something other than the watchlist: an imported
+      watchlist runs to thousands of films (D-15, D-16), each with up to four buckets, and this
+      is a document re-fetched on the client's schedule rather than a paginated read. A release
+      a year gone is not a date anyone scrolls back to; a release last month is exactly the one
+      the previous paragraph exists to protect.
+    - **A film with no slug is skipped**, for the reason the decision pass skips one: the event's
+      DESCRIPTION is a link to the film's page, and there is no page to link.
+    """
+    user_id = await session.scalar(
+        select(UserSettings.user_id)
+        .join(User, User.id == UserSettings.user_id)
+        .where(UserSettings.ical_token == token, entitled_user_clause())
+    )
+    if user_id is None:
+        return None
+
+    # Python-side, not SQL `CURRENT_DATE` — `get_calendar` next door takes the same care, and
+    # for the same reason: the cutoff must be the same instant for every row of one response.
+    earliest = datetime.now(tz=UTC).date() - timedelta(days=ICAL_PAST_WINDOW_DAYS)
+
+    # The governing date per (film, bucket): the earliest row in the subject, collapsed exactly
+    # as `get_calendar` collapses it (NEU-1206), over the same displayable types in the same
+    # single region — the one the home-release buckets are displayable in at all (D-26).
+    governing = (
+        select(
+            FilmReleaseDate.film_id.label("film_id"),
+            FilmReleaseDate.release_type.label("release_type"),
+            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
+                "governing_date"
+            ),
+        )
+        .join(WatchlistItem, WatchlistItem.film_id == FilmReleaseDate.film_id)
+        .where(
+            WatchlistItem.user_id == user_id,
+            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
+            FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
+        )
+        .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
+        .cte("ical_governing")
+    )
+
+    # DTSTAMP's source. `catalog.film_release_date` is delete-and-rebuilt on every ingest and
+    # carries no timestamp of its own, so "when did this date last move?" is answered by the
+    # table that exists to remember exactly that (`FilmReleaseDateChange`, NEU-1121) — per
+    # subject, which is the grain the UID is keyed on.
+    #
+    # Correlated per row rather than a grouped subquery joined in: the change table is
+    # append-only and unbounded, so grouping it whole would make every calendar fetch pay for
+    # the history of the entire catalog to read a handful of watchlisted films out of it. This
+    # way each row is one index seek on `ix_catalog_film_release_date_change_lookup`, and the
+    # work is bounded by the size of the user's watchlist.
+    last_moved = (
+        select(func.max(FilmReleaseDateChange.changed_at))
+        .where(
+            FilmReleaseDateChange.film_id == governing.c.film_id,
+            FilmReleaseDateChange.release_type == governing.c.release_type,
+            FilmReleaseDateChange.iso_3166_1 == PRIMARY_REGION,
+        )
+        .correlate(governing)
+        .scalar_subquery()
+    )
+
+    rows = (
+        await session.execute(
+            select(
+                governing.c.film_id,
+                governing.c.release_type,
+                governing.c.governing_date,
+                Film.tmdb_id,
+                Film.title,
+                # A date that has never been recorded as moving falls back to when the slate was
+                # first observed, and then to the film's own row — both fixed points. Never
+                # `now()`: a DTSTAMP computed per request would tell the client every event
+                # changed on every poll, which is the one thing a stable UID is for.
+                func.coalesce(
+                    last_moved,
+                    Film.release_dates_observed_at,
+                    Film.created_at,
+                ).label("updated_at"),
+            )
+            .select_from(governing)
+            .join(Film, Film.id == governing.c.film_id)
+            .where(Film.slug.is_not(None), governing.c.governing_date >= earliest)
+            .order_by(
+                governing.c.governing_date.asc(),
+                _calendar_type_rank(governing.c.release_type),
+                Film.title.asc(),
+            )
+        )
+    ).all()
+
+    return tuple(
+        CalendarFeedEvent(
+            film_id=str(row.film_id),
+            bucket=RELEASE_TYPE_BUCKETS[row.release_type],
+            title=row.title,
+            release_date=row.governing_date,
+            film_ref=film_ref(row.tmdb_id, row.title),
+            updated_at=row.updated_at,
+        )
+        for row in rows
+    )
