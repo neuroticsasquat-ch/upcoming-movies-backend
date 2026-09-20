@@ -724,12 +724,21 @@ _Avoid_: alias table, name index.
 
 **Follow**:
 A user's standing interest in an entity — a **person**, a **company**, a **franchise**, or a
-**title**. A follow produces **timeline** rows and nothing else: it never produces a push. Its
-point is that the user hears about a film they had never heard of, because they follow the
-people who made it. A person follow covers every published event on any in-play film where that
-person holds a seed-grade credit; **resolution** later adds events that *name* them on films they
-are not yet credited on.
-_Avoid_: subscription (that is billing), watch (that is the watchlist), track, favorite.
+**title** — and the only thing a user maintains (D-42, ADR-0018; code catches up in M8). A follow
+produces **timeline** rows *and* alerts. Its point is that the user hears about a film they had
+never heard of, because they follow the people who made it. For the timeline, a person follow
+covers every published event on any in-play film where that person holds a seed-grade credit;
+**resolution** later adds events that *name* them on films they are not yet credited on. For
+alerts, it covers the films its **coverage** selects.
+_Avoid_: subscription (that is billing), watchlist item (there is no such record any more),
+track, favorite.
+
+**Coverage**:
+Which of a followed person's films alert (D-43): `lead` — the person is director or in the top-3
+billing — is the default and is what keeps a prolific actor from becoming a push firehose;
+`all` widens it to every seed-grade credit. Company, franchise and title follows cover every
+matching film. Coverage narrows alerts only; the timeline's cut is always seed grade.
+_Avoid_: alert prefs (those were per film and are gone), tier, level.
 
 **Franchise**:
 A TMDB collection, and nothing more for now. Following a franchise matches films by
@@ -743,20 +752,25 @@ the feed with a where-clause, not a different kind of surface. Anonymous readers
 feed in its place.
 _Avoid_: personalized feed, my feed, stream, dashboard.
 
-**Watchlist item**:
-A title the user wants to be *told* about — the only thing in the system that produces a push or
-an immediate email. Reliability and volume are separate problems: a perfectly accurate follow
-feed still bombards, so following a prolific actor must never become a push firehose. Each item
-carries the user's alert preferences over `buy` / `rent` / `stream`.
-_Avoid_: follow (timeline only), favorite, subscription.
+**Watchlist**:
+The computed set of in-play films the user's follows cover for alerts, minus the films they have
+**muted** (D-42, D-45). It is the set the push whitelist, the calendar, the iCal feed and the
+digest slate all read, and it is a view over follows, not a record the user maintains: a film
+gets there by being followed as a title or by being covered by a person, company or franchise
+follow. This is the product's differentiator — a list seeded with films the user did not know
+existed. Volume is controlled by **coverage** and by the user's one store setting
+(`user_settings.alert_stores`, default `{stream}`, D-44), never per film.
+_Avoid_: watchlist item (the old per-film record), derived watchlist item (every entry is
+derived from a follow now), favorite, subscription.
 
-**Derived watchlist item**:
-A watchlist item the follow graph added on the user's behalf: a film whose director or top-3
-billed cast the user follows, or whose company, franchise or title they follow, while the film is
-in play. This is the product's differentiator — the watchlist seeded with films the user did not
-know existed. A user's removal of a derived item is a **dismissal** and is remembered, so the
-same follow never re-derives it.
-_Avoid_: auto-follow, suggestion (it is added, not offered), recommendation.
+**Mute**:
+A user's decision to stop hearing about one film (D-45): it leaves the watchlist, the calendar,
+the iCal feed and the digest slate, stays in the timeline, and can be undone. Held in
+`app.watchlist_dismissal`, the table that used to record permanent dismissals. "Stop" on a film
+that the user follows directly also deletes that title follow; "want" clears a mute and, if
+nothing else covers the film, creates a title follow.
+_Avoid_: dismissal (the old, permanent form), unfollow (a title follow may not be why it is
+there), hide, snooze.
 
 **Watchlist calendar**:
 The release calendar narrowed to the reader's own **watchlist items**, derived ones included —
@@ -764,8 +778,9 @@ what a subscriber sees when they ask "what of mine is coming out?". It is the ca
 where-clause, not a different kind of surface: same governing-date rule, same buckets, same
 upcoming-only window, same date-paged shape as the all-releases calendar, and none of the
 popularity/runtime cuts that keep noise off the public listing (a film on your own watchlist is
-not noise to you). It is drawn from the watchlist, never the follow graph: following a director
-puts nothing on it. The **iCal feed** is its subscribed form and holds the same films and dates;
+not noise to you). It is drawn from the watchlist, which since D-42 is the follow graph's
+alert coverage minus mutes: following a director does put their lead films on it. The **iCal
+feed** is its subscribed form and holds the same films and dates;
 the only thing the feed adds is a bounded reach into the past, because a subscribed client drops
 whatever a feed stops publishing.
 _Avoid_: my calendar (the nav item is "Calendar"), follow calendar, personal feed (that is the
