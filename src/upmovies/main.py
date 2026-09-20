@@ -31,6 +31,7 @@ from upmovies.routers import (
     ingest_admin,
     invites_admin,
     me,
+    me_calendar,
     moderation_admin,
     public,
     push,
@@ -128,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(imports.router)
     app.include_router(imports_tmdb.router)
     app.include_router(timeline.router)
+    app.include_router(me_calendar.router)
     app.include_router(public.router)
     return app
 
