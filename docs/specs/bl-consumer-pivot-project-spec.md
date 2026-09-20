@@ -161,12 +161,14 @@ Numbered so tickets can cite them (`D-n`).
   global feed; a client island swaps to the timeline once `me` resolves (the SSR-never-resolves-
   auth invariant stands; spec `NEU-1354-home-timeline-swap.md`). Supersedes *bl: Home Page & Feed
   Split* (cancelled). Empty follow graph renders an onboarding prompt, not an empty page.
-- **D-13 Derived watchlist rule.** A film is auto-added (`source=derived_from_follow`) when it is
+- **D-13 Derived watchlist rule** *(superseded 2026-09-20 by D-42 to D-45; the cut survives as
+  `coverage=lead`)*. A film is auto-added (`source=derived_from_follow`) when it is
   in play and: a followed person is its **director or in its top-3 billing**, or a followed
   company / franchise / title matches. Writers and cast 4–5 feed the timeline only. Derivation
   runs on follow creation and on every sweep credits pass. A user's removal of a derived item
   writes a **dismissal** row `(user, film)` that blocks re-derivation permanently.
-- **D-14 Watchlist prefs:** `alert_prefs` is a subset of `{buy, rent, stream}` per item, default
+- **D-14 Watchlist prefs** *(superseded 2026-09-20 by D-44: one store set per user)*:
+  `alert_prefs` is a subset of `{buy, rent, stream}` per item, default
   `{stream}`; plus the push-whitelist beats (date assigned/moved, home-release date, trailer)
   which are always on for a watchlist item.
 
@@ -309,6 +311,29 @@ lands.
   says access is currently limited while the subscription tier is built — not "upgrade now",
   because there is nothing to buy yet.
 
+### Follow subsumes the watchlist (2026-09-20, NEU-1405 planning; ADR-0018)
+
+- **D-42 One concept: follow.** Every follow feeds the timeline *and* alerts. The watchlist is
+  the **computed** set of in-play films the user's follows cover for alerts, minus the films
+  they have muted; it is no longer a record the user maintains. INV-7 ("follows produce
+  timeline rows only") is withdrawn. The word "watchlist" stays as the name of the set; the
+  film page shows one follow control and never says it.
+- **D-43 Coverage on the follow.** `app.follow.coverage ∈ lead|all`, default `lead`. For a
+  person follow it picks which credits alert: `lead` = director or top-3 billing (D-13's cut,
+  which is what keeps a prolific actor from becoming a push firehose), `all` = every
+  seed-grade credit (D-11's cut). Company, franchise and title follows cover every matching
+  film. Timeline coverage stays D-11 for every follow; coverage narrows alerts only.
+- **D-44 One store setting per user.** `app.user_settings.alert_stores` (subset of
+  `buy|rent|stream`, default `{stream}`) replaces per-item `alert_prefs`. No per-film
+  preferences exist. The always-on push whitelist beats (D-32) are unchanged.
+- **D-45 Mute, not dismissal.** Taking a film off the watchlist is a **mute**: it leaves
+  alerts, the calendar, the iCal feed and the digest slate, stays in the timeline, and can be
+  undone. `app.watchlist_dismissal` holds mutes (table kept, vocabulary changed).
+  `POST /me/watchlist {film_id}` means *want* (clear any mute; create a `manual` title follow
+  if nothing else covers the film); `DELETE /me/watchlist/{film_id}` means *stop* (delete a
+  direct title follow; mute if another follow still covers it). Both answer the resulting
+  item. Importers write a title follow per film and no watchlist rows.
+
 ## 6. Milestones and shared contracts
 
 Dependency-ordered. Each milestone's contracts are the cross-cutting agreements sibling tickets
@@ -443,6 +468,32 @@ digest; the product lives in the user's calendar.
   predicate, `status = suppressed`, asserted by a test per pass.
 - `/movie/{id}/videos` polling shares the D-27 scoped set; `trailer` event body carries the
   YouTube key.
+
+### M8 — Follow subsumes the watchlist
+
+**Goal:** one user-facing concept instead of two (D-42 to D-45, ADR-0018). Story NEU-1413;
+backend NEU-1414 first, then the film page (NEU-1405) and the pages (NEU-1415). The
+entitlement gate (D-37 to D-41) is untouched.
+
+**Shared contracts**
+- `app.follow.coverage ∈ lead|all` default `lead` (person follows only; ignored for the other
+  types). `app.user_settings.alert_stores TEXT[] default {stream}`. `app.watchlist_item.alert_prefs`
+  dropped. `app.watchlist_dismissal` kept as the mute table.
+- Watchlist = computed: in play, covered by any follow at its coverage, not muted. Materialised
+  or queried is NEU-1414's call; the calendar, iCal feed, notify and digest passes and the
+  slate mail must all read the one definition.
+- `GET /me/watchlist` → `{items: [{film, covered_by: [{entity_type, entity_id, name}],
+  followed, muted, created_at}]}`, muted films included, direct title follow first in
+  `covered_by`. `POST /me/watchlist {film_id}` = want; `DELETE /me/watchlist/{film_id}` = stop;
+  both return the item; `PATCH /me/watchlist/{film_id}` removed. `POST /me/follows` takes
+  optional `coverage`; `PATCH /me/follows/{entity_type}/{entity_id} {coverage}` new;
+  `FollowOut.coverage`. `GET/PATCH /me/settings` carry `alert_stores`.
+- Migration, once: manual `watchlist_item` rows → `manual` title follows (keep `created_at`);
+  dismissals unchanged; `alert_prefs` dropped.
+- Frontend: one `TitleFollowButton` under the film title with a static cue line, three access
+  states as today (NEU-1405); `/me/watchlist` without chips or a removal confirm, with "via …"
+  and a Muted section; `/me/follows` with the per-person coverage control; `/settings` with the
+  store set (NEU-1415).
 
 ## 7. Prerequisites and deploy notes
 
