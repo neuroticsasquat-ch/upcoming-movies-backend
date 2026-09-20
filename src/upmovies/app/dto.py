@@ -126,11 +126,19 @@ class InviteCreateRequest(BaseModel):
 
 
 class InviteOut(BaseModel):
+    """One invite as the admin page sees it (NEU-1408).
+
+    `consumed_by_email` is resolved at read time from the consuming account, because an admin
+    looking at a spent code wants to know *who* spent it, and `/admin/users` searches by address,
+    not by id. Both consumer fields are null for an outstanding code, and also for one spent by
+    an account that has since been deleted (the FK is `ON DELETE SET NULL`)."""
+
     code: str
     email_hint: str | None
     created_at: datetime
     consumed_at: datetime | None
     consumed_by_user_id: UUID | None
+    consumed_by_email: str | None
 
 
 class AdminUserOut(BaseModel):

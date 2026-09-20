@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.models import Invite
+from upmovies.app.models import Invite, User
 
 
 async def create(db: AsyncSession, *, code: str, email_hint: str | None) -> Invite:
@@ -20,9 +20,19 @@ async def get(db: AsyncSession, code: str) -> Invite | None:
     return await db.get(Invite, code)
 
 
-async def list_all(db: AsyncSession) -> list[Invite]:
-    rows = await db.execute(select(Invite).order_by(Invite.created_at.desc()))
-    return list(rows.scalars().all())
+async def list_all(db: AsyncSession) -> list[tuple[Invite, str | None]]:
+    """Every invite, newest first, each paired with the email of the account that spent it
+    (`None` while outstanding, or once that account is gone: the FK is `ON DELETE SET NULL`).
+
+    Resolved by an outer join rather than stored on the row — nothing about the invite changes
+    when its consumer's address does, and the page wants the current address."""
+    stmt = (
+        select(Invite, User.email)
+        .outerjoin(User, User.id == Invite.consumed_by_user_id)
+        .order_by(Invite.created_at.desc())
+    )
+    rows = await db.execute(stmt)
+    return [(invite, email) for invite, email in rows.all()]
 
 
 async def consume(
