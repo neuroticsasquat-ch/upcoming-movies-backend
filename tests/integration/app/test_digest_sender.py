@@ -428,6 +428,30 @@ async def test_a_film_reached_through_a_director_follow_is_on_the_slate(
     assert len(mailbox.sent) == 1
 
 
+async def test_a_released_film_a_company_follow_reaches_is_on_the_slate(
+    session, subscriber, make_film, add_release_date, attach_companies, send
+):
+    """D-46: the slate reads the same computed watchlist the calendar does, so a film TMDB has
+    marked `Released` is still on it while an indirect follow covers it — which is exactly the
+    window its remaining home-release dates fall in."""
+    user = await subscriber()
+    zodiac = await make_film(
+        slug="zodiac",
+        title="Zodiac",
+        status="Released",
+        release_date=TODAY - timedelta(days=300),
+    )
+    await attach_companies(zodiac, [(711, "A Studio")])
+    session.add(Follow(user_id=user.id, entity_type="company", entity_id="711", source="manual"))
+    await session.commit()
+    await add_release_date(film=zodiac, release_type=4, release_date=_on(TODAY + timedelta(days=3)))
+
+    result, mailbox = await send("weekly")
+
+    assert result.slate_dates == 1
+    assert len(mailbox.sent) == 1
+
+
 async def test_a_watchlisted_film_with_no_slug_is_not_on_the_slate(
     session, subscriber, make_film, add_release_date, watchlist, send
 ):

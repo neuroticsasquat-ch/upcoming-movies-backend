@@ -25,6 +25,8 @@ from upmovies.catalog.models import Film
 
 TODAY = date(2026, 9, 17)
 EXCLUDED = frozenset({"Released", "Canceled"})
+"""`TMDB_EXCLUDED_STATUSES`' default. Only the **timeline** builder takes it now: the alert
+window's own status term is a constant, `Canceled` alone (D-46)."""
 
 
 def _filter(user_id):
@@ -137,18 +139,13 @@ async def test_the_event_filter_executes_on_its_own(
 
 # --- M8: what a follow covers for alerts (D-42, D-43, D-45) ---------------------------------
 
-MAX_AGE_DAYS = 200
+MAX_AGE_DAYS = 365
 """`PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned here: the alert window rides on it, and a
 boundary test whose boundary moves with the environment is not a boundary test."""
 
 
 def _covered(user_id, **overrides):
-    kwargs = {
-        "user_id": user_id,
-        "today": TODAY,
-        "excluded_statuses": EXCLUDED,
-        "max_age_days": MAX_AGE_DAYS,
-    }
+    kwargs = {"user_id": user_id, "today": TODAY, "max_age_days": MAX_AGE_DAYS}
     return covered_film_ids(**{**kwargs, **overrides})
 
 
@@ -209,21 +206,25 @@ async def test_the_coverage_tier_decides_which_credits_alert(
         (TODAY - timedelta(days=MAX_AGE_DAYS), "In Production", True),
         (TODAY - timedelta(days=MAX_AGE_DAYS + 1), "In Production", False),
         (None, "In Production", True),
+        (None, None, True),
         (TODAY + timedelta(days=30), "Canceled", False),
-        (TODAY - timedelta(days=1), "Released", False),
+        (TODAY - timedelta(days=1), "Released", True),
+        (TODAY - timedelta(days=MAX_AGE_DAYS), "Released", True),
+        (TODAY - timedelta(days=MAX_AGE_DAYS + 1), "Released", False),
     ],
 )
 async def test_the_alert_window_bounds_an_indirect_follow(
     session, user, make_film, release_date, status, covered
 ):
     """The window is inclusive at its far end — a film exactly `max_age_days` old is still
-    covered, one a day older is not, and an undated one always is — while an excluded status
-    drops the film whatever its date says.
+    covered, one a day older is not, and an undated one always is — while `Canceled` drops the
+    film whatever its date says.
 
-    The last case is the one to read twice: `Released` is in the default
-    `TMDB_EXCLUDED_STATUSES`, so the relaxed date bound does **not** on its own keep a film
-    covered through an indirect follow once TMDB marks it out (see `alert_window_clause`). A
-    title follow is the affordance that does."""
+    The `Released` cases are the ones to read twice (D-46): `Released` is **inside** the window
+    and rides the date bound exactly like any other status, because it is the state the
+    home-release beats land in. The window's status term is `ALERT_WINDOW_DEAD_STATUSES`, not
+    `TMDB_EXCLUDED_STATUSES` — `Released` being in the latter is what this pins as no longer
+    relevant here. Only `Canceled` is out."""
     from tests.fixtures.catalog import add_credit
 
     film = await make_film(slug="windowed", title="Windowed", release_date=release_date)
@@ -233,6 +234,28 @@ async def test_the_alert_window_bounds_an_indirect_follow(
     await _follow(session, user, "person", "525")
 
     assert (film.id in await _ids(session, _covered(user.id))) is covered
+
+
+async def test_a_released_film_is_covered_for_alerts_but_not_on_the_timeline(
+    session, user, make_film
+):
+    """The two builders differ on purpose, and this pins the difference rather than assuming it
+    (D-46). One person follow, one recently-released film: the alert window holds it, because
+    that is where the `now_available` beat is about to land; `followed_film_ids` does not,
+    because timeline coverage is still D-11's in-play cut and a director's back catalogue would
+    otherwise flood it."""
+    from tests.fixtures.catalog import add_credit
+
+    film = await make_film(
+        slug="just-out", title="Just Out", release_date=TODAY - timedelta(days=30)
+    )
+    film.status = "Released"
+    await session.commit()
+    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
+    await _follow(session, user, "person", "525")
+
+    assert await _ids(session, _covered(user.id)) == {film.id}
+    assert await _ids(session, _filter(user.id)) == set()
 
 
 async def test_a_title_follow_covers_its_film_in_any_state(session, user, make_film):
@@ -257,12 +280,7 @@ async def test_the_watchlist_is_the_covered_set_minus_the_mutes(session, user, m
     session.add(WatchlistDismissal(user_id=user.id, film_id=muted.id))
     await session.commit()
 
-    watchlist = watchlist_film_ids(
-        user_id=user.id,
-        today=TODAY,
-        excluded_statuses=EXCLUDED,
-        max_age_days=MAX_AGE_DAYS,
-    )
+    watchlist = watchlist_film_ids(user_id=user.id, today=TODAY, max_age_days=MAX_AGE_DAYS)
     assert await _ids(session, _covered(user.id)) == {covered.id, muted.id}
     assert await _ids(session, watchlist) == {covered.id}
 
@@ -291,12 +309,7 @@ async def test_covering_follows_pairs_a_film_with_every_follow_that_reaches_it(
 
     rows = (
         await session.execute(
-            covering_follows(
-                user_id=user.id,
-                today=TODAY,
-                excluded_statuses=EXCLUDED,
-                max_age_days=MAX_AGE_DAYS,
-            )
+            covering_follows(user_id=user.id, today=TODAY, max_age_days=MAX_AGE_DAYS)
         )
     ).all()
     assert sorted((row.film_id, row.entity_type) for row in rows) == sorted(
@@ -314,9 +327,7 @@ async def test_covered_by_any_user_holds_while_one_uncovering_user_remains(
     await _follow(session, user, "title", str(film.id))
     await _follow(session, other, "title", str(film.id))
 
-    clause = covered_by_any_user_clause(
-        today=TODAY, excluded_statuses=EXCLUDED, max_age_days=MAX_AGE_DAYS
-    )
+    clause = covered_by_any_user_clause(today=TODAY, max_age_days=MAX_AGE_DAYS)
     polled = select(Film.id).where(clause)
     assert await _ids(session, polled) == {film.id}
 

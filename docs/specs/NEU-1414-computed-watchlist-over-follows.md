@@ -126,6 +126,13 @@ any AGENTS.md mention of the derivation phase lose the `derived` counter.
 
 ### D-1414.2 — The alert window
 
+> **Superseded in part by NEU-1417 (D-46).** The window's status term is now its own constant,
+> `catalog.queries.ALERT_WINDOW_DEAD_STATUSES` = `{Canceled}`, and the `excluded_statuses`
+> parameter is gone from `alert_window_clause` and every builder that only threaded it.
+> `Released` now rides the date bound, which is what the rationale below always described.
+> `PROVIDER_POLL_MAX_AGE_DAYS` is 365. See
+> `docs/specs/NEU-1417-alert-window-status-term.md`.
+
 `catalog/queries.py` gains `alert_window_clause(*, today, excluded_statuses, max_age_days)`
 beside `in_play_clause`: `(release_date IS NULL OR release_date >= today - max_age_days) AND
 (status IS NULL OR status NOT IN excluded)`. `max_age_days` is `settings.provider_poll_max_age_days`
@@ -301,6 +308,8 @@ check passes with the two hand-named constraints on the models.
   follow covers its film released, cancelled or undated.
 - A film whose primary date is `today - max_age_days` is covered; one a day older is not; one
   with a NULL date is covered; one whose status is excluded is not, whatever its date.
+  *(Superseded in part by NEU-1417 (D-46): the window's status term is `Canceled` alone, so a
+  `Released` film inside the date bound is covered.)*
 - `watchlist_film_ids` = `covered_film_ids` minus mutes; `covering_follows` lists every
   (film, follow) pair; `covered_by_any_user_clause` is true for a film covered by *any* user
   who has not muted it and false when the only covering user has.
@@ -376,6 +385,6 @@ api container against the single-writer `app_test` database, so run it once, in 
   for its removal confirm; `undefined` there is harmless, and NEU-1415 deletes the confirm).
 - Removing the unused `derived` value from `FOLLOW_SOURCES`.
 - Tuning `PROVIDER_POLL_MAX_AGE_DAYS`: the alert window rides on it by design; changing it is a
-  provider-poll decision.
+  provider-poll decision. *(Done in NEU-1417: 365, D-1417.2.)*
 - A CONTEXT.md sweep for every docstring that still says a follow produces timeline rows only;
   the ones on the surfaces this ticket rewrites are in scope, the rest are not.

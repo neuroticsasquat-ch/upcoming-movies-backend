@@ -1321,7 +1321,6 @@ def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None)
                 watchlist_film_ids(
                     user_id=watchlist_user_id,
                     today=datetime.now(tz=UTC).date(),
-                    excluded_statuses=settings.tmdb_excluded_statuses,
                     max_age_days=settings.provider_poll_max_age_days,
                 )
             )
@@ -1543,7 +1542,6 @@ async def get_ical_feed(
                 watchlist_film_ids(
                     user_id=user_id,
                     today=today,
-                    excluded_statuses=settings.tmdb_excluded_statuses,
                     max_age_days=settings.provider_poll_max_age_days,
                 )
             ),

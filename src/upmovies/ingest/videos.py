@@ -24,7 +24,10 @@ collection. So a followed director's next film is polled for its trailer now, wh
 this poll exists to catch. What keeps that from costing a back catalogue is the alert window
 (`catalog.queries.alert_window_clause`) bounding the three indirect branches, and `lead` being
 the default coverage — and it is bounded in the same shape for the provider poll beside it,
-because the two passes share the one selection query on purpose.
+because the two passes share the one selection query on purpose. That window ends at `Canceled`
+rather than at `Released` (D-46), so a released film a person follow reaches is polled until the
+window's far end: the trailer that goes up after a film opens, and the streaming debut beside
+it, are exactly what this poll was missing while `Released` cut the film out.
 
 **First observation is a baseline, never an event** (ADR-0014). The marker is
 `film.videos_observed_at`, not "does this film have ledger rows": the ordinary first read of an
@@ -347,7 +350,6 @@ async def run_video_poll(
     today: date,
     min_age_days: int,
     max_age_days: int,
-    excluded_statuses: frozenset[str],
     now: datetime | None = None,
     failure_threshold: int = 10,
     log_every: int = 250,
@@ -363,7 +365,6 @@ async def run_video_poll(
             today=today,
             min_age_days=min_age_days,
             max_age_days=max_age_days,
-            excluded_statuses=excluded_statuses,
         )
     result.selected = len(targets)
     log.info("videos: %d films due", result.selected)

@@ -128,9 +128,7 @@ class ProvidersResult:
     abort_error: str | None = None
 
 
-def poll_set_clause(
-    *, today: date, min_age_days: int, max_age_days: int, excluded_statuses: frozenset[str]
-) -> ColumnElement[bool]:
+def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> ColumnElement[bool]:
     """WHERE predicate selecting the films this poll owes a read — D-27's two rules, ORed.
 
     The theatrical rule is an EXISTS over the film's US theatrical rows **grouped by release
@@ -147,8 +145,12 @@ def poll_set_clause(
     is waiting on than the pass that tells them about it. It reaches further than the two
     `EXISTS` it replaces: a film followed only through its director is polled now, which is
     what makes a `now_available` beat possible for it at all. What bounds that reach is the
-    alert window and `coverage = 'lead'` being the default — without both, one followed
-    company would put its whole back catalogue in the set.
+    alert window's date ceiling and `coverage = 'lead'` being the default.
+
+    The window's status term is not rule 1's absence of one *or* in-play's: it ends at
+    `Canceled` (D-46), so a `Released` film an indirect follow reaches stays in the set until
+    the date ceiling. That agrees with rule 1, which has never filtered on status — a film past
+    its theatrical date is `Released`, and that is the state in which looking for offers pays.
 
     Tombstoned films are excluded. Their theatrical date keeps ageing inside the window, so
     without this a deleted id costs a request every day until it falls out the far end — and it
@@ -181,11 +183,7 @@ def poll_set_clause(
         Film.tmdb_missing_at.is_(None),
         or_(
             theatrical_due,
-            covered_by_any_user_clause(
-                today=today,
-                excluded_statuses=excluded_statuses,
-                max_age_days=max_age_days,
-            ),
+            covered_by_any_user_clause(today=today, max_age_days=max_age_days),
         ),
     )
 
@@ -196,7 +194,6 @@ async def load_poll_set(
     today: date,
     min_age_days: int,
     max_age_days: int,
-    excluded_statuses: frozenset[str],
 ) -> list[PollTarget]:
     """The films due a provider read, in a stable order.
 
@@ -215,7 +212,6 @@ async def load_poll_set(
                 today=today,
                 min_age_days=min_age_days,
                 max_age_days=max_age_days,
-                excluded_statuses=excluded_statuses,
             )
         )
         .order_by(Film.id)
@@ -453,7 +449,6 @@ async def run_provider_poll(
     today: date,
     min_age_days: int,
     max_age_days: int,
-    excluded_statuses: frozenset[str],
     now: datetime | None = None,
     region_code: str = PRIMARY_REGION,
     failure_threshold: int = 10,
@@ -470,7 +465,6 @@ async def run_provider_poll(
             today=today,
             min_age_days=min_age_days,
             max_age_days=max_age_days,
-            excluded_statuses=excluded_statuses,
         )
     result.selected = len(targets)
     log.info("providers: %d films due in %s", result.selected, region_code)

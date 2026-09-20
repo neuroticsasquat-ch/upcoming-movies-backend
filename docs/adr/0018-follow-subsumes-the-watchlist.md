@@ -58,8 +58,11 @@ that shrinks when a follow is deleted, a coverage narrows or a film ages out wou
 a reconciliation pass in both directions that never existed, and the batch passes already run
 the follow graph as SQL per user. The window a derived film is covered for is the **alert
 window** (`PROVIDER_POLL_MAX_AGE_DAYS` past its primary date), not D-13's "in play": a film
-that opened last month is still due its home-release card. See
-`docs/specs/NEU-1414-computed-watchlist-over-follows.md`.
+that opened last month is still due its home-release card. *(Amended 2026-09-20 in NEU-1417:
+the window's status term is its own, `Canceled` only; `Released` rides the date bound, since it
+is the state the home-release beats land in, and `PROVIDER_POLL_MAX_AGE_DAYS` is 365. D-46.)*
+See `docs/specs/NEU-1414-computed-watchlist-over-follows.md` and
+`docs/specs/NEU-1417-alert-window-status-term.md`.
 
 ## Considered alternatives
 

@@ -233,6 +233,26 @@ async def test_a_film_reached_through_a_director_follow_is_in_the_feed(
     assert _summaries((await _fetch(client, token)).text) == ["Followed Film — in theaters"]
 
 
+async def test_a_released_film_a_company_follow_reaches_is_in_the_feed(
+    client, session, subscriber, make_film, add_release_date, attach_companies
+):
+    # D-46: `Released` rides the alert window's date bound, so a subscriber's calendar keeps
+    # the film whose home-release date is the thing they are still waiting for.
+    user, token = await subscriber()
+    film = await make_film(
+        slug="opened",
+        title="Opened Film",
+        status="Released",
+        release_date=date.today() - timedelta(days=300),
+    )
+    await add_release_date(film=film, release_date=_FUTURE, release_type=4)
+    await attach_companies(film, [(711, "A Studio")])
+    session.add(Follow(user_id=user.id, entity_type="company", entity_id="711", source="manual"))
+    await session.commit()
+
+    assert _summaries((await _fetch(client, token)).text) == ["Opened Film — digital"]
+
+
 async def test_a_muted_film_leaves_the_feed(
     client, session, subscriber, make_film, add_release_date, watchlist
 ):

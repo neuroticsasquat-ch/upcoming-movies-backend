@@ -35,9 +35,8 @@ from upmovies.news.models import Event, EventSummary
 BASE_URL = "https://api.themoviedb.org/3"
 TODAY = date(2026, 9, 17)
 MIN_AGE = 14
-MAX_AGE = 200
-EXCLUDED = frozenset({"Released", "Canceled"})
-"""The statuses the alert window drops, pinned the way the ages are — the poll set's reach must
+MAX_AGE = 365
+"""`PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned the way `TODAY` is — the poll set's reach must
 not depend on the environment the suite runs in."""
 IN_WINDOW = TODAY - timedelta(days=60)
 UPCOMING = TODAY + timedelta(days=200)
@@ -97,7 +96,6 @@ async def _run(session_factory, tmdb_client, run_id, **overrides):
         "today": TODAY,
         "min_age_days": MIN_AGE,
         "max_age_days": MAX_AGE,
-        "excluded_statuses": EXCLUDED,
         "now": SEEN_AT,
     }
     return await run_video_poll(**{**kwargs, **overrides})
