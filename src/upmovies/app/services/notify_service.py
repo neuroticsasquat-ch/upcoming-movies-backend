@@ -282,7 +282,6 @@ async def alert_event_ids(
     recipient: Recipient,
     since: datetime,
     today: date,
-    excluded_statuses: frozenset[str],
     max_age_days: int,
 ) -> list[UUID]:
     """The window's events this user's **watchlist** earns an alert for (D-32, D-42).
@@ -304,7 +303,6 @@ async def alert_event_ids(
                 watchlist_film_ids(
                     user_id=recipient.user_id,
                     today=today,
-                    excluded_statuses=excluded_statuses,
                     max_age_days=max_age_days,
                 )
             ),
@@ -417,7 +415,6 @@ async def decide_for_user(
         recipient=recipient,
         since=since,
         today=today,
-        excluded_statuses=excluded_statuses,
         max_age_days=max_age_days,
     )
     digests = await digest_event_ids(

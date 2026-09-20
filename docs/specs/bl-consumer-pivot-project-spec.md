@@ -235,7 +235,8 @@ Numbered so tickets can cite them (`D-n`).
   (`confirmed`, ADR-0014 refinement) with `subject_key` token `US:digital` / `US:physical`.
 - **D-27 Provider polling.** `/movie/{id}/watch/providers`, region `US` in v1, schema keyed by
   `(film_id, region, provider_id, monetization_type)`. Poll set = films whose US theatrical
-  governing date is 14–200 days old **plus** any film with a follow or watchlist item. Daily,
+  governing date is 14–365 days old (200 until NEU-1417; see D-46) **plus** any film with a
+  follow or watchlist item. Daily,
   in the sweep's slot, with its own `ingest_run.kind`.
 - **D-28 `now_available` event.** New catalog-sourced event type, `confirmed`, one card per
   (film, monetization_type) on first insert into `availability_first_seen`; body names the
@@ -335,6 +336,14 @@ lands.
   if nothing else covers the film); `DELETE /me/watchlist/{film_id}` means *stop* (delete a
   direct title follow; mute if another follow still covers it). Both answer the resulting
   item. Importers write a title follow per film and no watchlist rows.
+- **D-46 The alert window ends at `Canceled`, not at `Released`.** A person, company or
+  franchise follow covers a film from announcement until `PROVIDER_POLL_MAX_AGE_DAYS` (365)
+  after its primary release date, in every TMDB status but `Canceled`. `Released` is the state
+  the home-release beats (D-26, D-28, D-35) land in, so a window that ended there delivered
+  none of them to an indirect follower. `TMDB_EXCLUDED_STATUSES` keeps governing admission and
+  the in-play working set; the window's own term is a constant
+  (`catalog.queries.ALERT_WINDOW_DEAD_STATUSES`), because TMDB's vocabulary is closed and there
+  is nothing to tune. Title follows are unchanged: any state. (NEU-1417, 2026-09-20.)
 
 ## 6. Milestones and shared contracts
 
@@ -483,9 +492,9 @@ entitlement gate (D-37 to D-41) is untouched.
   dropped. `app.watchlist_dismissal` kept as the mute table.
 - Watchlist = computed, **queried, never materialised** (settled in NEU-1414's planning,
   2026-09-20; `app.watchlist_item` is dropped). A person, company or franchise follow covers a
-  film inside the **alert window**: status not excluded and primary release date NULL or no
-  older than `PROVIDER_POLL_MAX_AGE_DAYS` (the provider poll's own ceiling, so alerts and the
-  `now_available` cards that feed them stop together); a title follow covers its film in any
+  film inside the **alert window**: not `Canceled`, and primary release date NULL or no
+  older than `PROVIDER_POLL_MAX_AGE_DAYS` (365 — the provider poll's own ceiling, so alerts and
+  the `now_available` cards that feed them stop together); a title follow covers its film in any
   state. Minus mutes. One query builder in `app/follow_queries.py` is what `GET /me/watchlist`,
   `/me/calendar`, the iCal feed, the notify and digest passes, the slate mail and the provider
   and video polls' "somebody is waiting on this film" rule (D-27 rule 2) all read.

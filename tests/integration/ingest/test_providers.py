@@ -40,11 +40,10 @@ from upmovies.news.models import Event, EventSummary
 BASE_URL = "https://api.themoviedb.org/3"
 TODAY = date(2026, 9, 17)
 MIN_AGE = 14
-MAX_AGE = 200
-EXCLUDED = frozenset({"Released", "Canceled"})
-"""The statuses a film is past caring about, as the alert window reads them — pinned here the
-way the ages are, so rule 2's reach does not depend on the environment the suite runs in."""
-# The window is [TODAY - 200, TODAY - 14] inclusive.
+MAX_AGE = 365
+"""`PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned here the way `TODAY` is so the poll set's reach
+does not depend on the environment the suite runs in."""
+# The window is [TODAY - 365, TODAY - 14] inclusive.
 IN_WINDOW = TODAY - timedelta(days=60)
 TOO_RECENT = TODAY - timedelta(days=3)
 TOO_OLD = TODAY - timedelta(days=400)
@@ -112,7 +111,6 @@ async def _run(session_factory, tmdb_client, run_id, **overrides):
         "today": TODAY,
         "min_age_days": MIN_AGE,
         "max_age_days": MAX_AGE,
-        "excluded_statuses": EXCLUDED,
     }
     return await run_provider_poll(**{**kwargs, **overrides})
 
@@ -270,6 +268,31 @@ async def test_a_film_covered_only_through_a_director_follow_is_polled(
     session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
     await session.commit()
     _mock_providers(203, flatrate=[8])
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.selected, result.polled) == (1, 1)
+
+
+@respx.mock
+async def test_a_released_film_an_indirect_follow_reaches_is_polled_past_the_old_ceiling(
+    session, session_factory, tmdb_client, run_id, make_user
+):
+    """The reach D-46 added. 250 days past its primary date and marked `Released`, with no US
+    theatrical row to put it in rule 1 — under NEU-1414's window the status term cut it out on
+    release day, and its streaming debut went unpolled and uncarded. The window now ends at
+    `Canceled`, so rule 2 keeps it until the date ceiling; nobody following it still means no
+    request."""
+    user = await make_user(email="late-streamer@example.com")
+    film = await add_film(session, 209, status="Released", release_date=TODAY - timedelta(days=250))
+    await add_credit(session, film, 527, credit_type="crew", job="Director", department="Directing")
+    await session.commit()
+
+    assert (await _run(session_factory, tmdb_client, run_id)).selected == 0
+
+    session.add(Follow(user_id=user.id, entity_type="person", entity_id="527", source="manual"))
+    await session.commit()
+    _mock_providers(209, flatrate=[8])
 
     result = await _run(session_factory, tmdb_client, run_id)
 

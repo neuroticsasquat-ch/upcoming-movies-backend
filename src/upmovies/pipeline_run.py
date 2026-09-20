@@ -420,7 +420,6 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
                 today=today,
                 min_age_days=settings.provider_poll_min_age_days,
                 max_age_days=settings.provider_poll_max_age_days,
-                excluded_statuses=settings.tmdb_excluded_statuses,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )
             videos = await run_video_poll(
@@ -430,7 +429,6 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
                 today=today,
                 min_age_days=settings.provider_poll_min_age_days,
                 max_age_days=settings.provider_poll_max_age_days,
-                excluded_statuses=settings.tmdb_excluded_statuses,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )
         # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes

@@ -145,6 +145,32 @@ async def test_a_film_reached_through_a_director_follow_is_on_the_calendar(
     assert _refs((await entitled_client.get("/me/calendar")).json()) == [ref(film)]
 
 
+async def test_a_released_film_a_company_follow_reaches_is_on_the_calendar(
+    entitled_client, session, make_film, add_release_date, attach_companies
+):
+    # D-46: `Released` is inside the alert window now, so an indirectly covered film keeps its
+    # place on the calendar for the home-release dates that are still to come.
+    film = await make_film(
+        slug="opened",
+        title="Opened Film",
+        status="Released",
+        release_date=date.today() - timedelta(days=300),
+    )
+    await add_release_date(film=film, release_date=_FUTURE, release_type=4)
+    await attach_companies(film, [(711, "A Studio")])
+    session.add(
+        Follow(
+            user_id=entitled_client.user.id,
+            entity_type="company",
+            entity_id="711",
+            source="manual",
+        )
+    )
+    await session.commit()
+
+    assert _refs((await entitled_client.get("/me/calendar")).json()) == [ref(film)]
+
+
 async def test_a_muted_film_leaves_the_calendar(
     entitled_client, session, make_film, add_release_date, watchlist
 ):

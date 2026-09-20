@@ -6,7 +6,7 @@ dates its events either side of it, so the window is explicit rather than a func
 the suite happened to run. `run_notify_pass` reads that watermark exactly as production does.
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -37,7 +37,9 @@ BETWEEN = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 LATER = datetime(2026, 9, 19, 3, 0, tzinfo=UTC)
 TODAY = date(2026, 9, 18)
 EXCLUDED = frozenset({"Released", "Canceled"})
-MAX_AGE_DAYS = 200
+"""`TMDB_EXCLUDED_STATUSES`' default. Only the **digest** branch reads it now (D-11's timeline
+builder); the alert window's status term is a constant, `Canceled` alone (D-46)."""
+MAX_AGE_DAYS = 365
 """The alert window's width — `PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned here the way the
 statuses are, so a film's coverage does not depend on the environment the suite runs in."""
 GRANTED = datetime(2027, 1, 1, tzinfo=UTC)
@@ -293,6 +295,48 @@ async def test_now_available_alerts_only_the_stores_the_user_wants(
     assert result.alerts_queued == 1
     (alert,) = [row for row in await _rows(session) if row.kind == "alert"]
     assert alert.user_id == streamer.id
+
+
+async def test_a_director_follow_alerts_on_a_released_films_now_available_beat(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    attach_credits,
+    seed_watermark,
+    run_pass,
+):
+    """The alert NEU-1417 is about (D-46). The user follows nobody but the director; the film
+    opened two months ago and TMDB has marked it `Released`, which under NEU-1414's window took
+    it off their watchlist on release day — the exact morning the `now_available` beat it was
+    waiting for arrives. The window's status term now ends at `Canceled`, so the alert is owed
+    and sent.
+
+    The digest line is absent on purpose: timeline coverage is still D-11's in-play cut, so a
+    released film reaches the alert branch and not the digest branch through the same follow.
+    """
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(
+        slug="dune", title="Dune", release_date=TODAY - timedelta(days=60), status="Released"
+    )
+    await attach_credits(film, crew=[{"id": 525, "name": "A Director", "job": "Director"}])
+    await _follow_person(session, user_id=user.id, person_id=525)
+    await add_event(
+        film=film,
+        event_type="now_available",
+        provenance="catalog",
+        region="US",
+        subject_key=["US:flatrate"],
+        created_at=NEW,
+    )
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (1, 0)
+    (alert,) = await _rows(session)
+    assert (alert.user_id, alert.kind) == (user.id, "alert")
 
 
 async def test_a_rumored_event_is_never_queued_in_any_kind(

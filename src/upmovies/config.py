@@ -162,13 +162,22 @@ class Settings(BaseSettings):
     # yet plausible and a daily request would buy nothing; the ceiling is where a film that
     # never got one stops costing a request a day forever. A film somebody's follows cover is
     # polled regardless of both — somebody is waiting on that answer. `max_age_days` is also
-    # the **alert window** (`catalog.queries.alert_window_clause`, D-1414.2): a follow covers a
-    # film for exactly as long as this poll still looks for offers on it, so tuning this moves
-    # both together, deliberately.
-    # Both are placeholders in the §4.5 sense: erring wide costs requests, erring narrow
-    # silently delays or misses the `now_available` beat the whole milestone is for.
+    # the **alert window** (`catalog.queries.alert_window_clause`, D-1414.2, D-46): a follow
+    # covers a film for exactly as long as this poll still looks for offers on it, so tuning
+    # this moves both together, deliberately.
+    #
+    # The ceiling is 365 and is **no longer a placeholder** (D-1417.2, NEU-1417). The default
+    # alert store is `stream`, so the window has to reach the streaming debut rather than the
+    # digital one: studio pay-1 windows run from about 45 days to about 240 days past
+    # theatrical, and a foreign title reaches US streaming later still. A year covers them with
+    # margin, and it costs the poll nothing measurable — admission skips `Released` films
+    # (`ingest.tmdb.filters.classify_skip`), so the catalog holds no back catalogue for the
+    # ceiling to let in, and the rule-1 set measured the same size at 365 as at 200 (97 vs 98
+    # films, 2026-09-20). The floor stays 14 and stays a placeholder in the §4.5 sense —
+    # nothing has measured it, and erring narrow there costs requests during the theatrical
+    # window where a home release is not yet plausible.
     provider_poll_min_age_days: int = Field(default=14, ge=0, alias="PROVIDER_POLL_MIN_AGE_DAYS")
-    provider_poll_max_age_days: int = Field(default=200, ge=1, alias="PROVIDER_POLL_MAX_AGE_DAYS")
+    provider_poll_max_age_days: int = Field(default=365, ge=1, alias="PROVIDER_POLL_MAX_AGE_DAYS")
 
     # The sweep's master switch, in the manner of NEWS_GOOGLE_ENABLED: off means it still
     # enumerates and still reports, but writes nothing (spec §7.3). Kept separate from the

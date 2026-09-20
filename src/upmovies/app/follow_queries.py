@@ -18,10 +18,10 @@ answers both of them:
   slate all read this and nothing else.
 
 The two differ in three deliberate ways, and only these three: a person follow's coverage
-(D-43) narrows which credits alert, the alert window (D-1414.2) bounds how long a follow keeps
-covering a film, and a **mute** (`app.watchlist_dismissal`) subtracts films from both — since
-D-45 a mute silences the film everywhere, so the exclusion lives *inside* the D-11 builders
-rather than at their call sites.
+(D-43) narrows which credits alert, the alert window (D-1414.2, D-46) bounds how long a follow
+keeps covering a film and in which statuses, and a **mute** (`app.watchlist_dismissal`)
+subtracts films from both — since D-45 a mute silences the film everywhere, so the exclusion
+lives *inside* the D-11 builders rather than at their call sites.
 
 The four branches are one per `follow.entity_type`:
 
@@ -293,7 +293,6 @@ def covered_film_ids(
     *,
     user_id: UUID,
     today: date,
-    excluded_statuses: frozenset[str],
     max_age_days: int,
     only: tuple[str, str] | None = None,
 ) -> Select[tuple[UUID]]:
@@ -301,9 +300,11 @@ def covered_film_ids(
 
     The timeline filter's three differences, all of them here: a person follow admits only the
     credits its `coverage` names, the person, company and franchise branches are bounded by the
-    alert window rather than by in-play, and a title follow covers its film in **any** state —
-    the user asked for that film, and one they put on the list the week it came out is exactly
-    the one they are waiting on the home release of.
+    alert window rather than by in-play — a wider date bound and a status term that ends at
+    `Canceled` rather than at `Released` (D-46) — and a title follow is bounded by neither, so
+    it covers its film in **any** state and at any age. The user asked for that film, and one
+    they put on the list the week it came out is exactly the one they are waiting on the home
+    release of.
 
     Mutes are *not* subtracted here; `watchlist_film_ids` is that set. Kept apart because the
     want/stop service needs the unmuted answer: "does anything still cover this film" is what
@@ -316,9 +317,7 @@ def covered_film_ids(
     halves hand it to a statement built in `pipeline_run`, where there is no session to hand it.
     `correlate(None)` keeps the subquery standalone whatever FROM list it lands in.
     """
-    window = alert_window_clause(
-        today=today, excluded_statuses=excluded_statuses, max_age_days=max_age_days
-    )
+    window = alert_window_clause(today=today, max_age_days=max_age_days)
     branches: list[ColumnElement[bool]] = []
     scoped_id = None if only is None else only[1]
 
@@ -352,7 +351,6 @@ def watchlist_film_ids(
     *,
     user_id: UUID,
     today: date,
-    excluded_statuses: frozenset[str],
     max_age_days: int,
 ) -> Select[tuple[UUID]]:
     """**The watchlist** (D-42): `covered_film_ids` minus the films this user has muted.
@@ -365,7 +363,6 @@ def watchlist_film_ids(
     return covered_film_ids(
         user_id=user_id,
         today=today,
-        excluded_statuses=excluded_statuses,
         max_age_days=max_age_days,
     ).where(Film.id.not_in(muted_film_ids(user_id)))
 
@@ -374,7 +371,6 @@ def covering_follows(
     *,
     user_id: UUID,
     today: date,
-    excluded_statuses: frozenset[str],
     max_age_days: int,
     film_id: UUID | None = None,
 ) -> Select[tuple[UUID, str, str, datetime]]:
@@ -398,9 +394,7 @@ def covering_follows(
     construction, and a dedupe across the whole set would be a sort over every pair to catch
     duplicates that cannot exist.
     """
-    window = alert_window_clause(
-        today=today, excluded_statuses=excluded_statuses, max_age_days=max_age_days
-    )
+    window = alert_window_clause(today=today, max_age_days=max_age_days)
     person_follows = _int_follows("person", user_id=user_id)
     person = (
         select(
@@ -453,9 +447,7 @@ def covering_follows(
     return stmt if film_id is None else stmt.where(pairs.c.film_id == film_id)
 
 
-def covered_by_any_user_clause(
-    *, today: date, excluded_statuses: frozenset[str], max_age_days: int
-) -> ColumnElement[bool]:
+def covered_by_any_user_clause(*, today: date, max_age_days: int) -> ColumnElement[bool]:
     """WHERE predicate over `catalog.film`: **somebody** covers this film and has not muted it.
 
     The provider and video polls' rule 2 (D-1414.3). The same four branches as
@@ -463,13 +455,16 @@ def covered_by_any_user_clause(
     the whole follow table instead of one user's rows — which is what stops the poll from
     reading a set the alerts do not, or the other way round.
 
+    That window admits a `Released` film until the date bound's far end (D-46), so a film
+    somebody reached through its director keeps being polled through the months its streaming
+    debut actually lands in. That is the whole point of polling it; `Released` is where the
+    answer arrives, not where it stops being worth asking.
+
     The mute test is per *covering user*, not per film: a film ten people follow and one of
     them has muted is still owed a poll, because the other nine are waiting on it. Only when
     every user who covers it has muted it does it leave the set.
     """
-    window = alert_window_clause(
-        today=today, excluded_statuses=excluded_statuses, max_age_days=max_age_days
-    )
+    window = alert_window_clause(today=today, max_age_days=max_age_days)
     person_follows = _int_follows("person")
     person = (
         select(literal(1))

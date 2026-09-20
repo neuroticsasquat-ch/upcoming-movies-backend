@@ -484,7 +484,6 @@ async def load_slate(
                 watchlist_film_ids(
                     user_id=user_id,
                     today=today,
-                    excluded_statuses=settings.tmdb_excluded_statuses,
                     max_age_days=settings.provider_poll_max_age_days,
                 )
             ),

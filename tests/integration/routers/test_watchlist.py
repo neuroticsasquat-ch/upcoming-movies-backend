@@ -194,6 +194,39 @@ async def test_wanting_a_released_film_still_yields_an_item(entitled_client, ses
     assert r.json()["followed"] is True
 
 
+async def test_a_released_film_a_company_follow_reaches_is_on_the_list(
+    entitled_client, session, attach_companies
+):
+    """D-46: the alert window's status term ends at `Canceled`, so a film TMDB has marked
+    `Released` stays on the watchlist through an *indirect* follow until the date ceiling —
+    which is when its home-release beats actually arrive. Under NEU-1414's window it fell off
+    on release day."""
+    released = await add_film(
+        session,
+        tmdb_id=553,
+        title="Zodiac",
+        slug="zodiac",
+        status="Released",
+        release_date=datetime.now(tz=UTC).date() - timedelta(days=300),
+    )
+    await session.commit()
+    await attach_companies(released, [(711, "A Studio")])
+    session.add(
+        Follow(
+            user_id=entitled_client.user.id,
+            entity_type="company",
+            entity_id="711",
+            source="manual",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.get("/me/watchlist")
+
+    assert r.status_code == 200
+    assert [item["film"]["title"] for item in r.json()["items"]] == ["Zodiac"]
+
+
 async def test_wanting_a_film_the_catalog_does_not_hold_is_404(entitled_client):
     r = await entitled_client.post(
         "/me/watchlist", json={"film_id": "00000000-0000-0000-0000-000000000001"}

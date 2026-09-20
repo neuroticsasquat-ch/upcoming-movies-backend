@@ -57,19 +57,15 @@ class WatchlistEntry:
     created_at: datetime
 
 
-def _window() -> tuple[date, frozenset[str], int]:
-    """The three arguments every coverage query takes, resolved once per request.
+def _window() -> tuple[date, int]:
+    """The two arguments every coverage query takes, resolved once per request.
 
     Request-time entry points resolve their own clock and settings — `public.service
     .get_timeline` does the same — because the alternative is every route that touches the
-    watchlist assembling the same three values. The batch passes are handed them instead, since
+    watchlist assembling the same values. The batch passes are handed them instead, since
     a pass fixes one `today` for its whole run."""
     settings: Settings = get_settings()
-    return (
-        datetime.now(tz=UTC).date(),
-        settings.tmdb_excluded_statuses,
-        settings.provider_poll_max_age_days,
-    )
+    return (datetime.now(tz=UTC).date(), settings.provider_poll_max_age_days)
 
 
 def _cover_sort_key(cover: tuple[str, str, datetime]) -> tuple[int, datetime, str, str]:
@@ -94,12 +90,11 @@ async def _entries(
 
     Muted films are **included and marked**, not dropped: the list is where a mute is undone.
     """
-    today, excluded_statuses, max_age_days = _window()
+    today, max_age_days = _window()
     rows = await db.execute(
         covering_follows(
             user_id=user.id,
             today=today,
-            excluded_statuses=excluded_statuses,
             max_age_days=max_age_days,
             film_id=film_id,
         )
@@ -166,11 +161,10 @@ async def _is_covered(db: AsyncSession, *, user: User, film_id: UUID) -> bool:
     Mutes are deliberately not subtracted: this is what decides between muting a film and
     answering that there is nothing left to mute, and a film the user has already silenced is
     still covered."""
-    today, excluded_statuses, max_age_days = _window()
+    today, max_age_days = _window()
     covered = covered_film_ids(
         user_id=user.id,
         today=today,
-        excluded_statuses=excluded_statuses,
         max_age_days=max_age_days,
     ).where(Film.id == film_id)
     return bool(await db.scalar(select(covered.exists())))

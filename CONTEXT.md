@@ -766,17 +766,18 @@ derived from a follow now), favorite, subscription.
 
 **Alert window**:
 How long a film stays coverable through a person, company or franchise follow: from
-announcement until `PROVIDER_POLL_MAX_AGE_DAYS` after its primary release date, and its status
-outside `TMDB_EXCLUDED_STATUSES`. Wider than **in play** on purpose — the date bound is moved
-back rather than cut at today, because a film that opened last month is still owed its
-home-release beat, and the bound is the provider poll's own ceiling, so the follow stops
-covering the film exactly when the catalog stops looking for offers on it. Note the status term
-is the *same* one **in play** applies, so a film TMDB has marked `Released` is outside the
-window whatever its date: what the moved date bound reaches is the film whose status has not
-caught up, or that carries none. A **title** follow ignores the window entirely — the user
-asked for that film, in any state — and that is the affordance for a released film somebody is
-still waiting on.
-_Avoid_: in play (that is the working set's term, and it ends on release day), active, upcoming.
+announcement until `PROVIDER_POLL_MAX_AGE_DAYS` after its primary release date, in any TMDB
+status but `Canceled`. Wider than **in play** in two ways, both deliberate (D-46). The date
+bound is moved back rather than cut at today, because a film that opened last month is still
+owed its home-release beat, and the bound is the provider poll's own ceiling, so the follow
+stops covering the film exactly when the catalog stops looking for offers on it. And `Released`
+is *inside* the window, because it is the state in which the beats the window exists for —
+`now_available`, the digital and physical release dates, the late trailer — actually happen;
+the window's status term is its own constant (`catalog.queries.ALERT_WINDOW_DEAD_STATUSES`),
+not `TMDB_EXCLUDED_STATUSES`, which keeps governing admission and **in play**. A **title**
+follow ignores the window entirely — the user asked for that film, in any state, at any age.
+_Avoid_: in play (that is the working set's term, and it ends on release day), in play's status
+term (`TMDB_EXCLUDED_STATUSES`, which excludes `Released` and this does not), active, upcoming.
 
 **Mute**:
 A user's decision to stop hearing about one film (D-45): it leaves the watchlist, the calendar,
