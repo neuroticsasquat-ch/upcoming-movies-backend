@@ -43,8 +43,11 @@ WRITER_JOBS = frozenset({"Writer", "Screenplay"})
 # newsworthiness — a popularity floor, or corroboration — not billing depth.
 TOP_BILLED_ORDER = 5
 # Strongest attachment first, so a rendered role list reads the way §3.2 lists the seed
-# grades and groups stably.
-ROLE_ORDER = ("director", "writer", "cast")
+# grades and groups stably. `crew` and `followed` are the two non-seed roles (D-49, D-50) and
+# sit last: `crew` is any crew job that is neither directing nor writing, `followed` is the
+# sweep's tranche for a non-seed credit held by a person somebody follows at `any`. Neither is
+# a seed grade, and their position here says so.
+ROLE_ORDER = ("director", "writer", "cast", "crew", "followed")
 
 
 def crew_role(job: str | None) -> str | None:
@@ -70,6 +73,60 @@ def credit_role(credit_type: str, job: str | None) -> str | None:
     if credit_type == "crew":
         return crew_role(job)
     return None
+
+
+def recorded_role(credit_type: str, job: str | None) -> str:
+    """The role one credit is *recorded* under (D-49) — `credit_role` made total.
+
+    Seed grade is a cut; **recorded grade** is not. Once the credit history records every
+    credit of a person somebody follows at coverage `any`, a third-unit gaffer and a
+    40th-billed extra both reach the carding phases, and `credit_role` answers None for the
+    gaffer — the value those phases use to mean "not a beat" and skip the row. So they read
+    this instead: `cast` for any cast credit whatever its billing, `crew` for a crew job that
+    is neither directing nor writing, and the seed-grade role otherwise.
+
+    It is total, and that is the point: every row in `catalog.film_credit_change` is there
+    because something chose to record it, so there is no longer such a thing as a recorded
+    credit with no role. `credit_role` keeps its None for the callers that are still asking
+    the *seed-grade* question. Totality rests on `credit_type` being one of two values, which
+    `ingest.tmdb.upsert._upsert_credits` is the only writer of and spells literally; anything
+    else reads as cast, the wider of the two.
+
+    `crew` cards as `crew_attached`, beside director and writer
+    (`news.catalog_events.CREDIT_ROLE_EVENT_TYPES`) — one beat, "somebody joined the crew",
+    at a grade the body names.
+    """
+    role = credit_role(credit_type, job)
+    if role is not None:
+        return role
+    return "crew" if credit_type == "crew" else "cast"
+
+
+def role_match_key(role: str, job: str | None) -> tuple[str, str | None]:
+    """The identity two recorded credits are the *same* credit under (D-49).
+
+    A role alone used to be that identity, and for the seed grades it still is: `director`
+    and `writer` each name the job that produced them, and `cast` deliberately ignores
+    billing so a performer slipping from 2nd to 4th is not a detachment.
+
+    `crew` is the one role that does not name its job — it is every job that is neither
+    directing nor writing, folded together so they card as one beat — so it carries the job
+    beside it here. Without that, "is this credit still there" would answer yes for a
+    reverted `Gaffer` credit on the strength of an unrelated `Best Boy` one, which is exactly
+    the edit the quarantine gate exists to suppress.
+
+    Beside `recorded_role` rather than inside it because the two answer different questions:
+    the role decides what a credit *cards as* (`CREDIT_ROLE_EVENT_TYPES`, the summary
+    templates, `ROLE_ORDER`), and folding the job into it there would mint an event type per
+    crew job.
+    """
+    return (role, job) if role == "crew" else (role, None)
+
+
+def recorded_credit_key(credit_type: str, job: str | None) -> tuple[str, str | None]:
+    """`role_match_key` from the two columns `catalog.film_credit` and `film_credit_change`
+    both hold — the form every caller reading raw rows wants."""
+    return role_match_key(recorded_role(credit_type, job), job)
 
 
 def is_top_billed(credit_order: int | None) -> bool:

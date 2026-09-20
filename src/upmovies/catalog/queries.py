@@ -1,5 +1,6 @@
 """Shared query predicates over `catalog.film`."""
 
+from collections.abc import Collection
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
@@ -11,8 +12,8 @@ from upmovies.catalog.seed_grade import (
     DIRECTOR_JOB,
     TOP_BILLED_ORDER,
     WRITER_JOBS,
-    credit_role,
     is_seed_grade,
+    recorded_credit_key,
 )
 
 # The one place `catalog` reads `news`. Dormancy is defined partly by what news did (or did
@@ -155,23 +156,46 @@ def seed_grade_credit_clause() -> ColumnElement[bool]:
     )
 
 
-async def present_seed_credits(
-    session: AsyncSession, *, film_ids: set[UUID]
-) -> dict[tuple[UUID, int, str], int | None]:
-    """Every `(film, person, seed-grade role)` that `catalog.film_credit` holds *right now*
+async def present_recorded_credits(
+    session: AsyncSession, *, film_ids: set[UUID], followed: Collection[int] = ()
+) -> dict[tuple[UUID, int, str, str | None], int | None]:
+    """Every `(film, person, recorded role, job)` that `catalog.film_credit` holds *right now*
     for these films, mapped to that credit's billing order.
+
+    The key is `catalog.seed_grade.role_match_key`, so a `crew` credit is matched on its job
+    and every other role is matched on the role alone — a reverted `Gaffer` credit must not
+    read as still present because the person also holds `Best Boy`.
 
     One query for a whole set of films rather than one per credit: every caller asks it of a
     batch — the sweep's quarantine gate of an aged backlog, its burst check of the same rows,
     the Tier-A short-circuit of one film's pending changes — and the rolling window makes that
     the same rows on every pass for as long as a hold lasts.
 
-    Seed grade is re-derived here rather than assumed from the `film_credit_change` row that
+    **Recorded grade, not seed grade** (D-49): a credit is here when it is seed grade *or* its
+    person is in `followed` — the people somebody follows at coverage `any`
+    (`app.follow_queries.people_followed_at_any`). That is the same rule `credit_history`
+    applied when it wrote the change row, which is what makes this answer the question the
+    callers actually ask: "is the credit this row recorded still there, under the same role?"
+    A default of no followed people keeps every caller that only ever asks about seed grade —
+    and every test written before M9 — reading exactly what it used to.
+
+    The grade is re-derived here rather than assumed from the `film_credit_change` row that
     recorded the attachment. `film_credit` is delete-and-rebuilt on every ingest, and a cast
     member who has since slipped out of the top-5 billing no longer holds a seed-grade credit
     — which is exactly how `credit_history` would diff them, as removed. Reading the same
     predicate is what stops the callers disagreeing about what "still attached" means, which
     is also why it lives here beside `seed_grade_credit_clause` rather than in any one of them.
+
+    **`followed` is read live, and shared with the writer.** D-49 says the gate checks presence
+    rather than the follow, and this does — it asks nothing about *who* is looking, and a
+    credit's presence is a property of the film. What it does not do is remember the follow set
+    a change was recorded under: passing a stale one is how this and `credit_history` would
+    come to mean two different things by "recorded", and the next ingest would then write a
+    removal for a credit this had just published an attachment for. The cost is the narrow
+    case where a follow is narrowed while its credit is still in quarantine: the pending
+    attachment is held from then on and ages out uncarded, which is the same end state as the
+    reverted edit beside it and the coherent one — the credit has stopped being recorded, so
+    there is nothing left to announce.
 
     Membership answers "is this credit still there"; the value answers ADR-0017 D-7's body
     ordering. Both are properties of the same live row, so they are read together —
@@ -180,6 +204,7 @@ async def present_seed_credits(
     """
     if not film_ids:
         return {}
+    watched = set(followed)
     stmt = select(
         FilmCredit.film_id,
         FilmCredit.person_id,
@@ -187,13 +212,15 @@ async def present_seed_credits(
         FilmCredit.job,
         FilmCredit.credit_order,
     ).where(FilmCredit.film_id.in_(film_ids))
-    present: dict[tuple[UUID, int, str], int | None] = {}
+    present: dict[tuple[UUID, int, str, str | None], int | None] = {}
     for row in await session.execute(stmt):
-        if not is_seed_grade(row.credit_type, row.job, row.credit_order):
+        if not (
+            is_seed_grade(row.credit_type, row.job, row.credit_order) or row.person_id in watched
+        ):
             continue
-        role = credit_role(row.credit_type, row.job)
-        if role is not None:
-            present[(row.film_id, row.person_id, role)] = row.credit_order
+        present[(row.film_id, row.person_id, *recorded_credit_key(row.credit_type, row.job))] = (
+            row.credit_order
+        )
     return present
 
 

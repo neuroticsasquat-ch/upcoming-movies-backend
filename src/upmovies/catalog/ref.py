@@ -1,4 +1,4 @@
-"""Public film URL refs: `<tmdb_id>-<slug-of-current-title>`.
+"""Public URL refs: `<tmdb_id>-<slug-of-current-name>`, for films and for people.
 
 A ref resolves on its **leading id only**; everything after the first hyphen is decorative and
 derived from the film's current title at read time, so it can never go stale the way a stored
@@ -11,6 +11,13 @@ immutable and now exists only to resolve URLs minted before this scheme (NEU-114
 The decorative half carries **no release year**, unlike `base_slug`. Release years move
 constantly for upcoming films — that is the domain — and every move would churn the canonical
 URL and mint another redirect. A title changes far less often than its date.
+
+The **person** pair (NEU-1418, D-1416.6) is the same scheme over `catalog.person`, and is
+spelled separately rather than generalised into one `entity_ref`: the two resolve against
+different tables with different ambiguity, and only the film side has a legacy `slug` column to
+fall back on (`parse_film_ref`'s whole subtlety). One shared helper would have to carry that
+asymmetry as a parameter, which is a worse way of saying the same thing than two four-line
+functions that cannot drift — the slug rule they share is `slugify`'s, not ours.
 """
 
 import re
@@ -36,6 +43,25 @@ def parse_film_ref(ref: str) -> int | None:
     too and let an exact slug match win; see `get_film_detail`. Returning the candidate and
     resolving the ambiguity at the query is the only honest split, because nothing about the
     string itself distinguishes the two cases.
+    """
+    match = _LEADING_ID.match(ref)
+    return int(match.group(1)) if match else None
+
+
+def person_ref(person_id: int, name: str) -> str:
+    """The canonical URL ref for a person. Falls back to the bare id when the name has no
+    slugifiable stem, exactly as `film_ref` does — TMDB carries names in every script, and a
+    name that transliterates to nothing is still a person with a page."""
+    stem = slugify(name)
+    return f"{person_id}-{stem}" if stem else str(person_id)
+
+
+def parse_person_ref(ref: str) -> int | None:
+    """The `catalog.person` id a ref addresses, or None when it does not lead with a number.
+
+    Unlike `parse_film_ref` this is an **answer, not a candidate**: people have no legacy slug
+    column, so there is no second resolution path and nothing for a numeric name to collide
+    with. A person called "1917" slugs to `<id>-1917`, which still leads with the id.
     """
     match = _LEADING_ID.match(ref)
     return int(match.group(1)) if match else None

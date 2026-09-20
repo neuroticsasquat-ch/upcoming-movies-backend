@@ -11,22 +11,25 @@ what makes them callable from `pipeline_run` as well as from a route.
 answers both of them:
 
 - *What belongs on my timeline?* — `followed_film_ids` and `events_naming_followed_people`,
-  D-11's two halves. Every follow reaches every seed-grade credit here, whatever its coverage.
+  D-11's two halves. Every follow reaches every seed-grade credit here whatever its coverage,
+  and a person follow at `any` reaches every credit (D-47).
 - *What am I waiting to hear about?* — `covered_film_ids`, and `watchlist_film_ids` once the
   mutes are taken out. **That set is the watchlist**: there is no `app.watchlist_item` any
   more, so `/me/calendar`, the iCal feed, the notify pass's alert branch and the digest's
   slate all read this and nothing else.
 
 The two differ in three deliberate ways, and only these three: a person follow's coverage
-(D-43) narrows which credits alert, the alert window (D-1414.2, D-46) bounds how long a follow
+(D-43) narrows which credits alert — and only ever *narrows*, since D-47 gave the timeline
+`any`'s reach too — the alert window (D-1414.2, D-46) bounds how long a follow
 keeps covering a film and in which statuses, and a **mute** (`app.watchlist_dismissal`)
 subtracts films from both — since D-45 a mute silences the film everywhere, so the exclusion
 lives *inside* the D-11 builders rather than at their call sites.
 
 The four branches are one per `follow.entity_type`:
 
-- **person** — films the followed person holds a credit on: *seed-grade* for the timeline
-  (`catalog.seed_grade`: director, Writer/Screenplay, top-5 billed), the coverage's cut for
+- **person** — films the followed person holds a credit on: *seed-grade or the follow's own
+  tier* for the timeline (`catalog.seed_grade`: director, Writer/Screenplay, top-5 billed —
+  widened to every credit at `any`), the coverage's cut for
   alerts. The in-play/alert-window term is this branch's alone on the timeline side: following
   a person is a standing interest in what they are making next, and their back catalogue would
   otherwise flood it. Following a *title*, a company or a franchise is a request for that
@@ -52,9 +55,10 @@ the cast means the WHERE (the type filter and the shape guard) has already run w
 """
 
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import Integer, Select, and_, cast, literal, or_, select, union_all
+from sqlalchemy import Integer, Select, and_, cast, literal, or_, select, true, union_all
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Subquery
@@ -66,7 +70,7 @@ from upmovies.catalog.queries import (
     in_play_clause,
     seed_grade_credit_clause,
 )
-from upmovies.catalog.seed_grade import DIRECTOR_JOB
+from upmovies.catalog.seed_grade import DIRECTOR_JOB, is_seed_grade
 from upmovies.news.models import RESOLVED_MENTION_PATHS, Event, EventStory, StoryPerson
 
 _INT_ID_PATTERN = r"^[0-9]+$"
@@ -80,8 +84,9 @@ with it. The two answer different questions and the numbers are load-bearing in 
 directions: seed grade decides whose filmography the sweep *enumerates*, where the measurement
 at NEU-1090 shows cutting to 3 discards demonstrably-shooting films at 14:1, while this decides
 whose casting is worth a **push**, where 5 would notify a user about a supporting role they did
-not follow the person for. `coverage = 'all'` is how a user who wants the wider cut asks for it
-(D-43), which is the affordance that makes the narrow default safe."""
+not follow the person for. `coverage = 'major'` (and, wider still, `any`) is how a user who
+wants more than this asks for it (D-43, D-48), which is the affordance that makes the narrow
+default safe."""
 
 
 def followed_tmdb_ids(
@@ -151,14 +156,69 @@ def lead_credit_clause() -> ColumnElement[bool]:
 
 
 def _coverage_credit_clause(coverage: ColumnElement[str]) -> ColumnElement[bool]:
-    """The credit cut a person follow's own `coverage` column asks for (D-43).
+    """The credit cut a person follow's own `coverage` column asks for (D-43, D-48).
 
     Takes the column rather than a Python value so the tier is read *per follow row*, inside
-    the one statement: a user following one director at `lead` and another at `all` is one
-    query, not two, which is what keeps the batch passes at one statement per user."""
+    the one statement: a user following one director at `lead` and another at `any` is one
+    query, not two, which is what keeps the batch passes at one statement per user.
+
+    `any`'s arm is `true()` rather than a predicate over `film_credit`, and that is the whole
+    spelling of the widest tier: every caller reaches this through a join from the follow to
+    that person's credit rows, so "the credit exists" is already said by the join. An unbilled
+    cast entry (`credit_order IS NULL`) and a third-unit crew job are in, which is what `any`
+    means.
+    """
     return or_(
         and_(coverage == "lead", lead_credit_clause()),
-        and_(coverage == "all", seed_grade_credit_clause()),
+        and_(coverage == "major", seed_grade_credit_clause()),
+        and_(coverage == "any", true()),
+    )
+
+
+def credit_tier(
+    credit_type: str, job: str | None, credit_order: int | None
+) -> Literal["lead", "major", "any"]:
+    """The **narrowest** coverage tier that reaches one credit — the badge `GET /people/{ref}`
+    renders beside it.
+
+    Beside `lead_credit_clause` because the lead cut is defined here, and derived from the same
+    two predicates the alert query runs (`lead_credit_clause`, `seed_grade_credit_clause`) so
+    the badge and the alert cannot disagree: a row the page labels "Major credits" is a row a
+    `major` follow alerts on, by construction rather than by review.
+
+    Total by design — every credit belongs to some tier, because `any` reaches all of them.
+    """
+    if credit_type == "crew" and job == DIRECTOR_JOB:
+        return "lead"
+    if credit_type == "cast" and credit_order is not None and credit_order < LEAD_TOP_BILLED_ORDER:
+        return "lead"
+    return "major" if is_seed_grade(credit_type, job, credit_order) else "any"
+
+
+def people_followed_at_any() -> Select[tuple[int]]:
+    """`SELECT DISTINCT person_id` for every person **somebody** follows at coverage `any`.
+
+    The one builder in this module that asks nothing about a user: the two callers are batch
+    passes deciding what the *system* records and enumerates, not what one person sees. The
+    credit history (D-49) records a non-seed credit change when its person is in this set, and
+    the sweep (D-50) enumerates these people beside the seed set.
+
+    **No entitlement filter**, on `covered_by_any_user_clause`'s reasoning: D-40 keeps a lapsed
+    user's follows, and the poll set does not filter either. Recording a credit change for
+    somebody whose grant has lapsed costs one row and is exactly what should already be there
+    when they come back; dropping it would need a backfill that cannot be written, because the
+    observation is gone.
+
+    The cast is in the SELECT list and the digit guard in the WHERE, per the module docstring.
+    """
+    return (
+        select(cast(Follow.entity_id, Integer))
+        .where(
+            Follow.entity_type == "person",
+            Follow.coverage == "any",
+            Follow.entity_id.regexp_match(_INT_ID_PATTERN),
+        )
+        .distinct()
     )
 
 
@@ -253,10 +313,15 @@ def followed_film_ids(
     is what stops the builder's meaning depending on the query it is dropped into, which is the
     whole premise of handing the same SELECT to the notify pass (NEU-1379).
 
-    **Coverage is not read here.** A person follow reaches every seed-grade credit on the
-    timeline whatever its `coverage`: the tier decides what is worth *interrupting* somebody
-    for, and narrowing the timeline with it would take away the surface the user would
-    otherwise catch the beat on (D-43).
+    **Coverage never narrows this, and only `any` widens it (D-47).** A person follow reaches
+    every seed-grade credit on the timeline whatever its tier: the tier decides what is worth
+    *interrupting* somebody for, and narrowing the timeline with it would take away the surface
+    the user would otherwise catch the beat on (D-43). `lead` and `major` are subsets of seed
+    grade, so for them this is the whole story. `any` is not a subset — it reaches a 12th-billed
+    actor the seed cut does not — and a user alerted about a casting they could then find
+    nowhere on their own timeline is the dead end D-47 closes. So the person branch reads the
+    follow *rows* rather than just their ids, and admits a credit that is seed grade **or**
+    whose follow is at `any`.
 
     **The mute exclusion is inside the builder, not at the call sites.** D-45 as amended
     silences a muted film everywhere, and there are four consumers — the timeline route, the
@@ -267,9 +332,11 @@ def followed_film_ids(
     rather than the whole feed — the onboarding prompt D-12 asks for is the client's call to
     make off `total == 0`, not something this hides by falling back.
     """
-    person_films = select(FilmCredit.film_id).where(
-        seed_grade_credit_clause(),
-        FilmCredit.person_id.in_(followed_tmdb_ids(user_id, "person")),
+    person_follows = _int_follows("person", user_id=user_id)
+    person_films = (
+        select(FilmCredit.film_id)
+        .join(person_follows, person_follows.c.key == FilmCredit.person_id)
+        .where(or_(seed_grade_credit_clause(), person_follows.c.coverage == "any"))
     )
     return (
         select(Film.id)

@@ -283,3 +283,38 @@ def test_reports_a_quiet_holds_pass_as_zeroes_rather_than_dropping_the_clause():
     )
 
     assert "holds: 0 new, 0 cleared, 0 expired" in detail
+
+
+def test_reports_which_roles_reached_the_candidates():
+    """The clause that makes a `no_tranche` count actionable — and, before
+    `SWEEP_ADMIT_FOLLOWED` is flipped, the only sign that the followed enumeration reaches
+    anything at all (D-50). Rendered in `ROLE_ORDER`, `followed` last."""
+    detail = sweep_detail(
+        EnumerateResult(
+            candidates_found=9,
+            withheld=9,
+            role_histogram=Counter({"cast": 4, "director": 2, "followed": 3}),
+        ),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+    )
+
+    assert "roles: director×2, cast×4, followed×3" in detail
+
+
+def test_the_role_clause_is_dropped_when_nothing_was_reached():
+    """Matching how `skip_counts` drops zero-valued reasons: a sweep that reached no
+    candidates has nothing to say about how."""
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+    )
+
+    assert "roles:" not in detail

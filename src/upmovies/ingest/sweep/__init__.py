@@ -17,7 +17,6 @@ from upmovies.ingest.sweep.credit_events import CreditGroup as CreditGroup
 from upmovies.ingest.sweep.credit_events import (
     SanityHoldCounts as SanityHoldCounts,
 )
-from upmovies.ingest.sweep.credit_events import credit_role as credit_role
 from upmovies.ingest.sweep.credit_events import group_attachments as group_attachments
 from upmovies.ingest.sweep.credit_events import (
     quarantine_attachments as quarantine_attachments,
@@ -25,6 +24,7 @@ from upmovies.ingest.sweep.credit_events import (
 from upmovies.ingest.sweep.credit_events import (
     reconcile_holds as reconcile_holds,
 )
+from upmovies.ingest.sweep.credit_events import recorded_role as recorded_role
 from upmovies.ingest.sweep.credit_events import (
     run_credit_attachment_events as run_credit_attachment_events,
 )

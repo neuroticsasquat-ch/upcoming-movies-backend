@@ -827,3 +827,173 @@ async def test_a_404_candidate_is_skipped_as_missing(session, session_factory, t
     assert result.candidate_failures == 0
     assert not result.aborted
     assert result.skip_counts["missing"] == 1
+
+
+# ── The followed tranche (D-50) ───────────────────────────────────────────────
+
+FOLLOWED_ONLY = AdmissionTranches(enabled=True, followed=True)
+
+
+async def _follow_at_any(session, person_id: int, *, email: str = "wide@example.com"):
+    from upmovies.app import passwords
+    from upmovies.app.models import Follow, User
+
+    user = User(
+        email=email,
+        password_hash=passwords.hash_password("hunter2hunter2"),
+        display_name="Wide Follower",
+    )
+    session.add(user)
+    await session.flush()
+    session.add(
+        Follow(
+            user_id=user.id,
+            entity_type="person",
+            entity_id=str(person_id),
+            source="manual",
+            coverage="any",
+        )
+    )
+    await session.flush()
+
+
+@respx.mock
+async def test_a_followed_person_is_enumerated_without_being_a_seed(
+    session, session_factory, tmdb_client, run_id
+):
+    """A follow is its own admission rule (D-50): nobody holds a seed-grade credit anywhere,
+    so the seed query returns nothing and the whole enumeration is the follow."""
+    session.add(Person(id=20, name="A Cinematographer"))
+    await _follow_at_any(session, 20)
+    await session.commit()
+    _mock_credits(20, crew=[make_credit_entry(100, department="Camera", job="Cinematographer")])
+    _mock_details(100)
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=FOLLOWED_ONLY)
+
+    assert result.seed_people == 1
+    assert result.candidates_found == 1
+    assert result.admitted == 1
+    assert result.role_histogram == {"followed": 1}
+
+
+@respx.mock
+async def test_a_followed_persons_candidate_needs_its_own_tranche(
+    session, session_factory, tmdb_client, run_id
+):
+    """The three seed-grade flags do not stand in for it, however wide open they are."""
+    session.add(Person(id=20, name="A Cinematographer"))
+    await _follow_at_any(session, 20)
+    await session.commit()
+    _mock_credits(20, crew=[make_credit_entry(100, department="Camera", job="Cinematographer")])
+    _mock_details(100)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=AdmissionTranches(enabled=True, directors=True, writers=True, cast=True),
+    )
+
+    assert (result.candidates_found, result.withheld, result.admitted) == (1, 1, 0)
+    assert await _film_count(session) == 0
+
+
+@respx.mock
+async def test_a_narrower_follow_enumerates_nobody(session, session_factory, tmdb_client, run_id):
+    """Only `any` joins the enumeration set. `lead` and `major` are alert tiers over people
+    the catalog already reaches, and asking TMDB for their filmographies would be a request
+    per follow for nothing."""
+    from upmovies.app import passwords
+    from upmovies.app.models import Follow, User
+
+    session.add(Person(id=20, name="A Cinematographer"))
+    user = User(
+        email="narrow@example.com",
+        password_hash=passwords.hash_password("hunter2hunter2"),
+        display_name="Narrow Follower",
+    )
+    session.add(user)
+    await session.flush()
+    session.add(
+        Follow(
+            user_id=user.id,
+            entity_type="person",
+            entity_id="20",
+            source="manual",
+            coverage="major",
+        )
+    )
+    await session.commit()
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=FOLLOWED_ONLY)
+
+    assert result.seed_people == 0
+
+
+@respx.mock
+async def test_a_tombstoned_followed_person_is_skipped(
+    session, session_factory, tmdb_client, run_id
+):
+    """`tmdb_missing_at` excludes both halves of the set: TMDB has deleted them, so their
+    filmography is a request that answers 404 on every run forever (NEU-1124)."""
+    from datetime import UTC, datetime
+
+    session.add(Person(id=20, name="Gone", tmdb_missing_at=datetime(2026, 1, 1, tzinfo=UTC)))
+    await _follow_at_any(session, 20)
+    await session.commit()
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=FOLLOWED_ONLY)
+
+    assert result.seed_people == 0
+
+
+@respx.mock
+async def test_a_followed_seed_person_is_enumerated_once_and_keeps_both_roles(
+    session, session_factory, tmdb_client, run_id
+):
+    """Set union, not concatenation: one request, and their seed-grade credits still yield
+    their own roles so the seed tranches judge those candidates as they always did."""
+    await _seed_director(session, person_id=10)
+    await _follow_at_any(session, 10)
+    await session.commit()
+    _mock_credits(
+        10,
+        crew=[
+            make_credit_entry(100, department="Directing", job="Director"),
+            make_credit_entry(101, department="Camera", job="Cinematographer"),
+        ],
+    )
+    _mock_details(100)
+    _mock_details(101)
+
+    result = await _run(
+        session_factory,
+        tmdb_client,
+        run_id,
+        tranches=AdmissionTranches(enabled=True, directors=True),
+    )
+
+    assert result.seed_people == 1
+    assert result.role_histogram == {"director": 1, "followed": 1}
+    assert (result.admitted, result.withheld) == (1, 1)
+    assert [f.tmdb_id for f in (await session.execute(select(Film))).scalars()] == [1, 100]
+
+
+@respx.mock
+async def test_a_follow_the_catalog_holds_no_person_row_for_is_still_enumerated(
+    session, session_factory, tmdb_client, run_id
+):
+    """The tombstone exclusion may only remove a person it can positively say is gone. The
+    follow routes validate the id's shape, not its existence, and the importers write
+    `entity_id` straight from their caller — so a follow with no `catalog.person` row behind
+    it is exactly the case where the follow is the only evidence there is."""
+    await _follow_at_any(session, 20)
+    await session.commit()
+    _mock_credits(20, crew=[make_credit_entry(100, department="Camera", job="Cinematographer")])
+    _mock_details(100)
+
+    result = await _run(session_factory, tmdb_client, run_id, tranches=FOLLOWED_ONLY)
+
+    assert result.seed_people == 1
+    assert result.admitted == 1

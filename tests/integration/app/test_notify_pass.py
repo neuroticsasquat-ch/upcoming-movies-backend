@@ -215,7 +215,7 @@ async def test_widening_the_coverage_puts_the_same_film_in_the_alert_branch(
     seed_watermark,
     run_pass,
 ):
-    """The same graph at `coverage = 'all'`: the credit now covers the film for alerts too, and
+    """The same graph at `coverage = 'major'`: the credit now covers the film for alerts too, and
     nothing else about the pass changes."""
     await seed_watermark()
     user = await subscriber()
@@ -223,7 +223,7 @@ async def test_widening_the_coverage_puts_the_same_film_in_the_alert_branch(
     # thing the two branches can disagree about is the coverage tier.
     film = await make_film(slug="dune", title="Dune", release_date=date(2099, 1, 1))
     await attach_credits(film, crew=[{"id": 488, "name": "A Writer", "job": "Screenplay"}])
-    await _follow_person(session, user_id=user.id, person_id=488, coverage="all")
+    await _follow_person(session, user_id=user.id, person_id=488, coverage="major")
     await add_event(film=film, event_type="release_date", created_at=NEW)
 
     result = await run_pass()

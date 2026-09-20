@@ -370,9 +370,9 @@ async def test_following_a_writer_covers_nothing_at_lead_and_everything_at_all(
     assert r.status_code == 201
     assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
 
-    r = await entitled_client.patch("/me/follows/person/488", json={"coverage": "all"})
+    r = await entitled_client.patch("/me/follows/person/488", json={"coverage": "major"})
     assert r.status_code == 200
-    assert r.json()["coverage"] == "all"
+    assert r.json()["coverage"] == "major"
     items = (await entitled_client.get("/me/watchlist")).json()["items"]
     assert [i["film"]["title"] for i in items] == [film.title]
 
@@ -384,10 +384,48 @@ async def test_coverage_can_be_asked_for_when_the_follow_is_created(entitled_cli
     await session.commit()
 
     r = await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "489", "coverage": "all"}
+        "/me/follows", json={"entity_type": "person", "entity_id": "489", "coverage": "major"}
     )
     assert r.status_code == 201
-    assert r.json()["coverage"] == "all"
+    assert r.json()["coverage"] == "major"
+
+
+@pytest.mark.parametrize("coverage", ["lead", "major", "any"])
+async def test_the_routes_accept_all_three_tiers(entitled_client, session, coverage):
+    """D-48's vocabulary, end to end. `all` is gone: the frontend must not ship its rename
+    before this, which is why the frontend ticket is blocked by this one."""
+    from upmovies.catalog.models import Person
+
+    person_id = 600 + ["lead", "major", "any"].index(coverage)
+    session.add(Person(id=person_id, name=f"Person {person_id}"))
+    await session.commit()
+
+    created = await entitled_client.post(
+        "/me/follows",
+        json={"entity_type": "person", "entity_id": str(person_id), "coverage": coverage},
+    )
+    assert created.status_code == 201
+    assert created.json()["coverage"] == coverage
+
+    patched = await entitled_client.patch(
+        f"/me/follows/person/{person_id}", json={"coverage": "lead"}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["coverage"] == "lead"
+
+
+async def test_the_retired_tier_name_is_refused(entitled_client, session):
+    """`all` was renamed to `major` (D-48) and the CHECK no longer admits it, so the DTO has to
+    refuse it at the boundary rather than let it reach a constraint violation."""
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=610, name="Person 610"))
+    await session.commit()
+
+    r = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "610", "coverage": "all"}
+    )
+    assert r.status_code == 422
 
 
 async def test_following_again_leaves_the_coverage_alone(entitled_client, session):
@@ -399,13 +437,13 @@ async def test_following_again_leaves_the_coverage_alone(entitled_client, sessio
     await session.commit()
 
     await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "all"}
+        "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "major"}
     )
     again = await entitled_client.post(
         "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "lead"}
     )
     assert again.status_code == 200
-    assert again.json()["coverage"] == "all"
+    assert again.json()["coverage"] == "major"
 
 
 @pytest.mark.parametrize("entity_type", ["company", "franchise", "title"])
@@ -415,7 +453,7 @@ async def test_coverage_on_a_non_person_follow_is_422(entitled_client, session, 
     entity_id = {"company": "1", "franchise": "1", "title": str(film_uuid())}[entity_type]
     r = await entitled_client.post(
         "/me/follows",
-        json={"entity_type": entity_type, "entity_id": entity_id, "coverage": "all"},
+        json={"entity_type": entity_type, "entity_id": entity_id, "coverage": "major"},
     )
     assert r.status_code == 422
     # The *named* refusal, not pydantic's generic error list: the client renders this one.
@@ -426,14 +464,14 @@ async def test_coverage_on_a_non_person_follow_is_422(entitled_client, session, 
 async def test_patching_the_coverage_of_a_non_person_follow_is_422(entitled_client, entity_type):
     entity_id = {"company": "1", "franchise": "1", "title": str(film_uuid())}[entity_type]
     r = await entitled_client.patch(
-        f"/me/follows/{entity_type}/{entity_id}", json={"coverage": "all"}
+        f"/me/follows/{entity_type}/{entity_id}", json={"coverage": "major"}
     )
     assert r.status_code == 422
     assert r.json()["detail"] == "coverage_not_applicable"
 
 
 async def test_patching_a_follow_that_does_not_exist_is_404(entitled_client):
-    r = await entitled_client.patch("/me/follows/person/999", json={"coverage": "all"})
+    r = await entitled_client.patch("/me/follows/person/999", json={"coverage": "major"})
     assert r.status_code == 404
     assert r.json()["detail"] == "follow_not_found"
 
@@ -452,13 +490,13 @@ async def test_patching_the_coverage_requires_the_csrf_header(entitled_client, s
     await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "491"})
 
     del entitled_client.headers["X-CSRF-Token"]
-    r = await entitled_client.patch("/me/follows/person/491", json={"coverage": "all"})
+    r = await entitled_client.patch("/me/follows/person/491", json={"coverage": "major"})
     assert r.status_code == 403
     assert r.json()["detail"] == "csrf_invalid"
 
 
 async def test_patching_the_coverage_is_403_for_an_unentitled_user(authed_client):
-    r = await authed_client.patch("/me/follows/person/1", json={"coverage": "all"})
+    r = await authed_client.patch("/me/follows/person/1", json={"coverage": "major"})
     assert r.status_code == 403
     assert r.json()["detail"] == "entitlement_required"
 

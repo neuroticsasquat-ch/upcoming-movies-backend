@@ -9,6 +9,11 @@ Two levels, deliberately kept apart (spec §7.3, §7.4):
   retrieval-health guard (ADR-0010) gets to react to a 1,446-person expansion before a
   7,519-person one, and if precision does collapse we learn *which* grade caused it rather
   than staring at one undifferentiated jump.
+- **`followed`** is the fourth flag and not a fifth seed grade (D-50): it admits a candidate
+  reached *only* through a non-seed credit of somebody a user follows at coverage `any`. It is
+  on the same footing as the three because the ramp's argument is about precision, and a
+  follow is a different kind of evidence — one user's stated interest rather than the
+  catalog's — so it deserves its own reading rather than being folded into the grade below it.
 
 Every flag defaults off, so "the sweep admits nothing" is a configuration rather than a
 code state: opening a tranche is an env change, not a deploy.
@@ -18,16 +23,18 @@ from collections.abc import Container
 from dataclasses import dataclass
 
 from upmovies.config import Settings
+from upmovies.ingest.sweep.seeds import FOLLOWED_ROLE
 
 
 @dataclass(frozen=True)
 class AdmissionTranches:
-    """Which seed grades may admit a film, master switch included."""
+    """Which roles may admit a film, master switch included."""
 
     enabled: bool = False
     directors: bool = False
     writers: bool = False
     cast: bool = False
+    followed: bool = False
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "AdmissionTranches":
@@ -38,13 +45,16 @@ class AdmissionTranches:
             directors=settings.sweep_admit_directors,
             writers=settings.sweep_admit_writers,
             cast=settings.sweep_admit_cast,
+            followed=settings.sweep_admit_followed,
         )
 
     def admits(self, roles: Container[str]) -> bool:
-        """Whether a candidate reached at these seed-grade `roles` may be written.
+        """Whether a candidate reached at these `roles` may be written.
 
         The film is the unit of admission, not the credit: one open tranche among the
-        grades that reached it is enough.
+        roles that reached it is enough. A candidate a followed person reaches as its director
+        is therefore admitted by `directors` whatever `followed` is set to — `followed` is
+        only ever what admits a candidate nothing else reached.
         """
         if not self.enabled:
             return False
@@ -52,4 +62,5 @@ class AdmissionTranches:
             (self.directors and "director" in roles)
             or (self.writers and "writer" in roles)
             or (self.cast and "cast" in roles)
+            or (self.followed and FOLLOWED_ROLE in roles)
         )

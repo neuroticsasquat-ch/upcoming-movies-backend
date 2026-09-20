@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from upmovies.app.dto import WatchlistFilmOut
+
 
 class SourceOut(BaseModel):
     url: str
@@ -120,6 +122,76 @@ class ReleaseDateOut(BaseModel):
     type_label: str
     date: datetime
     certification: str | None
+
+
+class PersonFilmSummaryOut(WatchlistFilmOut):
+    """`WatchlistFilmOut` plus the URL ref — the watchlist row's shape, as the spec asks, so a
+    film cited on a person page and the same film on the watchlist cannot show different dates.
+
+    It subclasses rather than restating the five fields: the reason `WatchlistFilmOut` carries
+    `headline_release` instead of `release_date` (NEU-1397 — the film page never displays
+    TMDB's primary date) is a rule about citing films anywhere, and a copy here would be a
+    second place for it to be got wrong. `ref` is added because this row links to the film page
+    and the watchlist's client builds that link itself."""
+
+    ref: str
+
+
+CreditTier = Literal["lead", "major", "any"]
+"""The narrowest coverage tier that reaches a credit (D-48). Mirrors `app.dto.FollowCoverage`,
+and is answered by `app.follow_queries.credit_tier` — the same predicates the alert query runs,
+so the badge on a person page and the alert it promises cannot disagree."""
+
+
+class PersonCreditOut(BaseModel):
+    """One credit a person holds on one film, with the tier that reaches it.
+
+    A writer-director holds two of these on the same film; they are listed rather than folded,
+    because "Director · Writer" is what the page reads and folding them would lose the tier of
+    each. `credit_order` is TMDB's 0-indexed billing and is null for crew and for an unbilled
+    cast entry."""
+
+    credit_type: Literal["cast", "crew"]
+    job: str | None
+    character: str | None
+    credit_order: int | None
+    tier: CreditTier
+
+
+class PersonFilmOut(BaseModel):
+    """One film on a person's page, with every credit they hold on it.
+
+    `tier` is the **narrowest** tier across `credits` — the one a follow needs to be at for
+    this row to reach the user at all — so the page can say "Lead roles reaches two of seven"
+    without the client re-deriving the rule."""
+
+    film: PersonFilmSummaryOut
+    credits: list[PersonCreditOut]
+    tier: CreditTier
+
+
+class PersonDetailResponse(BaseModel):
+    """A person's page (D-1416.6): who they are, and the films a follow could reach.
+
+    **Upcoming and recently released only.** `upcoming` is the in-play set and `recent` is the
+    alert window less the in-play set, which between them are exactly what a follow can reach
+    (D-46) — so the page shows the user what following this person would get them and nothing
+    else. A film is in one list or the other, never both, and their back catalogue is absent by
+    design rather than by pagination.
+
+    `id` is the TMDB person id; stringified, it is the `entity_id` a `person` follow is keyed
+    on. `ref` is canonical — the client redirects when the one it asked with differs, as the
+    film page does."""
+
+    ref: str
+    id: int
+    name: str
+    profile_path: str | None
+    known_for_department: str | None
+    birthday: date | None
+    deathday: date | None
+    upcoming: list[PersonFilmOut]
+    recent: list[PersonFilmOut]
 
 
 class CollectionOut(BaseModel):

@@ -150,7 +150,8 @@ Numbered so tickets can cite them (`D-n`).
 - **D-10 Follow entities:** `person` (TMDB person id), `company` (TMDB company id), `franchise`
   (= `catalog.collection` id, v1), `title` (film id). `source` ∈ `manual | letterboxd_import |
   tmdb_import | derived`.
-- **D-11 Person follow coverage (pre-resolution):** every published event on any **in-play**
+- **D-11 Person follow coverage (pre-resolution)** *(amended 2026-09-20 by D-47: a follow at
+  coverage `any` reaches every credit, not only seed grade)*: every published event on any **in-play**
   film where the person holds a **seed-grade** credit (`catalog/seed_grade.py`: director,
   Writer/Screenplay, top-5 billed). After M4, events that *name* a resolved person on a film
   they are not yet credited on also match. Company follow = films with that
@@ -319,7 +320,8 @@ lands.
   they have muted; it is no longer a record the user maintains. INV-7 ("follows produce
   timeline rows only") is withdrawn. The word "watchlist" stays as the name of the set; the
   film page shows one follow control and never says it.
-- **D-43 Coverage on the follow.** `app.follow.coverage ∈ lead|all`, default `lead`. For a
+- **D-43 Coverage on the follow** *(amended 2026-09-20 by D-47/D-48: three tiers `lead|major|any`,
+  `all` renamed `major`, and `any` widens the timeline too)*. `app.follow.coverage ∈ lead|all`, default `lead`. For a
   person follow it picks which credits alert: `lead` = director or top-3 billing (D-13's cut,
   which is what keeps a prolific actor from becoming a push firehose), `all` = every
   seed-grade credit (D-11's cut). Company, franchise and title follows cover every matching
@@ -344,6 +346,29 @@ lands.
   the in-play working set; the window's own term is a constant
   (`catalog.queries.ALERT_WINDOW_DEAD_STATUSES`), because TMDB's vocabulary is closed and there
   is nothing to tune. Title follows are unchanged: any state. (NEU-1417, 2026-09-20.)
+
+### Any credit, any person (2026-09-20, NEU-1416 planning)
+
+- **D-47 The widest tier widens the timeline.** Timeline reach for a person follow is *seed
+  grade OR the follow's own tier*. `lead` and `major` are subsets of seed grade, so D-11 holds
+  for them unchanged; `any` reaches every credit the person holds on an in-play film. Coverage
+  still never narrows the timeline. Amends D-11 and the last sentence of D-43.
+- **D-48 Three tiers: `lead | major | any`.** `all` is renamed `major` (director,
+  Writer/Screenplay, top-5: the seed grade) by a one-line data migration; `any` is every credit
+  at any billing or crew job. A tier called "all" beside one that reaches more is the drift the
+  glossary exists to stop. On screen: Lead roles, Major credits, Every credit.
+- **D-49 A follow is its own admission rule for the credit history.** `catalog.film_credit_change`
+  records seed-grade changes for everyone and *every* credit change for a person somebody
+  follows at `any` (the **recorded grade**). Non-seed cast cards as `casting`, non-seed crew as
+  `crew_attached`, through the same quarantine, burst grouping and sanity holds. Both sides of
+  the diff use the same followed set at the same moment, so a new follow never fabricates an
+  attachment; first observation stays a baseline. Not retroactive: existing credits are already
+  in `film_credit` and reach the timeline and alerts the moment the follow widens.
+- **D-50 Followed people are enumerated under a `followed` tranche.** The sweep's enumeration
+  set is the seed people plus every live person followed at `any`; their non-seed undated
+  credits are `followed` attachments, admitted only when `SWEEP_ADMIT_FOLLOWED` is on, under the
+  same status filter and corroboration bar as the other tranches. Seed grade and the NEU-1090
+  top-5 measurement are untouched (ADR-0013 amended). Spec `NEU-1416-follow-any-credit-depth.md`.
 
 ## 6. Milestones and shared contracts
 
@@ -515,6 +540,39 @@ entitlement gate (D-37 to D-41) is untouched.
   and a Muted section; `/me/follows` with the per-person coverage control; `/settings` with the
   store set (NEU-1415).
 
+### M9 — Any credit, any person
+
+**Goal:** a subscriber can follow *any* person from that person's own page and hear about any
+credit they pick up (D-47 to D-50). Story NEU-1416; backend ticket first, then the frontend
+ticket. Seed grade, the alert window, mutes and entitlement are untouched.
+
+**Shared contracts**
+- `app.follow.coverage ∈ lead|major|any`, default `lead`; `all` → `major` by migration.
+  `FollowOut.coverage`, `POST`/`PATCH /me/follows` carry the three values; the
+  `422 coverage_not_applicable` rule for non-person follows stands.
+- Timeline: seed grade OR the follow's tier (`any` = every credit); alerts: the tier's cut inside
+  the alert window. One `credit_tier(credit_type, job, credit_order)` in `app/follow_queries.py`
+  is what the person page's badges and the alert query both read.
+- Credit history records the **recorded grade**: seed grade, plus every credit of a person
+  followed at `any` (`people_followed_at_any()` query builder, no entitlement filter, as the poll
+  set). Roles gain `crew` (→ `crew_attached`); no new event type.
+- Sweep: enumeration set = seeds ∪ people followed at `any`; role `followed`; flag
+  `SWEEP_ADMIT_FOLLOWED` (default off) beside the three tranches.
+- `GET /people/{ref}` (`<id>-<slug>`, public, 404 for unknown or TMDB-deleted) →
+  `{ref, id, name, profile_path, known_for_department, birthday, deathday, upcoming: [...],
+  recent: [...]}`; each film row carries `film` (watchlist-row shape with `headline_release`),
+  `credits: [{credit_type, job, character, credit_order, tier}]` and the film's narrowest `tier`.
+  `upcoming` = in play; `recent` = inside the alert window but not in play; nothing older.
+- `GET /films/{ref}` sends the full cast (no 12 cap).
+- Frontend: `/person/:ref` in the public layout with canonical-ref redirect; follow button plus a
+  three-tier `CoverageControl` (Lead roles / Major credits / Every credit) that posts the tier on
+  first follow and patches after; Upcoming and Recently released sections with tier badges. Film
+  page cast and crew names link to the person page, buttons stay on seed-grade rows.
+  `/me/follows` uses the same control and links person rows internally. Header entity search and
+  company/collection pages are a separate story.
+
+Spec: `docs/specs/NEU-1416-follow-any-credit-depth.md`.
+
 ## 7. Prerequisites and deploy notes
 
 - `RESEND_API_KEY`, `TURNSTILE_SECRET`, `VAPID_*`, `TMDB_*` user-auth redirect URL, and
@@ -522,6 +580,8 @@ entitlement gate (D-37 to D-41) is untouched.
   (compose fallbacks are seeds, not defaults).
 - The sweep gains phases (`quarantine`, `providers`, `videos`); watch the sweep runtime and
   `record_progress` heartbeat contract.
+- `SWEEP_ADMIT_FOLLOWED` (M9) is a fourth tranche flag, default off; flip it in Coolify after the
+  NEU-1416 backend deploys, or followed people are enumerated but never admit.
 - Everything runs in the container via `task`; before claiming any ticket done: `task format`,
   then `task test && task lint && task typecheck` (backend) / `task test && task lint && task
   typecheck` (frontend).

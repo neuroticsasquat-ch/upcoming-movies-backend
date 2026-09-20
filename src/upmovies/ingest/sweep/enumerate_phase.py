@@ -24,6 +24,7 @@ from uuid import UUID
 
 import httpx
 
+from upmovies.app.follow_queries import people_followed_at_any
 from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import format_skip_detail, record_progress
 from upmovies.ingest.sweep.admission import AdmissionTranches
@@ -76,6 +77,16 @@ class EnumerateResult:
     withheld: int = 0
     """Reached only at seed grades whose tranche is closed. A statement about the rollout,
     not about the film — which is why it is counted before the corroboration threshold."""
+    role_histogram: Counter[str] = field(default_factory=Counter)
+    """Candidates that cleared *status*, by each role that reached them — so one candidate
+    reached as both director and cast is counted under both, and the counts do not sum to the
+    candidate total.
+
+    On the detail line rather than only in the log, for the reason `attachment_histogram` is
+    (see `summary`): Coolify runs the sweep through `docker exec` and its output never reaches
+    `docker logs`. What it answers is which tranche a closed `no_tranche` count is waiting on
+    — and, since D-50, whether the `followed` enumeration is reaching anything at all, which is
+    otherwise invisible until `SWEEP_ADMIT_FOLLOWED` is flipped."""
     attachment_histogram: Counter[int] = field(default_factory=Counter)
     """Candidates that cleared *status*, by `seed_attachment_count` — deliberately not
     narrowed by the corroboration threshold or the tranches. This is the distribution the
@@ -130,14 +141,24 @@ async def run_sweep_enumerate(
         seed_ids = await load_seed_person_ids(
             s, today=today, excluded_statuses=excluded_statuses, dormancy_days=dormancy_days
         )
+        # The followed half of that set, read back separately: `load_seed_person_ids` returns
+        # one flat union, and `seed_attachments` needs to know *which* of the people in it a
+        # follow put there — only they contribute `followed` attachments (D-50).
+        followed_ids = set((await s.execute(people_followed_at_any())).scalars().all())
         known_tmdb_ids = await load_known_film_tmdb_ids(s)
     result.seed_people = len(seed_ids)
-    log.info("enumerate: %d seed people, %d known films", len(seed_ids), len(known_tmdb_ids))
+    log.info(
+        "enumerate: %d people (%d followed at any), %d known films",
+        len(seed_ids),
+        len(followed_ids & set(seed_ids)),
+        len(known_tmdb_ids),
+    )
 
     attachments = await _collect_attachments(
         session_factory=session_factory,
         client=client,
         seed_ids=seed_ids,
+        followed_ids=followed_ids,
         result=result,
         guard=guard,
         heartbeat=heartbeat,
@@ -176,6 +197,7 @@ async def _collect_attachments(
     session_factory: SessionFactory,
     client: TMDBClient,
     seed_ids: list[int],
+    followed_ids: set[int],
     result: EnumerateResult,
     guard: AbortGuard,
     heartbeat: Heartbeat,
@@ -188,7 +210,9 @@ async def _collect_attachments(
         await heartbeat.tick()
         try:
             credits = await client.person_movie_credits(person_id)
-            attachments.extend(seed_attachments(person_id, credits))
+            attachments.extend(
+                seed_attachments(person_id, credits, followed=person_id in followed_ids)
+            )
             guard.succeeded()
             if i % log_every == 0:
                 log.info("enumerate: %d/%d seed people", i, len(seed_ids))
@@ -252,6 +276,7 @@ async def _judge_candidates(
                 # the M4 tuning ticket reads the threshold *off* (§4.3), so letting today's
                 # value truncate it would hide the evidence that it should be lowered.
                 result.attachment_histogram[tally.seed_attachment_count] += 1
+                result.role_histogram.update(tally.roles)
                 # The tranche gate is asked first, and the order is the reported reason.
                 # It is the rollout posture — an operator's deliberate setting — whereas the
                 # threshold is a judgement about the film. While a grade is closed nothing

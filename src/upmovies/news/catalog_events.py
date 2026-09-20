@@ -24,15 +24,23 @@ STATUS_EVENT_TYPES: dict[str, str] = {
 # this film already have one" — no window, no timestamp comparison, on either side.
 ONCE_PER_FILM_EVENT_TYPES = frozenset(STATUS_EVENT_TYPES.values())
 
-# The event type each seed-grade credit role cards as (spec §5.2). Director and writer share
-# one type: they are one beat, and TMDB commonly gains both in a single edit — which
+# The event type each *recorded* credit role cards as (spec §5.2, D-49). Director and writer
+# share one type: they are one beat, and TMDB commonly gains both in a single edit — which
 # `uq_event_catalog_change` would refuse as two catalog events at one timestamp anyway.
 # `casting` is an existing type; `crew_attached` is new with the credit half, and has to be
 # registered wherever the vocabulary is enumerated (`public.arc._EVENT_STAGE`,
 # `link.cluster._STALE_EVENT_TYPES`, `ck_event_type`) or it ranks below everything.
+#
+# `crew` joins them with the widest coverage tier (D-49): a followed person's non-seed crew
+# credit is a crew attachment like a director's, so it cards as `crew_attached` and groups
+# with one — a cinematographer and a director attaching in the same pass are one card, which
+# is what D-7's burst grouping already means by one beat. No new event type, so `ck_event_type`
+# is untouched. Keyed by `catalog.seed_grade.recorded_role`, which is total, so every key this
+# is subscripted with is present.
 CREDIT_ROLE_EVENT_TYPES: dict[str, str] = {
     "director": "crew_attached",
     "writer": "crew_attached",
+    "crew": "crew_attached",
     "cast": "casting",
 }
 
