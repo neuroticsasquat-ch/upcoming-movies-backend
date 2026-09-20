@@ -184,7 +184,9 @@ class EntitlementGrantRequest(BaseModel):
 # --- follows and the watchlist (M3, D-10 to D-14) ---------------------------------------------
 
 FollowEntityType = Literal["person", "company", "franchise", "title"]
-FollowCoverage = Literal["lead", "all"]
+FollowCoverage = Literal["lead", "major", "any"]
+"""The three person-follow tiers (D-48). Mirrors `app.models.FOLLOW_COVERAGES`, which renders
+the CHECK the same values are stored under."""
 AlertStore = Literal["buy", "rent", "stream"]
 
 
@@ -244,9 +246,10 @@ class FollowOut(BaseModel):
     image_path: str | None
     source: str
     coverage: str
-    """Which of a followed person's credits alert (D-43). Echoed on every row, and always
-    `lead` for a non-person follow, which reads it for nothing — one shape for the list, and
-    the client shows the control on person rows only (NEU-1415)."""
+    """Which of a followed person's credits alert (D-43, D-48) — and, at `any`, also what
+    reaches their timeline (D-47). Echoed on every row, and always `lead` for a non-person
+    follow, which reads it for nothing — one shape for the list, and the client shows the
+    control on person rows only (NEU-1415)."""
     created_at: datetime
 
 

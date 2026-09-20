@@ -253,6 +253,16 @@ class Settings(BaseSettings):
     sweep_admit_directors: bool = Field(default=False, alias="SWEEP_ADMIT_DIRECTORS")
     sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
+    # The fourth tranche (D-50), and the only one that is not a seed grade: it admits a
+    # candidate reached *only* through a non-seed credit of somebody a user follows at coverage
+    # `any`. Off by default like the three above, and for the same reason — opening it is an
+    # env change rather than a deploy — but it does not belong in their ramp order, because it
+    # is not a wider cut of the same evidence. A follow is one user saying this person is worth
+    # a request; the ramp exists to attribute a precision drop to a seed grade, and this flag's
+    # reading is about the follow graph instead. The credit *history* half of the same decision
+    # (D-49) needs no flag: it records for whoever is followed, and records nothing extra while
+    # nobody follows anyone that widely.
+    sweep_admit_followed: bool = Field(default=False, alias="SWEEP_ADMIT_FOLLOWED")
     # How many distinct seed people must reach an undated film before it may be admitted
     # (§4.1). One director attachment is the earliest and most valuable signal the product
     # sells; it is also exactly what a speculative TMDB entry looks like, and §4.2 left that

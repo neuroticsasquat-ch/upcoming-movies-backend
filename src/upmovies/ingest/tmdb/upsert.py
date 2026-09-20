@@ -29,11 +29,12 @@ from upmovies.catalog.models import (
 from upmovies.catalog.slug import assign_slug
 from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
 from upmovies.ingest.tmdb.credit_history import (
-    diff_seed_credits,
-    load_seed_credits,
+    diff_recorded_credits,
+    load_followed_person_ids,
+    load_recorded_credits,
     mark_credits_observed,
     record_credit_changes,
-    seed_credits_from_details,
+    recorded_credits_from_details,
 )
 from upmovies.ingest.tmdb.release_date_history import (
     diff_release_dates,
@@ -456,7 +457,7 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     Film credits are rebuilt (delete-and-reinsert) each run so that a person dropped
     from the cast/crew between runs is correctly removed.
 
-    The rebuild is also where seed-grade credit *history* is captured: both sides of the
+    The rebuild is also where recorded-grade credit *history* is captured: both sides of the
     diff are in hand here and nowhere else, so `catalog.film_credit_change` is written from
     them before the old side is destroyed. First observation is a baseline, never a change —
     see `ingest.tmdb.credit_history`.
@@ -464,8 +465,13 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     if not details.credits:
         return
 
+    # Recorded grade's second half (D-49), read once and handed to *both* sides of the diff
+    # below: judging them by two different answers is what would fabricate an attachment for
+    # a credit that never moved. One query per film, on the same session as the rest.
+    followed = await load_followed_person_ids(session)
+
     # Read the stored side before the delete below wipes it.
-    previous_seed_credits = await load_seed_credits(session, film_id)
+    previous_recorded_credits = await load_recorded_credits(session, film_id, followed=followed)
 
     # Step 1 — People: union of cast + crew, deduped by TMDB person id.
     await upsert_people(session, [*details.credits.cast, *details.credits.crew])
@@ -507,8 +513,9 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     await record_credit_changes(
         session,
         film_id,
-        diff_seed_credits(
-            previous=previous_seed_credits, current=seed_credits_from_details(details)
+        diff_recorded_credits(
+            previous=previous_recorded_credits,
+            current=recorded_credits_from_details(details, followed=followed),
         ),
     )
     await mark_credits_observed(session, film_id)

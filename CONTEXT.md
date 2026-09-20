@@ -410,7 +410,9 @@ _Avoid_: soft delete, archive, blacklist, dead flag.
 
 **Seed person**:
 Someone whose credits the sweep enumerates: anyone holding a **seed-grade** credit — director,
-writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film. 7,519
+writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film, plus
+every live person some user follows at coverage `any` (D-50), whose non-seed credits reach
+candidates under the `followed` **tranche**. 7,519
 of them at a 1,435-film catalog. Producers are deliberately not seed-grade: an EP credit travels
 far and says little about whether a project is real. The set is *self-expanding* — admitting a
 film contributes its own credits back as seeds — and **dormancy** is what bounds it, so a
@@ -418,8 +420,9 @@ project that goes nowhere stops paying for its own people.
 _Avoid_: tracked person, watched person, followed talent.
 
 **Tranche**:
-One seed grade's admission flag — `SWEEP_ADMIT_DIRECTORS`, `SWEEP_ADMIT_WRITERS`,
-`SWEEP_ADMIT_CAST` — opened one at a time so a precision drop names the grade that caused it
+One admission flag per way a candidate can be reached — `SWEEP_ADMIT_DIRECTORS`,
+`SWEEP_ADMIT_WRITERS`, `SWEEP_ADMIT_CAST`, and `SWEEP_ADMIT_FOLLOWED` for a non-seed credit
+held by a person followed at `any` (D-50) — opened one at a time so a precision drop names the grade that caused it
 rather than arriving as one undifferentiated jump. They sit under the master `SWEEP_ENABLED`,
 which is kept separate on purpose: the master is the rollback, the tranches are the ramp, and a
 sweep that enumerates and reports while admitting nothing is the state where all four are off.
@@ -436,6 +439,14 @@ can be: the earliest signal the product sells, and a speculative TMDB entry. Not
 with the **corroboration window**, which is about release-date stories agreeing with TMDB's
 change history — same word, unrelated mechanism.
 _Avoid_: confidence threshold, minimum seeds, corroboration window (that's the other one).
+
+**Recorded grade**:
+Which credit changes the credit history writes down (D-49): every **seed-grade** credit, plus
+every credit of a person somebody follows at coverage `any`. Seed grade is a property of the
+credit; recorded grade is seed grade *or* a property of who is watching. Both sides of a
+film's diff are judged by the same rule at the same moment, so a new follow never fabricates
+an attachment.
+_Avoid_: followed grade, tracked credit, widened seed grade (seed grade does not widen).
 
 **Seed grade**:
 The role classes that both qualify a person as a seed *and* qualify a candidate film for
@@ -727,18 +738,22 @@ A user's standing interest in an entity — a **person**, a **company**, a **fra
 **title** — and the only thing a user maintains (D-42, ADR-0018). A follow
 produces **timeline** rows *and* alerts. Its point is that the user hears about a film they had
 never heard of, because they follow the people who made it. For the timeline, a person follow
-covers every published event on any in-play film where that person holds a seed-grade credit;
-**resolution** later adds events that *name* them on films they are not yet credited on. For
+covers every published event on any in-play film where that person holds a seed-grade credit
+— or any credit at all, when its **coverage** is `any` (D-47); **resolution** later adds
+events that *name* them on films they are not yet credited on. For
 alerts, it covers the films its **coverage** selects.
 _Avoid_: subscription (that is billing), watchlist item (there is no such record any more),
 track, favorite.
 
 **Coverage**:
-Which of a followed person's films alert (D-43): `lead` — the person is director or in the top-3
-billing — is the default and is what keeps a prolific actor from becoming a push firehose;
-`all` widens it to every seed-grade credit. Company, franchise and title follows cover every
-matching film. Coverage narrows alerts only; the timeline's cut is always seed grade.
-_Avoid_: alert prefs (those were per film and are gone), tier, level.
+Which of a followed person's films alert (D-43, D-48): `lead` — the person is director or in
+the top-3 billing — is the default and is what keeps a prolific actor from becoming a push
+firehose; `major` widens it to every seed-grade credit; `any` to every credit the person holds,
+at any billing or crew job. Company, franchise and title follows cover every matching film.
+Coverage never narrows the timeline: its cut is seed grade, or every credit when the coverage
+is `any` (D-47). On screen the three read Lead roles, Major credits, Every credit.
+_Avoid_: alert prefs (those were per film and are gone), tier, level, all (the old name of
+`major`, retired because it no longer meant all).
 
 **Franchise**:
 A TMDB collection, and nothing more for now. Following a franchise matches films by

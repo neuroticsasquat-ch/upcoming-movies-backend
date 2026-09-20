@@ -172,12 +172,21 @@ class EmailToken(Base):
 
 FOLLOW_ENTITY_TYPES = ("person", "company", "franchise", "title")
 FOLLOW_SOURCES = ("manual", "letterboxd_import", "tmdb_import", "derived")
-FOLLOW_COVERAGES = ("lead", "all")
-"""Which of a followed *person*'s credits alert (D-43, M8).
+FOLLOW_COVERAGES = ("lead", "major", "any")
+"""Which of a followed *person*'s credits alert (D-43, D-48, M9).
 
-`lead` is the director-or-top-3 cut D-13 spent on the watchlist; `all` is every seed-grade
-credit. Widening the tiers later (NEU-1416) is a change to this tuple and the CHECK it renders,
-and nothing else: the coverage is read in one place, `app.follow_queries.covered_film_ids`."""
+`lead` is the director-or-top-3 cut D-13 spent on the watchlist; `major` is every seed-grade
+credit; `any` is every credit the person holds, at any billing position and any crew job.
+
+**`major` is what `all` was called until NEU-1416**, renamed the day the wider tier landed: a
+tier called "all" sitting beside one that reaches more is exactly the vocabulary drift
+`CONTEXT.md` exists to stop. The migration rewrites the rows, and nothing else in the codebase
+spells the old value.
+
+`any` is the one tier that also widens the **timeline** (D-47). Coverage is otherwise read for
+alerts alone — `app.follow_queries._coverage_credit_clause` and the three builders over it —
+but a user alerted about a 12th-billed casting they could not then find on their timeline is a
+dead end, so `followed_film_ids` reads the column too."""
 DEFAULT_COVERAGE = "lead"  # D-43; mirrored by the column's server default
 ALERT_STORES = ("buy", "rent", "stream")
 DEFAULT_ALERT_STORES = ("stream",)  # D-44; mirrored by the column's server default
@@ -195,10 +204,11 @@ class Follow(Base):
     here is both "show me this on my timeline" and "tell me when something happens to it".
 
     `coverage` is the one preference it carries, and it is read for `entity_type = 'person'`
-    only — which credits of that person alert, `lead` (director or top-3 billing) or `all`
-    (every seed-grade credit). It is stored on every row so the column is NOT NULL and the
-    coverage query can read it without a CASE on the type; the other three types name one
-    thing each, and there is nothing to narrow. Timeline coverage (D-11) is unchanged by it.
+    only — which credits of that person alert: `lead` (director or top-3 billing), `major`
+    (every seed-grade credit) or `any` (every credit at all). It is stored on every row so the
+    column is NOT NULL and the coverage query can read it without a CASE on the type; the other
+    three types name one thing each, and there is nothing to narrow. Timeline coverage (D-11) is
+    unchanged by it except at `any`, which widens the timeline too (D-47).
     The store preference is *not* here: it is one setting per user
     (`UserSettings.alert_stores`, D-44), because a user who wants to hear about streaming
     wants that for everything they follow.

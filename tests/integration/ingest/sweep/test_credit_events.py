@@ -27,8 +27,8 @@ from upmovies.ingest.sweep.credit_events import (
 from upmovies.ingest.tmdb.credit_history import (
     CREDIT_ADDED,
     CREDIT_REMOVED,
-    SeedCredit,
-    diff_seed_credits,
+    RecordedCredit,
+    diff_recorded_credits,
     record_credit_changes,
 )
 from upmovies.news.catalog_events import CREDIT_REMOVED_EVENT_TYPE
@@ -214,17 +214,17 @@ async def test_crew_and_cast_in_one_pass_card_as_their_own_beats(session, sessio
 
 
 async def test_a_films_first_observed_credits_card_nothing(session, session_factory, run_id):
-    """§5.3, the headline rule. Guaranteed upstream — `diff_seed_credits` returns nothing for
+    """§5.3, the headline rule. Guaranteed upstream — `diff_recorded_credits` returns nothing for
     a film the catalog has never observed — so this drives the *real* writer rather than
     hand-inserting rows, which would assert nothing about production behaviour."""
     film = await add_film(session, 1)
     for person_id, name in ((1, "Denis Villeneuve"), (2, "Zendaya")):
         await _person(session, person_id, name)
-    first_observation = diff_seed_credits(
+    first_observation = diff_recorded_credits(
         previous=None,
         current=[
-            SeedCredit(person_id=1, credit_type="crew", job="Director"),
-            SeedCredit(person_id=2, credit_type="cast", job=None),
+            RecordedCredit(person_id=1, credit_type="crew", job="Director"),
+            RecordedCredit(person_id=2, credit_type="cast", job=None),
         ],
     )
     await record_credit_changes(session, film.id, first_observation)
@@ -2225,3 +2225,205 @@ async def test_the_earliest_story_card_is_the_one_that_published_the_change(
 
     assert (await _change(session, film, person)).carded_by_event_id == scoop.id
     assert result.story_published == 1
+
+
+# ── The recorded grade: a followed person's non-seed credits (D-49) ───────────
+
+
+async def _follow_at_any(session, user, person_id: int) -> None:
+    from upmovies.app.models import Follow
+
+    session.add(
+        Follow(
+            user_id=user.id,
+            entity_type="person",
+            entity_id=str(person_id),
+            source="manual",
+            coverage="any",
+        )
+    )
+    await session.flush()
+
+
+async def test_a_followed_persons_minor_cast_credit_cards_as_casting(
+    session, session_factory, run_id, make_user
+):
+    """The beat D-49 exists for: a 12th-billed credit is not seed grade, so it only reaches
+    the history because somebody follows the person at `any` — and from there it goes through
+    the same quarantine and grouping as a lead's."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Supporting Actor")
+    await _follow_at_any(session, user, 100)
+    await add_credit(session, film, 100, credit_type="cast", credit_order=11)
+    await _cast(session, film, person, changed_at=AGED)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert (result.attachments_read, result.events_created, result.held) == (1, 1, 0)
+    (event,) = await _events(session, film)
+    assert event.event_type == "casting"
+    assert event.subject_key == ["a supporting actor"]
+    assert (await _summary(session, event)).summary == "A Supporting Actor joins the cast."
+
+
+async def test_a_followed_persons_non_seed_crew_credit_cards_as_crew_attached(
+    session, session_factory, run_id, make_user
+):
+    """A cinematographer carries no seed grade at all, so `credit_role` answers None for them
+    and the phase used to drop the row. `recorded_role` answers `crew`, which
+    `CREDIT_ROLE_EVENT_TYPES` cards as `crew_attached` beside a director's."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Cinematographer")
+    await _follow_at_any(session, user, 100)
+    await add_credit(
+        session, film, 100, credit_type="crew", job="Cinematographer", department="Camera"
+    )
+    await _attached(session, film, person, job="Cinematographer", changed_at=AGED)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert result.events_created == 1
+    (event,) = await _events(session, film)
+    assert event.event_type == "crew_attached"
+    assert (await _summary(session, event)).summary == "A Cinematographer joins the crew."
+
+
+async def test_a_director_and_a_followed_crew_member_share_one_card(
+    session, session_factory, run_id, make_user
+):
+    """Burst grouping is by (film, event type, pass), so a cinematographer's attachment joins
+    a director's in the same pass — one beat, one card, the body naming both by role."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    director = await _person(session, 100, "A Director")
+    dop = await _person(session, 101, "A Cinematographer")
+    await _follow_at_any(session, user, 101)
+    await add_credit(session, film, 100, credit_type="crew", job="Director", department="Directing")
+    await add_credit(
+        session, film, 101, credit_type="crew", job="Cinematographer", department="Camera"
+    )
+    await _attached(session, film, director, changed_at=AGED)
+    await _attached(session, film, dop, job="Cinematographer", changed_at=AGED)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert result.events_created == 1
+    (event,) = await _events(session, film)
+    assert event.event_type == "crew_attached"
+    assert (await _summary(session, event)).summary == (
+        "A Director attached to direct. A Cinematographer joins the crew."
+    )
+
+
+async def test_the_quarantine_gate_reads_a_followed_persons_credit_as_still_present(
+    session, session_factory, run_id, make_user
+):
+    """The gate asks "is this credit still in `catalog.film_credit` under the same recorded
+    role". Asked under seed grade alone, a followed person's non-seed credit is never present,
+    so every one of them would be held forever and nothing would ever card."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Supporting Actor")
+    await _follow_at_any(session, user, 100)
+    await add_credit(session, film, 100, credit_type="cast", credit_order=11)
+    await _cast(session, film, person, changed_at=AGED)
+    await session.commit()
+
+    assert (await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)).held == 0
+
+
+async def test_a_reverted_minor_credit_is_still_held(session, session_factory, run_id, make_user):
+    """The other half of the gate: widening what counts as present must not stop it noticing
+    an edit TMDB has taken back. No live credit row at all, so nothing publishes."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Supporting Actor")
+    await _follow_at_any(session, user, 100)
+    await _cast(session, film, person, changed_at=AGED)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert (result.events_created, result.held) == (0, 1)
+    assert await _events(session, film) == []
+
+
+async def test_a_narrowed_follow_stops_carding_the_credit_it_recorded(
+    session, session_factory, run_id, make_user
+):
+    """The quarantine gate and the credit-history diff read recorded grade from the *same*
+    live follow set, and that agreement is the load-bearing property: a gate that judged a
+    credit present under a rule the diff no longer records it under would publish an
+    attachment while the next ingest wrote its removal.
+
+    So a follow narrowed while its credit is still in quarantine takes the pending attachment
+    with it — held, never carded, and it ages out of the window. That is the narrower reading
+    of D-49's "the gate checks presence, not the follow": presence is still a property of the
+    film and of no user's preferences *at read time*, but what counts as a recorded credit is
+    one definition shared with the writer, not two.
+    """
+    from upmovies.app.models import Follow
+
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Supporting Actor")
+    await _follow_at_any(session, user, 100)
+    await add_credit(session, film, 100, credit_type="cast", credit_order=11)
+    await _cast(session, film, person, changed_at=AGED)
+    await session.commit()
+
+    follow = await session.get(Follow, (user.id, "person", "100"))
+    assert follow is not None
+    follow.coverage = "lead"
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert (result.events_created, result.held) == (0, 1)
+
+
+async def test_a_reverted_crew_job_is_held_even_when_another_job_survives(
+    session, session_factory, run_id, make_user
+):
+    """`crew` folds every non-seed job into one role, so the presence check has to compare the
+    *job* (`role_match_key`). Without that, a reverted `Gaffer` credit reads as still there on
+    the strength of an unrelated `Best Boy` one — the exact edit quarantine suppresses."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Sparks")
+    await _follow_at_any(session, user, 100)
+    await add_credit(session, film, 100, credit_type="crew", job="Best Boy", department="Lighting")
+    await _attached(session, film, person, job="Gaffer", changed_at=AGED)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert (result.events_created, result.held) == (0, 1)
+
+
+async def test_two_crew_jobs_in_one_edit_name_the_person_once(
+    session, session_factory, run_id, make_user
+):
+    """A recorded credit is identified by `(person, credit_type, job)`, so picking up two
+    non-seed crew jobs in one edit is two rows at one role — and a body reading "X and X join
+    the crew" is what the per-role dedupe in `group_attachments` exists to stop."""
+    user = await make_user(email="wide@example.com")
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "A Sparks")
+    await _follow_at_any(session, user, 100)
+    for job in ("Gaffer", "Best Boy"):
+        await add_credit(session, film, 100, credit_type="crew", job=job, department="Lighting")
+        await _attached(session, film, person, job=job, changed_at=AGED)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
+
+    assert (result.attachments_read, result.events_created) == (2, 1)
+    (event,) = await _events(session, film)
+    assert event.subject_key == ["a sparks"]
+    assert (await _summary(session, event)).summary == "A Sparks joins the crew."

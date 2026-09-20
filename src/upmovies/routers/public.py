@@ -13,6 +13,7 @@ from upmovies.public.dto import (
     FeedResponse,
     FilmDetailResponse,
     FilmIndexResponse,
+    PersonDetailResponse,
     PersonSearchResponse,
     PopularPeopleResponse,
 )
@@ -87,6 +88,29 @@ async def popular_people(
 ) -> PopularPeopleResponse:
     """The onboarding grid (D-17): the `limit` most popular people who have a profile photo."""
     return await service.get_popular_people(session, limit=limit)
+
+
+# Registered after the two literal paths above, though it need not be: Starlette matches
+# routes in registration order and `/people/search` and `/people/popular` are literals, which
+# `{ref}` would happily swallow if it came first. Keeping the order is cheaper than relying on
+# it, and `test_person_search_still_routes` is the assertion that it stays true.
+@router.get("/people/{ref}", response_model=PersonDetailResponse, dependencies=[_public_limit])
+async def get_person(
+    ref: str,
+    session: AsyncSession = Depends(get_session),
+) -> PersonDetailResponse:
+    """`ref` is `<person_id>-<name-slug>`, resolved on the leading id. The response's own `ref`
+    is the canonical one — callers redirect when it differs from what was requested.
+
+    Public, like the rest of this router and like the entity search beside it: the page renders
+    for an anonymous visitor, and the follow control on it is the thing that asks for an
+    account. 404 for an id the catalog does not hold and for one TMDB has deleted; the two are
+    the same answer because neither is a person anything will be ingested against again.
+    """
+    person = await service.get_person_detail(session, ref)
+    if person is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="person not found")
+    return person
 
 
 @router.get("/companies/search", response_model=CompanySearchResponse, dependencies=[_public_limit])

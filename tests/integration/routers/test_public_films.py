@@ -1041,6 +1041,24 @@ async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_
     assert cast[2]["profile_path"] == "/charlie.jpg"
 
 
+async def test_film_detail_sends_the_whole_cast(client, make_film, add_event, attach_credits):
+    """D-1416.7: the 12-cast cap is gone, so every name on the page can link to its person
+    page. The frontend's own `FOLLOWABLE_CAST_COUNT` still decides where the follow buttons
+    go, so nothing moves."""
+    film = await make_film(slug="full-cast-2026", title="Full Cast")
+    await add_event(film=film, event_type="casting", summary="Casting.")
+    await attach_credits(
+        film,
+        cast=[
+            {"id": 2000 + n, "name": f"Actor {n}", "character": f"Role {n}", "credit_order": n}
+            for n in range(20)
+        ],
+    )
+
+    body = (await client.get("/films/full-cast-2026")).json()
+    assert [c["person_id"] for c in body["cast"]] == [2000 + n for n in range(20)]
+
+
 async def test_film_detail_crew_grouped_orderable(client, make_film, add_event, attach_credits):
     """The full crew is returned (not just directors), ordered by department priority then job."""
     film = await make_film(slug="crew-2026", title="Crew Film")

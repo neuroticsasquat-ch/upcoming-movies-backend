@@ -1,4 +1,4 @@
-"""Seed-grade credit history: the diff `catalog.film_credit`'s rebuild throws away.
+"""Recorded-grade credit history: the diff `catalog.film_credit`'s rebuild throws away.
 
 `_upsert_credits` deletes a film's credit rows and reinserts the current set on every ingest,
 so the table can answer "who is attached now?" and nothing else. A director being *attached*
@@ -6,12 +6,26 @@ is invisible — the row simply exists afterwards, with no record that it did no
 This module recovers that signal at the one point in the system where both sides are already
 in hand, and writes it to `catalog.film_credit_change` for NEU-1083 to card.
 
+**Recorded grade is seed grade *or* a follow** (D-49). A credit is written down when it is
+seed grade — director, Writer/Screenplay, top-5 billed — or when its person is somebody a user
+follows at coverage `any`. Seed grade is a property of the credit; recorded grade is that, or a
+property of who is watching. The catalog already holds every credit of every film it has, so a
+wider follow reaches existing minor credits through the timeline and the alert query the moment
+it is made; what this adds is the *future* changes, and only for people somebody asked for.
+
+**Both sides of the diff are judged by the same followed set at the same moment.** The set is
+loaded once per `upsert_film` and passed to both `load_recorded_credits` and
+`recorded_credits_from_details`. Judging the stored side by yesterday's rule and the incoming
+side by today's would turn a credit that was present all along into a phantom `added` row the
+first time somebody followed its person — a fabricated beat, carded and pushed, about nothing
+that happened.
+
 **First observation is a baseline, never a change** (ADR-0014, spec §5.3). This is the
 safety-critical property of the whole credit half, and it is expressed structurally rather
-than left to fall out of the rebuild's ordering: `diff_seed_credits` takes `previous=None`
+than left to fall out of the rebuild's ordering: `diff_recorded_credits` takes `previous=None`
 for a film whose credits the catalog has never observed, and returns nothing for it whatever
 the incoming set contains. `previous=set()` is a different statement — the film *was*
-observed and held no seed-grade credit — and a director arriving then is a genuine
+observed and held no recorded credit — and a director arriving then is a genuine
 attachment.
 
 Which of the two a film is, is read from the durable `film.credits_observed_at` marker and
@@ -32,6 +46,7 @@ from uuid import UUID
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.follow_queries import people_followed_at_any
 from upmovies.catalog.models import Film, FilmCredit, FilmCreditChange
 from upmovies.catalog.seed_grade import is_seed_grade
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
@@ -41,12 +56,12 @@ CREDIT_REMOVED = "removed"
 
 
 @dataclass(frozen=True)
-class SeedCredit:
-    """One seed-grade credit, identified the way the diff must compare it.
+class RecordedCredit:
+    """One recorded-grade credit, identified the way the diff must compare it.
 
     Not by `credit_id`: TMDB reissues those, and a reissued id on an unchanged attachment
     would read as a detachment followed by a re-attachment. `job` is part of the identity
-    because one person can hold two seed-grade crew credits on a film they both wrote and
+    because one person can hold two crew credits on a film they both wrote and
     directed, and losing one of those is a change.
     """
 
@@ -57,34 +72,56 @@ class SeedCredit:
 
 @dataclass(frozen=True)
 class CreditChange:
-    """One seed-grade credit crossing into or out of a film's credit set."""
+    """One recorded-grade credit crossing into or out of a film's credit set."""
 
-    credit: SeedCredit
+    credit: RecordedCredit
     change: str
 
 
-def seed_credits_from_details(details: TMDBMovieDetails) -> set[SeedCredit]:
-    """The seed-grade credits in a TMDB details payload — the *incoming* side of the diff."""
+def _is_recorded(
+    credit_type: str,
+    job: str | None,
+    credit_order: int | None,
+    followed: Collection[int],
+    person_id: int,
+) -> bool:
+    """Recorded grade in one line: seed grade, or a person somebody follows at `any` (D-49)."""
+    return is_seed_grade(credit_type, job, credit_order) or person_id in followed
+
+
+def recorded_credits_from_details(
+    details: TMDBMovieDetails, *, followed: Collection[int] = ()
+) -> set[RecordedCredit]:
+    """The recorded-grade credits in a TMDB details payload — the *incoming* side of the diff.
+
+    `followed` defaults to empty, which is exactly seed grade: every caller that has no reason
+    to care about the follow graph gets the pre-M9 behaviour without passing anything.
+    """
     credits = details.credits
     if credits is None:
         return set()
-    seed: set[SeedCredit] = set()
+    recorded: set[RecordedCredit] = set()
     for member in credits.cast:
-        if is_seed_grade("cast", None, member.order):
-            seed.add(SeedCredit(person_id=member.id, credit_type="cast", job=None))
+        if _is_recorded("cast", None, member.order, followed, member.id):
+            recorded.add(RecordedCredit(person_id=member.id, credit_type="cast", job=None))
     for member in credits.crew:
-        if is_seed_grade("crew", member.job, None):
-            seed.add(SeedCredit(person_id=member.id, credit_type="crew", job=member.job))
-    return seed
+        if _is_recorded("crew", member.job, None, followed, member.id):
+            recorded.add(RecordedCredit(person_id=member.id, credit_type="crew", job=member.job))
+    return recorded
 
 
-async def load_seed_credits(session: AsyncSession, film_id: UUID) -> set[SeedCredit] | None:
-    """The seed-grade credits the catalog currently holds for a film — the *stored* side of
+async def load_recorded_credits(
+    session: AsyncSession, film_id: UUID, *, followed: Collection[int] = ()
+) -> set[RecordedCredit] | None:
+    """The recorded-grade credits the catalog currently holds for a film — the *stored* side of
     the diff — or None if it has never observed this film's credits at all.
 
     Observedness comes from `film.credits_observed_at`, not from the credit rows: a film
     observed holding nothing returns an empty set, and a director arriving next run is a
     genuine attachment rather than a second baseline.
+
+    `followed` must be the same set the incoming side is judged by, for the reason the module
+    docstring gives: a follow made between two observations must not fabricate an attachment.
 
     Must be called **before** the rebuild's delete, which is the only reason this is a
     function and not a subquery.
@@ -98,16 +135,16 @@ async def load_seed_credits(session: AsyncSession, film_id: UUID) -> set[SeedCre
         FilmCredit.person_id, FilmCredit.credit_type, FilmCredit.job, FilmCredit.credit_order
     ).where(FilmCredit.film_id == film_id)
     return {
-        SeedCredit(person_id=person_id, credit_type=credit_type, job=job)
+        RecordedCredit(person_id=person_id, credit_type=credit_type, job=job)
         for person_id, credit_type, job, credit_order in (await session.execute(stmt)).all()
-        if is_seed_grade(credit_type, job, credit_order)
+        if _is_recorded(credit_type, job, credit_order, followed, person_id)
     }
 
 
-def diff_seed_credits(
-    *, previous: Collection[SeedCredit] | None, current: Collection[SeedCredit]
+def diff_recorded_credits(
+    *, previous: Collection[RecordedCredit] | None, current: Collection[RecordedCredit]
 ) -> list[CreditChange]:
-    """The seed-grade attachments and detachments between two observations of a film.
+    """The recorded-grade attachments and detachments between two observations of a film.
 
     `previous is None` means this is the film's first observed credit set, which is a
     **baseline, never a change** — the rule this whole module exists to guarantee.
@@ -127,10 +164,21 @@ def diff_seed_credits(
     ]
 
 
-def _ordered(credits: set[SeedCredit]) -> list[SeedCredit]:
+def _ordered(credits: set[RecordedCredit]) -> list[RecordedCredit]:
     """A stable order for one side of the diff. `job` is normalized because a cast credit
     carries None there and None does not compare against a crew job."""
     return sorted(credits, key=lambda c: (c.person_id, c.credit_type, c.job or ""))
+
+
+async def load_followed_person_ids(session: AsyncSession) -> set[int]:
+    """The people somebody follows at coverage `any` — recorded grade's second half (D-49).
+
+    One query per `upsert_film`, read before the rebuild so both sides of the diff are judged
+    by the same answer. `ingest` reading `app` has precedent in `ingest.providers`: the follow
+    graph is what decides how much of TMDB is worth writing down, so the ingest path has to be
+    able to ask.
+    """
+    return set((await session.execute(people_followed_at_any())).scalars().all())
 
 
 async def record_credit_changes(

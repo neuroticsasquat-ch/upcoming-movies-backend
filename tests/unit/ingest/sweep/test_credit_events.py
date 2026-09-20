@@ -9,9 +9,9 @@ from uuid import uuid4
 
 from upmovies.ingest.sweep.credit_events import (
     AttachedCredit,
-    credit_role,
     group_attachments,
     observation_day,
+    recorded_role,
 )
 from upmovies.synthesize.deterministic import CreditAttached
 
@@ -33,16 +33,17 @@ def _attached(person_id, name, role, *, film_id=FILM, changed_at=AT, credit_orde
 
 
 def test_cast_and_crew_carry_the_roles_the_seed_grade_defines():
-    assert credit_role("crew", "Director") == "director"
-    assert credit_role("crew", "Screenplay") == "writer"
-    assert credit_role("cast", None) == "cast"
+    assert recorded_role("crew", "Director") == "director"
+    assert recorded_role("crew", "Screenplay") == "writer"
+    assert recorded_role("cast", None) == "cast"
 
 
-def test_a_credit_outside_the_seed_grade_has_no_role():
-    # The history only records seed-grade credits, so this is a defensive drop rather than a
-    # live case — but a role the renderer has no template for must never reach it.
-    assert credit_role("crew", "Executive Producer") is None
-    assert credit_role("sound", None) is None
+def test_a_credit_outside_the_seed_grade_still_carries_a_recorded_role():
+    # D-49: the history records every credit of a person followed at `any`, so a non-seed crew
+    # job now reaches this phase and must land on a role the renderer has a template for —
+    # `crew`, which `CREDIT_ROLE_EVENT_TYPES` cards as `crew_attached` beside a director's.
+    assert recorded_role("crew", "Executive Producer") == "crew"
+    assert recorded_role("cast", None) == "cast"
 
 
 def test_cast_added_in_one_observation_become_one_casting_group():

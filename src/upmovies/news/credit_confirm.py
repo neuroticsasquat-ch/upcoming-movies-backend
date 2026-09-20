@@ -48,9 +48,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.follow_queries import people_followed_at_any
 from upmovies.catalog.models import FilmCreditChange, Person
-from upmovies.catalog.queries import present_seed_credits
-from upmovies.catalog.seed_grade import credit_role
+from upmovies.catalog.queries import present_recorded_credits
+from upmovies.catalog.seed_grade import recorded_credit_key, recorded_role
 from upmovies.ingest.credit_holds import open_hold_keys
 from upmovies.ingest.tmdb.credit_history import CREDIT_ADDED
 from upmovies.news.catalog_events import CREDIT_EVENT_TYPES
@@ -73,12 +74,13 @@ async def _pending_changes(
     session: AsyncSession, *, floor: datetime, film_ids: Sequence[UUID] | None = None
 ) -> list[tuple[FilmCreditChange, str, str]]:
     """Unstamped `added` rows at or after `floor`, each with its person's normalized name and
-    the seed-grade role it carries. ORM rows rather than columns, because the caller's whole
+    the recorded role it carries. ORM rows rather than columns, because the caller's whole
     job is to write `carded_by_event_id` back onto them.
 
-    Rows whose `(credit_type, job)` carries no seed grade are dropped here rather than in SQL,
-    for the reason `load_attachment_backlog` filters holds in Python: the role is what
-    `credit_role` decides, and nothing in the row spells it.
+    The role is derived in Python rather than in SQL, for the reason `load_attachment_backlog`
+    filters holds there: `recorded_role` decides it, and nothing in the row spells it. Nothing
+    is dropped for having no role — every row here was recorded by `credit_history`, so it has
+    one by construction (D-49).
 
     **Rows under an open sanity hold are read past** (D-8), on the same terms and by the same
     key as `load_attachment_backlog`. A held row is one the sweep has deliberately taken out
@@ -105,9 +107,7 @@ async def _pending_changes(
     held = await open_hold_keys(session, since=floor)
     pending: list[tuple[FilmCreditChange, str, str]] = []
     for change, name in await session.execute(stmt):
-        role = credit_role(change.credit_type, change.job)
-        if role is None:
-            continue
+        role = recorded_role(change.credit_type, change.job)
         if (change.film_id, change.person_id, role, change.changed_at) in held:
             continue
         pending.append((change, normalize_name(name), role))
@@ -124,12 +124,12 @@ async def stamp_story_confirmed_changes(
     `apply_cluster_decisions` does — so a story and the changes its card published land
     together or not at all.
 
-    The credit must still be in `catalog.film_credit` under the same seed-grade role. Without
+    The credit must still be in `catalog.film_credit` under the same recorded role. Without
     that check a story naming someone TMDB has *already reverted* would stamp the reverted
     change and mark as published something quarantine exists to make sure never publishes;
     the story card itself is untouched either way, since a trade's word does not depend on
-    TMDB's. It reads the same `present_seed_credits` the quarantine gate does, so both gates
-    mean one thing by "still attached".
+    TMDB's. It reads the same `present_recorded_credits` the quarantine gate does, with the
+    same followed set, so both gates mean one thing by "still attached".
 
     `within_days` bounds this at `changed_at >= now - within_days`: a story is confirmation of
     a *recent* attachment, and beyond the window it is a retrospective that must not retire a
@@ -144,10 +144,16 @@ async def stamp_story_confirmed_changes(
     pending = [(c, n, r) for c, n, r in pending if n in names]
     if not pending:
         return 0
-    present = await present_seed_credits(session, film_ids={film_id})
+    followed = set((await session.execute(people_followed_at_any())).scalars().all())
+    present = await present_recorded_credits(session, film_ids={film_id}, followed=followed)
     stamped = 0
-    for change, _name, role in pending:
-        if (change.film_id, change.person_id, role) not in present:
+    for change, _name, _role in pending:
+        key = (
+            change.film_id,
+            change.person_id,
+            *recorded_credit_key(change.credit_type, change.job),
+        )
+        if key not in present:
             continue
         change.carded_by_event_id = event.id
         stamped += 1

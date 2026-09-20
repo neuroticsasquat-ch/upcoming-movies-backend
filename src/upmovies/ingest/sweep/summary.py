@@ -52,10 +52,17 @@ sweep and was only ever logged, and Coolify runs the sweep through `docker exec`
 never reaches `docker logs` and dies with the container. `detail` is the only durable outlet
 for the distribution the M4 tuning ticket reads the threshold off (§4.3) — and, after the
 directors flip, for what opening the writers tranche would admit (NEU-1089, NEU-1116).
+
+The role clause is beside it for the same reason and answers the neighbouring question: not
+*how many* people reached a candidate but *how*. It is what makes an undifferentiated
+`no_tranche` count actionable — which flag would admit those films — and it is the only signal
+that the `followed` enumeration (D-50) is reaching anything while `SWEEP_ADMIT_FOLLOWED` is
+still off and every candidate it finds is withheld.
 """
 
 from collections import Counter
 
+from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import format_skip_detail
 from upmovies.ingest.sweep.credit_events import CreditDetachmentResult, CreditEventResult
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
@@ -70,6 +77,28 @@ survive the grouping (≥1 is the total, ≥2 the total less the first bucket, �
 What it does cost is the region above 3 — §4.3 stopped there because the tranche got small,
 not because ≥4 is uninteresting, so a retune that wants to look higher needs this raised
 rather than the log it replaces."""
+
+
+def _format_role_detail(histogram: Counter[str]) -> str:
+    """The `roles: director×N, cast×N, followed×N` clause, or `""` when nothing was counted.
+
+    Which roles reached the candidates that cleared status, counted per candidate — so a film
+    two roles reached appears under both and the buckets do not sum to the candidate total.
+    Here rather than only in the log for the reason the module docstring gives: the sweep's
+    output never reaches `docker logs`, and `detail` is the only durable outlet.
+
+    What it answers is which tranche a `no_tranche` skip count is waiting on, and since D-50
+    whether the `followed` enumeration reaches anything — the one number that says the
+    followed half is working *before* `SWEEP_ADMIT_FOLLOWED` is flipped, when every candidate
+    it reaches is still being withheld.
+
+    Rendered in `ROLE_ORDER`, strongest attachment first and `followed` last, so two runs'
+    lines compare by eye. Zero-valued roles are dropped, matching `skip_counts`.
+    """
+    if not histogram:
+        return ""
+    buckets = ", ".join(f"{role}×{histogram[role]}" for role in ROLE_ORDER if histogram[role])
+    return f"roles: {buckets}" if buckets else ""
 
 
 def _format_attachment_detail(histogram: Counter[int]) -> str:
@@ -130,10 +159,14 @@ def sweep_detail(
         f"{released.changes_read} changes, "
         f"{released.skipped} already carded, {released.failures} failed",
     ]
+    # Both beside the enumerate clause they belong to, ahead of the phases that follow it,
+    # and inserted in reverse so they read `roles`, then `seed attachments`.
     attachments = _format_attachment_detail(enumerated.attachment_histogram)
     if attachments:
-        # Beside the enumerate clause it belongs to, ahead of the phases that follow it.
         parts.insert(1, attachments)
+    roles = _format_role_detail(enumerated.role_histogram)
+    if roles:
+        parts.insert(1, roles)
     if enumerated.aborted:
         parts.append(f"enumerate aborted: {enumerated.abort_error}")
     if refreshed.aborted:

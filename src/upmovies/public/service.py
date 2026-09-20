@@ -20,13 +20,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.dto import HeadlineReleaseOut
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import (
+    credit_tier,
     events_naming_followed_people,
     followed_film_ids,
     watchlist_film_ids,
 )
 from upmovies.app.models import User, UserSettings
+from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     Collection,
@@ -45,7 +48,8 @@ from upmovies.catalog.models import (
     ProductionCountry,
     WatchProvider,
 )
-from upmovies.catalog.ref import film_ref, parse_film_ref
+from upmovies.catalog.queries import alert_window_clause, in_play_clause
+from upmovies.catalog.ref import film_ref, parse_film_ref, parse_person_ref, person_ref
 from upmovies.catalog.release_grade import (
     PRIMARY_REGION,
     RELEASE_TYPE_BUCKETS,
@@ -83,6 +87,10 @@ from upmovies.public.dto import (
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
+    PersonCreditOut,
+    PersonDetailResponse,
+    PersonFilmOut,
+    PersonFilmSummaryOut,
     PersonSearchItem,
     PersonSearchResponse,
     PopularPeopleResponse,
@@ -419,6 +427,158 @@ async def get_popular_people(session: AsyncSession, *, limit: int) -> PopularPeo
         .all()
     )
     return PopularPeopleResponse(items=_person_search_items(list(people)), limit=limit)
+
+
+def _headline_out(headline: HeadlineRelease | None) -> HeadlineReleaseOut | None:
+    return (
+        None
+        if headline is None
+        else HeadlineReleaseOut(
+            date=headline.date,
+            kind=headline.kind,
+            country=headline.country,
+            bucket=headline.bucket,
+        )
+    )
+
+
+def _person_film_out(
+    film: Film, credits: list[PersonCreditOut], headline: HeadlineRelease | None
+) -> PersonFilmOut:
+    """One row of a person page. The row's own tier is the **narrowest** of its credits': the
+    tier a follow has to be at for this film to reach the user at all, which is the question
+    the badge answers."""
+    narrowest = min(credits, key=lambda c: _TIER_RANK[c.tier]).tier
+    return PersonFilmOut(
+        film=PersonFilmSummaryOut(
+            ref=film_ref(film.tmdb_id, film.title),
+            id=film.id,
+            tmdb_id=film.tmdb_id,
+            slug=film.slug,
+            title=film.title,
+            poster_path=film.poster_path,
+            headline_release=_headline_out(headline),
+        ),
+        credits=credits,
+        tier=narrowest,
+    )
+
+
+_TIER_RANK = {"lead": 0, "major": 1, "any": 2}
+"""Narrowest tier first, so `min` over a film's credits picks the one that reaches it."""
+
+
+async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResponse | None:
+    """A person's page (D-1416.6), or None for an unknown or tombstoned person.
+
+    **Two lists, and between them exactly what a follow can reach.** `upcoming` is the in-play
+    set (`in_play_clause`, the D-11 timeline's bound) and `recent` is the alert window
+    (`alert_window_clause`, D-46) less the in-play set, so every film is in one or the other
+    and never both. Nothing older is returned at all: the page's job is to show what following
+    this person would deliver, and a filmography stretching back thirty years answers a
+    different question — one `/films/search` already answers.
+
+    **Tombstoned people 404 rather than rendering empty.** `tmdb_missing_at` means TMDB has
+    deleted the person; they are not a follow target anywhere else (`_LIVE_PERSON`, used by
+    search and the onboarding grid), so a page offering a follow button for one would offer a
+    row that is dead from the moment it is written.
+
+    Each credit carries `credit_tier`, the same function the alert query's predicates are
+    spelled from, so what the badge promises and what a follow at that tier actually delivers
+    are one decision rather than two.
+    """
+    person_id = parse_person_ref(ref)
+    if person_id is None:
+        return None
+    person = (
+        await session.execute(select(Person).where(Person.id == person_id, _LIVE_PERSON))
+    ).scalar_one_or_none()
+    if person is None:
+        return None
+
+    settings = get_settings()
+    today = datetime.now(UTC).date()
+    in_play = in_play_clause(today=today, excluded_statuses=settings.tmdb_excluded_statuses)
+    window = alert_window_clause(today=today, max_age_days=settings.provider_poll_max_age_days)
+    rows = (
+        await session.execute(
+            select(
+                Film,
+                FilmCredit.credit_type,
+                FilmCredit.job,
+                FilmCredit.character,
+                FilmCredit.credit_order,
+                in_play.label("in_play"),
+            )
+            .join(FilmCredit, FilmCredit.film_id == Film.id)
+            .where(FilmCredit.person_id == person.id, or_(in_play, window))
+        )
+    ).all()
+
+    films: dict[UUID, Film] = {}
+    credits: dict[UUID, list[PersonCreditOut]] = {}
+    upcoming_ids: set[UUID] = set()
+    for row in rows:
+        film = row[0]
+        films[film.id] = film
+        credits.setdefault(film.id, []).append(
+            PersonCreditOut(
+                credit_type=row.credit_type,
+                job=row.job,
+                character=row.character,
+                credit_order=row.credit_order,
+                tier=credit_tier(row.credit_type, row.job, row.credit_order),
+            )
+        )
+        if row.in_play:
+            upcoming_ids.add(film.id)
+    headlines = await headline_releases(session, list(films), today=today)
+
+    def rows_for(film_ids: set[UUID], *, descending: bool) -> list[PersonFilmOut]:
+        # Sorted in Python rather than in SQL: the headline release is two statements of its
+        # own (`catalog.headline_release`), so the dates are only in hand once the films are.
+        # Undated films sort last in both lists — the `is None` term leads the key — because a
+        # film with no displayable date is the least certain thing on the page whichever
+        # direction the dates run. `sign` flips the date alone, so the title tiebreak stays
+        # alphabetical in both.
+        items = [
+            _person_film_out(films[fid], _ordered_credits(credits[fid]), headlines.get(fid))
+            for fid in film_ids
+        ]
+        sign = -1 if descending else 1
+        return sorted(
+            items,
+            key=lambda i: (
+                i.film.headline_release is None,
+                sign * (i.film.headline_release.date.toordinal() if i.film.headline_release else 0),
+                i.film.title,
+            ),
+        )
+
+    return PersonDetailResponse(
+        ref=person_ref(person.id, person.name),
+        id=person.id,
+        name=person.name,
+        profile_path=person.profile_path,
+        known_for_department=person.known_for_department,
+        birthday=person.birthday,
+        deathday=person.deathday,
+        upcoming=rows_for(upcoming_ids, descending=False),
+        recent=rows_for(set(films) - upcoming_ids, descending=True),
+    )
+
+
+def _ordered_credits(credits: list[PersonCreditOut]) -> list[PersonCreditOut]:
+    """A film's credits, narrowest tier first, then billing, then job — so "Director · Writer"
+    reads in that order and two renderings of the same row cannot differ."""
+    return sorted(
+        credits,
+        key=lambda c: (
+            _TIER_RANK[c.tier],
+            c.credit_order if c.credit_order is not None else len(_TIER_RANK) + 1000,
+            c.job or "",
+        ),
+    )
 
 
 async def get_company_search(
@@ -766,7 +926,6 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             .join(FilmCredit, FilmCredit.person_id == Person.id)
             .where(FilmCredit.film_id == film.id, FilmCredit.credit_type == "cast")
             .order_by(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc())
-            .limit(12)
         )
     ).all()
     cast_out = [

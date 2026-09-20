@@ -90,10 +90,14 @@ class StatusChanged:
 
 @dataclass(frozen=True)
 class CreditAttached:
-    """A director, writer or cast member newly credited on the film. `character` is only
-    meaningful for `cast` and is omitted from the body when absent."""
+    """A director, writer, cast member or other crew member newly credited on the film.
+    `character` is only meaningful for `cast` and is omitted from the body when absent.
 
-    role: str  # "director" | "writer" | "cast"
+    `crew` is the role a followed person's non-seed crew credit carries (D-49) — every job
+    that is neither directing nor writing, folded into one clause because the attachment does
+    not carry the job."""
+
+    role: str  # "director" | "writer" | "cast" | "crew"
     name: str
     character: str | None = None
     credit_order: int | None = None
@@ -121,9 +125,9 @@ class CreditsAttached:
 
 @dataclass(frozen=True)
 class CreditDetached:
-    """A director, writer or cast member no longer credited on the film."""
+    """A director, writer, cast member or other crew member no longer credited on the film."""
 
-    role: str  # "director" | "writer" | "cast"
+    role: str  # "director" | "writer" | "cast" | "crew"
     name: str
 
 
@@ -315,6 +319,13 @@ def _render_role(role: str, people: list[CreditAttached]) -> str:
                 return f"{names} joins the cast as {people[0].character}."
             verb = "joins" if len(people) == 1 else "join"
             return f"{names} {verb} the cast."
+        case "crew":
+            # A followed person's non-seed crew credit (D-49). The job it was for is
+            # deliberately not named: `catalog.film_credit_change` records `job`, but the
+            # attachment this card is built from carries only its role, and a body that
+            # sometimes said "as cinematographer" and sometimes did not would be two templates.
+            verb = "joins" if len(people) == 1 else "join"
+            return f"{names} {verb} the crew."
     raise ValueError(f"unknown credit role: {role!r}")
 
 
@@ -346,6 +357,9 @@ def _render_detached_role(role: str, people: list[CreditDetached]) -> str:
         case "cast":
             departs = "departs" if len(people) == 1 else "depart"
             return f"{names} {departs} the cast."
+        case "crew":
+            departs = "departs" if len(people) == 1 else "depart"
+            return f"{names} {departs} the crew."
     raise ValueError(f"unknown credit role: {role!r}")
 
 
