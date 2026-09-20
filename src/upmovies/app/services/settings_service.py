@@ -14,10 +14,11 @@ including the unentitled ones it is about to mark `suppressed` — turning the r
 subscriber opened their settings" into "this account was once looked at", and quietly leaving a
 live `ical_token` on accounts that never held a grant (D-39, D-40).
 
-The read-only half that pass needs — this user's settings, or the D-33 defaults unpersisted
-when there is no row — is deliberately not built here, because nothing calls it yet and an
-unused accessor is a guess at its signature. NEU-1379 adds it, *in this module* rather than by
-re-deriving `weekly` at the call site: the defaults are D-33's and must be spelled once."""
+The read-only half the batch passes need is not here and deliberately never has been: they
+read the row as a **column** in the query that selects their users, `COALESCE`d over an outer
+join to the D-33 and D-44 defaults — the digest pass for `digest_cadence`, the notify pass for
+`alert_stores` (D-44). That is what keeps a pass that merely *considered* a user from leaving
+them a settings row, and an accessor here would be the thing tempting it back."""
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,12 +43,27 @@ async def get_or_create(db: AsyncSession, *, user: User) -> UserSettings:
     return row
 
 
-async def set_digest_cadence(db: AsyncSession, *, user: User, digest_cadence: str) -> UserSettings:
-    """Set how often this user is digested, and commit. Creates the row if this is the first
-    thing they ever did with it — a PATCH from a client that never issued the GET is a perfectly
-    ordinary first touch, and refusing it would make the settings screen's order load-bearing."""
+async def update(
+    db: AsyncSession,
+    *,
+    user: User,
+    digest_cadence: str | None = None,
+    alert_stores: list[str] | None = None,
+) -> UserSettings:
+    """Write the settings the caller named — either, or both — and commit.
+
+    `None` means "not in this PATCH", not "clear it": an empty `alert_stores` list is a real
+    answer (no availability alerts at all, D-44) and is written as one. The request model is
+    what refuses a PATCH that names neither.
+
+    Creates the row if this is the first thing the user ever did with it — a PATCH from a
+    client that never issued the GET is a perfectly ordinary first touch, and refusing it would
+    make the settings screen's order load-bearing."""
     row = await get_or_create(db, user=user)
-    await user_settings_repo.set_digest_cadence(db, row, digest_cadence=digest_cadence)
+    if digest_cadence is not None:
+        await user_settings_repo.set_digest_cadence(db, row, digest_cadence=digest_cadence)
+    if alert_stores is not None:
+        await user_settings_repo.set_alert_stores(db, row, alert_stores=alert_stores)
     await db.commit()
     return row
 

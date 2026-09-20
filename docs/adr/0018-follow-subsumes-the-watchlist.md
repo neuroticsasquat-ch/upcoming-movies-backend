@@ -44,16 +44,22 @@ the user maintaining a second list.
    per-film preferences. The always-on push whitelist beats (D-32) are unchanged.
 4. **The watchlist is computed, and removal is a mute** (D-45). A film is on the user's
    watchlist when it is in play and at least one follow covers it at its coverage. A **mute**
-   removes it from alerts, the calendar, the iCal feed and the digest slate, but never from the
-   timeline, and is reversible. The existing `watchlist_dismissal` table holds mutes; only the
+   removes it from alerts, the calendar, the iCal feed, the digest slate and the timeline
+   (amended 2026-09-20 in NEU-1414's planning: a mute silences the film everywhere, including
+   events that only name a followed person on it), and is reversible. The existing `watchlist_dismissal` table holds mutes; only the
    vocabulary changes. `POST /me/watchlist {film_id}` means *want* (clear any mute, create a
    manual title follow if nothing else covers the film); `DELETE /me/watchlist/{film_id}`
    means *stop* (delete a direct title follow, mute if still covered). The word "watchlist"
    survives as the name of the computed set; the film page shows a single follow control.
 
-Whether the set is materialised into `watchlist_item` by the existing derivation pass or
-queried on demand is left to NEU-1414. The API contract on milestone M8 is what the frontend
-builds against either way.
+**Resolved in NEU-1414's planning (2026-09-20): the set is queried, never materialised, and
+`app.watchlist_item` is dropped.** The derivation pass was insert-only; materialising a set
+that shrinks when a follow is deleted, a coverage narrows or a film ages out would have needed
+a reconciliation pass in both directions that never existed, and the batch passes already run
+the follow graph as SQL per user. The window a derived film is covered for is the **alert
+window** (`PROVIDER_POLL_MAX_AGE_DAYS` past its primary date), not D-13's "in play": a film
+that opened last month is still due its home-release card. See
+`docs/specs/NEU-1414-computed-watchlist-over-follows.md`.
 
 ## Considered alternatives
 

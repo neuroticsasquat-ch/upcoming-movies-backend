@@ -172,9 +172,15 @@ class EmailToken(Base):
 
 FOLLOW_ENTITY_TYPES = ("person", "company", "franchise", "title")
 FOLLOW_SOURCES = ("manual", "letterboxd_import", "tmdb_import", "derived")
-WATCHLIST_SOURCES = ("manual", "derived_from_follow", "letterboxd_import", "tmdb_import")
-ALERT_PREFS = ("buy", "rent", "stream")
-DEFAULT_ALERT_PREFS = ("stream",)  # D-14; mirrored by the column's server default
+FOLLOW_COVERAGES = ("lead", "all")
+"""Which of a followed *person*'s credits alert (D-43, M8).
+
+`lead` is the director-or-top-3 cut D-13 spent on the watchlist; `all` is every seed-grade
+credit. Widening the tiers later (NEU-1416) is a change to this tuple and the CHECK it renders,
+and nothing else: the coverage is read in one place, `app.follow_queries.covered_film_ids`."""
+DEFAULT_COVERAGE = "lead"  # D-43; mirrored by the column's server default
+ALERT_STORES = ("buy", "rent", "stream")
+DEFAULT_ALERT_STORES = ("stream",)  # D-44; mirrored by the column's server default
 
 
 def _in_list(values: tuple[str, ...]) -> str:
@@ -182,17 +188,27 @@ def _in_list(values: tuple[str, ...]) -> str:
 
 
 class Follow(Base):
-    """A user's standing interest in a person, company, franchise or title (D-10).
+    """A user's standing interest in a person, company, franchise or title (D-10, D-42).
 
-    A follow produces timeline rows and nothing else — never a push; that is the watchlist's
-    job — so nothing here carries preferences.
+    **The only thing a user keeps** (M8, ADR-0018). It feeds the timeline *and* the alerts: the
+    watchlist is no longer a table but a query over this one (`app.follow_queries`), so a row
+    here is both "show me this on my timeline" and "tell me when something happens to it".
+
+    `coverage` is the one preference it carries, and it is read for `entity_type = 'person'`
+    only — which credits of that person alert, `lead` (director or top-3 billing) or `all`
+    (every seed-grade credit). It is stored on every row so the column is NOT NULL and the
+    coverage query can read it without a CASE on the type; the other three types name one
+    thing each, and there is nothing to narrow. Timeline coverage (D-11) is unchanged by it.
+    The store preference is *not* here: it is one setting per user
+    (`UserSettings.alert_stores`, D-44), because a user who wants to hear about streaming
+    wants that for everything they follow.
 
     `entity_id` is text because the four entity types do not share an id space: people,
     companies and franchises are TMDB integer ids (`catalog.person`, `catalog.production_company`
     and `catalog.collection` use them as primary keys), while a title is a `catalog.film` row,
     whose id is our UUID. One polymorphic column, rendered as the id the API already exposes for
     that entity, beats four nullable FK columns with a CHECK that exactly one is set: the row is
-    read by entity type every time anyway (timeline filter, derivation), and the DTO normalises
+    read by entity type every time anyway (timeline filter, coverage query), and the DTO normalises
     the value on the way in so `"012"` and `"12"` cannot become two follows. The cost is that
     the catalog cannot cascade a deletion into this table — acceptable, because films are never
     deleted (spec §4.4) and people, companies and collections are only ever upserted."""
@@ -203,7 +219,8 @@ class Follow(Base):
             f"entity_type IN ({_in_list(FOLLOW_ENTITY_TYPES)})", name="ck_follow_entity_type"
         ),
         CheckConstraint(f"source IN ({_in_list(FOLLOW_SOURCES)})", name="ck_follow_source"),
-        # The derivation pass (D-13) and the timeline (D-11) ask "who follows this entity?",
+        CheckConstraint(f"coverage IN ({_in_list(FOLLOW_COVERAGES)})", name="ck_follow_coverage"),
+        # The coverage query (D-43) and the timeline (D-11) ask "who follows this entity?",
         # the reverse of the primary key's "what does this user follow?".
         Index("ix_follow_entity", "entity_type", "entity_id"),
         {"schema": "app"},
@@ -215,51 +232,8 @@ class Follow(Base):
     entity_type: Mapped[str] = mapped_column(Text, primary_key=True)
     entity_id: Mapped[str] = mapped_column(Text, primary_key=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
-    )
-
-
-class WatchlistItem(Base):
-    """A title the user wants to be *told* about — the only row in the system that produces a
-    push (D-13, D-14).
-
-    `source` records who put it here. `manual` is the user; `derived_from_follow` is the follow
-    graph acting on their behalf, and is the value that makes a later removal a dismissal
-    rather than a plain delete; the two import sources are named here because D-15 and D-16
-    write them, and a CHECK that did not know about them would fail the import tickets at the
-    constraint rather than the review.
-
-    `alert_prefs` is the subset of `{buy, rent, stream}` availability beats this item may alert
-    on; the push-whitelist beats (a date assigned or moved, a home-release date, a trailer) are
-    always on for a watchlist item and are deliberately not represented here, so they cannot
-    be switched off. The default `{stream}` is a server default so a row written by the
-    derivation pass or an import gets it without each writer restating it."""
-
-    __tablename__ = "watchlist_item"
-    __table_args__ = (
-        CheckConstraint(
-            f"source IN ({_in_list(WATCHLIST_SOURCES)})", name="ck_watchlist_item_source"
-        ),
-        CheckConstraint(
-            f"alert_prefs <@ ARRAY[{_in_list(ALERT_PREFS)}]::text[]",
-            name="ck_watchlist_item_alert_prefs",
-        ),
-        # The notify pass (D-31) and the provider poll's scoped set (D-27) ask "who has this
-        # film watchlisted?", the reverse of the primary key.
-        Index("ix_watchlist_item_film_id", "film_id"),
-        {"schema": "app"},
-    )
-
-    user_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), primary_key=True
-    )
-    film_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), primary_key=True
-    )
-    source: Mapped[str] = mapped_column(Text, nullable=False)
-    alert_prefs: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{stream}'::text[]")
+    coverage: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text(f"'{DEFAULT_COVERAGE}'")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
@@ -267,13 +241,18 @@ class WatchlistItem(Base):
 
 
 class WatchlistDismissal(Base):
-    """The user removed a derived watchlist item, and the follow graph must not put it back
-    (D-13).
+    """A **mute**: the user is not interested in this film, whatever their follows say (D-45).
 
-    A row rather than a flag on the item because the item is gone: the dismissal is the only
-    thing left that says the derivation already happened and was refused. Permanent by design —
-    nothing deletes these, and a revoke leaves them alone (D-40) — but it binds the *derivation*
-    only: the user adding the same film by hand is a `manual` item and is not blocked by it."""
+    The table name is D-13's and outlived the record it described — the thing it now holds is
+    what `CONTEXT.md` calls a mute, and every caller says so. It is the one row that *subtracts*
+    from the computed watchlist (`app.follow_queries.watchlist_film_ids`), and since D-45 it
+    silences the film everywhere: the timeline and the digest's timeline section drop its events
+    too, including events that only name a followed person on it.
+
+    Reversible and non-destructive, which is the pair that matters. Un-muting is deleting this
+    row and restores the film on every surface at once, because nothing was deleted to mute it
+    (a mute never touches a follow, D-40). A film nothing covers any more keeps its mute
+    harmlessly: it subtracts from a set it is no longer in."""
 
     __tablename__ = "watchlist_dismissal"
     __table_args__ = {"schema": "app"}
@@ -424,8 +403,17 @@ NOTIFICATION_STATUSES = ("queued", "sent", "failed", "suppressed")
 
 
 class UserSettings(Base):
-    """One user's delivery preferences: how often they want the digest, and the token their
-    calendar subscribes with (D-33, D-34).
+    """One user's delivery preferences: how often they want the digest, which stores an
+    availability alert is worth, and the token their calendar subscribes with (D-33, D-34,
+    D-44).
+
+    `alert_stores` is the subset of `{buy, rent, stream}` availability beats this user is
+    alerted on, product-wide (D-44). One setting rather than the per-item `alert_prefs` M8
+    replaced: the question "do I care about rentals?" is a property of the person, not of each
+    film they follow, and a per-film answer had nowhere to live once the watchlist stopped
+    being a table. An empty array is allowed and means no store alerts at all — the D-32
+    whitelist beats (a date assigned or moved, a new trailer) are always on and are deliberately
+    not representable here, so they cannot be switched off.
 
     Keyed by the user with no surrogate id, like the follow graph next door: there is one row per
     user by definition and nothing ever names it another way.
@@ -451,6 +439,10 @@ class UserSettings(Base):
             f"digest_cadence IN ({_in_list(DIGEST_CADENCES)})",
             name="ck_user_settings_digest_cadence",
         ),
+        CheckConstraint(
+            f"alert_stores <@ ARRAY[{_in_list(ALERT_STORES)}]::text[]",
+            name="ck_user_settings_alert_stores",
+        ),
         {"schema": "app"},
     )
 
@@ -459,6 +451,9 @@ class UserSettings(Base):
     )
     digest_cadence: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text(f"'{DEFAULT_DIGEST_CADENCE}'")
+    )
+    alert_stores: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{stream}'::text[]")
     )
     ical_token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(

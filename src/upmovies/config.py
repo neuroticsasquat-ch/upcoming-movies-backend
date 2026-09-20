@@ -160,8 +160,11 @@ class Settings(BaseSettings):
     # while its US theatrical governing date is between these two ages, in days. The floor
     # keeps the poll off films still in their theatrical window, where a home release is not
     # yet plausible and a daily request would buy nothing; the ceiling is where a film that
-    # never got one stops costing a request a day forever. A film with a follow or a
-    # watchlist item is polled regardless of both — somebody is waiting on that answer.
+    # never got one stops costing a request a day forever. A film somebody's follows cover is
+    # polled regardless of both — somebody is waiting on that answer. `max_age_days` is also
+    # the **alert window** (`catalog.queries.alert_window_clause`, D-1414.2): a follow covers a
+    # film for exactly as long as this poll still looks for offers on it, so tuning this moves
+    # both together, deliberately.
     # Both are placeholders in the §4.5 sense: erring wide costs requests, erring narrow
     # silently delays or misses the `now_available` beat the whole milestone is for.
     provider_poll_min_age_days: int = Field(default=14, ge=0, alias="PROVIDER_POLL_MIN_AGE_DAYS")

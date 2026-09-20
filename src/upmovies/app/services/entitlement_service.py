@@ -56,7 +56,7 @@ async def grant(
 async def revoke(db: AsyncSession, *, user_id: UUID, revoked_by: User) -> User:
     """Clear `user_id`'s access expiry, commit, and record who did it. `NotFound` if no such user.
 
-    Clears one column and touches nothing else: follows, watchlist items, dismissals, settings
+    Clears one column and touches nothing else: follows, mutes, settings
     and the iCal token survive, so a later grant restores the account rather than handing back
     an empty one (D-40). Setting a past `entitled_until` through `grant` ends access just as
     well and keeps the date — this is the variant for "there was never meant to be a grant here"."""

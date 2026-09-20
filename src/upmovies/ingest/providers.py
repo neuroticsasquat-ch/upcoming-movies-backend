@@ -49,11 +49,11 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
-from sqlalchemy import ColumnElement, Date, Text, and_, cast, delete, func, literal, or_, select
+from sqlalchemy import ColumnElement, Date, and_, cast, delete, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.models import Follow, WatchlistItem
+from upmovies.app.follow_queries import covered_by_any_user_clause
 from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     AvailabilityFirstSeen,
@@ -128,7 +128,9 @@ class ProvidersResult:
     abort_error: str | None = None
 
 
-def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> ColumnElement[bool]:
+def poll_set_clause(
+    *, today: date, min_age_days: int, max_age_days: int, excluded_statuses: frozenset[str]
+) -> ColumnElement[bool]:
     """WHERE predicate selecting the films this poll owes a read — D-27's two rules, ORed.
 
     The theatrical rule is an EXISTS over the film's US theatrical rows **grouped by release
@@ -137,6 +139,16 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
     film in scope on any one of its US theatrical subjects is in scope: a title that opened
     limited 210 days ago and wide 150 days ago is squarely in the window on the beat an
     audience would name, and taking the earliest subject across the whole film would drop it.
+
+    **Rule 2 is the computed watchlist, asked of everybody at once** (D-1414.3):
+    `follow_queries.covered_by_any_user_clause` — a film any user's follows cover, at that
+    follow's coverage, inside the alert window, and that they have not muted. One predicate
+    shared with the alerts, so the poll cannot come to a different answer about what somebody
+    is waiting on than the pass that tells them about it. It reaches further than the two
+    `EXISTS` it replaces: a film followed only through its director is polled now, which is
+    what makes a `now_available` beat possible for it at all. What bounds that reach is the
+    alert window and `coverage = 'lead'` being the default — without both, one followed
+    company would put its whole back catalogue in the set.
 
     Tombstoned films are excluded. Their theatrical date keeps ageing inside the window, so
     without this a deleted id costs a request every day until it falls out the far end — and it
@@ -165,29 +177,26 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
         )
         .exists()
     )
-    # A title follow carries the film's UUID in `app.follow.entity_id`, which is text because
-    # the four entity types do not share an id space (see `Follow`) — so the join casts rather
-    # than comparing a UUID to text.
-    followed = (
-        select(literal(1))
-        .select_from(Follow)
-        .where(Follow.entity_type == "title", Follow.entity_id == cast(Film.id, Text))
-        .exists()
-    )
-    watchlisted = (
-        select(literal(1))
-        .select_from(WatchlistItem)
-        .where(WatchlistItem.film_id == Film.id)
-        .exists()
-    )
     return and_(
         Film.tmdb_missing_at.is_(None),
-        or_(theatrical_due, followed, watchlisted),
+        or_(
+            theatrical_due,
+            covered_by_any_user_clause(
+                today=today,
+                excluded_statuses=excluded_statuses,
+                max_age_days=max_age_days,
+            ),
+        ),
     )
 
 
 async def load_poll_set(
-    session: AsyncSession, *, today: date, min_age_days: int, max_age_days: int
+    session: AsyncSession,
+    *,
+    today: date,
+    min_age_days: int,
+    max_age_days: int,
+    excluded_statuses: frozenset[str],
 ) -> list[PollTarget]:
     """The films due a provider read, in a stable order.
 
@@ -201,7 +210,14 @@ async def load_poll_set(
     never reaches are still due tomorrow)."""
     stmt = (
         select(Film.id, Film.tmdb_id)
-        .where(poll_set_clause(today=today, min_age_days=min_age_days, max_age_days=max_age_days))
+        .where(
+            poll_set_clause(
+                today=today,
+                min_age_days=min_age_days,
+                max_age_days=max_age_days,
+                excluded_statuses=excluded_statuses,
+            )
+        )
         .order_by(Film.id)
     )
     rows = await session.execute(stmt)
@@ -437,6 +453,7 @@ async def run_provider_poll(
     today: date,
     min_age_days: int,
     max_age_days: int,
+    excluded_statuses: frozenset[str],
     now: datetime | None = None,
     region_code: str = PRIMARY_REGION,
     failure_threshold: int = 10,
@@ -449,7 +466,11 @@ async def run_provider_poll(
 
     async with owned_session(session_factory) as s:
         targets = await load_poll_set(
-            s, today=today, min_age_days=min_age_days, max_age_days=max_age_days
+            s,
+            today=today,
+            min_age_days=min_age_days,
+            max_age_days=max_age_days,
+            excluded_statuses=excluded_statuses,
         )
     result.selected = len(targets)
     log.info("providers: %d films due in %s", result.selected, region_code)

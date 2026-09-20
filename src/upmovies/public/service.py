@@ -21,8 +21,12 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.entitlements import entitled_user_clause
-from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
-from upmovies.app.models import User, UserSettings, WatchlistItem
+from upmovies.app.follow_queries import (
+    events_naming_followed_people,
+    followed_film_ids,
+    watchlist_film_ids,
+)
+from upmovies.app.models import User, UserSettings
 from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     Collection,
@@ -1132,6 +1136,10 @@ async def get_timeline(
     than on `/feed` for the same film and day. The shape and the ordering are the feed's; the
     contents are what this user follows.
 
+    **A muted film is absent from both halves** (D-45). The exclusion lives inside the two
+    builders rather than here, so the digest section that summarises this timeline cannot
+    disagree with it about what the user silenced.
+
     Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
     and the feed are the same product surface — same DTO, same `created_at` day grouping, same
     day pagination (ADR-0016) — and the client swaps one for the other on `/` as soon as `me`
@@ -1294,10 +1302,10 @@ def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None)
     displayable in, so widening the bucket map widens both calendars without a second region
     rule (D-26).
 
-    `watchlist_user_id` narrows the set to that user's watchlist rows, any `source`. It belongs
-    here rather than in a later predicate for the reason `get_ical_feed` puts it here: the
-    collapse is per subject, so a user filter applied after it would be collapsing over rows
-    the caller cannot see.
+    `watchlist_user_id` narrows the set to that user's computed watchlist (M8): the films their
+    follows cover, minus the ones they have muted. It belongs here rather than in a later
+    predicate for the reason `get_ical_feed` puts it here: the collapse is per subject, so a
+    user filter applied after it would be collapsing over rows the caller cannot see.
     """
     governing = select(
         FilmReleaseDate.film_id.label("film_id"),
@@ -1307,9 +1315,17 @@ def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None)
         ),
     )
     if watchlist_user_id is not None:
-        governing = governing.join(
-            WatchlistItem, WatchlistItem.film_id == FilmReleaseDate.film_id
-        ).where(WatchlistItem.user_id == watchlist_user_id)
+        settings = get_settings()
+        governing = governing.where(
+            FilmReleaseDate.film_id.in_(
+                watchlist_film_ids(
+                    user_id=watchlist_user_id,
+                    today=datetime.now(tz=UTC).date(),
+                    excluded_statuses=settings.tmdb_excluded_statuses,
+                    max_age_days=settings.provider_poll_max_age_days,
+                )
+            )
+        )
     return (
         governing.where(
             FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
@@ -1433,10 +1449,10 @@ async def get_watchlist_calendar(
 
     That set is the `.ics` feed's, not the public listing's, and for the feed's reasons:
 
-    - **Watchlist rows only, any `source`.** A follow produces timeline rows and nothing else
-      (D-13), so following a director puts nothing here; a derived item *does* count, because
-      the follow graph put it there on the user's behalf and it is exactly the film they would
-      otherwise miss.
+    - **The computed watchlist** (D-42): every film this user's follows cover at their
+      coverage, minus the ones they have muted. Following a director puts their in-window films
+      here — that is the point of the merged model, and exactly the film the user would
+      otherwise miss — while a muted film leaves this page and the `.ics` feed together.
     - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
       user has on their own watchlist is not noise to them, and applying the cuts here would
       make this page disagree with the same user's subscribed calendar — the bug this endpoint
@@ -1476,10 +1492,11 @@ async def get_ical_feed(
     What the feed holds, and why it is not the public calendar's query with a user filter bolted
     on:
 
-    - **Watchlist rows only.** A follow produces timeline rows and nothing else (D-13); the
-      watchlist is the surface that is allowed to reach out to the user, and a calendar the user
-      subscribed to is that. Derived items count — the follow graph put them there on the user's
-      behalf, and a derived item is exactly the one they would otherwise miss.
+    - **The computed watchlist** (D-42): every film this user's follows cover at their
+      coverage, minus the ones they have muted. The watchlist is the surface that is allowed to
+      reach out to the user, and a calendar the user subscribed to is that — a film reached
+      through a followed director is exactly the one they would otherwise miss, and a muted one
+      leaves this feed and `/me/calendar` together.
     - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
       user has on their own watchlist is not noise to them — the same reasoning
       `digest_sender.load_slate` records for the slate.
@@ -1506,7 +1523,9 @@ async def get_ical_feed(
 
     # Python-side, not SQL `CURRENT_DATE` — `get_calendar` next door takes the same care, and
     # for the same reason: the cutoff must be the same instant for every row of one response.
-    earliest = datetime.now(tz=UTC).date() - timedelta(days=ICAL_PAST_WINDOW_DAYS)
+    today = datetime.now(tz=UTC).date()
+    earliest = today - timedelta(days=ICAL_PAST_WINDOW_DAYS)
+    settings = get_settings()
 
     # The governing date per (film, bucket): the earliest row in the subject, collapsed exactly
     # as `get_calendar` collapses it (NEU-1206), over the same displayable types in the same
@@ -1519,9 +1538,15 @@ async def get_ical_feed(
                 "governing_date"
             ),
         )
-        .join(WatchlistItem, WatchlistItem.film_id == FilmReleaseDate.film_id)
         .where(
-            WatchlistItem.user_id == user_id,
+            FilmReleaseDate.film_id.in_(
+                watchlist_film_ids(
+                    user_id=user_id,
+                    today=today,
+                    excluded_statuses=settings.tmdb_excluded_statuses,
+                    max_age_days=settings.provider_poll_max_age_days,
+                )
+            ),
             FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
             FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
         )

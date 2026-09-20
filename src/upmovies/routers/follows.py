@@ -12,6 +12,7 @@ from upmovies.app.dto import (
     FollowEntityType,
     FollowListResponse,
     FollowOut,
+    FollowUpdateRequest,
     normalise_entity_id,
 )
 from upmovies.app.entitlements import require_entitled
@@ -35,6 +36,7 @@ def _to_out(follow: Follow, label: EntityLabel | None) -> FollowOut:
         name=None if label is None else label.name,
         image_path=None if label is None else label.image_path,
         source=follow.source,
+        coverage=follow.coverage,
         created_at=follow.created_at,
     )
 
@@ -61,10 +63,21 @@ async def create_follow(
     db: AsyncSession = Depends(get_session),
 ) -> FollowOut:
     """Follow an entity. 201 with the new row, or 200 with the existing one: a follow button
-    that is clicked twice should not fail the second time, and the caller can tell which."""
+    that is clicked twice should not fail the second time, and the caller can tell which.
+
+    `422 coverage_not_applicable` for a `coverage` on any type but `person`, exactly as the
+    PATCH below refuses it (D-1414.6)."""
+    if payload.coverage is not None and payload.entity_type != "person":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="coverage_not_applicable"
+        )
     try:
         follow, label, created = await follow_service.follow(
-            db, user=user, entity_type=payload.entity_type, entity_id=payload.entity_id
+            db,
+            user=user,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            coverage=payload.coverage,
         )
     except NotFound:
         raise HTTPException(
@@ -72,6 +85,49 @@ async def create_follow(
         ) from None
     if not created:
         response.status_code = status.HTTP_200_OK
+    return _to_out(follow, label)
+
+
+@router.patch(
+    "/{entity_type}/{entity_id}",
+    response_model=FollowOut,
+    dependencies=[Depends(require_csrf)],
+)
+async def update_follow(
+    entity_type: FollowEntityType,
+    entity_id: str,
+    payload: FollowUpdateRequest,
+    user: User = Depends(entitled),
+    db: AsyncSession = Depends(get_session),
+) -> FollowOut:
+    """Set a person follow's coverage (D-43). 200 with the whole row, so the control that
+    changed redraws from one response.
+
+    `422 coverage_not_applicable` for the other three entity types — they name one thing each,
+    so there is nothing to narrow, and storing a value nothing reads while answering `200`
+    would tell the client it had changed something."""
+    if entity_type != "person":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="coverage_not_applicable"
+        )
+    try:
+        canonical = normalise_entity_id(entity_type, entity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_entity_id"
+        ) from None
+    try:
+        follow, label = await follow_service.set_coverage(
+            db,
+            user=user,
+            entity_type=entity_type,
+            entity_id=canonical,
+            coverage=payload.coverage,
+        )
+    except NotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="follow_not_found"
+        ) from None
     return _to_out(follow, label)
 
 

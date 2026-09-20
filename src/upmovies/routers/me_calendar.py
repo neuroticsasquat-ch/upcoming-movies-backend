@@ -3,7 +3,7 @@
 `CalendarResponse` exactly as `/calendar` answers it, with the same `limit`/`offset` bounds and
 the same date-paging, so the tabbed calendar page can render "my watchlist" and "all releases"
 through one component and one set of grouping helpers. What differs is the film set, and only
-that: the caller's watchlist items, drawn the way the subscribed `.ics` feed draws them.
+that: the caller's computed watchlist (M8), drawn the way the subscribed `.ics` feed draws it.
 
 Shaped like `routers/timeline.py` rather than living beside `/calendar` in `routers/public.py`:
 the gate is applied once at the router, so a second `/me/calendar/*` route added later cannot

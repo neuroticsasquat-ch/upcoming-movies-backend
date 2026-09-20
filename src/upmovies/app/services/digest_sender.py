@@ -17,8 +17,9 @@ on the feed lands as one tall day here too, deliberately.
 
 **The weekly send is the "your slate" mail (D-33).** Before the timeline section it lists the
 upcoming US dates — theatrical, digital and physical — for every film on the user's watchlist
-in the next `SLATE_WINDOW_DAYS`. The slate is assembled from `watchlist_item` and
-`film_release_date` directly, not from notification rows: a date that has not *moved* produces
+in the next `SLATE_WINDOW_DAYS`. The watchlist is the computed set (`app.follow_queries
+.watchlist_film_ids`, M8), joined to `film_release_date` directly rather than to notification
+rows: a date that has not *moved* produces
 no event, and the slate's job is to say what is coming, not what changed. Each film's date per
 release type is the governing one — the earliest row in the (film, US, type) subject, the same
 collapse `public.service.get_calendar` and `catalog.headline_release` apply — so the slate
@@ -61,12 +62,13 @@ from sqlalchemy import Date, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.entitlements import entitled_user_clause
+from upmovies.app.follow_queries import watchlist_film_ids
 from upmovies.app.models import (
     DEFAULT_DIGEST_CADENCE,
+    Follow,
     Notification,
     User,
     UserSettings,
-    WatchlistItem,
 )
 from upmovies.app.services.alert_sender import (
     BEAT_LABELS,
@@ -260,7 +262,7 @@ class DigestSendResult:
     cadence: str
     users_considered: int = 0
     """Users on this cadence with something to look at — a `queued` digest row, or (weekly) a
-    watchlist item that might put a date on the slate. The working set, not the user table."""
+    follow that might put a date on the slate. The working set, not the user table."""
     mails_sent: int = 0
     """Mails handed to the provider: inboxes touched, one per user. Reported beside `sent`
     because a weekly mail can carry a slate and no rows at all."""
@@ -308,8 +310,10 @@ async def load_recipients(
     The gate is read as a column rather than a filter, for the reason the alert sender gives:
     a user it refuses is owed `suppressed` rows, not silence. The `EXISTS` terms keep the pass
     proportional to what is owed rather than to signups: on the daily cadence only a queued row
-    puts a user in the set; weekly adds anyone with a watchlist, because the slate is built from
-    it and needs no row at all."""
+    puts a user in the set; weekly adds anyone with a **follow**, because the slate is computed
+    from the follow graph (M8) and needs no row at all. A follow that covers nothing dated
+    costs one empty slate query and no mail — "nothing queued and an empty slate gets no mail"
+    already covers it."""
     queued_digest = exists().where(
         Notification.user_id == User.id,
         Notification.kind == DIGEST_KIND,
@@ -318,7 +322,7 @@ async def load_recipients(
     )
     owed = queued_digest
     if cadence == "weekly":
-        owed = or_(queued_digest, exists().where(WatchlistItem.user_id == User.id))
+        owed = or_(queued_digest, exists().where(Follow.user_id == User.id))
     rows = await session.execute(
         select(
             User.id,
@@ -452,6 +456,10 @@ async def load_slate(
 ) -> tuple[SlateDay, ...]:
     """The upcoming US dates for this user's watchlist, soonest first (D-33).
 
+    The watchlist is `follow_queries.watchlist_film_ids` — what their follows cover at their
+    coverage, minus their mutes (D-42, D-45) — so a film they have silenced never reaches the
+    slate, and a film reached only through a followed director does.
+
     One governing date per (film, release type): the earliest `film_release_date` row in the
     subject, cast to a UTC calendar date — the same collapse `public.service.get_calendar`
     makes, restricted to `PRIMARY_REGION` because that is the only region every displayable
@@ -471,9 +479,15 @@ async def load_slate(
                 "governing_date"
             ),
         )
-        .join(WatchlistItem, WatchlistItem.film_id == FilmReleaseDate.film_id)
         .where(
-            WatchlistItem.user_id == user_id,
+            FilmReleaseDate.film_id.in_(
+                watchlist_film_ids(
+                    user_id=user_id,
+                    today=today,
+                    excluded_statuses=settings.tmdb_excluded_statuses,
+                    max_age_days=settings.provider_poll_max_age_days,
+                )
+            ),
             FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
             FilmReleaseDate.release_type.in_(SLATE_RELEASE_TYPES),
         )

@@ -9,10 +9,11 @@ years of trailers behind it must record all of them and say nothing; only what t
 videos at all — the ordinary state of an in-play title — is still observed, and the teaser it
 gets next month is a real beat rather than a second baseline.
 
-**The scoped set is the provider poll's**, which already admits any followed or watchlisted
-film whatever its dates say. That rule is the one that matters here: a trailer precedes a
-theatrical date by months, so for videos the followed-but-unreleased film is the typical
-subject rather than the exception.
+**The scoped set is the provider poll's**, which admits any film somebody's follows cover —
+by title whatever its dates say, or through a person, company or franchise inside the alert
+window (D-1414.3). That rule is the one that matters here: a trailer precedes a theatrical date
+by months, so for videos the followed-but-unreleased film is the typical subject rather than the
+exception.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -22,9 +23,9 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from tests.fixtures.catalog import add_film
+from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_video, make_videos
-from upmovies.app.models import Follow, WatchlistItem
+from upmovies.app.models import Follow
 from upmovies.catalog.models import Film, FilmFieldChange, FilmReleaseDate, FilmVideo
 from upmovies.ingest import runs
 from upmovies.ingest.tmdb.client import TMDBClient
@@ -35,6 +36,9 @@ BASE_URL = "https://api.themoviedb.org/3"
 TODAY = date(2026, 9, 17)
 MIN_AGE = 14
 MAX_AGE = 200
+EXCLUDED = frozenset({"Released", "Canceled"})
+"""The statuses the alert window drops, pinned the way the ages are — the poll set's reach must
+not depend on the environment the suite runs in."""
 IN_WINDOW = TODAY - timedelta(days=60)
 UPCOMING = TODAY + timedelta(days=200)
 WIDE = 3
@@ -93,6 +97,7 @@ async def _run(session_factory, tmdb_client, run_id, **overrides):
         "today": TODAY,
         "min_age_days": MIN_AGE,
         "max_age_days": MAX_AGE,
+        "excluded_statuses": EXCLUDED,
         "now": SEEN_AT,
     }
     return await run_video_poll(**{**kwargs, **overrides})
@@ -455,12 +460,15 @@ async def test_an_in_play_followed_film_is_polled(
 
 
 @respx.mock
-async def test_an_in_play_watchlisted_film_is_polled(
+async def test_a_film_covered_only_through_a_director_follow_is_polled(
     session, session_factory, tmdb_client, run_id, make_user
 ):
+    """What M8 widened here: a followed director's next film is exactly the one whose teaser
+    the user is waiting for, and the old set reached it only where D-13 had derived an item."""
     user = await make_user(email="watcher@example.com")
     film = await add_film(session, 121, status="In Production")
-    session.add(WatchlistItem(user_id=user.id, film_id=film.id, source="manual"))
+    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
+    session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
     await session.commit()
     _mock_videos(121, [])
 

@@ -229,7 +229,7 @@ class FilmDetailResponse(BaseModel):
     # `None` — not an empty box — when no poll has found the film anywhere (D-29). The two are
     # different answers: an empty box would claim we looked and it is nowhere, which is only
     # true for a film the providers poll actually reaches (D-27's scoped set is films past
-    # their theatrical date, plus anything followed or watchlisted).
+    # their theatrical date, plus anything somebody's follows cover).
     where_to_watch: WhereToWatchOut | None = None
 
 

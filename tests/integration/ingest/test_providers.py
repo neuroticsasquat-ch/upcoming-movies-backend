@@ -2,9 +2,11 @@
 it writes for them (D-27).
 
 The scoped set carries most of the weight. It is two independent rules — a theatrical date
-inside the age window, or *anybody* following or watchlisting the title — and the second is not
-an optimisation of the first: a watchlisted film that never had a US theatrical date has nothing
-to age, so rule 1 alone would never poll it and the user would never hear that it landed.
+inside the age window, or *anybody's* follows covering the film (D-1414.3) — and the second is
+not an optimisation of the first: a film somebody follows by title that never had a US
+theatrical date has nothing to age, so rule 1 alone would never poll it and the user would never
+hear that it landed. Rule 2 is the computed watchlist asked of every user at once, so it reaches
+a film followed only through its director too, and drops one every covering user has muted.
 
 The write is the other half, and it is two tables with opposite lifetimes over one read: the
 ledger (`availability_first_seen`) is insert-only and is what `now_available` will card off
@@ -19,9 +21,9 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from tests.fixtures.catalog import add_film
+from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_provider, make_watch_providers
-from upmovies.app.models import Follow, WatchlistItem
+from upmovies.app.models import Follow, WatchlistDismissal
 from upmovies.catalog.models import (
     AvailabilityFirstSeen,
     Film,
@@ -39,6 +41,9 @@ BASE_URL = "https://api.themoviedb.org/3"
 TODAY = date(2026, 9, 17)
 MIN_AGE = 14
 MAX_AGE = 200
+EXCLUDED = frozenset({"Released", "Canceled"})
+"""The statuses a film is past caring about, as the alert window reads them — pinned here the
+way the ages are, so rule 2's reach does not depend on the environment the suite runs in."""
 # The window is [TODAY - 200, TODAY - 14] inclusive.
 IN_WINDOW = TODAY - timedelta(days=60)
 TOO_RECENT = TODAY - timedelta(days=3)
@@ -107,6 +112,7 @@ async def _run(session_factory, tmdb_client, run_id, **overrides):
         "today": TODAY,
         "min_age_days": MIN_AGE,
         "max_age_days": MAX_AGE,
+        "excluded_statuses": EXCLUDED,
     }
     return await run_provider_poll(**{**kwargs, **overrides})
 
@@ -216,24 +222,6 @@ async def test_only_us_theatrical_dates_put_a_film_in_the_window(
 
 
 @respx.mock
-async def test_a_watchlisted_film_is_polled_whatever_its_dates_say(
-    session, session_factory, tmdb_client, run_id, make_user
-):
-    """Rule 2, and the reason it is not an optimisation of rule 1: this film has no theatrical
-    date to age at all, so the window would never reach it — and somebody is waiting on the
-    answer."""
-    user = await make_user(email="watcher@example.com")
-    film = await add_film(session, 200, status="Released")
-    session.add(WatchlistItem(user_id=user.id, film_id=film.id, source="manual"))
-    await session.commit()
-    _mock_providers(200, flatrate=[8])
-
-    result = await _run(session_factory, tmdb_client, run_id)
-
-    assert (result.selected, result.polled) == (1, 1)
-
-
-@respx.mock
 async def test_a_followed_title_is_polled_whatever_its_dates_say(
     session, session_factory, tmdb_client, run_id, make_user
 ):
@@ -253,11 +241,12 @@ async def test_a_followed_title_is_polled_whatever_its_dates_say(
 
 
 @respx.mock
-async def test_a_person_follow_does_not_put_a_film_in_the_poll_set(
+async def test_a_person_follow_reaching_no_credit_puts_nothing_in_the_poll_set(
     session, session_factory, tmdb_client, run_id, make_user
 ):
-    """Only *title* follows name a film. A person follow carries a TMDB person id in the same
-    text column, and reading it as a film id would poll an arbitrary film or none."""
+    """A person follow carries a TMDB person id in the same text column a title follow carries
+    a film UUID in, and reading it as a film id would poll an arbitrary film or none. It
+    reaches films through `catalog.film_credit` or not at all."""
     user = await make_user(email="person-follower@example.com")
     await add_film(session, 202, status="Released")
     session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
@@ -266,6 +255,67 @@ async def test_a_person_follow_does_not_put_a_film_in_the_poll_set(
     result = await _run(session_factory, tmdb_client, run_id)
 
     assert result.selected == 0
+
+
+@respx.mock
+async def test_a_film_covered_only_through_a_director_follow_is_polled(
+    session, session_factory, tmdb_client, run_id, make_user
+):
+    """What M8 widened (D-1414.3). The old rule reached this film only where D-13 had already
+    derived a watchlist item; now the poll reads the same coverage the alerts do, so a followed
+    director's next film is polled for the offer that will card its `now_available` beat."""
+    user = await make_user(email="director-follower@example.com")
+    film = await add_film(session, 203)
+    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
+    session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
+    await session.commit()
+    _mock_providers(203, flatrate=[8])
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.selected, result.polled) == (1, 1)
+
+
+@respx.mock
+async def test_a_credit_outside_the_follows_coverage_puts_nothing_in_the_poll_set(
+    session, session_factory, tmdb_client, run_id, make_user
+):
+    """The poll's set is bounded by the same coverage the alerts are (D-43): a writing credit
+    is not `lead`, so nobody is waiting on this film's offers."""
+    user = await make_user(email="writer-follower@example.com")
+    film = await add_film(session, 204)
+    await add_credit(session, film, 526, credit_type="crew", job="Screenplay", department="Writing")
+    session.add(Follow(user_id=user.id, entity_type="person", entity_id="526", source="manual"))
+    await session.commit()
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert result.selected == 0
+
+
+@respx.mock
+async def test_a_film_every_covering_user_has_muted_leaves_the_poll_set(
+    session, session_factory, tmdb_client, run_id, make_user
+):
+    """The mute is per covering *user*, not per film: the film stays in the set while anybody
+    who covers it is still listening, and leaves it when the last of them stops."""
+    muter = await make_user(email="muter@example.com")
+    waiter = await make_user(email="waiter@example.com")
+    film = await add_film(session, 205, status="Released")
+    for user in (muter, waiter):
+        session.add(
+            Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+        )
+    session.add(WatchlistDismissal(user_id=muter.id, film_id=film.id))
+    await session.commit()
+    _mock_providers(205, flatrate=[8])
+
+    assert (await _run(session_factory, tmdb_client, run_id)).selected == 1
+
+    session.add(WatchlistDismissal(user_id=waiter.id, film_id=film.id))
+    await session.commit()
+
+    assert (await _run(session_factory, tmdb_client, run_id)).selected == 0
 
 
 @respx.mock
@@ -288,7 +338,9 @@ async def test_a_film_matching_both_rules_is_polled_once(
 ):
     user = await make_user(email="both@example.com")
     film = await _add_released_film(session, 110)
-    session.add(WatchlistItem(user_id=user.id, film_id=film.id, source="manual"))
+    session.add(
+        Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+    )
     await session.commit()
     route = _mock_providers(110, flatrate=[8])
 

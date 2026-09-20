@@ -327,8 +327,10 @@ lands.
   `buy|rent|stream`, default `{stream}`) replaces per-item `alert_prefs`. No per-film
   preferences exist. The always-on push whitelist beats (D-32) are unchanged.
 - **D-45 Mute, not dismissal.** Taking a film off the watchlist is a **mute**: it leaves
-  alerts, the calendar, the iCal feed and the digest slate, stays in the timeline, and can be
-  undone. `app.watchlist_dismissal` holds mutes (table kept, vocabulary changed).
+  alerts, the calendar, the iCal feed, the digest slate *and the timeline* (amended in the
+  NEU-1414 planning session, 2026-09-20: a mute means "not interested in this film", and it
+  silences the film everywhere, including events that only name a followed person on it), and
+  can be undone. `app.watchlist_dismissal` holds mutes (table kept, vocabulary changed).
   `POST /me/watchlist {film_id}` means *want* (clear any mute; create a `manual` title follow
   if nothing else covers the film); `DELETE /me/watchlist/{film_id}` means *stop* (delete a
   direct title follow; mute if another follow still covers it). Both answer the resulting
@@ -479,17 +481,26 @@ entitlement gate (D-37 to D-41) is untouched.
 - `app.follow.coverage ∈ lead|all` default `lead` (person follows only; ignored for the other
   types). `app.user_settings.alert_stores TEXT[] default {stream}`. `app.watchlist_item.alert_prefs`
   dropped. `app.watchlist_dismissal` kept as the mute table.
-- Watchlist = computed: in play, covered by any follow at its coverage, not muted. Materialised
-  or queried is NEU-1414's call; the calendar, iCal feed, notify and digest passes and the
-  slate mail must all read the one definition.
+- Watchlist = computed, **queried, never materialised** (settled in NEU-1414's planning,
+  2026-09-20; `app.watchlist_item` is dropped). A person, company or franchise follow covers a
+  film inside the **alert window**: status not excluded and primary release date NULL or no
+  older than `PROVIDER_POLL_MAX_AGE_DAYS` (the provider poll's own ceiling, so alerts and the
+  `now_available` cards that feed them stop together); a title follow covers its film in any
+  state. Minus mutes. One query builder in `app/follow_queries.py` is what `GET /me/watchlist`,
+  `/me/calendar`, the iCal feed, the notify and digest passes, the slate mail and the provider
+  and video polls' "somebody is waiting on this film" rule (D-27 rule 2) all read.
 - `GET /me/watchlist` → `{items: [{film, covered_by: [{entity_type, entity_id, name}],
   followed, muted, created_at}]}`, muted films included, direct title follow first in
   `covered_by`. `POST /me/watchlist {film_id}` = want; `DELETE /me/watchlist/{film_id}` = stop;
-  both return the item; `PATCH /me/watchlist/{film_id}` removed. `POST /me/follows` takes
+  `POST` returns the item (`200`); `DELETE` returns the item (`200`) while another follow
+  still covers the film, now muted, and `204` once nothing covers it (there is no item left to
+  answer). `PATCH /me/watchlist/{film_id}` removed. `POST /me/follows` takes
   optional `coverage`; `PATCH /me/follows/{entity_type}/{entity_id} {coverage}` new;
   `FollowOut.coverage`. `GET/PATCH /me/settings` carry `alert_stores`.
-- Migration, once: manual `watchlist_item` rows → `manual` title follows (keep `created_at`);
-  dismissals unchanged; `alert_prefs` dropped.
+- Migration, once: every non-derived `watchlist_item` row (`manual`, `letterboxd_import`,
+  `tmdb_import`) with no title follow yet → a title follow with the row's own `source` and
+  `created_at`; `derived_from_follow` rows dropped (their follows recompute them); dismissals
+  unchanged; the table dropped with `alert_prefs`.
 - Frontend: one `TitleFollowButton` under the film title with a static cue line, three access
   states as today (NEU-1405); `/me/watchlist` without chips or a removal confirm, with "via …"
   and a Muted section; `/me/follows` with the per-person coverage control; `/settings` with the

@@ -13,7 +13,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select, update
 
-from upmovies.app.models import Notification, UserSettings, WatchlistItem
+from upmovies.app.models import Follow, Notification, UserSettings, WatchlistDismissal
 from upmovies.app.services.digest_sender import (
     DIGEST_BEAT_LABELS,
     SLATE_WINDOW_DAYS,
@@ -96,8 +96,19 @@ def queue_digest(session):
 
 @pytest.fixture
 def watchlist(session):
+    """Put a film on a user's watchlist — which, since M8, is following it by title. The slate
+    reads the computed set, so this is the whole of the setup it needs."""
+
     async def _add(*, user_id: UUID, film_id: UUID) -> None:
-        session.add(WatchlistItem(user_id=user_id, film_id=film_id, source="manual"))
+        session.add(
+            Follow(
+                user_id=user_id,
+                entity_type="title",
+                entity_id=str(film_id),
+                source="manual",
+                coverage="lead",
+            )
+        )
         await session.commit()
 
     return _add
@@ -371,6 +382,50 @@ async def test_the_slate_is_the_governing_us_date_per_release_type_inside_the_wi
     assert "Tuesday, September 22, 2026" not in text  # premiere
     assert "Thursday, October 8, 2026" not in text  # dune's later US wide row
     assert "Other" not in text
+
+
+async def test_a_muted_film_is_not_on_the_slate(
+    session, subscriber, make_film, add_release_date, watchlist, send
+):
+    """D-45: the slate reads the computed watchlist, and a mute subtracts from it — so the film
+    leaves the weekly mail on the same terms it leaves the calendar."""
+    user = await subscriber()
+    dune = await make_film(slug="dune", title="Dune")
+    await watchlist(user_id=user.id, film_id=dune.id)
+    await add_release_date(film=dune, release_date=_on(TODAY + timedelta(days=3)))
+    session.add(WatchlistDismissal(user_id=user.id, film_id=dune.id))
+    await session.commit()
+
+    result, mailbox = await send("weekly")
+
+    assert result.slate_dates == 0
+    assert mailbox.sent == []
+
+
+async def test_a_film_reached_through_a_director_follow_is_on_the_slate(
+    session, subscriber, make_film, add_release_date, attach_credits, send
+):
+    """The other direction M8 opened: the slate is what the user's follows cover, so a film they
+    never named is on it because they follow the person making it (D-42)."""
+    user = await subscriber()
+    dune = await make_film(slug="dune", title="Dune")
+    await attach_credits(dune, crew=[{"id": 900, "name": "A Director", "job": "Director"}])
+    session.add(
+        Follow(
+            user_id=user.id,
+            entity_type="person",
+            entity_id="900",
+            source="manual",
+            coverage="lead",
+        )
+    )
+    await session.commit()
+    await add_release_date(film=dune, release_date=_on(TODAY + timedelta(days=3)))
+
+    result, mailbox = await send("weekly")
+
+    assert result.slate_dates == 1
+    assert len(mailbox.sent) == 1
 
 
 async def test_a_watchlisted_film_with_no_slug_is_not_on_the_slate(

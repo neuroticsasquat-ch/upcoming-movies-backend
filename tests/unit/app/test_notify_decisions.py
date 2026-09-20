@@ -1,4 +1,4 @@
-"""The decision pass's rules that need no database: the `now_available` preference match, the
+"""The decision pass's rules that need no database: the `now_available` store match, the
 vocabulary bridge it depends on, and the run's detail line.
 
 The pass itself is covered in `tests/integration/app/test_notify_pass.py`; what is here is the
@@ -8,72 +8,79 @@ right monetization type.
 
 from uuid import uuid4
 
-from upmovies.app.models import ALERT_PREFS, DEFAULT_ALERT_PREFS
+from upmovies.app.models import ALERT_STORES, DEFAULT_ALERT_STORES
 from upmovies.app.services.notify_service import (
-    ALERT_PREF_BY_MONETIZATION,
+    ALERT_STORE_BY_MONETIZATION,
     PUSH_WHITELIST,
     NotifyResult,
     Recipient,
     notify_detail,
-    now_available_matches_prefs,
+    now_available_matches_stores,
 )
 from upmovies.catalog.models import MONETIZATION_TYPES
 
 
-def test_every_monetization_type_maps_to_a_real_alert_preference():
-    """The bridge between the two vocabularies, pinned from both ends (D-14, D-28).
+def test_every_monetization_type_maps_to_a_real_alert_store():
+    """The bridge between the two vocabularies, pinned from both ends (D-44, D-28).
 
-    A fourth offer kind added to the poll with no preference beside it would not fail: it would
-    card `now_available` events that quietly match nobody's watchlist. Likewise a preference
+    A fourth offer kind added to the poll with no store beside it would not fail: it would
+    card `now_available` events that quietly match nobody's watchlist. Likewise a store
     renamed on the user-facing side. Both are a failing assertion here instead."""
-    assert set(ALERT_PREF_BY_MONETIZATION) == set(MONETIZATION_TYPES)
-    assert set(ALERT_PREF_BY_MONETIZATION.values()) == set(ALERT_PREFS)
+    assert set(ALERT_STORE_BY_MONETIZATION) == set(MONETIZATION_TYPES)
+    assert set(ALERT_STORE_BY_MONETIZATION.values()) == set(ALERT_STORES)
 
 
-def test_flatrate_is_the_stream_preference():
-    """The one word the two vocabularies disagree on, and the default every watchlist item is
-    written with — so the mapping being wrong would silently mute the common case."""
-    assert ALERT_PREF_BY_MONETIZATION["flatrate"] == "stream"
-    assert now_available_matches_prefs(["US:flatrate"], list(DEFAULT_ALERT_PREFS))
+def test_flatrate_is_the_stream_store():
+    """The one word the two vocabularies disagree on, and the default every user holds until
+    they change it — so the mapping being wrong would silently mute the common case."""
+    assert ALERT_STORE_BY_MONETIZATION["flatrate"] == "stream"
+    assert now_available_matches_stores(["US:flatrate"], list(DEFAULT_ALERT_STORES))
 
 
-def test_a_type_outside_the_prefs_does_not_match():
-    assert not now_available_matches_prefs(["US:rent"], ["stream"])
-    assert not now_available_matches_prefs(["US:buy"], ["stream", "rent"])
+def test_a_type_outside_the_stores_does_not_match():
+    assert not now_available_matches_stores(["US:rent"], ["stream"])
+    assert not now_available_matches_stores(["US:buy"], ["stream", "rent"])
 
 
 def test_one_wanted_type_among_several_is_enough():
     """One observation can card rent and buy together, so the question is whether *any* token
     is wanted, not all of them."""
-    assert now_available_matches_prefs(["US:rent", "US:buy"], ["buy"])
+    assert now_available_matches_stores(["US:rent", "US:buy"], ["buy"])
 
 
 def test_a_card_with_no_subject_key_matches_nothing():
-    assert not now_available_matches_prefs(None, ["stream", "rent", "buy"])
-    assert not now_available_matches_prefs([], ["stream", "rent", "buy"])
+    assert not now_available_matches_stores(None, ["stream", "rent", "buy"])
+    assert not now_available_matches_stores([], ["stream", "rent", "buy"])
 
 
 def test_a_token_with_no_monetization_half_matches_nothing_rather_than_raising():
     """This runs over the ledger on a schedule; one bad key must not cost every user their
     notifications for the day."""
-    assert not now_available_matches_prefs(["nonsense", "US:"], ["stream"])
+    assert not now_available_matches_stores(["nonsense", "US:"], ["stream"])
 
 
 def test_a_token_with_no_region_still_matches_on_its_type():
     """The permissive direction, deliberately. The region half is not part of the question —
     the poll tracks one region (`catalog.PRIMARY_REGION`) — so a card that somehow lost it is
     still a card saying the film is streamable, and muting it would be the worse failure."""
-    assert now_available_matches_prefs([":flatrate"], ["stream"])
+    assert now_available_matches_stores([":flatrate"], ["stream"])
 
 
-def test_an_empty_preference_set_wants_nothing():
-    """`alert_prefs` is user-editable and may legitimately be emptied — that is how a user
-    turns availability alerts off without leaving the watchlist."""
-    assert not now_available_matches_prefs(["US:flatrate"], [])
+def test_an_empty_store_setting_wants_nothing():
+    """`alert_stores` is user-editable and may legitimately be emptied — that is how a user
+    turns availability alerts off without unfollowing anything (D-44)."""
+    assert not now_available_matches_stores(["US:flatrate"], [])
 
 
 def test_the_push_whitelist_is_d32s_three_beats():
     assert set(PUSH_WHITELIST) == {"release_date", "now_available", "trailer"}
+
+
+def test_a_recipient_holds_the_default_stores_until_the_pass_reads_a_row():
+    """`load_recipients` COALESCEs over an outer join, and the dataclass default is the other
+    half of that: a user with no settings row is alerted on `{stream}` (D-44), not on
+    nothing."""
+    assert Recipient(user_id=uuid4(), deliverable=True).alert_stores == DEFAULT_ALERT_STORES
 
 
 def test_a_deliverable_recipient_queues_and_everyone_else_is_suppressed():

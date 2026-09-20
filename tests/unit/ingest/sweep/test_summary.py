@@ -5,7 +5,6 @@ from collections import Counter
 from upmovies.ingest.sweep import (
     CreditDetachmentResult,
     CreditEventResult,
-    DerivationResult,
     EnumerateResult,
     FieldEventResult,
     RefreshResult,
@@ -25,7 +24,6 @@ def test_reports_every_phase_distinctly():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "enumerate:" in detail
@@ -42,7 +40,6 @@ def test_counts_every_failure_the_phases_recorded():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "5 failed" in detail
@@ -59,7 +56,6 @@ def test_names_the_phase_that_aborted():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "enumerate aborted: aborted after 10 consecutive failures" in detail
@@ -73,7 +69,6 @@ def test_a_clean_pass_says_nothing_about_aborting():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
 
@@ -88,7 +83,6 @@ def test_reports_what_the_field_change_phase_carded():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "events: 4 carded from 31 changes, 27 already carded, 1 failed" in detail
@@ -102,7 +96,6 @@ def test_names_the_field_change_phase_when_it_aborts():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "events aborted: aborted after 10 consecutive failures" in detail
@@ -118,7 +111,6 @@ def test_reports_what_the_credit_phase_carded():
         CreditEventResult(attachments_read=12, events_created=3, skipped=9, failures=1),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "credits: 3 carded from 12 attachments, 9 already carded, 0 held, 1 failed" in detail
@@ -132,7 +124,6 @@ def test_names_the_credit_phase_when_it_aborts():
         CreditEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "credits aborted: aborted after 10 consecutive failures" in detail
@@ -159,7 +150,6 @@ def test_reports_admissions_against_skips_by_reason():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "12 admitted" in detail
@@ -177,7 +167,6 @@ def test_a_pass_that_skipped_nothing_still_reports_a_skip_total():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "3 admitted, skipped 0," in detail
@@ -191,7 +180,6 @@ def test_reports_what_the_release_date_phase_carded():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(changes_read=9, events_created=4, skipped=5),
-        DerivationResult(),
     )
 
     assert "release dates: 4 carded from 9 changes, 5 already carded, 0 failed" in detail
@@ -205,7 +193,6 @@ def test_names_the_release_date_phase_when_it_aborts():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
-        DerivationResult(),
     )
 
     assert "release dates aborted: aborted after 10 consecutive failures" in detail
@@ -224,7 +211,6 @@ def test_reports_the_attachment_histogram():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "seed attachments: 1×8421, 2×932, 3+×140" in detail
@@ -240,41 +226,10 @@ def test_a_pass_that_reached_no_candidates_says_nothing_about_attachments():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     # The label, not the bare word: the credits clause legitimately says "from 0 attachments".
     assert "seed attachments:" not in detail
-
-
-def test_reports_what_the_derivation_phase_wrote():
-    """0 items is the healthy steady state, so the users considered is what distinguishes it
-    from a pass that selected nobody — a dropped grant, or a broken follow-graph filter."""
-    detail = sweep_detail(
-        EnumerateResult(),
-        RefreshResult(),
-        FieldEventResult(),
-        CreditEventResult(),
-        CreditDetachmentResult(),
-        ReleaseEventResult(),
-        DerivationResult(users_considered=42, items_created=7, failures=1),
-    )
-
-    assert "watchlist: 7 derived for 42 users, 1 failed" in detail
-
-
-def test_names_the_derivation_phase_when_it_aborts():
-    detail = sweep_detail(
-        EnumerateResult(),
-        RefreshResult(),
-        FieldEventResult(),
-        CreditEventResult(),
-        CreditDetachmentResult(),
-        ReleaseEventResult(),
-        DerivationResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
-    )
-
-    assert "watchlist aborted: aborted after 10 consecutive failures" in detail
 
 
 def test_the_credits_clause_reports_what_quarantine_is_holding():
@@ -287,7 +242,6 @@ def test_the_credits_clause_reports_what_quarantine_is_holding():
         CreditEventResult(attachments_read=40, events_created=2, skipped=1, held=37),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "credits: 2 carded from 40 attachments, 1 already carded, 37 held, 0 failed" in detail
@@ -310,7 +264,6 @@ def test_reports_the_sanity_holds_apart_from_the_quarantine_count():
         ),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "4 held" in detail
@@ -327,7 +280,6 @@ def test_reports_a_quiet_holds_pass_as_zeroes_rather_than_dropping_the_clause():
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
     assert "holds: 0 new, 0 cleared, 0 expired" in detail

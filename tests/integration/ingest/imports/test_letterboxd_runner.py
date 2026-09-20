@@ -13,7 +13,7 @@ from sqlalchemy import select
 from tests.fixtures.catalog import add_film
 from tests.fixtures.letterboxd import export_zip, ratings_csv, watchlist_csv
 from tests.fixtures.tmdb import make_details
-from upmovies.app.models import Follow, ImportJob, WatchlistDismissal, WatchlistItem
+from upmovies.app.models import Follow, ImportJob, WatchlistDismissal
 from upmovies.app.repos import import_job_repo
 from upmovies.catalog.models import Film, Person
 from upmovies.config import get_settings
@@ -51,7 +51,7 @@ WATCHLIST_TMDB_IDS = (1001, 1002)
 RATED_TMDB_IDS = (2001, 2002, 2003)
 
 # Director, then billing slots 0, 1 and 2. Slot 2 is present in every payload and must never
-# become a follow — it is the line between this cut and `derivation_service`'s deeper one.
+# become a follow — it is the line between this cut and `follow_queries`' deeper `lead` one.
 RATED_CREDITS = {
     2001: {"director": 100, "cast": [200, 201, 202]},
     2002: {"director": 100, "cast": [210, 211, 212]},
@@ -188,10 +188,13 @@ async def test_a_fixture_export_produces_the_expected_follows_watchlist_and_repo
         {"name": "A Film That Does Not Exist", "year": 1999, "kind": "watchlist"}
     ]
 
-    # Two title follows, plus the distinct people of the three promoted ratings. `Heat` and
-    # `The Insider` share a director, which is counted once — the follow is idempotent.
+    # Two title follows — the watchlist films, counted as `watchlist_created` above because a
+    # title follow is what a watchlist row has become (M8) — plus the distinct people of the
+    # three promoted ratings. `Heat` and `The Insider` share a director, which is counted once:
+    # the follow is idempotent.
     follows = await _rows(session, Follow)
-    assert job.follows_created == len(follows) == 2 + len(PROMOTED_PEOPLE)
+    assert job.follows_created == len(PROMOTED_PEOPLE)
+    assert len(follows) == 2 + len(PROMOTED_PEOPLE)
     assert {f.source for f in follows} == {"letterboxd_import"}
     assert {f.entity_id for f in follows if f.entity_type == "person"} == {
         str(p) for p in PROMOTED_PEOPLE
@@ -245,18 +248,18 @@ async def test_a_rating_below_the_cut_costs_no_request_and_is_not_reported(
 
 
 @respx.mock
-async def test_a_watchlisted_film_gets_an_item_carrying_the_import_source(
+async def test_a_watchlisted_film_becomes_a_title_follow_carrying_the_import_source(
     session, session_factory, user, export
 ):
-    # Written before the title follow, so the follow's derivation cannot claim the row as
-    # `derived_from_follow` first — see `follow_service.follow`.
+    """One row per watchlist film, not two (D-1414.9). The store preference it used to carry is
+    one setting per user now (D-44), so there is nothing else for the import to write."""
     _mock_tmdb()
     await _run(session, session_factory, user, export)
 
-    items = await _rows(session, WatchlistItem)
-    assert len(items) == 2
-    assert {item.source for item in items} == {"letterboxd_import"}
-    assert {tuple(item.alert_prefs) for item in items} == {("stream",)}
+    titles = [f for f in await _rows(session, Follow) if f.entity_type == "title"]
+    assert len(titles) == 2
+    assert {f.source for f in titles} == {"letterboxd_import"}
+    assert {f.coverage for f in titles} == {"lead"}
 
 
 # --- running it twice ----------------------------------------------------------------------
@@ -268,13 +271,13 @@ async def test_re_uploading_the_same_export_creates_nothing_new(
 ):
     _mock_tmdb()
     first = await _run(session, session_factory, user, export)
-    before = (len(await _rows(session, Follow)), len(await _rows(session, WatchlistItem)))
+    before = len(await _rows(session, Follow))
 
     second = await _run(session, session_factory, user, export)
 
     assert second.status == "succeeded"
     assert (second.follows_created, second.watchlist_created) == (0, 0)
-    assert (len(await _rows(session, Follow)), len(await _rows(session, WatchlistItem))) == before
+    assert len(await _rows(session, Follow)) == before
     # The report is not idempotency-dependent: the title is still unplaceable.
     assert second.unmatched == first.unmatched
 
@@ -297,15 +300,16 @@ async def test_a_second_run_reads_a_fresh_films_credits_out_of_the_catalog(
     assert details_calls == []
 
 
-# --- the dismissal -------------------------------------------------------------------------
+# --- the mute ------------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_a_dismissed_film_is_not_put_back_on_the_watchlist(
+async def test_an_import_follows_a_muted_film_and_leaves_the_mute_alone(
     session, session_factory, user, export
 ):
-    # D-13: the user already took this film off a derived watchlist, and an import is not a
-    # reason to overrule that.
+    """Both facts are the user's and the import overrules neither (D-1414.9): they listed the
+    film, so the follow is created; they silenced it, so it stays silent and shows on
+    `/me/watchlist` as `muted: true` for them to undo."""
     film = await add_film(session, tmdb_id=1001, title="Dune", slug="dune")
     session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
     await session.commit()
@@ -313,11 +317,9 @@ async def test_a_dismissed_film_is_not_put_back_on_the_watchlist(
     _mock_tmdb()
     job = await _run(session, session_factory, user, export)
 
-    assert job.watchlist_created == 1
-    assert {item.film_id for item in await _rows(session, WatchlistItem)} != {film.id}
-    # The follow is still created — they listed the film, and a follow is a timeline row
-    # rather than an alert.
+    assert job.watchlist_created == 2
     assert str(film.id) in {f.entity_id for f in await _rows(session, Follow)}
+    assert [m.film_id for m in await _rows(session, WatchlistDismissal)] == [film.id]
 
 
 # --- the crash -----------------------------------------------------------------------------
@@ -345,5 +347,4 @@ async def test_a_crash_mid_run_fails_the_job_and_keeps_the_rows_already_done(
     # The first row survived whole: commit-per-row is what makes a partial import worth
     # keeping, and the alternative — one transaction for the job — would discard it.
     assert {f.tmdb_id for f in await _rows(session, Film)} == {1001}
-    assert len(await _rows(session, WatchlistItem)) == 1
     assert len(await _rows(session, Follow)) == 1

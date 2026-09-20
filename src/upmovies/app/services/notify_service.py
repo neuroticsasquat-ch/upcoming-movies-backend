@@ -5,13 +5,14 @@ chain. It is the only writer of `app.notification` — ingest never calls it, an
 either — because the decision is a fan-out over *every* user, and a route only ever knows about
 the one who made the request.
 
-**Two branches, from INV-7's two halves.** A watchlist item is the only row that produces a
-push, so the alert branch reads `app.watchlist_item` and admits only D-32's whitelist. A follow
-produces timeline rows, so the digest branch reads the follow graph through
-`app.follow_queries` — the same builders `/me/timeline` hands to the feed, which is what keeps
-"in my digest" and "on my timeline" from drifting into two answers. A user who both follows
-and watchlists a film gets both rows: an alert and a digest line are different deliveries of
-the same news, not duplicates of one (`app.models.Notification`).
+**Two branches, one graph (M8).** Both read `app.follow_queries`, at its two grains: the alert
+branch takes `watchlist_film_ids` — what this user's follows *cover*, at each person follow's
+coverage, minus their mutes — and admits only D-32's whitelist; the digest branch takes the
+D-11 builders `/me/timeline` hands to the feed, which is what keeps "in my digest" and "on my
+timeline" from drifting into two answers. A film in both sets earns both rows: an alert and a
+digest line are different deliveries of the same news, not duplicates of one
+(`app.models.Notification`). A **muted** film earns neither — the exclusion is inside the
+builders, so it reaches this pass without a rule of its own (D-45).
 
 **Push is a second channel on the alert branch, not a third branch** (D-36). A user with a
 `push_subscription` row gets the same whitelisted events queued twice, `channel = 'email'` and
@@ -43,13 +44,24 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import Select, and_, exists, func, or_, select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import Select, Text, and_, cast, exists, func, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.entitlements import entitled_user_clause
-from upmovies.app.follow_queries import events_naming_followed_people, followed_film_ids
-from upmovies.app.models import Follow, Notification, PushSubscription, User, WatchlistItem
+from upmovies.app.follow_queries import (
+    events_naming_followed_people,
+    followed_film_ids,
+    watchlist_film_ids,
+)
+from upmovies.app.models import (
+    DEFAULT_ALERT_STORES,
+    Follow,
+    Notification,
+    PushSubscription,
+    User,
+    UserSettings,
+)
 from upmovies.app.verification import verified_user_clause
 from upmovies.catalog.models import Film
 from upmovies.ingest.runs import last_successful_run_started_at, record_progress
@@ -65,7 +77,7 @@ NOTIFY_RUN_KIND = "notify"
 so the name is part of the contract rather than a label."""
 
 ALWAYS_ON_ALERT_TYPES = frozenset({"release_date", "trailer"})
-"""The whitelist beats a watchlist item cannot switch off (D-32, `WatchlistItem.alert_prefs`).
+"""The whitelist beats no setting can switch off (D-32, beside `UserSettings.alert_stores`).
 A date assigned or moved and a new trailer are *why* the film is on the list."""
 
 NOW_AVAILABLE_EVENT_TYPE = "now_available"
@@ -81,14 +93,14 @@ PUSH_WHITELIST = tuple(sorted(ALWAYS_ON_ALERT_TYPES | {NOW_AVAILABLE_EVENT_TYPE}
 """D-32 in full. Everything outside it is digest material; nothing `unconfirmed` is in it at
 all, because the window admits only `confidence = 'confirmed'` before the type is even read."""
 
-ALERT_PREF_BY_MONETIZATION = {"flatrate": "stream", "rent": "rent", "buy": "buy"}
-"""The one place `catalog.MONETIZATION_TYPES` and `app.models.ALERT_PREFS` meet.
+ALERT_STORE_BY_MONETIZATION = {"flatrate": "stream", "rent": "rent", "buy": "buy"}
+"""The one place `catalog.MONETIZATION_TYPES` and `app.models.ALERT_STORES` meet.
 
 They disagree on one word: TMDB calls a subscription offer `flatrate` (and so does
 `availability_first_seen`, and so do the `US:flatrate` tokens `now_available` writes into
-`subject_key`), while D-14 spells the user-facing preference `stream`. Mapping them here, once,
-is what stops a `{stream}` watchlist item — the server default, and so the setting most users
-will have — from silently matching nothing at all. `tests/unit/app/test_notify_decisions.py`
+`subject_key`), while D-44 spells the user-facing setting `stream`. Mapping them here, once,
+is what stops a `{stream}` setting — the column default, and so the value most users will
+have — from silently matching nothing at all. `tests/unit/app/test_notify_decisions.py`
 pins the mapping to `MONETIZATION_TYPES`, so a fourth offer kind fails a test rather than
 quietly alerting nobody about itself."""
 
@@ -98,7 +110,7 @@ class NotifyResult:
     """What one decision pass considered and wrote."""
 
     users_considered: int = 0
-    """Users holding a follow or a watchlist item — the pass's working set, not the user table.
+    """Users holding a follow — the pass's working set, not the user table.
     Reported because `0 queued` is a perfectly healthy quiet day and says nothing on its own
     about whether the pass had anybody to decide for."""
     events_considered: int = 0
@@ -130,6 +142,13 @@ class Recipient:
     deliverable: bool
     """Verified *and* entitled. The two suppress by the same rule and in the same place (D-39),
     so they are one answer here rather than two flags a caller could combine differently."""
+    alert_stores: tuple[str, ...] = DEFAULT_ALERT_STORES
+    """Which availability beats this user is alerted on (D-44).
+
+    Read with the recipient rather than per event, because it is one row per user and the
+    alternative is joining `app.user_settings` into the alert query — where a user with no
+    settings row would need the same `COALESCE` all over again. `()` is a real value and means
+    no store alerts; the D-32 whitelist beats are unaffected either way."""
     has_push: bool = False
     """Whether this user has a `push_subscription` row (D-36).
 
@@ -149,10 +168,10 @@ class Recipient:
         return "queued" if self.deliverable else "suppressed"
 
 
-def now_available_matches_prefs(
-    subject_key: Sequence[str] | None, alert_prefs: Sequence[str]
+def now_available_matches_stores(
+    subject_key: Sequence[str] | None, alert_stores: Sequence[str]
 ) -> bool:
-    """Whether a `now_available` card names an availability type this item wants (D-14, D-28).
+    """Whether a `now_available` card names an availability type this user wants (D-44, D-28).
 
     The card's `subject_key` carries one `region:monetization` token per type the film was
     newly seen under — one card can announce rent *and* buy in a single observation — so this
@@ -162,9 +181,9 @@ def now_available_matches_prefs(
     runs over the whole ledger on a schedule, and one malformed key must not cost every user
     their notifications for the day. An empty or absent `subject_key` is such a card with no
     types at all, and matches nothing on the same terms."""
-    wanted = set(alert_prefs)
+    wanted = set(alert_stores)
     return any(
-        ALERT_PREF_BY_MONETIZATION.get(token.partition(":")[2]) in wanted
+        ALERT_STORE_BY_MONETIZATION.get(token.partition(":")[2]) in wanted
         for token in subject_key or ()
     )
 
@@ -218,48 +237,77 @@ def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
 
 
 async def load_recipients(session: AsyncSession) -> list[Recipient]:
-    """Every user with a follow or a watchlist item, oldest account first.
+    """Every user with a follow, oldest account first.
+
+    One `EXISTS`, not two: a follow is the only thing a user keeps now (M8), so it is the whole
+    working set — an account that follows nothing is owed no decision by definition, and
+    selecting it would buy three statements per signup on every run.
 
     Both the entitlement and the verification rule are read here, as columns rather than as
     filters, because this pass owes a `suppressed` row to the users they exclude (D-39) —
     filtering them out in SQL is exactly the silent skip the decision is meant to replace.
 
-    The `EXISTS` pair is what keeps the pass proportional to the graph rather than to signups:
-    an account that follows nothing and watchlists nothing is owed no decision by definition,
-    and selecting it would buy three statements per signup on every run."""
+    `alert_stores` is `COALESCE`d over an **outer** join for the reason the digest pass reads
+    the cadence that way: the settings row is created lazily (`app.models.UserSettings`), so
+    most users have none, and an inner join would drop every one of them — while creating one
+    here would turn "this subscriber opened their settings" into "this account was once
+    considered" (`app.services.settings_service`)."""
     rows = await session.execute(
         select(
             User.id,
             and_(entitled_user_clause(), verified_user_clause()).label("deliverable"),
             exists().where(PushSubscription.user_id == User.id).label("has_push"),
+            func.coalesce(
+                UserSettings.alert_stores, cast(list(DEFAULT_ALERT_STORES), ARRAY(Text))
+            ).label("alert_stores"),
         )
-        .where(
-            or_(
-                exists().where(Follow.user_id == User.id),
-                exists().where(WatchlistItem.user_id == User.id),
-            )
-        )
+        .outerjoin(UserSettings, UserSettings.user_id == User.id)
+        .where(exists().where(Follow.user_id == User.id))
         .order_by(User.created_at, User.id)
     )
     return [
-        Recipient(user_id=row.id, deliverable=row.deliverable, has_push=row.has_push)
+        Recipient(
+            user_id=row.id,
+            deliverable=row.deliverable,
+            has_push=row.has_push,
+            alert_stores=tuple(row.alert_stores),
+        )
         for row in rows
     ]
 
 
-async def alert_event_ids(session: AsyncSession, *, user_id: UUID, since: datetime) -> list[UUID]:
-    """The window's events this user's watchlist earns an alert for (D-32).
+async def alert_event_ids(
+    session: AsyncSession,
+    *,
+    recipient: Recipient,
+    since: datetime,
+    today: date,
+    excluded_statuses: frozenset[str],
+    max_age_days: int,
+) -> list[UUID]:
+    """The window's events this user's **watchlist** earns an alert for (D-32, D-42).
 
-    The whitelist is applied in SQL; the `now_available` preference check is not, because it
+    The watchlist is `follow_queries.watchlist_film_ids` and nothing else: the films this
+    user's follows cover at their coverage, inside the alert window, minus their mutes. Taking
+    the builder rather than restating the rule is what keeps this pass, `/me/watchlist`, the
+    calendar and the slate agreeing about one set.
+
+    The whitelist is applied in SQL; the `now_available` store check is not, because it
     compares two arrays through a vocabulary mapping and reads far better as one named
     predicate than as a `CASE` over `unnest`. The SQL half has already cut the rows to this
     user's watchlist and this window, so what Python filters is a handful of events, not the
     ledger."""
     rows = await session.execute(
-        select(Event.id, Event.event_type, Event.subject_key, WatchlistItem.alert_prefs)
-        .join(WatchlistItem, WatchlistItem.film_id == Event.film_id)
+        select(Event.id, Event.event_type, Event.subject_key)
         .where(
-            WatchlistItem.user_id == user_id,
+            Event.film_id.in_(
+                watchlist_film_ids(
+                    user_id=recipient.user_id,
+                    today=today,
+                    excluded_statuses=excluded_statuses,
+                    max_age_days=max_age_days,
+                )
+            ),
             Event.event_type.in_(PUSH_WHITELIST),
             Event.id.in_(deliverable_events(since)),
         )
@@ -269,7 +317,7 @@ async def alert_event_ids(session: AsyncSession, *, user_id: UUID, since: dateti
         row.id
         for row in rows
         if row.event_type in ALWAYS_ON_ALERT_TYPES
-        or now_available_matches_prefs(row.subject_key, row.alert_prefs)
+        or now_available_matches_stores(row.subject_key, recipient.alert_stores)
     ]
 
 
@@ -356,6 +404,7 @@ async def decide_for_user(
     since: datetime,
     today: date,
     excluded_statuses: frozenset[str],
+    max_age_days: int,
 ) -> list[Decision]:
     """Both branches for one user, written in one statement. Returns the decisions written.
 
@@ -363,7 +412,14 @@ async def decide_for_user(
     the same event, the same `alert` kind, once per channel. Deliberately derived from the one
     list rather than queried twice — "the push whitelist" is D-32's list, and a push branch
     that selected its own events would be free to drift from the mail that accompanies it."""
-    alerts = await alert_event_ids(session, user_id=recipient.user_id, since=since)
+    alerts = await alert_event_ids(
+        session,
+        recipient=recipient,
+        since=since,
+        today=today,
+        excluded_statuses=excluded_statuses,
+        max_age_days=max_age_days,
+    )
     digests = await digest_event_ids(
         session,
         user_id=recipient.user_id,
@@ -386,6 +442,7 @@ async def run_notify_pass(
     run_id: UUID,
     today: date,
     excluded_statuses: frozenset[str],
+    max_age_days: int,
     failure_threshold: int = 10,
 ) -> NotifyResult:
     """Decide what every user is owed about the events published since the last successful run.
@@ -437,6 +494,7 @@ async def run_notify_pass(
                     since=since,
                     today=today,
                     excluded_statuses=excluded_statuses,
+                    max_age_days=max_age_days,
                 )
                 if written:
                     # One unit of work is one user, as it is for every other per-item loop in
