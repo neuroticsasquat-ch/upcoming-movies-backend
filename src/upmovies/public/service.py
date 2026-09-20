@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    CTE,
     ColumnElement,
     Date,
     Select,
@@ -1284,42 +1285,61 @@ def _calendar_type_rank(release_type: ColumnElement[int]) -> ColumnElement[int]:
     return case(_CALENDAR_TYPE_RANK, value=release_type, else_=len(_CALENDAR_BUCKET_ORDER))
 
 
-async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
-    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    # (2, 3, 4, 5) — derived, never drifts. The region filter below is already US-only, which
-    # is exactly the cut the home-release types (4, 5) are displayable in, so widening the
-    # bucket map widens the calendar without a second region rule (D-26).
-    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)
+def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None) -> CTE:
+    """The governing release date per (film, category): the earliest date in the subject,
+    collapsed *before* any window filter (NEU-1206).
 
-    # Governing release date per (film, category): collapse to the earliest date for the
-    # subject before applying the upcoming filter (NEU-1206).
-    governing = (
-        select(
-            FilmReleaseDate.film_id.label("film_id"),
-            FilmReleaseDate.release_type.label("release_type"),
-            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
-                "governing_date"
-            ),
-        )
-        .where(
+    The types are `RELEASE_TYPE_BUCKETS`' keys — (2, 3, 4, 5), derived, never drifts — and the
+    region filter is already US-only, which is exactly the cut the home-release types (4, 5) are
+    displayable in, so widening the bucket map widens both calendars without a second region
+    rule (D-26).
+
+    `watchlist_user_id` narrows the set to that user's watchlist rows, any `source`. It belongs
+    here rather than in a later predicate for the reason `get_ical_feed` puts it here: the
+    collapse is per subject, so a user filter applied after it would be collapsing over rows
+    the caller cannot see.
+    """
+    governing = select(
+        FilmReleaseDate.film_id.label("film_id"),
+        FilmReleaseDate.release_type.label("release_type"),
+        func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
+            "governing_date"
+        ),
+    )
+    if watchlist_user_id is not None:
+        governing = governing.join(
+            WatchlistItem, WatchlistItem.film_id == FilmReleaseDate.film_id
+        ).where(WatchlistItem.user_id == watchlist_user_id)
+    return (
+        governing.where(
             FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
-            FilmReleaseDate.release_type.in_(surfaced_types),
+            FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
         )
         .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
-        .cte("governing")
+        .cte(name)
     )
 
+
+async def _calendar_page(
+    session: AsyncSession,
+    *,
+    governing: CTE,
+    visible: tuple[ColumnElement[bool], ...],
+    limit: int,
+    offset: int,
+) -> CalendarResponse:
+    """One page of a calendar, from a governing CTE and the predicates that decide which of its
+    rows the caller may see.
+
+    The public calendar and the caller's own (`get_watchlist_calendar`) differ in exactly those
+    two inputs — which films, and which cuts. Paging by date, within-date ordering and the
+    decoration are spelled once, here, because the frontend renders both through one component
+    and one set of grouping helpers: a page whose shape or ordering drifted would be a second
+    component in disguise (D-1411.3).
+    """
     # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
     # film rows — so the UI shows "N dates at a time" with a deterministic "view more".
     # `total` is the number of distinct upcoming dates.
-    visible = (
-        governing.c.governing_date >= today,
-        Film.slug.is_not(None),
-        func.coalesce(Film.adult, False).is_(False),
-        or_(Film.runtime.is_(None), Film.runtime == 0, Film.runtime >= 75),
-        Film.popularity > 1.5,
-    )
-
     distinct_dates = (
         select(governing.c.governing_date.label("d"))
         .select_from(governing)
@@ -1383,6 +1403,57 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         for row in rows
     ]
     return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
+    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
+    governing = _calendar_governing_cte(name="governing")
+    # The noise cuts that keep a public listing clean. They are the public route's alone: the
+    # watchlist calendar next door deliberately carries none of them (D-1411.2).
+    visible = (
+        governing.c.governing_date >= today,
+        Film.slug.is_not(None),
+        func.coalesce(Film.adult, False).is_(False),
+        or_(Film.runtime.is_(None), Film.runtime == 0, Film.runtime >= 75),
+        Film.popularity > 1.5,
+    )
+    return await _calendar_page(
+        session, governing=governing, visible=visible, limit=limit, offset=offset
+    )
+
+
+async def get_watchlist_calendar(
+    session: AsyncSession, *, user_id: UUID, limit: int, offset: int
+) -> CalendarResponse:
+    """`GET /me/calendar`: the release calendar narrowed to this user's watchlist (D-34, D-39).
+
+    Same response shape, same date-paging, same buckets, same governing-date rule and the same
+    upcoming-only window as `get_calendar` — the frontend renders both tabs through one
+    component, so the only thing allowed to differ is which films.
+
+    That set is the `.ics` feed's, not the public listing's, and for the feed's reasons:
+
+    - **Watchlist rows only, any `source`.** A follow produces timeline rows and nothing else
+      (D-13), so following a director puts nothing here; a derived item *does* count, because
+      the follow graph put it there on the user's behalf and it is exactly the film they would
+      otherwise miss.
+    - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
+      user has on their own watchlist is not noise to them, and applying the cuts here would
+      make this page disagree with the same user's subscribed calendar — the bug this endpoint
+      exists to prevent (D-1411.2). Only the slug rule survives, for the reason every surface
+      applies it: a row links to the film's page and there is no page to link.
+
+    The window is `get_calendar`'s `>= today`, *not* the feed's reach into the past (D-1411.1).
+    That reach exists for a client reason — a subscribed calendar drops every event a feed stops
+    publishing — and a JSON page re-rendered on every visit has no such client; paging
+    soonest-first over a past window would open page one on releases a year gone.
+    """
+    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
+    governing = _calendar_governing_cte(name="watchlist_governing", watchlist_user_id=user_id)
+    visible = (governing.c.governing_date >= today, Film.slug.is_not(None))
+    return await _calendar_page(
+        session, governing=governing, visible=visible, limit=limit, offset=offset
+    )
 
 
 async def get_ical_feed(

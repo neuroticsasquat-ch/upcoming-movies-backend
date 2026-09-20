@@ -758,6 +758,19 @@ know existed. A user's removal of a derived item is a **dismissal** and is remem
 same follow never re-derives it.
 _Avoid_: auto-follow, suggestion (it is added, not offered), recommendation.
 
+**Watchlist calendar**:
+The release calendar narrowed to the reader's own **watchlist items**, derived ones included —
+what a subscriber sees when they ask "what of mine is coming out?". It is the calendar with a
+where-clause, not a different kind of surface: same governing-date rule, same buckets, same
+upcoming-only window, same date-paged shape as the all-releases calendar, and none of the
+popularity/runtime cuts that keep noise off the public listing (a film on your own watchlist is
+not noise to you). It is drawn from the watchlist, never the follow graph: following a director
+puts nothing on it. The **iCal feed** is its subscribed form and holds the same films and dates;
+the only thing the feed adds is a bounded reach into the past, because a subscribed client drops
+whatever a feed stops publishing.
+_Avoid_: my calendar (the nav item is "Calendar"), follow calendar, personal feed (that is the
+timeline), subscription calendar (that is the iCal feed's delivery form, not a different set).
+
 **Push whitelist**:
 The closed set of beats allowed to interrupt a user about a watchlist title: a date assigned, a
 date moved (a **slip** especially), a home-release date, **now available**, a trailer. Everything
