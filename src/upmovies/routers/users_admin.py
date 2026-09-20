@@ -2,9 +2,9 @@
 their entitlement from the admin UI (D-38).
 
 Human-facing, so `require_current_admin` (session cookie + `is_admin`) rather than the
-`ADMIN_TOKEN` `require_admin` that gates `/admin/invites` next door — whose shape this otherwise
-borrows. Granting access is a decision a person makes about another person, and the audit line it
-writes is only worth writing if it names one.
+machine-facing `ADMIN_TOKEN` `require_admin` — the same gate `/admin/invites` next door sits behind
+since NEU-1408, whose shape this otherwise borrows. Granting access is a decision a person makes
+about another person, and the audit line it writes is only worth writing if it names one.
 
 These routes are the *only* way `app.user.entitled_until` is written until the billing project
 takes over. There is no signup trial and no global setting (D-37), so an account that nobody has

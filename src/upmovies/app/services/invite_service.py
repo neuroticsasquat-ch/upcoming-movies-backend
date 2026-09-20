@@ -36,8 +36,9 @@ async def create_invite(db: AsyncSession, *, email_hint: str | None = None) -> I
     return invite
 
 
-async def list_invites(db: AsyncSession) -> list[Invite]:
-    """Admin-only listing of every invite ever issued."""
+async def list_invites(db: AsyncSession) -> list[tuple[Invite, str | None]]:
+    """Admin-only listing of every invite ever issued, newest first, each with the email of the
+    account that spent it (`None` while outstanding)."""
     return await invite_repo.list_all(db)
 
 
