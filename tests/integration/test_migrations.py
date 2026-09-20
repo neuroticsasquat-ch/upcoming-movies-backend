@@ -136,3 +136,147 @@ async def test_head_migration_round_trips(test_engine: AsyncEngine, migrated_db_
     model = await _snapshot(test_engine)
     migrated = await _migrated_snapshot(migrated_db_url)
     _assert_parity(model, migrated)
+
+
+# --- the M8 data migration (NEU-1414) -------------------------------------------------------
+
+_BEFORE_M8 = "f798756f89c7"
+"""The revision immediately before M8 (`0a2426602d7c`), which is the one that drops
+`app.watchlist_item` and copies what a user chose into follows."""
+
+
+@pytest.fixture
+async def m8_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision *short* of M8, so a test can seed the rows the
+    migration is supposed to carry and then run it.
+
+    Its own database rather than the session-scoped one above: that one is at head by
+    definition, and the thing under test is the transition. Function-scoped because seeding and
+    upgrading are what the test does, and a second test must not inherit the first's rows."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_m8")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            _alembic(url, "upgrade", _BEFORE_M8)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m8_db_url: str):
+    """The one-shot copy, against every kind of row the old model could hold (D-1414.10).
+
+    What a user or their import *chose* becomes a title follow carrying its own `source` and
+    `created_at` — the date they first showed interest, which is what the computed list sorts
+    on. What the follow graph derived is not copied: its follows are still there and recompute
+    it on read. A film they already followed keeps the follow it had, `created_at` included,
+    because that row is at least as old and at least as truthful."""
+    engine = create_async_engine(m8_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO app."user" (id, email, password_hash, display_name)
+                VALUES ('11111111-1111-1111-1111-111111111111', 'm8@example.com', 'x', 'M8')
+                """)
+            )
+            for n, film_id in enumerate(
+                (
+                    "22222222-2222-2222-2222-222222222222",
+                    "33333333-3333-3333-3333-333333333333",
+                    "44444444-4444-4444-4444-444444444444",
+                    "55555555-5555-5555-5555-555555555555",
+                ),
+                start=1,
+            ):
+                await conn.execute(
+                    text(
+                        "INSERT INTO catalog.film (id, tmdb_id, title) "
+                        "VALUES (:id, :tmdb_id, :title)"
+                    ),
+                    {"id": film_id, "tmdb_id": 9000 + n, "title": f"Film {n}"},
+                )
+            await conn.execute(
+                text("""
+                INSERT INTO app.watchlist_item (user_id, film_id, source, created_at) VALUES
+                  ('11111111-1111-1111-1111-111111111111',
+                   '22222222-2222-2222-2222-222222222222', 'manual', '2024-01-02T00:00:00Z'),
+                  ('11111111-1111-1111-1111-111111111111',
+                   '33333333-3333-3333-3333-333333333333',
+                   'letterboxd_import', '2024-02-03T00:00:00Z'),
+                  ('11111111-1111-1111-1111-111111111111',
+                   '44444444-4444-4444-4444-444444444444',
+                   'derived_from_follow', '2024-03-04T00:00:00Z'),
+                  ('11111111-1111-1111-1111-111111111111',
+                   '55555555-5555-5555-5555-555555555555', 'manual', '2024-04-05T00:00:00Z')
+                """)
+            )
+            # Already followed by title, with an older row than the item above it.
+            await conn.execute(
+                text("""
+                INSERT INTO app.follow (user_id, entity_type, entity_id, source, created_at)
+                VALUES ('11111111-1111-1111-1111-111111111111', 'title',
+                        '55555555-5555-5555-5555-555555555555', 'manual',
+                        '2023-12-01T00:00:00Z')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.watchlist_dismissal (user_id, film_id)
+                VALUES ('11111111-1111-1111-1111-111111111111',
+                        '44444444-4444-4444-4444-444444444444')
+                """)
+            )
+
+        _alembic(m8_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            follows = (
+                await conn.execute(
+                    text(
+                        "SELECT entity_id, source, coverage, created_at FROM app.follow "
+                        "WHERE entity_type = 'title' ORDER BY entity_id"
+                    )
+                )
+            ).all()
+            assert [(row[0], row[1], row[2]) for row in follows] == [
+                ("22222222-2222-2222-2222-222222222222", "manual", "lead"),
+                ("33333333-3333-3333-3333-333333333333", "letterboxd_import", "lead"),
+                ("55555555-5555-5555-5555-555555555555", "manual", "lead"),
+            ]
+            # The copied rows keep the date the user first showed interest; the row that was
+            # already a follow keeps its own, older one.
+            assert [row[3].date().isoformat() for row in follows] == [
+                "2024-01-02",
+                "2024-02-03",
+                "2023-12-01",
+            ]
+            # The mute survives (D-40), on a film nothing copied.
+            mutes = (
+                (await conn.execute(text("SELECT film_id FROM app.watchlist_dismissal")))
+                .scalars()
+                .all()
+            )
+            assert [str(film_id) for film_id in mutes] == ["44444444-4444-4444-4444-444444444444"]
+            # And the table is gone.
+            exists = await conn.scalar(text("SELECT to_regclass('app.watchlist_item') IS NOT NULL"))
+            assert exists is False
+            stores = await conn.scalar(
+                text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = 'app' AND table_name = 'user_settings' "
+                    "AND column_name = 'alert_stores'"
+                )
+            )
+            assert stores is not None
+    finally:
+        await engine.dispose()

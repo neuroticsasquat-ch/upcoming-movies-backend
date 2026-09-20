@@ -34,13 +34,6 @@ from upmovies.ingest.sweep.credit_events import (
 from upmovies.ingest.sweep.credit_events import (
     sanity_holds as sanity_holds,
 )
-from upmovies.ingest.sweep.derivation_phase import DerivationResult as DerivationResult
-from upmovies.ingest.sweep.derivation_phase import (
-    load_derivation_user_ids as load_derivation_user_ids,
-)
-from upmovies.ingest.sweep.derivation_phase import (
-    run_watchlist_derivation as run_watchlist_derivation,
-)
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult as EnumerateResult
 from upmovies.ingest.sweep.enumerate_phase import run_sweep_enumerate as run_sweep_enumerate
 from upmovies.ingest.sweep.field_events import CatalogFieldEvent as CatalogFieldEvent

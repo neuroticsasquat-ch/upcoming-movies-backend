@@ -1,6 +1,7 @@
 """The follow graph's rows (D-10). Repo: pure DB I/O, no commits, no business rules."""
 
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import NamedTuple
 from uuid import UUID
 
@@ -78,12 +79,30 @@ async def get(
 
 
 async def create(
-    db: AsyncSession, *, user_id: UUID, entity_type: str, entity_id: str, source: str
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    entity_type: str,
+    entity_id: str,
+    source: str,
+    coverage: str,
 ) -> Follow:
-    follow = Follow(user_id=user_id, entity_type=entity_type, entity_id=entity_id, source=source)
+    follow = Follow(
+        user_id=user_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        source=source,
+        coverage=coverage,
+    )
     db.add(follow)
     await db.flush()
     return follow
+
+
+async def set_coverage(db: AsyncSession, follow: Follow, *, coverage: str) -> None:
+    """Replace the coverage on the loaded row. Caller commits."""
+    follow.coverage = coverage
+    await db.flush()
 
 
 async def list_for_user(db: AsyncSession, user_id: UUID) -> list[Follow]:
@@ -122,26 +141,31 @@ async def get_entity_label(
 
 
 async def entity_labels(
-    db: AsyncSession, follows: list[Follow]
+    db: AsyncSession, entities: Iterable[tuple[str, str]]
 ) -> dict[tuple[str, str], EntityLabel]:
-    """The labels for a whole list of follows, keyed by `(entity_type, entity_id)`.
+    """The labels for a whole list of `(entity_type, entity_id)` pairs, keyed by the pair.
 
     One grouped lookup per entity type present — at most four statements for a list of any
-    length — rather than a correlated subquery or a round trip per row. A follow whose entity the
-    catalog does not hold simply has no key here; the caller renders it with nulls and keeps the
-    row (D-40)."""
+    length — rather than a correlated subquery or a round trip per row. An entity the catalog
+    does not hold simply has no key here; the caller renders it with nulls and keeps the row
+    (D-40).
+
+    Takes the pairs rather than `Follow` rows because the watchlist asks the same question of
+    the *covering* follows it read as bare columns (`follow_queries.covering_follows`), and a
+    second grouped lookup spelled over there is how the two lists would come to label the same
+    person differently."""
     ids_by_type: dict[str, dict[int | UUID, list[str]]] = defaultdict(lambda: defaultdict(list))
-    for follow in follows:
-        if follow.entity_type not in _LABEL_COLUMNS:
+    for entity_type, entity_id in entities:
+        if entity_type not in _LABEL_COLUMNS:
             continue
-        key = _entity_key(follow.entity_type, follow.entity_id)
+        key = _entity_key(entity_type, entity_id)
         if key is not None:
             # Keyed by the catalog pk so the row that comes back can be matched to the follow it
             # belongs to without re-normalising, and holding *every* spelling that resolved to
             # that pk: "0287" and "287" are the same person, and a writer that bypassed
             # `normalise_entity_id` can leave both in the table. Keeping one would label one of
             # the two rows and silently null the other.
-            ids_by_type[follow.entity_type][key].append(follow.entity_id)
+            ids_by_type[entity_type][key].append(entity_id)
 
     labels: dict[tuple[str, str], EntityLabel] = {}
     for entity_type, ids in ids_by_type.items():

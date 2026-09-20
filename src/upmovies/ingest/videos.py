@@ -9,22 +9,22 @@ create. They stay two passes rather than one loop because a TMDB outage on one e
 not cost the other its whole pass — the abort guards are per phase, the way the sweep's are.
 
 **The scoped set is `providers.load_poll_set`, unchanged**, and it already carries D-35's
-"plus in-play films with a follow": that set's second rule is *anybody follows the title or
-has it on their watchlist*, with no date bound at all, so a followed film two years from
-release is in it. This matters more here than it does for providers — a trailer precedes a
-theatrical date by months, so for videos the followed-but-unreleased film is the *typical*
-subject rather than the exception, and the poll would be pointless without it.
+"plus films somebody is waiting on": that set's second rule is the computed watchlist asked of
+every user at once (`follow_queries.covered_by_any_user_clause`, D-1414.3), which has no
+release-date floor, so a followed film two years from release is in it. This matters more here
+than it does for providers — a trailer precedes a theatrical date by months, so for videos the
+followed-but-unreleased film is the *typical* subject rather than the exception, and the poll
+would be pointless without it.
 
-What that rule does *not* reach is a film followed only through a **person, company or
-franchise**. Those follows put a film on a user's timeline (D-11) but name no film directly,
-and they reach this set only where D-13 has already derived a watchlist item — director or
-top-three billing, in play, and cancellable by a dismissal. So a film followed through its
-writer or its fifth-billed actor is on that user's timeline and is not polled. Deliberate,
-and the narrow reading of "the same scoped set": widening it here would fork the two passes'
-selection, and widening it in `poll_set_clause` would quietly re-scope the provider poll too.
-Following one prolific director would add every in-play film they are credited on to a set
-that already costs two TMDB requests per film. Worth revisiting on evidence of missed beats,
-not before.
+M8 widened that rule to reach a film followed only through a **person, company or franchise**,
+which the previous note said it could not. That was the D-13 derivation's limitation, and there
+is no derivation any more: a person follow covers the director-or-top-3 credits its `coverage`
+names (or every seed-grade credit at `all`), a company follow its films, a franchise follow its
+collection. So a followed director's next film is polled for its trailer now, which is the beat
+this poll exists to catch. What keeps that from costing a back catalogue is the alert window
+(`catalog.queries.alert_window_clause`) bounding the three indirect branches, and `lead` being
+the default coverage — and it is bounded in the same shape for the provider poll beside it,
+because the two passes share the one selection query on purpose.
 
 **First observation is a baseline, never an event** (ADR-0014). The marker is
 `film.videos_observed_at`, not "does this film have ledger rows": the ordinary first read of an
@@ -347,6 +347,7 @@ async def run_video_poll(
     today: date,
     min_age_days: int,
     max_age_days: int,
+    excluded_statuses: frozenset[str],
     now: datetime | None = None,
     failure_threshold: int = 10,
     log_every: int = 250,
@@ -358,7 +359,11 @@ async def run_video_poll(
 
     async with owned_session(session_factory) as s:
         targets = await load_poll_set(
-            s, today=today, min_age_days=min_age_days, max_age_days=max_age_days
+            s,
+            today=today,
+            min_age_days=min_age_days,
+            max_age_days=max_age_days,
+            excluded_statuses=excluded_statuses,
         )
     result.selected = len(targets)
     log.info("videos: %d films due", result.selected)

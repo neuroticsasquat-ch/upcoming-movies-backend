@@ -14,7 +14,7 @@ import respx
 from sqlalchemy import select
 
 from tests.fixtures.tmdb import make_details
-from upmovies.app.models import Follow, ImportJob, WatchlistDismissal, WatchlistItem
+from upmovies.app.models import Follow, ImportJob, WatchlistDismissal
 from upmovies.app.repos import import_job_repo
 from upmovies.catalog.models import Film, Person
 from upmovies.config import get_settings
@@ -175,14 +175,15 @@ async def test_the_two_lists_produce_the_expected_films_follows_and_watchlist(
     assert job.unmatched == []
 
     assert job.watchlist_created == 2
-    items = await _rows(session, WatchlistItem)
-    assert {item.source for item in items} == {"tmdb_import"}
-    assert {tuple(item.alert_prefs) for item in items} == {("stream",)}
-
     follows = await _rows(session, Follow)
     assert {f.source for f in follows} == {"tmdb_import"}
-    # Two title follows, plus the distinct people of the two favorites.
-    assert job.follows_created == len(follows) == 2 + len(PROMOTED_PEOPLE)
+    titles = [f for f in follows if f.entity_type == "title"]
+    assert len(titles) == 2
+    assert {f.coverage for f in titles} == {"lead"}
+    # The two title follows are what `watchlist_created` counted (M8); `follows_created` is the
+    # distinct people of the two favorites.
+    assert job.follows_created == len(PROMOTED_PEOPLE)
+    assert len(follows) == 2 + len(PROMOTED_PEOPLE)
     assert {f.entity_id for f in follows if f.entity_type == "person"} == {
         str(p) for p in PROMOTED_PEOPLE
     }
@@ -215,7 +216,6 @@ async def test_a_film_on_both_lists_gets_both_treatments(session, session_factor
     film = (await session.execute(select(Film).where(Film.tmdb_id == 1002))).scalar_one()
     follows = await _rows(session, Follow)
     assert str(film.id) in {f.entity_id for f in follows if f.entity_type == "title"}
-    assert film.id in {item.film_id for item in await _rows(session, WatchlistItem)}
     assert {"101", "210", "211"} <= {f.entity_id for f in follows if f.entity_type == "person"}
 
 
@@ -253,33 +253,30 @@ async def test_a_film_tmdb_has_deleted_is_reported_rather_than_failing_the_job(
 async def test_re_running_the_same_account_creates_nothing_new(session, session_factory, user):
     _mock_tmdb()
     await _run(session, session_factory, user)
-    before = (len(await _rows(session, Follow)), len(await _rows(session, WatchlistItem)))
+    before = len(await _rows(session, Follow))
 
     second = await _run(session, session_factory, user)
 
     assert second.status == "succeeded"
     assert (second.follows_created, second.watchlist_created) == (0, 0)
-    assert (len(await _rows(session, Follow)), len(await _rows(session, WatchlistItem))) == before
+    assert len(await _rows(session, Follow)) == before
 
 
 @respx.mock
-async def test_a_dismissed_film_is_not_put_back_on_the_watchlist(session, session_factory, user):
-    # D-13, exactly as for the Letterboxd import: an import is not a reason to overrule a
-    # removal the user already made.
+async def test_an_import_follows_a_muted_film_and_leaves_the_mute_alone(
+    session, session_factory, user
+):
+    # Exactly as for the Letterboxd import (D-1414.9): the import overrules neither fact.
     _mock_tmdb()
     await _run(session, session_factory, user)
     film = (await session.execute(select(Film).where(Film.tmdb_id == 1001))).scalar_one()
-    for item in await _rows(session, WatchlistItem):
-        if item.film_id == film.id:
-            await session.delete(item)
     session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
     await session.commit()
 
     await _run(session, session_factory, user)
 
-    assert film.id not in {item.film_id for item in await _rows(session, WatchlistItem)}
-    # The follow is still there — they listed the film, and a follow is a timeline row.
     assert str(film.id) in {f.entity_id for f in await _rows(session, Follow)}
+    assert [m.film_id for m in await _rows(session, WatchlistDismissal)] == [film.id]
 
 
 # --- the session ------------------------------------------------------------------------------
@@ -368,7 +365,7 @@ async def test_a_crash_mid_run_fails_the_job_and_keeps_the_rows_already_done(
     assert finished.error
     # Commit-per-row is what makes a partial import worth keeping.
     assert {f.tmdb_id for f in await _rows(session, Film)} == {1001}
-    assert len(await _rows(session, WatchlistItem)) == 1
+    assert len([f for f in await _rows(session, Follow) if f.entity_type == "title"]) == 1
 
 
 @respx.mock

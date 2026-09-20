@@ -20,7 +20,6 @@ from upmovies.ingest.sweep import (
     AdmissionTranches,
     CreditDetachmentResult,
     CreditEventResult,
-    DerivationResult,
     FieldEventResult,
     RefreshResult,
     ReleaseEventResult,
@@ -447,7 +446,6 @@ async def test_the_attachment_histogram_still_counts_what_the_threshold_excluded
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
 
@@ -476,7 +474,6 @@ async def test_a_candidate_reached_only_through_a_writer_waits_for_its_tranche(
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
-        DerivationResult(),
     )
 
 

@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from tests.fixtures.ical import events, prop_dt, prop_text
 from tests.fixtures.public import ref
 from tests.fixtures.users import ENTITLED_UNTIL, _build_authed_client
-from upmovies.app.models import Follow, WatchlistItem
+from upmovies.app.models import Follow, WatchlistDismissal
 
 _FUTURE = datetime(2099, 7, 4, 0, 0, tzinfo=UTC)
 _LATER = datetime(2099, 9, 1, 0, 0, tzinfo=UTC)
@@ -25,12 +25,22 @@ _PAST = datetime(2000, 1, 1, 0, 0, tzinfo=UTC)
 
 @pytest.fixture
 def watchlist(session):
-    """Put a film on a user's watchlist. Writes the row rather than posting to `/me/watchlist`
-    because `source` is the axis under test here and only the derivation pass writes the
-    derived one."""
+    """Put a film on a user's watchlist — which, since M8, is following it by title.
+
+    Writes the row rather than posting to `/me/watchlist` because what is under test here is
+    the calendar's film set, and a fixture that went through the route would be testing the
+    want verb twice."""
 
     async def _add(*, user, film, source: str = "manual") -> None:
-        session.add(WatchlistItem(user_id=user.id, film_id=film.id, source=source))
+        session.add(
+            Follow(
+                user_id=user.id,
+                entity_type="title",
+                entity_id=str(film.id),
+                source=source,
+                coverage="lead",
+            )
+        )
         await session.commit()
 
     return _add
@@ -113,34 +123,40 @@ async def test_only_the_callers_watchlist_reaches_their_calendar(
     assert _refs(yours) == [ref(theirs)]
 
 
-async def test_a_followed_film_that_is_not_watchlisted_is_absent(
+async def test_a_film_reached_through_a_director_follow_is_on_the_calendar(
     entitled_client, session, make_film, add_release_date, attach_credits
 ):
-    # A follow produces timeline rows and nothing else (D-13): following a director puts
-    # nothing on this calendar.
+    # M8 (D-42): the watchlist is what the user's follows cover, so following a director puts
+    # their in-window films here. This is the assertion that used to say the opposite.
     film = await make_film(slug="followed", title="Followed Film")
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
     await attach_credits(film, crew=[{"id": 900, "name": "A Director", "job": "Director"}])
     session.add(
         Follow(
-            user_id=entitled_client.user.id, entity_type="person", entity_id="900", source="manual"
+            user_id=entitled_client.user.id,
+            entity_type="person",
+            entity_id="900",
+            source="manual",
+            coverage="lead",
         )
     )
     await session.commit()
 
-    assert _refs((await entitled_client.get("/me/calendar")).json()) == []
-
-
-async def test_a_derived_watchlist_item_is_included(
-    entitled_client, make_film, add_release_date, watchlist
-):
-    # The follow graph put it there on the user's behalf; it is exactly the film they would
-    # otherwise miss, not a lesser one.
-    film = await make_film(slug="derived", title="Derived Film")
-    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=entitled_client.user, film=film, source="derived_from_follow")
-
     assert _refs((await entitled_client.get("/me/calendar")).json()) == [ref(film)]
+
+
+async def test_a_muted_film_leaves_the_calendar(
+    entitled_client, session, make_film, add_release_date, watchlist
+):
+    # D-45: a mute silences the film everywhere the watchlist is read, and this page is one of
+    # them. The follow it was reached through is untouched.
+    film = await make_film(slug="muted", title="Muted Film")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+    await watchlist(user=entitled_client.user, film=film)
+    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=film.id))
+    await session.commit()
+
+    assert _refs((await entitled_client.get("/me/calendar")).json()) == []
 
 
 async def test_a_watchlist_film_with_no_slug_is_absent(

@@ -76,6 +76,49 @@ def in_play_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnE
     )
 
 
+def alert_window_clause(
+    *, today: date, excluded_statuses: frozenset[str], max_age_days: int
+) -> ColumnElement[bool]:
+    """WHERE predicate selecting films a follow still covers *for alerts* (D-43) — released up
+    to `max_age_days` ago, undated, or still to come, and not called off.
+
+    `in_play_clause` with its release bound moved back by `max_age_days` instead of cutting at
+    `today`, and the difference is the whole point. A film that opened last month has not
+    finished happening: its `now_available` beat fires 14 to 200 days after the theatrical date,
+    and an in-play cut would have dropped the film from every follow that covers it the morning
+    it came out — which is exactly when the user is waiting to hear that they can watch it.
+
+    `max_age_days` is `PROVIDER_POLL_MAX_AGE_DAYS` at every call site, deliberately rather than
+    a number of its own: the provider poll stops looking for offers on a film that old, so past
+    it there is nothing left for the coverage to deliver, and one constant keeps the two from
+    disagreeing about when a film is finished. Tuning it is a provider-poll decision that moves
+    both.
+
+    Why any bound at all: a company or franchise follow otherwise covers its entire back
+    catalogue, and through `follow_queries.covered_by_any_user_clause` the provider poll would
+    then read every film in it, every day.
+
+    The NULL guards are `in_play_clause`'s, for the same reason: `NULL NOT IN (...)` is NULL,
+    which would drop undated films and films of unknown status rather than keep them.
+
+    **Known limit, spelled out because it bounds what the relaxed date bound buys
+    (NEU-1414).** `excluded_statuses` defaults to `Released,Canceled`, so a film TMDB has
+    marked `Released` is outside this window whatever its date — which is most of the
+    population the moved date bound was aimed at. What the relaxation still reaches is the
+    film whose status TMDB has not caught up on and the one that carries none at all, and a
+    **title** follow is unaffected either way (it covers its film in any state, which is what
+    keeps the case the user asked for whole). Narrowing the status term to cancellation alone
+    would widen this to every recently-released film, and that is a product decision about
+    what a person follow is worth after release, not a detail to change under a rename: it
+    belongs with the `PROVIDER_POLL_MAX_AGE_DAYS` tuning ticket, which already owns this
+    window's width.
+    """
+    return and_(
+        or_(Film.release_date.is_(None), Film.release_date >= today - timedelta(days=max_age_days)),
+        or_(Film.status.is_(None), Film.status.not_in(excluded_statuses)),
+    )
+
+
 def seed_grade_credit_clause() -> ColumnElement[bool]:
     """WHERE predicate over `catalog.film_credit` selecting the seed-grade credits — director,
     Writer/Screenplay, or top-5 billed cast (`catalog.seed_grade`).

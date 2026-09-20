@@ -724,7 +724,7 @@ _Avoid_: alias table, name index.
 
 **Follow**:
 A user's standing interest in an entity — a **person**, a **company**, a **franchise**, or a
-**title** — and the only thing a user maintains (D-42, ADR-0018; code catches up in M8). A follow
+**title** — and the only thing a user maintains (D-42, ADR-0018). A follow
 produces **timeline** rows *and* alerts. Its point is that the user hears about a film they had
 never heard of, because they follow the people who made it. For the timeline, a person follow
 covers every published event on any in-play film where that person holds a seed-grade credit;
@@ -753,19 +753,34 @@ feed in its place.
 _Avoid_: personalized feed, my feed, stream, dashboard.
 
 **Watchlist**:
-The computed set of in-play films the user's follows cover for alerts, minus the films they have
-**muted** (D-42, D-45). It is the set the push whitelist, the calendar, the iCal feed and the
-digest slate all read, and it is a view over follows, not a record the user maintains: a film
-gets there by being followed as a title or by being covered by a person, company or franchise
-follow. This is the product's differentiator — a list seeded with films the user did not know
+The computed set of films the user's follows cover for alerts, minus the films they have
+**muted** (D-42, D-45). It is the set the push whitelist, the calendar, the iCal feed, the
+digest slate and the provider poll's "somebody is waiting on this film" rule all read, and it is
+a view over follows, not a record the user maintains: a film gets there by being followed as a
+title (in any state) or by being covered by a person, company or franchise follow while it is
+inside the **alert window**. This is the product's differentiator — a list seeded with films the user did not know
 existed. Volume is controlled by **coverage** and by the user's one store setting
 (`user_settings.alert_stores`, default `{stream}`, D-44), never per film.
 _Avoid_: watchlist item (the old per-film record), derived watchlist item (every entry is
 derived from a follow now), favorite, subscription.
 
+**Alert window**:
+How long a film stays coverable through a person, company or franchise follow: from
+announcement until `PROVIDER_POLL_MAX_AGE_DAYS` after its primary release date, and its status
+outside `TMDB_EXCLUDED_STATUSES`. Wider than **in play** on purpose — the date bound is moved
+back rather than cut at today, because a film that opened last month is still owed its
+home-release beat, and the bound is the provider poll's own ceiling, so the follow stops
+covering the film exactly when the catalog stops looking for offers on it. Note the status term
+is the *same* one **in play** applies, so a film TMDB has marked `Released` is outside the
+window whatever its date: what the moved date bound reaches is the film whose status has not
+caught up, or that carries none. A **title** follow ignores the window entirely — the user
+asked for that film, in any state — and that is the affordance for a released film somebody is
+still waiting on.
+_Avoid_: in play (that is the working set's term, and it ends on release day), active, upcoming.
+
 **Mute**:
 A user's decision to stop hearing about one film (D-45): it leaves the watchlist, the calendar,
-the iCal feed and the digest slate, stays in the timeline, and can be undone. Held in
+the iCal feed, the digest slate and the timeline, and can be undone. Held in
 `app.watchlist_dismissal`, the table that used to record permanent dismissals. "Stop" on a film
 that the user follows directly also deletes that title follow; "want" clears a mute and, if
 nothing else covers the film, creates a title follow.
@@ -773,7 +788,7 @@ _Avoid_: dismissal (the old, permanent form), unfollow (a title follow may not b
 there), hide, snooze.
 
 **Watchlist calendar**:
-The release calendar narrowed to the reader's own **watchlist items**, derived ones included —
+The release calendar narrowed to the reader's own **watchlist** —
 what a subscriber sees when they ask "what of mine is coming out?". It is the calendar with a
 where-clause, not a different kind of surface: same governing-date rule, same buckets, same
 upcoming-only window, same date-paged shape as the all-releases calendar, and none of the

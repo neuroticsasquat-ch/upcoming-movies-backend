@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -184,7 +184,8 @@ class EntitlementGrantRequest(BaseModel):
 # --- follows and the watchlist (M3, D-10 to D-14) ---------------------------------------------
 
 FollowEntityType = Literal["person", "company", "franchise", "title"]
-AlertPref = Literal["buy", "rent", "stream"]
+FollowCoverage = Literal["lead", "all"]
+AlertStore = Literal["buy", "rent", "stream"]
 
 
 def normalise_entity_id(entity_type: str, entity_id: str) -> str:
@@ -203,13 +204,30 @@ def normalise_entity_id(entity_type: str, entity_id: str) -> str:
 
 
 class FollowCreateRequest(BaseModel):
+    """A new follow. `coverage` is the person tier (D-43); absent means `lead`.
+
+    Sending it for another entity type is refused rather than ignored — they name one thing
+    each, so there is nothing to narrow, and a client that sends it has misunderstood the
+    control it is drawing. That check is the **route's**, not a validator here, because the
+    refusal is a named one (`422 coverage_not_applicable`) and a `ValueError` raised in a
+    model validator reaches the client as pydantic's generic error list instead. The PATCH
+    beside it refuses on the same terms, in the same place."""
+
     entity_type: FollowEntityType
     entity_id: str = Field(min_length=1, max_length=64)
+    coverage: FollowCoverage | None = None
 
     @model_validator(mode="after")
     def _normalise(self) -> "FollowCreateRequest":
         self.entity_id = normalise_entity_id(self.entity_type, self.entity_id)
         return self
+
+
+class FollowUpdateRequest(BaseModel):
+    """A PATCH of one follow. `coverage` is required — it is the only thing a follow has that
+    can be changed, so a body without it is a client bug."""
+
+    coverage: FollowCoverage
 
 
 class FollowOut(BaseModel):
@@ -225,6 +243,10 @@ class FollowOut(BaseModel):
     name: str | None
     image_path: str | None
     source: str
+    coverage: str
+    """Which of a followed person's credits alert (D-43). Echoed on every row, and always
+    `lead` for a non-person follow, which reads it for nothing — one shape for the list, and
+    the client shows the control on person rows only (NEU-1415)."""
     created_at: datetime
 
 
@@ -232,10 +254,10 @@ class FollowListResponse(BaseModel):
     items: list[FollowOut]
 
 
-def normalise_alert_prefs(prefs: list[str]) -> list[str]:
-    """Canonical order, no duplicates, so two prefs lists that mean the same thing compare
+def normalise_alert_stores(stores: list[str]) -> list[str]:
+    """Canonical order, no duplicates, so two store lists that mean the same thing compare
     equal and the row reads the same however the client spelled it."""
-    return [p for p in ("buy", "rent", "stream") if p in prefs]
+    return [s for s in ("buy", "rent", "stream") if s in stores]
 
 
 class HeadlineReleaseOut(BaseModel):
@@ -271,30 +293,45 @@ class WatchlistFilmOut(BaseModel):
 
 
 class WatchlistCreateRequest(BaseModel):
+    """**Want** this film (D-1414.5). No preferences: the stores an availability alert is worth
+    are one setting per user now (`UserSettingsUpdateRequest.alert_stores`, D-44), not a choice
+    per film."""
+
     film_id: UUID
-    # Omitted means the D-14 default, `{stream}`; an explicit empty list means "no availability
-    # alerts", which is a different thing and is honoured.
-    alert_prefs: list[AlertPref] | None = None
-
-    @field_validator("alert_prefs")
-    @classmethod
-    def _normalise(cls, v: list[str] | None) -> list[str] | None:
-        return None if v is None else normalise_alert_prefs(v)
 
 
-class WatchlistUpdateRequest(BaseModel):
-    alert_prefs: list[AlertPref]
+class WatchlistCoverOut(BaseModel):
+    """One follow that puts a film on the watchlist.
 
-    @field_validator("alert_prefs")
-    @classmethod
-    def _normalise(cls, v: list[str]) -> list[str]:
-        return normalise_alert_prefs(v)
+    `name` is nullable on the terms `FollowOut` gives: a follow can outlive the entity it names
+    and D-40 keeps the row, so an unresolvable cover is rendered with a null name rather than
+    dropped — which would make a film look uncovered when something covers it."""
+
+    entity_type: str
+    entity_id: str
+    name: str | None
 
 
 class WatchlistItemOut(BaseModel):
+    """One film on the computed watchlist (D-42), and how it got there.
+
+    `covered_by` is every follow that covers the film, the direct title follow first and the
+    rest oldest first, which is the order the film page's "via Christopher Nolan" line reads
+    from (NEU-1405). `followed` says whether one of them is that direct title follow — the
+    difference between a film the user asked for and one their follows reached.
+
+    `muted` is on the item rather than a reason to omit it: a muted film is listed, marked, and
+    un-mutable from the list, because the user looking at their watchlist is exactly who wants
+    to undo one.
+
+    `created_at` is the earliest of the covering follows' — when this film first started being
+    covered, which is what the list sorts on. There is no `source`: nothing records who put the
+    film here, because nothing *put* it here."""
+
     film: WatchlistFilmOut
-    source: str
-    alert_prefs: list[str]
+    covered_by: list[WatchlistCoverOut]
+    followed: bool
+    muted: bool
     created_at: datetime
 
 
@@ -377,18 +414,35 @@ class UserSettingsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     digest_cadence: DigestCadence
+    alert_stores: list[str]
+    """Which availability beats this user is alerted on, product-wide (D-44). `[]` is a real
+    answer — no store alerts — and is not the same as the default `["stream"]`."""
     ical_token: str
     created_at: datetime
     updated_at: datetime
 
 
 class UserSettingsUpdateRequest(BaseModel):
-    """A PATCH of the settings. One field for now, and `digest_cadence` is required rather than
-    optional: a PATCH with nothing in it is a client bug, and pydantic saying so is cheaper than
-    a route that quietly does nothing. D-36's push preferences land beside it as their own
-    optional fields when they exist."""
+    """A PATCH of the settings: either field, or both.
 
-    digest_cadence: DigestCadence
+    Both are optional and at least one is required, which is the shape a two-field PATCH wants
+    — the settings screen writes the control the user touched, not the whole row, and a
+    required `digest_cadence` would make changing the stores restate the cadence. An empty body
+    stays a `422`: it is a client bug, and pydantic saying so is cheaper than a route that
+    quietly does nothing. D-36's push preferences land beside them on the same terms."""
+
+    digest_cadence: DigestCadence | None = None
+    alert_stores: list[AlertStore] | None = None
+
+    @model_validator(mode="after")
+    def _normalise(self) -> "UserSettingsUpdateRequest":
+        if self.digest_cadence is None and self.alert_stores is None:
+            raise ValueError("no_settings_given")
+        if self.alert_stores is not None:
+            self.alert_stores = cast(
+                list[AlertStore], normalise_alert_stores(list(self.alert_stores))
+            )
+        return self
 
 
 # --- web push (M7, D-36) ----------------------------------------------------------------------

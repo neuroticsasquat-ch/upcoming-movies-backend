@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.fixtures.public import ref
+from upmovies.app.models import WatchlistDismissal
 from upmovies.news.models import EventStory, StoryPerson
 
 
@@ -265,6 +266,53 @@ async def test_a_resolved_mention_reaches_the_timeline_without_a_credit(
     body = (await entitled_client.get("/me/timeline")).json()
     assert [i["film_ref"] for i in body["items"]] == [ref(uncredited)]
     assert body["total"] == 1
+
+
+async def test_a_muted_film_leaves_the_timeline(
+    entitled_client, session, make_film, add_event, follow
+):
+    """D-45 as amended in M8: "not interested in this film" silences it everywhere, so the
+    timeline drops its events beside the calendar and the alerts. The follow is untouched —
+    un-muting restores the film on every surface at once (D-40)."""
+    muted = await make_film(slug="muted", title="Muted", release_date=None)
+    kept = await make_film(slug="kept", title="Kept", release_date=None)
+    for film in (muted, kept):
+        await add_event(film=film, summary="a beat", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+        await follow("title", str(film.id))
+
+    body = (await entitled_client.get("/me/timeline")).json()
+    assert sorted(i["film_ref"] for i in body["items"]) == sorted([ref(kept), ref(muted)])
+
+    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=muted.id))
+    await session.commit()
+
+    body = (await entitled_client.get("/me/timeline")).json()
+    assert [i["film_ref"] for i in body["items"]] == [ref(kept)]
+
+
+async def test_a_muted_film_drops_a_mention_only_event_too(
+    entitled_client, session, make_film, add_event, make_person, follow, name_in_story
+):
+    """The case the mute would otherwise miss. D-11's second half reaches this event through
+    the *person*, not the film — so without the exclusion inside the builder, a muted film
+    would keep leaking onto the timeline through every story that names somebody on it."""
+    uncredited = await make_film(slug="uncredited", title="Uncredited", release_date=None)
+    await make_person(id=525, name="C. Nolan")
+    named = await add_event(
+        film=uncredited,
+        summary="names them",
+        created_at=datetime(2026, 6, 3, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/a"},),
+    )
+    await name_in_story(named, person_id=525, path="accepted")
+    await follow("person", 525)
+
+    assert (await entitled_client.get("/me/timeline")).json()["total"] == 1
+
+    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=uncredited.id))
+    await session.commit()
+
+    assert (await entitled_client.get("/me/timeline")).json()["total"] == 0
 
 
 @pytest.mark.parametrize(

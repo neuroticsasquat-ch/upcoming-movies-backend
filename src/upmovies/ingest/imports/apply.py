@@ -7,13 +7,13 @@ TMDB gives the id. Past that point both want the same two treatments, and the sp
 second says so in as many words — "the NEU-1356 watchlist path exactly", "the NEU-1356 ratings
 path exactly". So the two treatments live here and the resolution stays in each runner:
 
-- `apply_watchlist_film` — the film in full, a watchlist item, and a title follow. For a film
-  the user is asking to be told about.
+- `apply_watchlist_film` — the film in full and a title follow. For a film the user is asking
+  to be told about.
 - `apply_film_people` — the director and top-2 billing as person follows, and no
   `catalog.film` row. For a film the user is telling us about their taste with.
 
 The `source` each writes is the caller's, because it is the one thing that genuinely differs:
-`letterboxd_import` or `tmdb_import` on every row (D-10, D-14).
+`letterboxd_import` or `tmdb_import` on every row (D-10).
 
 Also here: `Progress`, the running totals both runners keep, because the counts it reports are
 incremented inside these two functions."""
@@ -30,9 +30,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.dto import normalise_entity_id
-from upmovies.app.models import User, WatchlistDismissal
+from upmovies.app.models import User
 from upmovies.app.repos import import_job_repo
-from upmovies.app.services import follow_service, watchlist_service
+from upmovies.app.services import follow_service
 from upmovies.catalog.models import Film, FilmCredit
 from upmovies.catalog.seed_grade import DIRECTOR_JOB
 from upmovies.db import SessionLocal
@@ -56,8 +56,9 @@ IMPORT_TOP_BILLED_ORDER = 2
 and 1 (NEU-1356 §3).
 
 The third cut in the codebase, and deliberately the shallowest. `catalog.seed_grade`'s 5
-decides whose filmography the sweep *enumerates*; `derivation_service`'s 3 decides whose
-casting earns a **push**. This one decides what a user gets for having liked a film — an
+decides whose filmography the sweep *enumerates*; `follow_queries.LEAD_TOP_BILLED_ORDER`'s 3
+decides whose casting earns a **push** under the default coverage. This one decides what a
+user gets for having liked a film — an
 inference from a rating or a favorite, not a request — and a fifth-billed role in a film
 somebody enjoyed is not evidence they want that actor's next project in their timeline.
 Shallower still would lose the co-lead."""
@@ -123,32 +124,31 @@ async def apply_watchlist_film(
     *,
     source: str,
 ) -> bool:
-    """The watchlist treatment for one film: the film in full, a watchlist item, and a title
-    follow. `False` when TMDB no longer has the film, so the caller can report it.
+    """The watchlist treatment for one film: the film in full and a title follow. `False` when
+    TMDB no longer has the film, so the caller can report it.
 
-    The item is written **before** the follow, which is the order `follow_service.follow`'s
-    docstring requires and the reverse of the one NEU-1356 §3's table lists: a title follow
-    derives the film it names, so following first would leave a `derived_from_follow` item and
-    this row's `source` would never land."""
+    One row, not two (M8). A title follow *is* the film being on the watchlist now, so the
+    watchlist item this used to write first — and the ordering rule that went with it — are
+    gone with the table.
+
+    **A mute the user has on file is left alone.** They listed the film, so the follow is
+    created; they silenced it, so it stays silenced, and `GET /me/watchlist` shows it as
+    `muted: true` for them to undo. The old code skipped the *item* on a dismissal, which was
+    the same judgement about the same two facts — an import is not a reason to un-silence
+    something — and the film would end up off the watchlist either way."""
     film_id = await film_id_for(db, client, tmdb_id)
     if film_id is None:
         return False
 
-    # D-13: the user already took this film off a derived watchlist, and an import is not a
-    # reason to put it back. The follow below is still created — they listed the film, and a
-    # follow is a timeline row rather than an alert — and its derivation is blocked by the same
-    # dismissal, so the film stays off the watchlist either way.
-    dismissed = await db.get(WatchlistDismissal, (user.id, film_id)) is not None
-    if not dismissed:
-        _, _, _, created = await watchlist_service.add(
-            db, user=user, film_id=film_id, source=source
-        )
-        if created:
-            progress.watchlist_created += 1
-
-    await follow_entity(
+    created = await follow_entity(
         db, user, progress, entity_type="title", entity_id=str(film_id), source=source
     )
+    if created:
+        # Counted as a watchlist film rather than a follow, because this is the count the
+        # onboarding screen renders as "N watchlist films" (`import_job.watchlist_created`)
+        # and a title follow is what a watchlist row has become. `follows_created` keeps
+        # meaning the person follows the taste half inferred.
+        progress.watchlist_created += 1
     return True
 
 
@@ -171,9 +171,10 @@ async def apply_film_people(
     if people is None:
         return False
     for person_id in people:
-        await follow_entity(
+        if await follow_entity(
             db, user, progress, entity_type="person", entity_id=str(person_id), source=source
-        )
+        ):
+            progress.follows_created += 1
     return True
 
 
@@ -185,22 +186,29 @@ async def follow_entity(
     entity_type: str,
     entity_id: str,
     source: str,
-) -> None:
-    """Create one import follow, counting it only if it is new.
+) -> bool:
+    """Create one import follow and say whether it is new.
+
+    The count belongs to the caller, not here: the same call writes a *watchlist* film on the
+    title path and an inferred taste follow on the people path, and the onboarding screen
+    reports those as two different numbers (`import_job.watchlist_created` and
+    `follows_created`).
 
     Through `normalise_entity_id` for the same reason the routes are: `app.follow.entity_id` is
     polymorphic text with no foreign key, so two spellings of one id are two follow rows that
-    nothing will ever reconcile. `derive=False` — see `follow_service.follow`."""
+    nothing will ever reconcile.
+
+    `coverage` is left to the default (`lead`), which is what an inference deserves: an import
+    creates hundreds of person follows from a ratings history, and `all` on each would alert
+    the user about every seed-grade credit of everyone they ever gave four stars to."""
     _, _, created = await follow_service.follow(
         db,
         user=user,
         entity_type=entity_type,
         entity_id=normalise_entity_id(entity_type, entity_id),
         source=source,
-        derive=False,
     )
-    if created:
-        progress.follows_created += 1
+    return created
 
 
 async def film_id_for(db: AsyncSession, client: TMDBClient, tmdb_id: int) -> UUID | None:

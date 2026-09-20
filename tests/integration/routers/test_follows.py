@@ -1,8 +1,16 @@
 """`/me/follows` (D-10): the follow graph's CRUD, behind the entitlement gate (D-39)."""
 
+from uuid import uuid4
+
 import pytest
 
 from tests.fixtures.catalog import add_film
+
+
+def film_uuid() -> str:
+    """A well-formed film id that names nothing — enough to reach the coverage guard, which
+    runs before the follow is ever looked up."""
+    return str(uuid4())
 
 
 @pytest.fixture
@@ -238,13 +246,12 @@ async def test_list_does_not_require_csrf_header(entitled_client):
     assert r.status_code == 200
 
 
-# --- derived watchlist items (D-13) --------------------------------------------------------
+# --- what a follow covers for alerts (D-42, D-43) -------------------------------------------
 
 
-async def test_following_a_director_derives_their_in_play_films(entitled_client, session):
-    """The synchronous half of the derivation (D-13): the items are on the list by the time the
-    POST answers, so the client that just followed can render the watchlist without a second
-    round trip waiting on the sweep."""
+async def test_following_a_director_puts_their_films_on_the_watchlist(entitled_client, session):
+    """No derivation, no second row: the watchlist is a query over the follow that was just
+    made, so the film is on the list by the time the client asks (D-42)."""
     from datetime import date
 
     from upmovies.catalog.models import FilmCredit, Person
@@ -268,19 +275,20 @@ async def test_following_a_director_derives_their_in_play_films(entitled_client,
         "/me/follows", json={"entity_type": "person", "entity_id": "525"}
     )
     assert r.status_code == 201
+    assert r.json()["coverage"] == "lead"
 
-    r = await entitled_client.get("/me/watchlist")
-    assert r.status_code == 200
-    items = r.json()["items"]
-    assert [(i["film"]["title"], i["source"], i["alert_prefs"]) for i in items] == [
-        (film.title, "derived_from_follow", ["stream"])
+    items = (await entitled_client.get("/me/watchlist")).json()["items"]
+    assert [(i["film"]["title"], i["followed"], i["muted"]) for i in items] == [
+        (film.title, False, False)
+    ]
+    assert items[0]["covered_by"] == [
+        {"entity_type": "person", "entity_id": "525", "name": "Christopher Nolan"}
     ]
 
 
-async def test_a_dismissed_film_is_never_derived_again(entitled_client, session):
-    """Follow → derive → remove (which writes the dismissal) → follow something else that
-    reaches the same film. The film stays off the list, which is the whole point of the
-    dismissal row being permanent."""
+async def test_unfollowing_takes_the_film_off_the_list_again(entitled_client, session):
+    """The other direction the materialised list could never do: nothing deleted a derived item
+    when its follow went (ADR-0018), and now there is nothing to delete."""
     from datetime import date
 
     from upmovies.catalog.models import Collection
@@ -289,37 +297,64 @@ async def test_a_dismissed_film_is_never_derived_again(entitled_client, session)
     film = await add_film(session, tmdb_id=552, release_date=date(2099, 1, 1), collection_id=10)
     await session.commit()
 
-    r = await entitled_client.post(
-        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
-    )
-    assert r.status_code == 201
-    assert len((await entitled_client.get("/me/watchlist")).json()["items"]) == 1
+    await entitled_client.post("/me/follows", json={"entity_type": "franchise", "entity_id": "10"})
+    assert [
+        i["film"]["id"] for i in (await entitled_client.get("/me/watchlist")).json()["items"]
+    ] == [str(film.id)]
 
-    r = await entitled_client.delete(f"/me/watchlist/{film.id}")
+    r = await entitled_client.delete("/me/follows/franchise/10")
     assert r.status_code == 204
-
-    r = await entitled_client.post(
-        "/me/follows", json={"entity_type": "franchise", "entity_id": "10"}
-    )
-    assert r.status_code == 201
     assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
 
 
-async def test_following_a_person_with_no_qualifying_credit_derives_nothing(
+async def test_a_mute_survives_the_follow_that_reached_the_film(entitled_client, session):
+    """Stop → unfollow → follow something else that reaches the same film. The mute is still on
+    file, so the film stays silent: D-40 keeps it, and un-muting is the user's to do."""
+    from datetime import date
+
+    from upmovies.catalog.models import Collection
+
+    session.add(Collection(id=11, name="Another Franchise"))
+    film = await add_film(session, tmdb_id=553, release_date=date(2099, 1, 1), collection_id=11)
+    await session.commit()
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+    assert len((await entitled_client.get("/me/watchlist")).json()["items"]) == 1
+
+    # Nothing else covers it yet, so stopping deletes the title follow and answers 204.
+    assert (await entitled_client.delete(f"/me/watchlist/{film.id}")).status_code == 204
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+    items = (await entitled_client.get("/me/watchlist")).json()["items"]
+    assert [i["muted"] for i in items] == [False]
+
+    # Now with a mute on file: stop while a franchise follow also covers it, then unfollow the
+    # title and reach the film again through the franchise.
+    await entitled_client.post("/me/follows", json={"entity_type": "franchise", "entity_id": "11"})
+    assert (await entitled_client.delete(f"/me/watchlist/{film.id}")).status_code == 200
+    items = (await entitled_client.get("/me/watchlist")).json()["items"]
+    assert [i["muted"] for i in items] == [True]
+
+
+async def test_following_a_writer_covers_nothing_at_lead_and_everything_at_all(
     entitled_client, session
 ):
-    """A follow is not a watchlist add: the writer cut (D-13) means the POST can legitimately
-    leave the watchlist empty, and the route must still answer 201."""
+    """The coverage tier, both ways (D-43). A writing credit is seed grade — it is on the
+    timeline — but it is not `lead`, so it alerts only once the user widens the follow."""
     from datetime import date
 
     from upmovies.catalog.models import FilmCredit, Person
 
-    film = await add_film(session, tmdb_id=553, release_date=date(2099, 1, 1))
+    film = await add_film(session, tmdb_id=554, release_date=date(2099, 1, 1))
     session.add(Person(id=488, name="A Writer"))
     await session.flush()
     session.add(
         FilmCredit(
-            credit_id="c-553-488",
+            credit_id="c-554-488",
             film_id=film.id,
             person_id=488,
             credit_type="crew",
@@ -334,6 +369,98 @@ async def test_following_a_person_with_no_qualifying_credit_derives_nothing(
     )
     assert r.status_code == 201
     assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
+
+    r = await entitled_client.patch("/me/follows/person/488", json={"coverage": "all"})
+    assert r.status_code == 200
+    assert r.json()["coverage"] == "all"
+    items = (await entitled_client.get("/me/watchlist")).json()["items"]
+    assert [i["film"]["title"] for i in items] == [film.title]
+
+
+async def test_coverage_can_be_asked_for_when_the_follow_is_created(entitled_client, session):
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=489, name="Another Writer"))
+    await session.commit()
+
+    r = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "489", "coverage": "all"}
+    )
+    assert r.status_code == 201
+    assert r.json()["coverage"] == "all"
+
+
+async def test_following_again_leaves_the_coverage_alone(entitled_client, session):
+    """A follow button pressed twice is not a request to reset what the user chose on the
+    person page; the PATCH is how a tier changes."""
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=490, name="A Third Writer"))
+    await session.commit()
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "all"}
+    )
+    again = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "lead"}
+    )
+    assert again.status_code == 200
+    assert again.json()["coverage"] == "all"
+
+
+@pytest.mark.parametrize("entity_type", ["company", "franchise", "title"])
+async def test_coverage_on_a_non_person_follow_is_422(entitled_client, session, entity_type):
+    """Those three name one thing each, so there is nothing to narrow — and storing a value
+    nothing reads while answering 201 would tell the client it had changed something."""
+    entity_id = {"company": "1", "franchise": "1", "title": str(film_uuid())}[entity_type]
+    r = await entitled_client.post(
+        "/me/follows",
+        json={"entity_type": entity_type, "entity_id": entity_id, "coverage": "all"},
+    )
+    assert r.status_code == 422
+    # The *named* refusal, not pydantic's generic error list: the client renders this one.
+    assert r.json()["detail"] == "coverage_not_applicable"
+
+
+@pytest.mark.parametrize("entity_type", ["company", "franchise", "title"])
+async def test_patching_the_coverage_of_a_non_person_follow_is_422(entitled_client, entity_type):
+    entity_id = {"company": "1", "franchise": "1", "title": str(film_uuid())}[entity_type]
+    r = await entitled_client.patch(
+        f"/me/follows/{entity_type}/{entity_id}", json={"coverage": "all"}
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "coverage_not_applicable"
+
+
+async def test_patching_a_follow_that_does_not_exist_is_404(entitled_client):
+    r = await entitled_client.patch("/me/follows/person/999", json={"coverage": "all"})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "follow_not_found"
+
+
+@pytest.mark.parametrize("payload", [{"coverage": "everything"}, {"coverage": None}, {}])
+async def test_a_malformed_coverage_patch_is_422(entitled_client, payload):
+    r = await entitled_client.patch("/me/follows/person/999", json=payload)
+    assert r.status_code == 422
+
+
+async def test_patching_the_coverage_requires_the_csrf_header(entitled_client, session):
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=491, name="A Fourth Writer"))
+    await session.commit()
+    await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "491"})
+
+    del entitled_client.headers["X-CSRF-Token"]
+    r = await entitled_client.patch("/me/follows/person/491", json={"coverage": "all"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "csrf_invalid"
+
+
+async def test_patching_the_coverage_is_403_for_an_unentitled_user(authed_client):
+    r = await authed_client.patch("/me/follows/person/1", json={"coverage": "all"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "entitlement_required"
 
 
 # --- entity names on the list (NEU-1396) ---------------------------------------------------

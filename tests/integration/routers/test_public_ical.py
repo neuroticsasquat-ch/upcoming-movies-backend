@@ -15,7 +15,7 @@ from tests.fixtures.ical import events, prop_dt, prop_text
 from tests.fixtures.public import ref
 from tests.fixtures.users import ENTITLED_UNTIL, _build_authed_client
 from upmovies.app import tokens
-from upmovies.app.models import Follow, UserSettings, WatchlistItem
+from upmovies.app.models import Follow, UserSettings, WatchlistDismissal
 from upmovies.catalog.models import FilmReleaseDateChange
 from upmovies.config import get_settings
 from upmovies.public.service import ICAL_PAST_WINDOW_DAYS
@@ -40,8 +40,18 @@ def subscriber(session, make_user):
 
 @pytest.fixture
 def watchlist(session):
+    """Put a film on a user's watchlist — which, since M8, is following it by title."""
+
     async def _add(*, user, film, source: str = "manual"):
-        session.add(WatchlistItem(user_id=user.id, film_id=film.id, source=source))
+        session.add(
+            Follow(
+                user_id=user.id,
+                entity_type="title",
+                entity_id=str(film.id),
+                source=source,
+                coverage="lead",
+            )
+        )
         await session.commit()
 
     return _add
@@ -200,29 +210,38 @@ async def test_only_this_users_watchlist_reaches_their_feed(
     assert _summaries((await _fetch(client, token)).text) == ["My Film — in theaters"]
 
 
-async def test_a_derived_watchlist_item_is_included(
-    client, subscriber, make_film, add_release_date, watchlist
+async def test_a_film_reached_through_a_director_follow_is_in_the_feed(
+    client, session, subscriber, make_film, add_release_date, attach_credits
 ):
-    # The follow graph put it there on the user's behalf (D-13); it is the item they would
-    # otherwise miss, not a lesser one.
-    user, token = await subscriber()
-    film = await make_film(slug="derived", title="Derived Film")
-    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=user, film=film, source="derived_from_follow")
-
-    assert _summaries((await _fetch(client, token)).text) == ["Derived Film — in theaters"]
-
-
-async def test_a_followed_film_that_is_not_watchlisted_is_excluded(
-    client, session, subscriber, make_film, add_release_date
-):
-    # A follow produces timeline rows and nothing else (D-13). Only the watchlist reaches out.
+    # M8 (D-42): the feed is drawn from the computed watchlist, so following a director puts
+    # their in-window films in it. This is the assertion that used to say the opposite.
     user, token = await subscriber()
     film = await make_film(slug="followed", title="Followed Film")
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+    await attach_credits(film, crew=[{"id": 900, "name": "A Director", "job": "Director"}])
     session.add(
-        Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+        Follow(
+            user_id=user.id,
+            entity_type="person",
+            entity_id="900",
+            source="manual",
+            coverage="lead",
+        )
     )
+    await session.commit()
+
+    assert _summaries((await _fetch(client, token)).text) == ["Followed Film — in theaters"]
+
+
+async def test_a_muted_film_leaves_the_feed(
+    client, session, subscriber, make_film, add_release_date, watchlist
+):
+    # D-45: the `.ics` feed and `/me/calendar` read one set, so a mute empties both together.
+    user, token = await subscriber()
+    film = await make_film(slug="muted", title="Muted Film")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+    await watchlist(user=user, film=film)
+    session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
     await session.commit()
 
     assert _events((await _fetch(client, token)).text) == []
