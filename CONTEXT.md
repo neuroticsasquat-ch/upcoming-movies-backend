@@ -273,7 +273,8 @@ _Avoid_: development, item, happening.
 **Attach**:
 Adding a newly linked story to an event that *already exists*, rather than forming a new one
 — a beat already logged gaining another report of itself. The counterpart to forming an
-event. A story attaches to exactly one event.
+event. A story attaches to exactly one event, and attaching never re-alerts: a second outlet
+reporting the same casting is the same card, so an entity follower hears it once (EF-13).
 _Avoid_: merge (that's the defect below), append, link (that's the story→film step).
 
 **Split beat**:
@@ -773,8 +774,10 @@ The signed-in home surface: the publication log filtered to the user's follows. 
 the feed (**publication**), same day grouping, same "what's new since I last looked" reading —
 it is the feed with a where-clause, not a different kind of surface. The where-clause is
 `film IN (titles you follow) OR event IN (attachments of entities you follow)` (EF-3); it is
-the same clause the digest and the notify pass read. Anonymous readers see the global feed in
-its place.
+the same clause the digest and the notify pass read. A story mention reaches an entity
+follower only as the entity's first association with, or first detachment from, the film
+(EF-13, `first_association_clause`); every other mention is nothing to them. Anonymous readers
+see the global feed in its place.
 _Avoid_: personalized feed, my feed, stream, dashboard, watchlist (retired: the set of films
 you follow is just the Films filter of the follows page).
 
@@ -822,8 +825,9 @@ coverage (retired).
 
 **Digest**:
 The batched delivery of a user's timeline — daily or weekly, their choice — for everything the
-push whitelist does not cover. The weekly "your slate" mail is a digest; its slate is the
-films the user follows.
+push whitelist does not cover. It carries every card the timeline carries, `rumored` ones
+included (EF-7, EF-10; NEU-1437): confirmation is what a *push* waits for, not a digest line.
+The weekly "your slate" mail is a digest; its slate is the films the user follows.
 _Avoid_: newsletter, summary email, notification.
 
 **Home-release date**:

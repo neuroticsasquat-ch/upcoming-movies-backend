@@ -347,7 +347,17 @@ EF-8, EF-9, EF-13 for people, EF-14, EF-15, EF-16, EF-18). Backend then frontend
   `entity_attachment_event_ids(user_id)` (events whose `subject_key` tokens or resolved
   mentions name a followed entity in an attach or detach role, or `canceled` on a film the
   entity is attached to), `title_followed_by_any_user_clause()`. The timeline is
-  `film_id IN title_follow_film_ids OR id IN entity_attachment_event_ids`.
+  `film_id IN title_follow_film_ids OR id IN entity_attachment_event_ids`. A followed person is
+  matched to a card by normalized name (`subject_key` carries names, not ids); companies and
+  collections by their id tokens. EF-13's predicate is `first_association_clause(user_id)`, one
+  builder both the timeline and the notify pass reach, with an attach arm and a (still empty at
+  M3) detach arm; it carves out a credit stamped `carded_by_event_id = the card` so a D-5 story
+  card survives its own confirmation (NEU-1437 spec).
+- `deliverable_events()` drops its `confidence = 'confirmed'` term: the digest carries rumored
+  cards as the timeline does (EF-7). The alert branch carries `confirmed` as the interim rule
+  until NEU-1438 applies EF-8's provenance clause. NEU-1437 rewires the event readers
+  (timeline, digest, alert); the film readers (calendar, iCal, slate, poll set) and the
+  watchlist builders and mutes are NEU-1439's.
 - `notify_service`: `PUSH_WHITELIST` becomes two sets, `TITLE_PUSH_TYPES` and
   `ENTITY_PUSH_TYPES`, applied per reach; the seed-grade clause for title-follow credit
   cards reads `seed_grade.is_seed_role`; the provenance clause of EF-8.
