@@ -3,6 +3,7 @@
 from collections import Counter
 
 from upmovies.ingest.sweep import (
+    CollectionEventResult,
     CompanyEventResult,
     CreditDetachmentResult,
     CreditEventResult,
@@ -26,12 +27,46 @@ def test_reports_every_phase_distinctly():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "enumerate:" in detail
     assert "refresh:" in detail
     assert "7519 seeds" in detail
     assert "0/0 refreshed" in detail
+
+
+def test_the_collections_clause_reports_carded_held_and_read():
+    """EF-5's franchise half (NEU-1434). No burst count beside it, unlike the companies
+    clause: the phase runs no burst check."""
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+        CompanyEventResult(),
+        CollectionEventResult(changes_read=9, events_created=2, skipped=1, held=6),
+    )
+
+    assert "collections: 2 carded from 9 changes, 1 already carded, 6 held, 0 failed" in detail
+    assert "burst" not in detail.split("collections:")[1]
+
+
+def test_a_collections_abort_is_named():
+    detail = sweep_detail(
+        EnumerateResult(),
+        RefreshResult(),
+        FieldEventResult(),
+        CreditEventResult(),
+        CreditDetachmentResult(),
+        ReleaseEventResult(),
+        CompanyEventResult(),
+        CollectionEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
+    )
+
+    assert "collections aborted: aborted after 10 consecutive failures" in detail
 
 
 def test_counts_every_failure_the_phases_recorded():
@@ -43,6 +78,7 @@ def test_counts_every_failure_the_phases_recorded():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "5 failed" in detail
@@ -60,6 +96,7 @@ def test_names_the_phase_that_aborted():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "enumerate aborted: aborted after 10 consecutive failures" in detail
@@ -74,6 +111,7 @@ def test_a_clean_pass_says_nothing_about_aborting():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
 
@@ -89,6 +127,7 @@ def test_reports_what_the_field_change_phase_carded():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "events: 4 carded from 31 changes, 27 already carded, 1 failed" in detail
@@ -103,6 +142,7 @@ def test_names_the_field_change_phase_when_it_aborts():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "events aborted: aborted after 10 consecutive failures" in detail
@@ -119,6 +159,7 @@ def test_reports_what_the_credit_phase_carded():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "credits: 3 carded from 12 attachments, 9 already carded, 0 held, 1 failed" in detail
@@ -133,6 +174,7 @@ def test_names_the_credit_phase_when_it_aborts():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "credits aborted: aborted after 10 consecutive failures" in detail
@@ -160,6 +202,7 @@ def test_reports_admissions_against_skips_by_reason():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "12 admitted" in detail
@@ -178,6 +221,7 @@ def test_a_pass_that_skipped_nothing_still_reports_a_skip_total():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "3 admitted, skipped 0," in detail
@@ -192,6 +236,7 @@ def test_reports_what_the_release_date_phase_carded():
         CreditDetachmentResult(),
         ReleaseEventResult(changes_read=9, events_created=4, skipped=5),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "release dates: 4 carded from 9 changes, 5 already carded, 0 failed" in detail
@@ -206,6 +251,7 @@ def test_names_the_release_date_phase_when_it_aborts():
         CreditDetachmentResult(),
         ReleaseEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "release dates aborted: aborted after 10 consecutive failures" in detail
@@ -225,6 +271,7 @@ def test_reports_the_attachment_histogram():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "seed attachments: 1×8421, 2×932, 3+×140" in detail
@@ -241,6 +288,7 @@ def test_a_pass_that_reached_no_candidates_says_nothing_about_attachments():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     # The label, not the bare word: the credits clause legitimately says "from 0 attachments".
@@ -258,6 +306,7 @@ def test_the_credits_clause_reports_what_quarantine_is_holding():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "credits: 2 carded from 40 attachments, 1 already carded, 37 held, 0 failed" in detail
@@ -281,6 +330,7 @@ def test_reports_the_sanity_holds_apart_from_the_quarantine_count():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "4 held" in detail
@@ -298,6 +348,7 @@ def test_reports_a_quiet_holds_pass_as_zeroes_rather_than_dropping_the_clause():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "holds: 0 new, 0 cleared, 0 expired" in detail
@@ -319,6 +370,7 @@ def test_reports_which_roles_reached_the_candidates():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "roles: director×2, cast×4, followed×3" in detail
@@ -335,6 +387,7 @@ def test_the_role_clause_is_dropped_when_nothing_was_reached():
         CreditDetachmentResult(),
         ReleaseEventResult(),
         CompanyEventResult(),
+        CollectionEventResult(),
     )
 
     assert "roles:" not in detail

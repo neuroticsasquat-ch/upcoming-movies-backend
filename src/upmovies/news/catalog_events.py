@@ -72,6 +72,28 @@ COMPANY_EVENT_TYPES: tuple[str, ...] = (
     COMPANY_REMOVED_EVENT_TYPE,
 )
 
+# The franchise half (EF-5, NEU-1434). A film filed under a TMDB collection, or moved out of
+# one. Unlike the studio half this needed no new history table: `collection_id` is a plain
+# `catalog.film` column outside `FILM_FIELD_CHANGE_DENYLIST`, so `film_field_change` has been
+# recording every change to it since the trigger shipped — `ingest.sweep.collection_events`
+# reads those rows, and a *move* (`id -> id'`) is the one transition that is two beats.
+# Registered on exactly the studio half's terms: in `ck_event_type` and in
+# `public.arc._EVENT_STAGE` (`collection_attached` only), and deliberately **not** in
+# `HIDDEN_EVENT_TYPES` — a film joining a franchise is the whole of what a franchise follow
+# delivers (EF-3).
+#
+# Absent from `CATALOG_EVENT_TYPES` below for the reason the company types are: that set is
+# `link.cluster._catalog_dedup_target`'s, and the cluster vocabulary has no organisation types
+# at all until EF-12 gives it one.
+COLLECTION_ATTACHED_EVENT_TYPE = "collection_attached"
+COLLECTION_REMOVED_EVENT_TYPE = "collection_removed"
+
+# The pair, in the order the sweep cards them, matching `COMPANY_EVENT_TYPES`.
+COLLECTION_EVENT_TYPES: tuple[str, ...] = (
+    COLLECTION_ATTACHED_EVENT_TYPE,
+    COLLECTION_REMOVED_EVENT_TYPE,
+)
+
 # Every event type a catalog change can raise. `release_date` is the odd one out among the
 # field-change types: a film's date may move repeatedly, so it is the only one of those
 # matched on *when* rather than on existence.

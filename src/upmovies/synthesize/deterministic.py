@@ -11,10 +11,10 @@ Two contracts this module exists to hold:
 - **`model` is a sentinel, never a real model id.** No call is made, and `ingest.llm_call` /
   `ingest.run_llm_usage` are the system's cost ledger — a row naming a real model there would
   price tokens that were never spent.
-- **The wording lives in one place.** Six trigger sites (release date, status, credits,
-  production companies, the watch-provider poll and the video poll) write these bodies;
-  §5.4's phrasing must not be copy-pasted across them, and `prompt_version` must move when
-  the phrasing does.
+- **The wording lives in one place.** Seven trigger sites (release date, status, credits,
+  production companies, collections, the watch-provider poll and the video poll) write these
+  bodies; §5.4's phrasing must not be copy-pasted across them, and `prompt_version` must move
+  when the phrasing does.
 
 Callers own the transaction, in line with the rest of the ingest pipelines.
 """
@@ -39,7 +39,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-8"
+TEMPLATE_VERSION = "deterministic-9"
 
 
 @dataclass(frozen=True)
@@ -185,6 +185,46 @@ class CompaniesDetached:
 
 
 @dataclass(frozen=True)
+class CollectionAttached:
+    """A TMDB collection the film is newly filed under (EF-5, NEU-1434).
+
+    The display name, not the id: the id is the card's identity and rides in
+    `Event.subject_key` (`news.subject_key.collection_subject_token`), while the body needs the
+    string a reader recognises.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True)
+class CollectionsAttached:
+    """Every collection one sweep pass saw a film filed under, as one body (D-7).
+
+    A film holds at most one collection at a time, so unlike `CompaniesAttached` this is
+    plural only across *observations*: a film moved from one franchise to another and back
+    inside a single quarantine window has two arrivals released together, and they are one
+    beat.
+    """
+
+    collections: tuple[CollectionAttached, ...]
+
+
+@dataclass(frozen=True)
+class CollectionDetached:
+    """A TMDB collection the film is no longer filed under (EF-5, NEU-1434)."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class CollectionsDetached:
+    """Every collection one sweep pass saw a film leave, as one body. `CollectionsAttached`'s
+    mirror, on the same grouping rule."""
+
+    collections: tuple[CollectionDetached, ...]
+
+
+@dataclass(frozen=True)
 class AvailableOn:
     """One monetization type a film was newly observed under, and the services carrying it.
 
@@ -242,6 +282,10 @@ CatalogChange = (
     | CompaniesAttached
     | CompanyDetached
     | CompaniesDetached
+    | CollectionAttached
+    | CollectionsAttached
+    | CollectionDetached
+    | CollectionsDetached
     | NowAvailable
     | TrailerReleased
 )
@@ -452,6 +496,38 @@ def _render_company_detachments(change: CompaniesDetached) -> str:
     return f"{names} {verb} no longer attached."
 
 
+def _render_collections(change: CollectionsAttached) -> str:
+    """ "The film joins the Dune Collection." — one clause, however many franchises.
+
+    **The film is referred to, not named**, which is where this departs from the illustrative
+    phrasing in the EF-5 spec line ("*Dune: Part Three* joins the Dune collection"), on the
+    reason recorded on `_STATUS_BODIES` and applied again by the studio bodies: the card
+    renders under the film's own title on the feed, the film page and in both mails, so
+    repeating the title is the redundancy the summarizer prompt already tells the model to
+    avoid. "The film" rather than a bare verb, because unlike every other attachment body the
+    subject here *is* the film — a franchise does not join a film, a film joins a franchise.
+
+    The word "collection" is not appended: TMDB's own names carry it ("Dune Collection", "The
+    Dark Knight Collection"), so a body that added one would read "the Dune Collection
+    collection". On screen the franchise is whatever TMDB calls it, which is also why
+    `CONTEXT.md`'s "avoid *collection* on screen" is not violated here — the word arrives as
+    part of a proper name rather than as our term for the thing.
+    """
+    names = _join_names([c.name for c in change.collections])
+    return f"The film joins the {names}."
+
+
+def _render_collection_detachments(change: CollectionsDetached) -> str:
+    """ "The film leaves the Dune Collection." — the mirror, and the spec line's own verb.
+
+    "Leaves" rather than the credit bodies' "is no longer attached to": the subject is the
+    film, and a film is not *attached* to a franchise in the sense a director is attached to a
+    film — it is filed under one.
+    """
+    names = _join_names([c.name for c in change.collections])
+    return f"The film leaves the {names}."
+
+
 # Keyed on the monetization types the poll stores (`catalog.models.MONETIZATION_TYPES`), which
 # a CHECK constraint holds the ledger to — so unlike a TMDB status an unrecognised key here is a
 # bug in the caller, not new data from upstream, and `_render_now_available` raises on it.
@@ -518,6 +594,14 @@ def render_summary(change: CatalogChange) -> str:
             return _render_company_detachments(CompaniesDetached(companies=(change,)))
         case CompaniesDetached():
             return _render_company_detachments(change)
+        case CollectionAttached():
+            return _render_collections(CollectionsAttached(collections=(change,)))
+        case CollectionsAttached():
+            return _render_collections(change)
+        case CollectionDetached():
+            return _render_collection_detachments(CollectionsDetached(collections=(change,)))
+        case CollectionsDetached():
+            return _render_collection_detachments(change)
         case NowAvailable():
             return _render_now_available(change)
         case TrailerReleased():

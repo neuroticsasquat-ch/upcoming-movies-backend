@@ -2,6 +2,25 @@
 dated `/discover/movie` roster cannot reach (spec §3, §6)."""
 
 from upmovies.ingest.sweep.admission import AdmissionTranches as AdmissionTranches
+from upmovies.ingest.sweep.collection_events import (
+    CollectionEventResult as CollectionEventResult,
+)
+from upmovies.ingest.sweep.collection_events import CollectionGroup as CollectionGroup
+from upmovies.ingest.sweep.collection_events import (
+    collection_field_events as collection_field_events,
+)
+from upmovies.ingest.sweep.collection_events import (
+    group_collection_changes as group_collection_changes,
+)
+from upmovies.ingest.sweep.collection_events import (
+    mark_window_reverts as mark_window_reverts,
+)
+from upmovies.ingest.sweep.collection_events import (
+    quarantine_collection_changes as quarantine_collection_changes,
+)
+from upmovies.ingest.sweep.collection_events import (
+    run_collection_events as run_collection_events,
+)
 from upmovies.ingest.sweep.company_events import CompanyEventResult as CompanyEventResult
 from upmovies.ingest.sweep.company_events import CompanyGroup as CompanyGroup
 from upmovies.ingest.sweep.company_events import (

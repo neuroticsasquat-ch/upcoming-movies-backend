@@ -57,6 +57,11 @@ _STALE_EVENT_TYPES = {
     # vocabulary so the rule is in place the day it can (EF-5, EF-12). `crew_attached` has
     # been here on the same terms since the credit half shipped.
     "company_attached",
+    # Registered with the rest of the vocabulary (EF-5), and the one member of this set whose
+    # membership should be re-examined the day EF-12 lets the model emit it: TMDB routinely
+    # files a *released* film under a collection for the first time, so a franchise attachment
+    # is not the early-production beat every other type here is.
+    "collection_attached",
     "crew_attached",
     "production_start",
     "production_wrap",

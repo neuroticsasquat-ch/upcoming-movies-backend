@@ -56,8 +56,8 @@ from upmovies.synthesize.deterministic import (
 
 log = logging.getLogger(__name__)
 
-# The one `catalog.film` column in scope. Everything else the trigger records (title, runtime,
-# overview, …) is metadata drift, not a beat.
+# The `catalog.film` columns whose history the sweep reads at all. Everything else the trigger
+# records (title, runtime, overview, …) is metadata drift, not a beat.
 #
 # `release_date` was here until NEU-1121 and is deliberately gone. That column is TMDB's
 # *primary* date — the earliest release in any country of any type — while the film page shows
@@ -65,7 +65,17 @@ log = logging.getLogger(__name__)
 # displayed. Its whole surface is now the year parenthetical after the title, and displayable
 # release dates card from `catalog.film_release_date_change` instead (`sweep.release_events`).
 # The consequence is accepted: the header year can change with nothing carding it.
-TRACKED_FIELDS: tuple[str, ...] = ("status",)
+#
+# **Two columns, two phases** (EF-5, NEU-1434). `status` cards here. `collection_id` cards in
+# `sweep.collection_events`, which reads these same rows through `load_change_backlog` and is
+# its own phase because almost nothing this one does fits it: a franchise attachment is
+# `rumored` rather than `confirmed`, waits out the credit quarantine with a live-state check at
+# publication, can happen to one film repeatedly rather than once, and a *move* is the one
+# transition that is two beats from one row. This tuple stays the single list of columns in
+# scope so the two phases cannot disagree about it; each passes `fields` for its own half.
+STATUS_FIELD = "status"
+COLLECTION_FIELD = "collection_id"
+TRACKED_FIELDS: tuple[str, ...] = (STATUS_FIELD, COLLECTION_FIELD)
 
 
 @dataclass(frozen=True)
@@ -116,7 +126,7 @@ def classify_field_change(
     quantity the page shows, so it raises no events. Displayable release dates card from
     `catalog.film_release_date_change` via `sweep.release_events`.
     """
-    if field == "status":
+    if field == STATUS_FIELD:
         if not isinstance(new_value, str):
             return None
         event_type = STATUS_EVENT_TYPES.get(new_value)
@@ -126,8 +136,13 @@ def classify_field_change(
     return None
 
 
-async def load_change_backlog(session: AsyncSession, *, since: datetime) -> list[TrackedChange]:
-    """Every tracked-field change recorded at or after `since`, oldest first.
+async def load_change_backlog(
+    session: AsyncSession, *, since: datetime, fields: tuple[str, ...] = TRACKED_FIELDS
+) -> list[TrackedChange]:
+    """Every change to `fields` recorded at or after `since`, oldest first.
+
+    `fields` defaults to every column in scope; each phase passes its own half, so neither
+    reads a backlog of rows it will only discard (`TRACKED_FIELDS`).
 
     Deliberately a fixed rolling window rather than a watermark off the last run. A watermark
     would advance past changes a *failed* sweep never got to, losing them permanently, and it
@@ -147,7 +162,7 @@ async def load_change_backlog(session: AsyncSession, *, since: datetime) -> list
             FilmFieldChange.new_value,
             FilmFieldChange.changed_at,
         )
-        .where(FilmFieldChange.field.in_(TRACKED_FIELDS), FilmFieldChange.changed_at >= since)
+        .where(FilmFieldChange.field.in_(fields), FilmFieldChange.changed_at >= since)
         .order_by(FilmFieldChange.changed_at, FilmFieldChange.id)
     )
     return [
@@ -238,7 +253,7 @@ async def run_field_change_events(
     since = now - timedelta(days=lookback_days)
 
     async with owned_session(session_factory) as s:
-        changes = await load_change_backlog(s, since=since)
+        changes = await load_change_backlog(s, since=since, fields=(STATUS_FIELD,))
     result.changes_read = len(changes)
     log.info("field events: %d tracked changes since %s", result.changes_read, since.isoformat())
 
