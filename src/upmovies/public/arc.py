@@ -27,6 +27,12 @@ _EVENT_STAGE: dict[str, str] = {
     # means here. Unmapped it would fall to `most_significant_event_type`'s -1 and rank beneath
     # every other type — a director attachment would lose to anything it shared a day with.
     "crew_attached": "announced",
+    # A studio attaching is the same "this is real now" beat a director attaching is (EF-5):
+    # a film with a distributor behind it has moved, and on a day that carries nothing else
+    # that is what the group should read as. `company_removed` is deliberately absent, like
+    # `credit_removed` — a detachment is a correction to an arc, not a stage of one, and at
+    # -1 it yields to any real beat it shares a day with.
+    "company_attached": "announced",
     "production_start": "shooting",
     "production_wrap": "wrapped",
     "release_date": "dated",

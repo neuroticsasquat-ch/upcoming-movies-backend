@@ -20,6 +20,11 @@ from upmovies.news.models import Event
 # `other` is the uncategorized catch-all where residual hype lands (NEU-367). Hidden from
 # users but kept in the table, so hiding stays reversible — note that events hidden at
 # creation are never summarized, so un-hiding a type needs a synthesis backfill.
+#
+# `company_attached` and `company_removed` are deliberately *not* here (EF-5, NEU-1433). A
+# studio joining or leaving a film is the whole of what a studio follow delivers (EF-3), so
+# hiding it would leave that follow with nothing to show; the type is listed here only to
+# record that the question was asked and answered.
 HIDDEN_EVENT_TYPES = ("other",)
 
 

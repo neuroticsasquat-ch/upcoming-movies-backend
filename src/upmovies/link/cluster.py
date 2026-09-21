@@ -53,6 +53,10 @@ _VALID_TYPES = {
 _STALE_EVENT_TYPES = {
     "announced",
     "casting",
+    # Early-production beats the LLM cannot emit *yet*, registered with the rest of the
+    # vocabulary so the rule is in place the day it can (EF-5, EF-12). `crew_attached` has
+    # been here on the same terms since the credit half shipped.
+    "company_attached",
     "crew_attached",
     "production_start",
     "production_wrap",

@@ -716,6 +716,8 @@ def test_every_visible_event_type_has_a_digest_label_and_an_unknown_one_still_re
     visible = (
         "announced",
         "casting",
+        "company_attached",
+        "company_removed",
         "credit_removed",
         "crew_attached",
         "now_available",

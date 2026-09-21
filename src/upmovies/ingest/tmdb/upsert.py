@@ -28,6 +28,13 @@ from upmovies.catalog.models import (
 )
 from upmovies.catalog.slug import assign_slug
 from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
+from upmovies.ingest.tmdb.company_history import (
+    companies_from_details,
+    diff_companies,
+    load_observed_companies,
+    mark_companies_observed,
+    record_company_changes,
+)
 from upmovies.ingest.tmdb.credit_history import (
     diff_recorded_credits,
     load_followed_person_ids,
@@ -332,6 +339,18 @@ async def _upsert_references(session: AsyncSession, details: TMDBMovieDetails) -
 
 
 async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovieDetails) -> None:
+    """Rebuild the four join tables, and capture the studio *history* the company rebuild would
+    otherwise throw away (EF-5).
+
+    The company diff lives here for the reason the credit diff lives in `_upsert_credits`: both
+    sides of it are in hand at this point and nowhere else, because the next statement deletes
+    the stored one. First observation is a baseline, never a change — see
+    `ingest.tmdb.company_history`.
+    """
+    # Read the stored side before the delete below wipes it. None means the catalog has never
+    # observed this film's companies, which `diff_companies` reads as a baseline.
+    previous_companies = await load_observed_companies(session, film_id)
+
     await session.execute(delete(FilmGenre).where(FilmGenre.film_id == film_id))
     await session.execute(
         delete(FilmProductionCompany).where(FilmProductionCompany.film_id == film_id)
@@ -368,6 +387,15 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
                 [{"film_id": film_id, "iso_639_1": sl.iso_639_1} for sl in details.spoken_languages]
             )
         )
+
+    # The marker is set last and only here, so the very first pass writes a baseline and every
+    # later one a diff.
+    await record_company_changes(
+        session,
+        film_id,
+        diff_companies(previous=previous_companies, current=companies_from_details(details)),
+    )
+    await mark_companies_observed(session, film_id)
 
 
 async def _rebuild_release_dates(
