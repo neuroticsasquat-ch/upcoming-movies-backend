@@ -151,6 +151,24 @@ class Settings(BaseSettings):
     sweep_sanity_posthumous_years: int = Field(
         default=2, ge=1, alias="SWEEP_SANITY_POSTHUMOUS_YEARS"
     )
+    # The studio half's one sanity check (EF-5, NEU-1433): how many films a single production
+    # company may be recorded as attaching to on one observation day. Reaching the threshold is
+    # enough — a company with N or more same-day attachments has every one of them withheld, the
+    # `>=` `SWEEP_SANITY_MAX_FILMS_PER_DAY` already uses. D-8's shape with its own number, and
+    # the number has to be a very different one — a person reaching twenty new seed-grade
+    # credits in a day is vanishingly rare, while a studio genuinely picking up a slate in one
+    # TMDB editing session is not.
+    #
+    # 100 is a placeholder set from the shape of the attack rather than from measurement, and
+    # set deliberately generously because this check has no escape hatch: the credit holds keep
+    # an `ingest.credit_hold` row an admin can release by hand (`ingest.credit_holds`), while
+    # this one is stateless and a withheld run that never falls below the threshold simply ages
+    # out of the rolling window uncarded. Retune against `film_company_change` once there is a
+    # distribution to read. `0` turns the check off, which is safe here precisely because there
+    # are no hold rows to strand.
+    sweep_company_sanity_max_films_per_day: int = Field(
+        default=100, ge=0, alias="SWEEP_COMPANY_SANITY_MAX_FILMS_PER_DAY"
+    )
     # The age below which a seed-grade credit is implausible on its face. 3 rather than 5:
     # infants really are cast, and a bar set where a genuine credit lives would hold real
     # casting announcements to catch a vandal who could equally have typed 1 as 4.

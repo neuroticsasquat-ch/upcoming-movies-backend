@@ -18,6 +18,7 @@ from upmovies.catalog.models import Film, FilmAlternativeTitle, FilmCredit, Pers
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.sweep import (
     AdmissionTranches,
+    CompanyEventResult,
     CreditDetachmentResult,
     CreditEventResult,
     FieldEventResult,
@@ -446,6 +447,7 @@ async def test_the_attachment_histogram_still_counts_what_the_threshold_excluded
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
+        CompanyEventResult(),
     )
 
 
@@ -474,6 +476,7 @@ async def test_a_candidate_reached_only_through_a_writer_waits_for_its_tranche(
         CreditEventResult(),
         CreditDetachmentResult(),
         ReleaseEventResult(),
+        CompanyEventResult(),
     )
 
 

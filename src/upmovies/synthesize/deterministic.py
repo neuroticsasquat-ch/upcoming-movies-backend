@@ -11,9 +11,10 @@ Two contracts this module exists to hold:
 - **`model` is a sentinel, never a real model id.** No call is made, and `ingest.llm_call` /
   `ingest.run_llm_usage` are the system's cost ledger — a row naming a real model there would
   price tokens that were never spent.
-- **The wording lives in one place.** Five trigger sites (release date, status, credits, the
-  watch-provider poll and the video poll) write these bodies; §5.4's phrasing must not be
-  copy-pasted across them, and `prompt_version` must move when the phrasing does.
+- **The wording lives in one place.** Six trigger sites (release date, status, credits,
+  production companies, the watch-provider poll and the video poll) write these bodies;
+  §5.4's phrasing must not be copy-pasted across them, and `prompt_version` must move when
+  the phrasing does.
 
 Callers own the transaction, in line with the rest of the ingest pipelines.
 """
@@ -38,7 +39,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-7"
+TEMPLATE_VERSION = "deterministic-8"
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,46 @@ class CreditsDetached:
 
 
 @dataclass(frozen=True)
+class CompanyAttached:
+    """A production company newly listed on the film (EF-5).
+
+    The display name, not the id: the id is the card's identity and rides in
+    `Event.subject_key` (`news.subject_key.company_subject_token`), while the body needs the
+    string a reader recognises.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True)
+class CompaniesAttached:
+    """Every company one sweep pass saw attach to a film, as one body (D-7).
+
+    Grouped for the reason `CreditsAttached` is: `uq_event_catalog_change` allows one catalog
+    event per film, type and timestamp, and a film entering production routinely gains its
+    studio, its financier and its production arm in a single TMDB edit. Three cards each
+    reading "X joins the production." would be three cards about one beat.
+    """
+
+    companies: tuple[CompanyAttached, ...]
+
+
+@dataclass(frozen=True)
+class CompanyDetached:
+    """A production company no longer listed on the film (EF-5)."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class CompaniesDetached:
+    """Every company one sweep pass saw leave a film, as one body. `CompaniesAttached`'s
+    mirror, on the same grouping rule."""
+
+    companies: tuple[CompanyDetached, ...]
+
+
+@dataclass(frozen=True)
 class AvailableOn:
     """One monetization type a film was newly observed under, and the services carrying it.
 
@@ -197,6 +238,10 @@ CatalogChange = (
     | CreditsAttached
     | CreditDetached
     | CreditsDetached
+    | CompanyAttached
+    | CompaniesAttached
+    | CompanyDetached
+    | CompaniesDetached
     | NowAvailable
     | TrailerReleased
 )
@@ -375,6 +420,38 @@ def _render_detachments(change: CreditsDetached) -> str:
     )
 
 
+def _render_companies(change: CompaniesAttached) -> str:
+    """ "Legendary Pictures joins the production." — one clause, however many companies.
+
+    **The film is not named**, which is where this departs from the illustrative phrasing in
+    the EF-5 spec line ("Legendary Pictures joins *Dune: Part Three*"). Every other body in
+    this module leaves the title out for a reason that applies here unchanged and is recorded
+    on `_STATUS_BODIES`: the card renders under the film's own title on the feed, the film page
+    and in both mails, so naming it again is the redundancy the summarizer prompt already tells
+    the model to avoid. The spec line reads as a description of the beat rather than as the
+    literal template, and following it literally would make the studio bodies the only ones on
+    the feed that repeat their heading.
+
+    "the production" rather than "the film": it is what the beat is called, and it keeps the
+    clause parallel with the crew body's "join the crew."
+    """
+    names = _join_names([c.name for c in change.companies])
+    verb = "joins" if len(change.companies) == 1 else "join"
+    return f"{names} {verb} the production."
+
+
+def _render_company_detachments(change: CompaniesDetached) -> str:
+    """ "Legendary Pictures is no longer attached." — the mirror, phrased off the detached
+    credit bodies ("X is no longer attached to direct") so one vocabulary covers both halves.
+
+    No "to produce": the credit bodies can name the job because the credit carries one, and a
+    company row does not — TMDB publishes no role for a production company, so a body that
+    claimed one would be inventing it."""
+    names = _join_names([c.name for c in change.companies])
+    verb = "is" if len(change.companies) == 1 else "are"
+    return f"{names} {verb} no longer attached."
+
+
 # Keyed on the monetization types the poll stores (`catalog.models.MONETIZATION_TYPES`), which
 # a CHECK constraint holds the ledger to — so unlike a TMDB status an unrecognised key here is a
 # bug in the caller, not new data from upstream, and `_render_now_available` raises on it.
@@ -433,6 +510,14 @@ def render_summary(change: CatalogChange) -> str:
             return _render_detachments(CreditsDetached(credits=(change,)))
         case CreditsDetached():
             return _render_detachments(change)
+        case CompanyAttached():
+            return _render_companies(CompaniesAttached(companies=(change,)))
+        case CompaniesAttached():
+            return _render_companies(change)
+        case CompanyDetached():
+            return _render_company_detachments(CompaniesDetached(companies=(change,)))
+        case CompaniesDetached():
+            return _render_company_detachments(change)
         case NowAvailable():
             return _render_now_available(change)
         case TrailerReleased():

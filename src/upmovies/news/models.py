@@ -78,7 +78,8 @@ class Event(Base):
     __tablename__ = "event"
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('announced', 'casting', 'credit_removed', 'crew_attached', "
+            "event_type IN ('announced', 'casting', 'company_attached', 'company_removed', "
+            "'credit_removed', 'crew_attached', "
             "'now_available', 'production_start', 'production_wrap', 'release_date', "
             "'trailer', 'first_look', 'other')",
             name="ck_event_type",

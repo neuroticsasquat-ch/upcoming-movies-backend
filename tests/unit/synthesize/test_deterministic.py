@@ -6,6 +6,10 @@ from upmovies.synthesize.deterministic import (
     DETERMINISTIC_MODEL,
     TEMPLATE_VERSION,
     AvailableOn,
+    CompaniesAttached,
+    CompaniesDetached,
+    CompanyAttached,
+    CompanyDetached,
     CreditAttached,
     CreditDetached,
     CreditsAttached,
@@ -291,7 +295,9 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "deterministic-7"
+    """Bumped to 8 by the company bodies (EF-5): a summary has to be traceable back to the
+    phrasing that produced it, so this moves whenever a template above does."""
+    assert TEMPLATE_VERSION == "deterministic-8"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────
@@ -437,4 +443,66 @@ def test_the_trailer_body_does_not_name_the_film_or_the_video():
     body = render_summary(TrailerReleased())
 
     assert "trailer" in body.lower()
+    assert body.count(".") == 1
+
+
+# --- production companies (EF-5, NEU-1433) --------------------------------------
+
+
+def test_a_studio_attaching_joins_the_production():
+    assert (
+        render_summary(CompaniesAttached(companies=(CompanyAttached(name="Legendary Pictures"),)))
+        == "Legendary Pictures joins the production."
+    )
+
+
+def test_several_studios_attaching_share_one_clause():
+    """D-7: a film gaining its studio and its financier in one edit is one beat, and the body
+    names both rather than repeating itself on two cards."""
+    assert (
+        render_summary(
+            CompaniesAttached(
+                companies=(
+                    CompanyAttached(name="Legendary Pictures"),
+                    CompanyAttached(name="Warner Bros. Pictures"),
+                )
+            )
+        )
+        == "Legendary Pictures and Warner Bros. Pictures join the production."
+    )
+
+
+def test_a_studio_detaching_is_no_longer_attached():
+    assert (
+        render_summary(CompaniesDetached(companies=(CompanyDetached(name="Legendary Pictures"),)))
+        == "Legendary Pictures is no longer attached."
+    )
+
+
+def test_several_studios_detaching_share_one_clause():
+    assert (
+        render_summary(
+            CompaniesDetached(
+                companies=(CompanyDetached(name="A Studio"), CompanyDetached(name="B Studio"))
+            )
+        )
+        == "A Studio and B Studio are no longer attached."
+    )
+
+
+def test_one_company_renders_as_the_singular_change():
+    change = CompanyAttached(name="Legendary Pictures")
+
+    assert render_summary(CompaniesAttached(companies=(change,))) == render_summary(change)
+    detached = CompanyDetached(name="Legendary Pictures")
+    assert render_summary(CompaniesDetached(companies=(detached,))) == render_summary(detached)
+
+
+def test_a_company_body_does_not_name_the_film():
+    """Where this departs from the EF-5 spec line's illustrative phrasing ("Legendary Pictures
+    joins *Dune: Part Three*"): every body in this module leaves the title out, because the
+    card renders under the film's own title on every surface that shows it."""
+    body = render_summary(CompaniesAttached(companies=(CompanyAttached(name="Legendary"),)))
+
+    assert "Film" not in body
     assert body.count(".") == 1

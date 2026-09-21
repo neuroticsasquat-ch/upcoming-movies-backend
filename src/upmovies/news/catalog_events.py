@@ -52,6 +52,26 @@ CREDIT_EVENT_TYPES = frozenset(CREDIT_ROLE_EVENT_TYPES.values())
 # The shared vocabulary home for the detachment carding phase.
 CREDIT_REMOVED_EVENT_TYPE = "credit_removed"
 
+# The studio half (EF-5, NEU-1433). A production company joining or leaving a film, read out
+# of `catalog.film_company_change` the way the credit types are read out of
+# `film_credit_change`. Registered in `ck_event_type` and in `public.arc._EVENT_STAGE`
+# (`company_attached` only, for the reason `CREDIT_REMOVED_EVENT_TYPE` is absent from it: a
+# detachment is a correction to an arc, not a stage of one), and deliberately **not** in
+# `HIDDEN_EVENT_TYPES` — a studio attaching is a beat the timeline shows.
+#
+# Absent from `CATALOG_EVENT_TYPES` below, like `now_available` and unlike the credit types:
+# that set is `link.cluster._catalog_dedup_target`'s, for beats the LLM reaches under another
+# name, and the cluster vocabulary has no organisation types at all until EF-12 gives it one.
+COMPANY_ATTACHED_EVENT_TYPE = "company_attached"
+COMPANY_REMOVED_EVENT_TYPE = "company_removed"
+
+# The pair, in the order the sweep cards them: attachments first, so a film that gained one
+# studio and lost another in the same pass reads forwards.
+COMPANY_EVENT_TYPES: tuple[str, ...] = (
+    COMPANY_ATTACHED_EVENT_TYPE,
+    COMPANY_REMOVED_EVENT_TYPE,
+)
+
 # Every event type a catalog change can raise. `release_date` is the odd one out among the
 # field-change types: a film's date may move repeatedly, so it is the only one of those
 # matched on *when* rather than on existence.

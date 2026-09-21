@@ -75,6 +75,24 @@ class Film(Base):
     run is silently swallowed as a baseline. Ingest bookkeeping, not a fact about the film —
     hence its place in `FILM_FIELD_CHANGE_DENYLIST`.
     """
+    companies_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When the catalog first held an observation of this film's production companies — NULL
+    until it has.
+
+    `credits_observed_at` for the studio half (EF-5, NEU-1433), and load-bearing for the same
+    reason: `film_production_company` is delete-and-rebuilt on every ingest, so "holds no
+    company rows" cannot tell a film nobody has looked at from one TMDB lists no companies for
+    — and the first studio to attach to the second is exactly the beat the company half exists
+    to raise.
+
+    Backfilled to `now()` for every film already in the catalog by this column's own migration,
+    which is what NEU-1436 keys the EF-4 admission exception on: with the marker left NULL,
+    every existing film would read as a first observation on its next refresh and card an
+    attachment for every followed studio in the catalog at once (D-1436.3). Ingest bookkeeping
+    rather than a fact about the film, so it joins `FILM_FIELD_CHANGE_DENYLIST`.
+    """
     release_dates_observed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -452,6 +470,61 @@ class FilmCreditChange(Base):
     """
 
 
+class FilmCompanyChange(Base):
+    """Append-only history of production companies attaching to and detaching from a film,
+    written by the join rebuild in `ingest.tmdb.company_history` (EF-5, NEU-1433).
+
+    `catalog.film_production_company` is delete-and-rebuilt on every ingest, exactly as
+    `film_credit` is, so it holds no memory of a studio having joined — only that one is on
+    the film now. This table is that memory, and it is what lets a studio follow deliver an
+    attachment stream (EF-3) rather than every beat on every film the studio ever touched.
+
+    Unlike `film_credit_change` there is **no recorded grade**: a company row is a company row,
+    TMDB publishes no billing order for them, and a film carries a handful rather than a cast
+    of forty. Every company that crosses the set is written down.
+
+    What it *does* inherit, and must earn explicitly for the same reasons, is **first
+    observation is a baseline, never a change** (ADR-0014, spec §5.3), keyed on the durable
+    `film.companies_observed_at` marker rather than on the join table being empty — see
+    `ingest.tmdb.company_history` for why the two are not the same statement.
+    """
+
+    __tablename__ = "film_company_change"
+    __table_args__ = (
+        Index("ix_catalog_film_company_change_lookup", "film_id", "changed_at"),
+        Index("ix_catalog_film_company_change_carded_by", "carded_by_event_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    company_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.production_company.id"), nullable=False
+    )
+    change: Mapped[str] = mapped_column(Text, nullable=False)
+    """`added` or `removed`."""
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    carded_by_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_film_company_change_carded_by"),
+        nullable=True,
+    )
+    """The event that published this change, when one has — `film_credit_change`'s column and
+    its `ON DELETE SET NULL` rationale, in full.
+
+    Nothing writes it yet: the story half that stamps it is EF-12's organisation resolution,
+    which has no extraction schema until M4. It is here now because the sweep's backlog loader
+    already reads `carded_by_event_id IS NULL`, so the seam a trade scoop will arrive on is the
+    filter rather than a later migration.
+    """
+
+
 class FilmReleaseDateChange(Base):
     """Append-only history of **displayable** release dates being set or moved, written by the
     release-date rebuild in `ingest.tmdb.release_date_history` (NEU-1121).
@@ -700,6 +773,7 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "tmdb_raw",
     "updated_at",
     "credits_observed_at",
+    "companies_observed_at",
     "release_dates_observed_at",
     "videos_observed_at",
     "tmdb_missing_at",
