@@ -73,6 +73,7 @@ from upmovies.ingest.providers import providers_detail, run_provider_poll
 from upmovies.ingest.runs import create_run, finalize_run, mark_stale_runs_cancelled
 from upmovies.ingest.sweep import (
     AdmissionTranches,
+    CollectionEventResult,
     CompanyEventResult,
     CreditDetachmentResult,
     CreditEventResult,
@@ -80,6 +81,7 @@ from upmovies.ingest.sweep import (
     FieldEventResult,
     RefreshResult,
     ReleaseEventResult,
+    run_collection_events,
     run_company_events,
     run_credit_attachment_events,
     run_credit_detachment_events,
@@ -358,11 +360,31 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             max_films_per_day=settings.sweep_company_sanity_max_films_per_day,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
+        # The franchise half (EF-5, NEU-1434), reading the `collection_id` rows of
+        # `film_field_change` — the same table the status phase above reads, and written by
+        # the same refresh. Its own phase for the reasons `sweep.collection_events` documents,
+        # and last on the studio half's reasoning: newest, and the cheapest to lose.
+        collections = await run_collection_events(
+            session_factory=_session_factory,
+            run_id=run_id,
+            now=now,
+            lookback_days=settings.sweep_event_lookback_days,
+            quarantine_hours=settings.sweep_credit_quarantine_hours,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
         # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
         # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
         # to be covered by the same net as the work it reports on.
         await _finalize_sweep(
-            run_id, enumerated, refreshed, carded, attached, detached, released, companies
+            run_id,
+            enumerated,
+            refreshed,
+            carded,
+            attached,
+            detached,
+            released,
+            companies,
+            collections,
         )
     except Exception as e:
         log.exception("sweep crashed")
@@ -378,6 +400,7 @@ async def _finalize_sweep(
     detached: CreditDetachmentResult,
     released: ReleaseEventResult,
     companies: CompanyEventResult,
+    collections: CollectionEventResult,
 ) -> None:
     """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
     failures, and the every-phase detail line either way — a run that aborted still reports
@@ -392,6 +415,7 @@ async def _finalize_sweep(
             ("credit removals", detached),
             ("release dates", released),
             ("companies", companies),
+            ("collections", collections),
         )
         if result.aborted
     ]
@@ -402,7 +426,14 @@ async def _finalize_sweep(
             status="failed" if aborts else "succeeded",
             error="; ".join(aborts) or None,
             detail=sweep_detail(
-                enumerated, refreshed, carded, attached, detached, released, companies
+                enumerated,
+                refreshed,
+                carded,
+                attached,
+                detached,
+                released,
+                companies,
+                collections,
             ),
         )
         await s.commit()

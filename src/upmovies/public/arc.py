@@ -33,6 +33,11 @@ _EVENT_STAGE: dict[str, str] = {
     # `credit_removed` — a detachment is a correction to an arc, not a stage of one, and at
     # -1 it yields to any real beat it shares a day with.
     "company_attached": "announced",
+    # A film filed under a franchise is the same "this is real now" beat (EF-5, NEU-1434):
+    # TMDB files a title under a collection once the sequel it belongs to is a real thing, so
+    # on a day that carries nothing else that is what the group should read as.
+    # `collection_removed` is absent on `company_removed`'s reasoning.
+    "collection_attached": "announced",
     "production_start": "shooting",
     "production_wrap": "wrapped",
     "release_date": "dated",

@@ -6,6 +6,10 @@ from upmovies.synthesize.deterministic import (
     DETERMINISTIC_MODEL,
     TEMPLATE_VERSION,
     AvailableOn,
+    CollectionAttached,
+    CollectionDetached,
+    CollectionsAttached,
+    CollectionsDetached,
     CompaniesAttached,
     CompaniesDetached,
     CompanyAttached,
@@ -295,9 +299,9 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    """Bumped to 8 by the company bodies (EF-5): a summary has to be traceable back to the
-    phrasing that produced it, so this moves whenever a template above does."""
-    assert TEMPLATE_VERSION == "deterministic-8"
+    """Bumped to 9 by the collection bodies (EF-5, NEU-1434): a summary has to be traceable
+    back to the phrasing that produced it, so this moves whenever a template above does."""
+    assert TEMPLATE_VERSION == "deterministic-9"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────
@@ -503,6 +507,72 @@ def test_a_company_body_does_not_name_the_film():
     joins *Dune: Part Three*"): every body in this module leaves the title out, because the
     card renders under the film's own title on every surface that shows it."""
     body = render_summary(CompaniesAttached(companies=(CompanyAttached(name="Legendary"),)))
+
+    assert "Film" not in body
+    assert body.count(".") == 1
+
+
+# --- collections (EF-5, NEU-1434) -----------------------------------------------
+
+
+def test_a_film_joining_a_franchise_reads_as_the_film_joining_it():
+    """The subject is the film, unlike every other attachment body: a franchise does not join
+    a film, a film joins a franchise."""
+    assert (
+        render_summary(
+            CollectionsAttached(collections=(CollectionAttached(name="Dune Collection"),))
+        )
+        == "The film joins the Dune Collection."
+    )
+
+
+def test_a_film_leaving_a_franchise_uses_the_spec_line_s_verb():
+    assert (
+        render_summary(
+            CollectionsDetached(collections=(CollectionDetached(name="Dune Collection"),))
+        )
+        == "The film leaves the Dune Collection."
+    )
+
+
+def test_two_franchises_visited_in_one_window_share_one_clause():
+    """A film holds one collection at a time, so a plural body is only ever reached across
+    observations collapsed into one pass (D-7)."""
+    assert (
+        render_summary(
+            CollectionsAttached(
+                collections=(
+                    CollectionAttached(name="Dune Collection"),
+                    CollectionAttached(name="Alien Collection"),
+                )
+            )
+        )
+        == "The film joins the Dune Collection and Alien Collection."
+    )
+
+
+def test_one_collection_renders_as_the_singular_change():
+    change = CollectionAttached(name="Dune Collection")
+
+    assert render_summary(CollectionsAttached(collections=(change,))) == render_summary(change)
+    detached = CollectionDetached(name="Dune Collection")
+    assert render_summary(CollectionsDetached(collections=(detached,))) == render_summary(detached)
+
+
+def test_the_word_collection_is_never_appended_to_the_name():
+    """TMDB's own names carry it, so appending one would read "the Dune Collection
+    collection"."""
+    body = render_summary(
+        CollectionsAttached(collections=(CollectionAttached(name="Dune Collection"),))
+    )
+
+    assert body.lower().count("collection") == 1
+
+
+def test_a_collection_body_does_not_name_the_film():
+    """Where this departs from the EF-5 spec line's illustrative phrasing ("*Dune: Part Three*
+    joins the Dune collection"): the card renders under the film's own title everywhere."""
+    body = render_summary(CollectionsAttached(collections=(CollectionAttached(name="Dune"),)))
 
     assert "Film" not in body
     assert body.count(".") == 1

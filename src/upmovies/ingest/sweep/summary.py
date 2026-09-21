@@ -26,6 +26,11 @@ burst is a specific claim about a named company. It is the *only* place a compan
 visible — the check keeps no rows, unlike `ingest.credit_hold`, so a run withheld on this line
 and nowhere else is the whole record that it happened.
 
+The collections clause (EF-5, NEU-1434) carries **held** for the companies clause's reason,
+and carries no burst count because the franchise phase runs no burst check — filing a slate of
+films under one new collection in a single editing session is ordinary TMDB curation rather
+than the shape of defacement the studio threshold is for.
+
 The credits clause reports **held** (NEU-1368) apart from both carded and already-carded,
 because quarantine (D-3) makes "nothing carded" ambiguous: a pass that read an empty window
 and a pass that withheld everything it read are otherwise the same line. It counts attachment
@@ -71,6 +76,7 @@ from collections import Counter
 
 from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import format_skip_detail
+from upmovies.ingest.sweep.collection_events import CollectionEventResult
 from upmovies.ingest.sweep.company_events import CompanyEventResult
 from upmovies.ingest.sweep.credit_events import CreditDetachmentResult, CreditEventResult
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
@@ -141,6 +147,7 @@ def sweep_detail(
     detached: CreditDetachmentResult,
     released: ReleaseEventResult,
     companies: CompanyEventResult,
+    collections: CollectionEventResult,
 ) -> str:
     """One line reporting all phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
@@ -171,6 +178,10 @@ def sweep_detail(
         f"{companies.changes_read} changes, "
         f"{companies.skipped} already carded, {companies.held} held, "
         f"{companies.bursts_held} burst held, {companies.failures} failed",
+        f"collections: {collections.events_created} carded from "
+        f"{collections.changes_read} changes, "
+        f"{collections.skipped} already carded, {collections.held} held, "
+        f"{collections.failures} failed",
     ]
     # Both beside the enumerate clause they belong to, ahead of the phases that follow it,
     # and inserted in reverse so they read `roles`, then `seed attachments`.
@@ -194,4 +205,6 @@ def sweep_detail(
         parts.append(f"release dates aborted: {released.abort_error}")
     if companies.aborted:
         parts.append(f"companies aborted: {companies.abort_error}")
+    if collections.aborted:
+        parts.append(f"collections aborted: {collections.abort_error}")
     return "; ".join(parts)
