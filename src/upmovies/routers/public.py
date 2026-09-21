@@ -7,7 +7,9 @@ from upmovies.deps import get_session
 from upmovies.public import service
 from upmovies.public.dto import (
     CalendarResponse,
+    CollectionDetailResponse,
     CollectionSearchResponse,
+    CompanyDetailResponse,
     CompanySearchResponse,
     FeedDayResponse,
     FeedResponse,
@@ -137,6 +139,38 @@ async def search_collections(
     return await service.get_collection_search(session, q=q, limit=limit, offset=offset)
 
 
+# Registered after `/companies/search` and `/collections/search` for the reason spelled above
+# `/people/{ref}`: the literal paths would otherwise be swallowed by `{ref}`, and
+# `test_entity_search_still_routes` is the assertion that they stay ahead of it.
+@router.get("/companies/{ref}", response_model=CompanyDetailResponse, dependencies=[_public_limit])
+async def get_company(
+    ref: str,
+    session: AsyncSession = Depends(get_session),
+) -> CompanyDetailResponse:
+    """`ref` is `<company_id>-<name-slug>`, resolved on the leading id. The response's own `ref`
+    is the canonical one — callers redirect when it differs from what was requested, as the
+    person and film pages do. 404 for an id the catalog does not hold."""
+    company = await service.get_company_detail(session, ref)
+    if company is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="company not found")
+    return company
+
+
+@router.get(
+    "/collections/{ref}", response_model=CollectionDetailResponse, dependencies=[_public_limit]
+)
+async def get_collection(
+    ref: str,
+    session: AsyncSession = Depends(get_session),
+) -> CollectionDetailResponse:
+    """`ref` is `<collection_id>-<name-slug>`, resolved on the leading id. `/companies/{ref}`
+    over franchises, down to the redirect rule and the 404."""
+    collection = await service.get_collection_detail(session, ref)
+    if collection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="collection not found")
+    return collection
+
+
 @router.get("/feed", response_model=FeedResponse, dependencies=[_public_limit])
 async def get_feed(
     limit: int = Query(default=50, ge=1, le=100),
@@ -203,7 +237,8 @@ async def get_calendar_feed(
 async def get_sitemap(session: AsyncSession = Depends(get_session)) -> Response:
     settings = get_settings()
     films = await service.get_sitemap_films(session)
+    entities = await service.get_sitemap_entities(session)
     return Response(
-        content=render_sitemap(settings.public_base_url, films),
+        content=render_sitemap(settings.public_base_url, films, entities),
         media_type="application/xml",
     )

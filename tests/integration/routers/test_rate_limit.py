@@ -222,11 +222,13 @@ async def test_public_routes_are_limited_once_the_flag_is_set(client, limited):
     assert r.json()["bucket"] == "public"
 
 
-async def test_the_public_routes_share_one_bucket(client, store):
+async def test_the_public_routes_share_one_bucket(client, store, make_company, make_collection):
+    await make_company(id=174, name="Warner Bros. Pictures")
+    await make_collection(id=263, name="The Dark Knight Collection")
     settings = Settings(  # type: ignore[call-arg]
         RATE_LIMIT_ENABLED="true",
         RATE_LIMIT_PUBLIC_ENABLED="true",
-        RATE_LIMIT_PUBLIC="8/60",
+        RATE_LIMIT_PUBLIC="10/60",
     )
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_rate_limit_store] = lambda: store
@@ -239,8 +241,10 @@ async def test_the_public_routes_share_one_bucket(client, store):
         assert (await client.get("/people/popular")).status_code == 200
         assert (await client.get("/companies/search?q=dune")).status_code == 200
         assert (await client.get("/collections/search?q=dune")).status_code == 200
+        assert (await client.get("/companies/174")).status_code == 200
+        assert (await client.get("/collections/263")).status_code == 200
         # The sitemap is deliberately outside the bucket — crawlers, cached upstream — so it
-        # answers after the other eight have spent every token.
+        # answers after the other ten have spent every token.
         assert (await client.get("/films/0-nothing")).status_code == 429
         assert (await client.get("/sitemap.xml")).status_code == 200
     finally:

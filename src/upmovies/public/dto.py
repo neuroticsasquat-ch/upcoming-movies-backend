@@ -124,15 +124,20 @@ class ReleaseDateOut(BaseModel):
     certification: str | None
 
 
-class PersonFilmSummaryOut(WatchlistFilmOut):
-    """`WatchlistFilmOut` plus the URL ref — the watchlist row's shape, as the spec asks, so a
-    film cited on a person page and the same film on the watchlist cannot show different dates.
+class FilmRowOut(WatchlistFilmOut):
+    """One film cited on an entity page — person, studio or franchise. `WatchlistFilmOut` plus
+    the URL ref: the watchlist row's shape, as the spec asks, so a film cited on an entity page
+    and the same film on the watchlist cannot show different dates.
 
     It subclasses rather than restating the five fields: the reason `WatchlistFilmOut` carries
     `headline_release` instead of `release_date` (NEU-1397 — the film page never displays
     TMDB's primary date) is a rule about citing films anywhere, and a copy here would be a
     second place for it to be got wrong. `ref` is added because this row links to the film page
-    and the watchlist's client builds that link itself."""
+    and the watchlist's client builds that link itself.
+
+    The studio and franchise pages (NEU-1428) return this row **bare**; the person page wraps
+    it in `PersonFilmOut` to hang that person's credits and tier off it, which is the only
+    thing the three pages do differently."""
 
     ref: str
 
@@ -165,9 +170,45 @@ class PersonFilmOut(BaseModel):
     this row to reach the user at all — so the page can say "Lead roles reaches two of seven"
     without the client re-deriving the rule."""
 
-    film: PersonFilmSummaryOut
+    film: FilmRowOut
     credits: list[PersonCreditOut]
     tier: CreditTier
+
+
+class CompanyDetailResponse(BaseModel):
+    """A studio's page (EF-17): who they are, and the films a follow could reach.
+
+    Same two lists as `PersonDetailResponse` and for the same reason — `upcoming` is the
+    in-play set, `recent` is the alert window less it, and the back catalogue is absent by
+    design. The rows are bare `FilmRowOut`s: a studio credit has no tier and no job to name,
+    so the person row's `credits` and `tier` would be empty ceremony on every row.
+
+    `id` is the TMDB company id; stringified, it is the `entity_id` a `company` follow is keyed
+    on. `ref` is canonical — the client redirects when the one it asked with differs.
+    """
+
+    ref: str
+    id: int
+    name: str
+    logo_path: str | None
+    upcoming: list[FilmRowOut]
+    recent: list[FilmRowOut]
+
+
+class CollectionDetailResponse(BaseModel):
+    """A franchise's page (EF-17) — `CompanyDetailResponse` over `catalog.collection`, carrying
+    the collection's `poster_path` where a studio carries its `logo_path`.
+
+    `id` is the TMDB collection id; stringified, it is the `entity_id` a `franchise` follow is
+    keyed on.
+    """
+
+    ref: str
+    id: int
+    name: str
+    poster_path: str | None
+    upcoming: list[FilmRowOut]
+    recent: list[FilmRowOut]
 
 
 class PersonDetailResponse(BaseModel):

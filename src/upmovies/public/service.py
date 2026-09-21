@@ -49,7 +49,16 @@ from upmovies.catalog.models import (
     WatchProvider,
 )
 from upmovies.catalog.queries import alert_window_clause, in_play_clause
-from upmovies.catalog.ref import film_ref, parse_film_ref, parse_person_ref, person_ref
+from upmovies.catalog.ref import (
+    collection_ref,
+    company_ref,
+    film_ref,
+    parse_collection_ref,
+    parse_company_ref,
+    parse_film_ref,
+    parse_person_ref,
+    person_ref,
+)
 from upmovies.catalog.release_grade import (
     PRIMARY_REGION,
     RELEASE_TYPE_BUCKETS,
@@ -71,9 +80,11 @@ from upmovies.public.dto import (
     CalendarItem,
     CalendarResponse,
     CastMemberOut,
+    CollectionDetailResponse,
     CollectionOut,
     CollectionSearchItem,
     CollectionSearchResponse,
+    CompanyDetailResponse,
     CompanyOut,
     CompanySearchItem,
     CompanySearchResponse,
@@ -87,10 +98,10 @@ from upmovies.public.dto import (
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
+    FilmRowOut,
     PersonCreditOut,
     PersonDetailResponse,
     PersonFilmOut,
-    PersonFilmSummaryOut,
     PersonSearchItem,
     PersonSearchResponse,
     PopularPeopleResponse,
@@ -442,6 +453,38 @@ def _headline_out(headline: HeadlineRelease | None) -> HeadlineReleaseOut | None
     )
 
 
+def _film_row_out(film: Film, headline: HeadlineRelease | None) -> FilmRowOut:
+    """One film cited on an entity page (person, studio or franchise), in the watchlist row's
+    shape. One function because it is one row — a studio page and a person page disagreeing
+    about a film's date would be the exact bug `WatchlistFilmOut` exists to prevent."""
+    return FilmRowOut(
+        ref=film_ref(film.tmdb_id, film.title),
+        id=film.id,
+        tmdb_id=film.tmdb_id,
+        slug=film.slug,
+        title=film.title,
+        poster_path=film.poster_path,
+        headline_release=_headline_out(headline),
+    )
+
+
+def _film_row_order_key(row: FilmRowOut, *, sign: int) -> tuple[bool, float, str]:
+    """The order every entity page's two lists run in.
+
+    Sorted in Python rather than in SQL: the headline release is two statements of its own
+    (`catalog.headline_release`), so the dates are only in hand once the films are. Undated
+    films sort last in both lists — the `is None` term leads the key — because a film with no
+    displayable date is the least certain thing on the page whichever direction the dates run.
+    `sign` flips the date alone (`-1` for `recent`, newest first), so the title tiebreak stays
+    alphabetical in both.
+    """
+    return (
+        row.headline_release is None,
+        sign * (row.headline_release.date.toordinal() if row.headline_release else 0),
+        row.title,
+    )
+
+
 def _person_film_out(
     film: Film, credits: list[PersonCreditOut], headline: HeadlineRelease | None
 ) -> PersonFilmOut:
@@ -450,15 +493,7 @@ def _person_film_out(
     the badge answers."""
     narrowest = min(credits, key=lambda c: _TIER_RANK[c.tier]).tier
     return PersonFilmOut(
-        film=PersonFilmSummaryOut(
-            ref=film_ref(film.tmdb_id, film.title),
-            id=film.id,
-            tmdb_id=film.tmdb_id,
-            slug=film.slug,
-            title=film.title,
-            poster_path=film.poster_path,
-            headline_release=_headline_out(headline),
-        ),
+        film=_film_row_out(film, headline),
         credits=credits,
         tier=narrowest,
     )
@@ -535,25 +570,12 @@ async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResp
     headlines = await headline_releases(session, list(films), today=today)
 
     def rows_for(film_ids: set[UUID], *, descending: bool) -> list[PersonFilmOut]:
-        # Sorted in Python rather than in SQL: the headline release is two statements of its
-        # own (`catalog.headline_release`), so the dates are only in hand once the films are.
-        # Undated films sort last in both lists — the `is None` term leads the key — because a
-        # film with no displayable date is the least certain thing on the page whichever
-        # direction the dates run. `sign` flips the date alone, so the title tiebreak stays
-        # alphabetical in both.
         items = [
             _person_film_out(films[fid], _ordered_credits(credits[fid]), headlines.get(fid))
             for fid in film_ids
         ]
         sign = -1 if descending else 1
-        return sorted(
-            items,
-            key=lambda i: (
-                i.film.headline_release is None,
-                sign * (i.film.headline_release.date.toordinal() if i.film.headline_release else 0),
-                i.film.title,
-            ),
-        )
+        return sorted(items, key=lambda i: _film_row_order_key(i.film, sign=sign))
 
     return PersonDetailResponse(
         ref=person_ref(person.id, person.name),
@@ -578,6 +600,108 @@ def _ordered_credits(credits: list[PersonCreditOut]) -> list[PersonCreditOut]:
             c.credit_order if c.credit_order is not None else len(_TIER_RANK) + 1000,
             c.job or "",
         ),
+    )
+
+
+async def _entity_film_lists(
+    session: AsyncSession, films_of_entity: Select[tuple[Film]]
+) -> tuple[list[FilmRowOut], list[FilmRowOut]]:
+    """The `(upcoming, recent)` pair every entity page returns, given a statement selecting that
+    entity's films.
+
+    **Two lists, and between them exactly what a follow can reach.** `upcoming` is the in-play
+    set (`in_play_clause`, the D-11 timeline's bound) and `recent` is the alert window
+    (`alert_window_clause`, D-46) less the in-play set, so every film is in one or the other and
+    never both. Nothing older is returned at all: the page's job is to show what following this
+    entity would deliver, and a back catalogue stretching back thirty years answers a different
+    question — one `/films/search` already answers.
+
+    The caller passes only the membership half of the query (which company, which collection),
+    because that is the only thing the studio and franchise pages disagree about. The window
+    split, the headline dates and the ordering are this project's rule, spelled once.
+    """
+    settings = get_settings()
+    today = datetime.now(UTC).date()
+    in_play = in_play_clause(today=today, excluded_statuses=settings.tmdb_excluded_statuses)
+    window = alert_window_clause(today=today, max_age_days=settings.provider_poll_max_age_days)
+    rows = (
+        await session.execute(
+            films_of_entity.add_columns(in_play.label("in_play")).where(or_(in_play, window))
+        )
+    ).all()
+
+    films: dict[UUID, Film] = {row[0].id: row[0] for row in rows}
+    upcoming_ids = {row[0].id for row in rows if row.in_play}
+    headlines = await headline_releases(session, list(films), today=today)
+
+    def rows_for(film_ids: set[UUID], *, descending: bool) -> list[FilmRowOut]:
+        items = [_film_row_out(films[fid], headlines.get(fid)) for fid in film_ids]
+        sign = -1 if descending else 1
+        return sorted(items, key=lambda row: _film_row_order_key(row, sign=sign))
+
+    return rows_for(upcoming_ids, descending=False), rows_for(
+        set(films) - upcoming_ids, descending=True
+    )
+
+
+async def get_company_detail(session: AsyncSession, ref: str) -> CompanyDetailResponse | None:
+    """A studio's page (EF-17), or None for an id the catalog does not hold.
+
+    The person page's shape without its credits: a studio's relationship to a film is a single
+    membership row (`catalog.film_production_company`), so there is no job to name and no tier
+    to badge — the film either counts as the studio's or it does not.
+    """
+    company_id = parse_company_ref(ref)
+    if company_id is None:
+        return None
+    company = (
+        await session.execute(select(ProductionCompany).where(ProductionCompany.id == company_id))
+    ).scalar_one_or_none()
+    if company is None:
+        return None
+
+    upcoming, recent = await _entity_film_lists(
+        session,
+        select(Film)
+        .join(FilmProductionCompany, FilmProductionCompany.film_id == Film.id)
+        .where(FilmProductionCompany.company_id == company.id),
+    )
+    return CompanyDetailResponse(
+        ref=company_ref(company.id, company.name),
+        id=company.id,
+        name=company.name,
+        logo_path=company.logo_path,
+        upcoming=upcoming,
+        recent=recent,
+    )
+
+
+async def get_collection_detail(session: AsyncSession, ref: str) -> CollectionDetailResponse | None:
+    """A franchise's page (EF-17), or None for an id the catalog does not hold.
+
+    `get_company_detail` over `catalog.collection`. Membership is a column on the film itself
+    (`film.collection_id` — TMDB gives a film at most one collection) rather than a join table,
+    which is the only difference between the two.
+    """
+    collection_id = parse_collection_ref(ref)
+    if collection_id is None:
+        return None
+    collection = (
+        await session.execute(select(Collection).where(Collection.id == collection_id))
+    ).scalar_one_or_none()
+    if collection is None:
+        return None
+
+    upcoming, recent = await _entity_film_lists(
+        session, select(Film).where(Film.collection_id == collection.id)
+    )
+    return CollectionDetailResponse(
+        ref=collection_ref(collection.id, collection.name),
+        id=collection.id,
+        name=collection.name,
+        poster_path=collection.poster_path,
+        upcoming=upcoming,
+        recent=recent,
     )
 
 
@@ -988,6 +1112,80 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
 class SitemapFilm:
     ref: str
     lastmod: datetime
+
+
+@dataclass
+class SitemapEntity:
+    """One entity page in the sitemap. `path` is the frontend's route segment for that type —
+    `person`, `studio` or `franchise` (EF-19's on-screen vocabulary, which the URLs follow even
+    though the code says `company` and `collection`)."""
+
+    path: str
+    ref: str
+
+
+async def get_sitemap_entities(session: AsyncSession) -> list[SitemapEntity]:
+    """Every person, studio and franchise page worth crawling (EF-17).
+
+    **An entity is listed when it has at least one film in reach** — in play, or inside the
+    alert window — which is exactly the set its page renders. The alternative, listing every
+    row in three catalog tables, would submit hundreds of thousands of pages whose whole content
+    is "No upcoming films", and a crawler is entitled to read a sitemap as a claim that the URLs
+    on it are worth fetching.
+
+    **No `lastmod`, unlike the film rows.** A film page's freshness is the news on it and
+    `event.created_at` states it exactly; an entity page changes when any of its films moves,
+    which is not a timestamp this schema holds. `lastmod` is optional in the protocol and an
+    invented one is worse than none — a wrong date teaches the crawler to ignore the field.
+    """
+    settings = get_settings()
+    today = datetime.now(UTC).date()
+    in_reach = or_(
+        in_play_clause(today=today, excluded_statuses=settings.tmdb_excluded_statuses),
+        alert_window_clause(today=today, max_age_days=settings.provider_poll_max_age_days),
+    )
+
+    people = (
+        await session.execute(
+            select(Person.id, Person.name)
+            .join(FilmCredit, FilmCredit.person_id == Person.id)
+            .join(Film, Film.id == FilmCredit.film_id)
+            .where(_LIVE_PERSON, in_reach)
+            .group_by(Person.id, Person.name)
+            .order_by(Person.id.asc())
+        )
+    ).all()
+    companies = (
+        await session.execute(
+            select(ProductionCompany.id, ProductionCompany.name)
+            .join(
+                FilmProductionCompany,
+                FilmProductionCompany.company_id == ProductionCompany.id,
+            )
+            .join(Film, Film.id == FilmProductionCompany.film_id)
+            .where(in_reach)
+            .group_by(ProductionCompany.id, ProductionCompany.name)
+            .order_by(ProductionCompany.id.asc())
+        )
+    ).all()
+    collections = (
+        await session.execute(
+            select(Collection.id, Collection.name)
+            .join(Film, Film.collection_id == Collection.id)
+            .where(in_reach)
+            .group_by(Collection.id, Collection.name)
+            .order_by(Collection.id.asc())
+        )
+    ).all()
+
+    return [
+        *(SitemapEntity(path="person", ref=person_ref(id_, name)) for id_, name in people),
+        *(SitemapEntity(path="studio", ref=company_ref(id_, name)) for id_, name in companies),
+        *(
+            SitemapEntity(path="franchise", ref=collection_ref(id_, name))
+            for id_, name in collections
+        ),
+    ]
 
 
 async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
