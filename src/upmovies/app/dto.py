@@ -184,9 +184,6 @@ class EntitlementGrantRequest(BaseModel):
 # --- follows and the watchlist (M3, D-10 to D-14) ---------------------------------------------
 
 FollowEntityType = Literal["person", "company", "franchise", "title"]
-FollowCoverage = Literal["lead", "major", "any"]
-"""The three person-follow tiers (D-48). Mirrors `app.models.FOLLOW_COVERAGES`, which renders
-the CHECK the same values are stored under."""
 AlertStore = Literal["buy", "rent", "stream"]
 
 
@@ -206,30 +203,21 @@ def normalise_entity_id(entity_type: str, entity_id: str) -> str:
 
 
 class FollowCreateRequest(BaseModel):
-    """A new follow. `coverage` is the person tier (D-43); absent means `lead`.
+    """A new follow: the entity, and nothing else (EF-1).
 
-    Sending it for another entity type is refused rather than ignored — they name one thing
-    each, so there is nothing to narrow, and a client that sends it has misunderstood the
-    control it is drawing. That check is the **route's**, not a validator here, because the
-    refusal is a named one (`422 coverage_not_applicable`) and a `ValueError` raised in a
-    model validator reaches the client as pydantic's generic error list instead. The PATCH
-    beside it refuses on the same terms, in the same place."""
+    A `coverage` in the body is **ignored**, not refused, and that is a deliberate two-deploy
+    kindness: M2 drops the tier from the backend while the M3 frontend still draws the control
+    (EF-1, spec §6), so 422-ing the field would break every follow button in the live client
+    for the length of the gap. Pydantic's default `extra="ignore"` is what does it: the field
+    is simply not declared here, so an unknown key is dropped on the way in."""
 
     entity_type: FollowEntityType
     entity_id: str = Field(min_length=1, max_length=64)
-    coverage: FollowCoverage | None = None
 
     @model_validator(mode="after")
     def _normalise(self) -> "FollowCreateRequest":
         self.entity_id = normalise_entity_id(self.entity_type, self.entity_id)
         return self
-
-
-class FollowUpdateRequest(BaseModel):
-    """A PATCH of one follow. `coverage` is required — it is the only thing a follow has that
-    can be changed, so a body without it is a client bug."""
-
-    coverage: FollowCoverage
 
 
 class FollowOut(BaseModel):
@@ -245,11 +233,6 @@ class FollowOut(BaseModel):
     name: str | None
     image_path: str | None
     source: str
-    coverage: str
-    """Which of a followed person's credits alert (D-43, D-48) — and, at `any`, also what
-    reaches their timeline (D-47). Echoed on every row, and always `lead` for a non-person
-    follow, which reads it for nothing — one shape for the list, and the client shows the
-    control on person rows only (NEU-1415)."""
     created_at: datetime
 
 

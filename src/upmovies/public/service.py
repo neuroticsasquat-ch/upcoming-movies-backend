@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.app.dto import HeadlineReleaseOut
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import (
-    credit_tier,
     events_naming_followed_people,
     followed_film_ids,
     watchlist_film_ids,
@@ -65,6 +64,7 @@ from upmovies.catalog.release_grade import (
     displayable_regions,
     is_displayable_release,
 )
+from upmovies.catalog.seed_grade import DIRECTOR_JOB, is_seed_grade
 from upmovies.config import get_settings
 from upmovies.news.catalog_events import video_key_of
 from upmovies.news.models import Event, EventStory, EventSummary, Story
@@ -488,19 +488,16 @@ def _film_row_order_key(row: FilmRowOut, *, sign: int) -> tuple[bool, float, str
 def _person_film_out(
     film: Film, credits: list[PersonCreditOut], headline: HeadlineRelease | None
 ) -> PersonFilmOut:
-    """One row of a person page. The row's own tier is the **narrowest** of its credits': the
-    tier a follow has to be at for this film to reach the user at all, which is the question
-    the badge answers."""
-    narrowest = min(credits, key=lambda c: _TIER_RANK[c.tier]).tier
-    return PersonFilmOut(
-        film=_film_row_out(film, headline),
-        credits=credits,
-        tier=narrowest,
-    )
+    """One row of a person page. Every credit on it is one a follow delivers (EF-2), so the row
+    has nothing left to qualify itself with."""
+    return PersonFilmOut(film=_film_row_out(film, headline), credits=credits)
 
 
-_TIER_RANK = {"lead": 0, "major": 1, "any": 2}
-"""Narrowest tier first, so `min` over a film's credits picks the one that reaches it."""
+_UNBILLED = 1_000_000
+"""Where a credit with no billing position sorts: after every billed one.
+
+A sentinel rather than `None` because the sort key is a tuple and `None` does not compare
+against an `int`. Crew rows and the long tail of a cast list both arrive without an `order`."""
 
 
 async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResponse | None:
@@ -518,9 +515,9 @@ async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResp
     search and the onboarding grid), so a page offering a follow button for one would offer a
     row that is dead from the moment it is written.
 
-    Each credit carries `credit_tier`, the same function the alert query's predicates are
-    spelled from, so what the badge promises and what a follow at that tier actually delivers
-    are one decision rather than two.
+    **Every credit is listed, and every one of them is reached by a follow** (EF-2). The tier
+    badge D-48 hung on each row is gone with the tier itself: the page's answer to "what would
+    following them deliver?" is now the list, unqualified.
     """
     person_id = parse_person_ref(ref)
     if person_id is None:
@@ -562,7 +559,6 @@ async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResp
                 job=row.job,
                 character=row.character,
                 credit_order=row.credit_order,
-                tier=credit_tier(row.credit_type, row.job, row.credit_order),
             )
         )
         if row.in_play:
@@ -591,16 +587,37 @@ async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResp
 
 
 def _ordered_credits(credits: list[PersonCreditOut]) -> list[PersonCreditOut]:
-    """A film's credits, narrowest tier first, then billing, then job — so "Director · Writer"
-    reads in that order and two renderings of the same row cannot differ."""
+    """A film's credits, director first, then the rest of seed grade, then everything else —
+    and within each, billing before job. So "Director · Writer" reads in that order and two
+    renderings of the same row cannot differ.
+
+    **A deliberate rule, not the tier rank rewritten.** The old key sorted on `credit_tier`,
+    and it did not say this: `lead` folded the director in with the top-3 billed, so a
+    director who was also 2nd-billed rendered "<character> · Director" while one who was
+    4th-billed rendered "Director · <character>". That was an accident of a cut built to
+    decide what alerts, and EF-1 deleted the cut. Ranking the director outright is what the
+    page was always trying to say — it is the credit a film is attributed to — so the
+    inconsistency goes with the tier rather than being preserved.
+
+    This is presentation only. It borrows `seed_grade`'s primitives because they already name
+    "the roles a film is known by"; it decides nothing about what a follow delivers, which
+    since EF-2 is every credit here whatever its rank.
+    """
     return sorted(
         credits,
         key=lambda c: (
-            _TIER_RANK[c.tier],
-            c.credit_order if c.credit_order is not None else len(_TIER_RANK) + 1000,
+            _credit_rank(c),
+            c.credit_order if c.credit_order is not None else _UNBILLED,
             c.job or "",
         ),
     )
+
+
+def _credit_rank(credit: PersonCreditOut) -> int:
+    """`0` for a director credit, `1` for any other seed-grade role, `2` for the rest."""
+    if credit.credit_type == "crew" and credit.job == DIRECTOR_JOB:
+        return 0
+    return 1 if is_seed_grade(credit.credit_type, credit.job, credit.credit_order) else 2
 
 
 async def _entity_film_lists(
@@ -648,7 +665,7 @@ async def get_company_detail(session: AsyncSession, ref: str) -> CompanyDetailRe
     """A studio's page (EF-17), or None for an id the catalog does not hold.
 
     The person page's shape without its credits: a studio's relationship to a film is a single
-    membership row (`catalog.film_production_company`), so there is no job to name and no tier
+    membership row (`catalog.film_production_company`), so there is no job to name and no grade
     to badge — the film either counts as the studio's or it does not.
     """
     company_id = parse_company_ref(ref)
@@ -1805,8 +1822,8 @@ async def get_watchlist_calendar(
 
     That set is the `.ics` feed's, not the public listing's, and for the feed's reasons:
 
-    - **The computed watchlist** (D-42): every film this user's follows cover at their
-      coverage, minus the ones they have muted. Following a director puts their in-window films
+    - **The computed watchlist** (D-42): every film this user's follows cover, minus the ones
+      they have muted. Following a director puts their in-window films
       here — that is the point of the merged model, and exactly the film the user would
       otherwise miss — while a muted film leaves this page and the `.ics` feed together.
     - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
@@ -1848,8 +1865,8 @@ async def get_ical_feed(
     What the feed holds, and why it is not the public calendar's query with a user filter bolted
     on:
 
-    - **The computed watchlist** (D-42): every film this user's follows cover at their
-      coverage, minus the ones they have muted. The watchlist is the surface that is allowed to
+    - **The computed watchlist** (D-42): every film this user's follows cover, minus the ones
+      they have muted. The watchlist is the surface that is allowed to
       reach out to the user, and a calendar the user subscribed to is that — a film reached
       through a followed director is exactly the one they would otherwise miss, and a muted one
       leaves this feed and `/me/calendar` together.

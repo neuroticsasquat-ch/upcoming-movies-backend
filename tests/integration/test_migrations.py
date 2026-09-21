@@ -243,19 +243,21 @@ async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m
             follows = (
                 await conn.execute(
                     text(
-                        "SELECT entity_id, source, coverage, created_at FROM app.follow "
+                        "SELECT entity_id, source, created_at FROM app.follow "
                         "WHERE entity_type = 'title' ORDER BY entity_id"
                     )
                 )
             ).all()
-            assert [(row[0], row[1], row[2]) for row in follows] == [
-                ("22222222-2222-2222-2222-222222222222", "manual", "lead"),
-                ("33333333-3333-3333-3333-333333333333", "letterboxd_import", "lead"),
-                ("55555555-5555-5555-5555-555555555555", "manual", "lead"),
+            # `coverage` is not read back: NEU-1432 drops the column further up the chain, and
+            # this test runs to *head*. A title follow carried `lead` for nothing anyway.
+            assert [(row[0], row[1]) for row in follows] == [
+                ("22222222-2222-2222-2222-222222222222", "manual"),
+                ("33333333-3333-3333-3333-333333333333", "letterboxd_import"),
+                ("55555555-5555-5555-5555-555555555555", "manual"),
             ]
             # The copied rows keep the date the user first showed interest; the row that was
             # already a follow keeps its own, older one.
-            assert [row[3].date().isoformat() for row in follows] == [
+            assert [row[2].date().isoformat() for row in follows] == [
                 "2024-01-02",
                 "2024-02-03",
                 "2023-12-01",
@@ -278,5 +280,111 @@ async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m
                 )
             )
             assert stores is not None
+    finally:
+        await engine.dispose()
+
+
+# --- the binary-follow migration (NEU-1432) -------------------------------------------------
+
+_BEFORE_BINARY_FOLLOWS = "c7a1e4d9b2f3"
+"""The revision immediately before `a5e1c93b7d40`, which drops `app.follow.coverage` and
+deletes the person follows the ratings and favorites path inferred (EF-1, EF-20)."""
+
+
+@pytest.fixture
+async def binary_follows_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision short of the binary-follow migration, on the
+    `m8_db_url` pattern and for its reason: the thing under test is the transition."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_binary_follows")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            _alembic(url, "upgrade", _BEFORE_BINARY_FOLLOWS)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def test_the_binary_follow_migration_deletes_exactly_the_imported_person_follows(
+    binary_follows_db_url: str,
+):
+    """EF-1's delete, against every combination of `(entity_type, source)` the table can hold.
+
+    **Only person follows from an import go.** They were an inference — the user rated a film,
+    so the importer followed its lead actors — tolerable only because the default coverage kept
+    them narrow, and under EF-2 each would push on every credit change of everyone the user
+    ever gave four stars to. A *title* follow from the same import is a film the user put on a
+    list, which is a choice and is kept; so is a manually followed person, and so are company
+    and franchise follows, which the imports never wrote and which have no tier to widen.
+    """
+    engine = create_async_engine(binary_follows_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO app."user" (id, email, password_hash, display_name)
+                VALUES ('11111111-1111-1111-1111-111111111111', 'ef1@example.com', 'x', 'EF1')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO catalog.film (id, tmdb_id, title)
+                VALUES ('22222222-2222-2222-2222-222222222222', 9001, 'A Film')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.follow (user_id, entity_type, entity_id, source, coverage) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 'person', '100',
+                   'letterboxd_import', 'lead'),
+                  ('11111111-1111-1111-1111-111111111111', 'person', '101',
+                   'tmdb_import', 'lead'),
+                  ('11111111-1111-1111-1111-111111111111', 'person', '102', 'manual', 'any'),
+                  ('11111111-1111-1111-1111-111111111111', 'person', '103', 'derived', 'major'),
+                  ('11111111-1111-1111-1111-111111111111', 'title',
+                   '22222222-2222-2222-2222-222222222222', 'letterboxd_import', 'lead'),
+                  ('11111111-1111-1111-1111-111111111111', 'company', '200',
+                   'tmdb_import', 'lead'),
+                  ('11111111-1111-1111-1111-111111111111', 'franchise', '300', 'manual', 'lead')
+                """)
+            )
+
+        _alembic(binary_follows_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT entity_type, entity_id, source FROM app.follow "
+                        "ORDER BY entity_type, entity_id"
+                    )
+                )
+            ).all()
+            assert [tuple(row) for row in rows] == [
+                ("company", "200", "tmdb_import"),
+                ("franchise", "300", "manual"),
+                ("person", "102", "manual"),
+                ("person", "103", "derived"),
+                ("title", "22222222-2222-2222-2222-222222222222", "letterboxd_import"),
+            ]
+            # And the column is gone, CHECK included — the parity test compares names, so a
+            # constraint outliving its column would fail there instead of here.
+            column = await conn.scalar(
+                text(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'app' AND table_name = 'follow' "
+                    "AND column_name = 'coverage'"
+                )
+            )
+            assert column == 0
     finally:
         await engine.dispose()

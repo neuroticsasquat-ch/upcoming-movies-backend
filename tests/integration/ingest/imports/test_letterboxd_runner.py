@@ -259,7 +259,6 @@ async def test_a_watchlisted_film_becomes_a_title_follow_carrying_the_import_sou
     titles = [f for f in await _rows(session, Follow) if f.entity_type == "title"]
     assert len(titles) == 2
     assert {f.source for f in titles} == {"letterboxd_import"}
-    assert {f.coverage for f in titles} == {"lead"}
 
 
 # --- running it twice ----------------------------------------------------------------------

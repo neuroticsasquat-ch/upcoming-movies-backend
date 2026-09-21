@@ -79,11 +79,11 @@ def recorded_role(credit_type: str, job: str | None) -> str:
     """The role one credit is *recorded* under (D-49) — `credit_role` made total.
 
     Seed grade is a cut; **recorded grade** is not. Once the credit history records every
-    credit of a person somebody follows at coverage `any`, a third-unit gaffer and a
-    40th-billed extra both reach the carding phases, and `credit_role` answers None for the
-    gaffer — the value those phases use to mean "not a beat" and skip the row. So they read
-    this instead: `cast` for any cast credit whatever its billing, `crew` for a crew job that
-    is neither directing nor writing, and the seed-grade role otherwise.
+    credit of a person somebody follows, a third-unit gaffer and a 40th-billed extra both
+    reach the carding phases, and `credit_role` answers None for the gaffer — the value those
+    phases use to mean "not a beat" and skip the row. So they read this instead: `cast` for any
+    cast credit whatever its billing, `crew` for a crew job that is neither directing nor
+    writing, and the seed-grade role otherwise.
 
     It is total, and that is the point: every row in `catalog.film_credit_change` is there
     because something chose to record it, so there is no longer such a thing as a recorded

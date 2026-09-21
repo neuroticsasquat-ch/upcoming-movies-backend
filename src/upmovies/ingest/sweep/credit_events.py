@@ -29,7 +29,7 @@ they never pass through quarantine, so they keep the per-observation discipline 
 **An attachment is quarantined before it cards** (ADR-0017, D-3). A `change='added'` row is
 eligible only once it has survived `SWEEP_CREDIT_QUARANTINE_HOURS` *and* the credit is still
 in `catalog.film_credit` under the same **recorded** role (D-49 — seed grade, or any credit of
-a person somebody follows at coverage `any`). TMDB is community-edited, and the
+a person somebody follows). TMDB is community-edited, and the
 edit this suppresses is the one that was never true — vandalism reverted within the hour,
 a misfiled credit — which under immediate carding published a beat and then needed a
 correction card to take it back. Nothing is written while a row is held: the rolling window
@@ -72,7 +72,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.follow_queries import people_followed_at_any
+from upmovies.app.follow_queries import followed_people
 from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.catalog.person_dates import date_contradiction
 from upmovies.catalog.queries import present_recorded_credits
@@ -988,7 +988,7 @@ async def run_credit_attachment_events(
     """Card every recorded credit attachment TMDB recorded in the window, less the ones
     quarantine and the sanity checks are still holding.
 
-    The people followed at coverage `any` are read once, at the top, and handed to every live
+    The followed people are read once, at the top, and handed to every live
     `catalog.film_credit` read below (D-49). Their non-seed credits are in the backlog because
     `credit_history` recorded them, so a gate asking "is this credit still there" under seed
     grade alone would hold every one of them forever.
@@ -1014,7 +1014,7 @@ async def run_credit_attachment_events(
             now=now,
             since=since,
             max_films_per_day=max_films_per_day,
-            followed=set((await s.execute(people_followed_at_any())).scalars().all()),
+            followed=set((await s.execute(followed_people())).scalars().all()),
         )
         await s.commit()
     result.holds_cleared = reconciled.cleared
@@ -1029,7 +1029,7 @@ async def run_credit_attachment_events(
         result.story_published = await stamp_prior_story_cards(
             s, since=since, within_days=story_confirm_days
         )
-        followed = set((await s.execute(people_followed_at_any())).scalars().all())
+        followed = set((await s.execute(followed_people())).scalars().all())
         backlog = await load_attachment_backlog(s, since=since)
         # Same session as the load: the quarantine gate reads live `film_credit` state
         # against the backlog it just read, and a second session could straddle a refresh

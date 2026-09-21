@@ -2230,7 +2230,7 @@ async def test_the_earliest_story_card_is_the_one_that_published_the_change(
 # ── The recorded grade: a followed person's non-seed credits (D-49) ───────────
 
 
-async def _follow_at_any(session, user, person_id: int) -> None:
+async def _follows(session, user, person_id: int) -> None:
     from upmovies.app.models import Follow
 
     session.add(
@@ -2239,7 +2239,6 @@ async def _follow_at_any(session, user, person_id: int) -> None:
             entity_type="person",
             entity_id=str(person_id),
             source="manual",
-            coverage="any",
         )
     )
     await session.flush()
@@ -2254,7 +2253,7 @@ async def test_a_followed_persons_minor_cast_credit_cards_as_casting(
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Supporting Actor")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     await add_credit(session, film, 100, credit_type="cast", credit_order=11)
     await _cast(session, film, person, changed_at=AGED)
     await session.commit()
@@ -2277,7 +2276,7 @@ async def test_a_followed_persons_non_seed_crew_credit_cards_as_crew_attached(
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Cinematographer")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     await add_credit(
         session, film, 100, credit_type="crew", job="Cinematographer", department="Camera"
     )
@@ -2301,7 +2300,7 @@ async def test_a_director_and_a_followed_crew_member_share_one_card(
     film = await add_film(session, 1, release_date=None, status="Planned")
     director = await _person(session, 100, "A Director")
     dop = await _person(session, 101, "A Cinematographer")
-    await _follow_at_any(session, user, 101)
+    await _follows(session, user, 101)
     await add_credit(session, film, 100, credit_type="crew", job="Director", department="Directing")
     await add_credit(
         session, film, 101, credit_type="crew", job="Cinematographer", department="Camera"
@@ -2329,7 +2328,7 @@ async def test_the_quarantine_gate_reads_a_followed_persons_credit_as_still_pres
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Supporting Actor")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     await add_credit(session, film, 100, credit_type="cast", credit_order=11)
     await _cast(session, film, person, changed_at=AGED)
     await session.commit()
@@ -2343,7 +2342,7 @@ async def test_a_reverted_minor_credit_is_still_held(session, session_factory, r
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Supporting Actor")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     await _cast(session, film, person, changed_at=AGED)
     await session.commit()
 
@@ -2353,7 +2352,7 @@ async def test_a_reverted_minor_credit_is_still_held(session, session_factory, r
     assert await _events(session, film) == []
 
 
-async def test_a_narrowed_follow_stops_carding_the_credit_it_recorded(
+async def test_a_dropped_follow_stops_carding_the_credit_it_recorded(
     session, session_factory, run_id, make_user
 ):
     """The quarantine gate and the credit-history diff read recorded grade from the *same*
@@ -2361,25 +2360,29 @@ async def test_a_narrowed_follow_stops_carding_the_credit_it_recorded(
     credit present under a rule the diff no longer records it under would publish an
     attachment while the next ingest wrote its removal.
 
-    So a follow narrowed while its credit is still in quarantine takes the pending attachment
+    So a follow dropped while its credit is still in quarantine takes the pending attachment
     with it — held, never carded, and it ages out of the window. That is the narrower reading
     of D-49's "the gate checks presence, not the follow": presence is still a property of the
     film and of no user's preferences *at read time*, but what counts as a recorded credit is
     one definition shared with the writer, not two.
+
+    Unfollowing is the only way to make this happen since EF-1 — there is no tier left to
+    narrow — and a 12th-billed credit is the case that shows it, because seed grade would
+    carry it on its own if recorded grade were not what the gate reads.
     """
     from upmovies.app.models import Follow
 
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Supporting Actor")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     await add_credit(session, film, 100, credit_type="cast", credit_order=11)
     await _cast(session, film, person, changed_at=AGED)
     await session.commit()
 
     follow = await session.get(Follow, (user.id, "person", "100"))
     assert follow is not None
-    follow.coverage = "lead"
+    await session.delete(follow)
     await session.commit()
 
     result = await _run(session_factory, run_id, quarantine_hours=QUARANTINE_HOURS)
@@ -2396,7 +2399,7 @@ async def test_a_reverted_crew_job_is_held_even_when_another_job_survives(
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Sparks")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     await add_credit(session, film, 100, credit_type="crew", job="Best Boy", department="Lighting")
     await _attached(session, film, person, job="Gaffer", changed_at=AGED)
     await session.commit()
@@ -2415,7 +2418,7 @@ async def test_two_crew_jobs_in_one_edit_name_the_person_once(
     user = await make_user(email="wide@example.com")
     film = await add_film(session, 1, release_date=None, status="Planned")
     person = await _person(session, 100, "A Sparks")
-    await _follow_at_any(session, user, 100)
+    await _follows(session, user, 100)
     for job in ("Gaffer", "Best Boy"):
         await add_credit(session, film, 100, credit_type="crew", job=job, department="Lighting")
         await _attached(session, film, person, job=job, changed_at=AGED)

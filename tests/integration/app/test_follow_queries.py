@@ -149,14 +149,13 @@ def _covered(user_id, **overrides):
     return covered_film_ids(**{**kwargs, **overrides})
 
 
-async def _follow(session, user, entity_type: str, entity_id: str, coverage: str = "lead"):
+async def _follow(session, user, entity_type: str, entity_id: str, source: str = "manual"):
     session.add(
         Follow(
             user_id=user.id,
             entity_type=entity_type,
             entity_id=entity_id,
-            source="manual",
-            coverage=coverage,
+            source=source,
         )
     )
     await session.commit()
@@ -166,55 +165,35 @@ async def _ids(session, stmt) -> set:
     return set((await session.execute(stmt)).scalars().all())
 
 
-@pytest.mark.parametrize(
-    ("credit", "at_lead", "at_major", "at_any"),
-    [
-        (
-            {"credit_type": "crew", "job": "Director", "department": "Directing"},
-            True,
-            True,
-            True,
-        ),
-        (
-            {"credit_type": "crew", "job": "Screenplay", "department": "Writing"},
-            False,
-            True,
-            True,
-        ),
-        ({"credit_type": "cast", "credit_order": 0}, True, True, True),
-        ({"credit_type": "cast", "credit_order": 3}, False, True, True),
-        ({"credit_type": "cast", "credit_order": 5}, False, False, True),
-        ({"credit_type": "cast", "credit_order": None}, False, False, True),
-        (
-            {"credit_type": "crew", "job": "Gaffer", "department": "Lighting"},
-            False,
-            False,
-            True,
-        ),
-    ],
-)
-async def test_the_coverage_tier_decides_which_credits_alert(
-    session, user, make_film, credit, at_lead, at_major, at_any
-):
-    """D-43 and D-48's three tiers against the cuts in the codebase: `lead` is
-    director-or-top-3, `major` is seed grade (director, writer, top-5), and `any` reaches
-    every credit — a 6th-billed role, an unbilled one, a crew job that is neither directing
-    nor writing. `credit_order = None` is TMDB's long tail and must read as "unbilled", not as
-    slot 0, at every tier below `any`."""
+_EVERY_CREDIT_SHAPE = [
+    {"credit_type": "crew", "job": "Director", "department": "Directing"},
+    {"credit_type": "crew", "job": "Screenplay", "department": "Writing"},
+    {"credit_type": "cast", "credit_order": 0},
+    {"credit_type": "cast", "credit_order": 3},
+    {"credit_type": "cast", "credit_order": 5},
+    {"credit_type": "cast", "credit_order": None},
+    {"credit_type": "crew", "job": "Gaffer", "department": "Lighting"},
+]
+"""One credit of every shape the three deleted tiers used to sort between.
+
+Kept as a list rather than collapsed to a single case because it is the whole content of EF-2:
+the rows at the bottom — a 6th-billed role, an unbilled one, a crew job that is neither
+directing nor writing — are exactly the ones `lead` and `major` declined, and a seed-grade
+term creeping back into any builder would show up here and nowhere else. `credit_order = None`
+is TMDB's long tail and must read as "unbilled", never as slot 0."""
+
+
+@pytest.mark.parametrize("credit", _EVERY_CREDIT_SHAPE)
+async def test_every_credit_of_a_followed_person_alerts(session, user, make_film, credit):
+    """EF-1 and EF-2: the follow is binary, so there is no cut between the credits a person
+    holds and the ones that reach their follower. This replaces D-43 and D-48's tier table."""
     from tests.fixtures.catalog import add_credit
 
     film = await make_film(slug="covered", title="Covered")
     await add_credit(session, film, 525, **credit)
     await _follow(session, user, "person", "525")
 
-    assert (film.id in await _ids(session, _covered(user.id))) is at_lead
-
-    for tier, reached in (("major", at_major), ("any", at_any)):
-        follow = await session.get(Follow, (user.id, "person", "525"))
-        assert follow is not None
-        follow.coverage = tier
-        await session.commit()
-        assert (film.id in await _ids(session, _covered(user.id))) is reached
+    assert film.id in await _ids(session, _covered(user.id))
 
 
 @pytest.mark.parametrize(
@@ -402,51 +381,50 @@ async def test_a_muted_film_leaves_the_mention_filter_too(
     assert await _ids(session, events_naming_followed_people(user.id)) == set()
 
 
-# --- D-47: `any` widens the timeline too -----------------------------------------------------
+# --- EF-2: every credit reaches the timeline too ---------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("coverage", "on_timeline"),
-    [("lead", False), ("major", False), ("any", True)],
-)
-async def test_only_the_widest_tier_widens_the_timeline(
-    session, user, make_film, coverage, on_timeline
+@pytest.mark.parametrize("credit", _EVERY_CREDIT_SHAPE)
+async def test_every_credit_of_a_followed_person_reaches_the_timeline(
+    session, user, make_film, credit
 ):
-    """D-11 as D-47 amends it. `lead` and `major` are subsets of seed grade, so a 12th-billed
-    credit is outside both and the timeline is unchanged for them; `any` is not a subset, and
-    without this the user would be alerted about a casting they could then find nowhere."""
+    """D-11's person branch as EF-2 leaves it. The seed-grade cut it used to carry is gone with
+    the tiers: a user alerted about a casting they could then find nowhere on their own
+    timeline was the dead end D-47 half-closed, and a binary follow closes it for every credit
+    at once."""
     from tests.fixtures.catalog import add_credit
 
     film = await make_film(slug="minor", title="Minor", release_date=None)
-    await add_credit(session, film, 525, credit_type="cast", credit_order=11)
-    await _follow(session, user, "person", "525", coverage=coverage)
+    await add_credit(session, film, 525, **credit)
+    await _follow(session, user, "person", "525")
 
-    assert (film.id in await _ids(session, _filter(user.id))) is on_timeline
+    assert film.id in await _ids(session, _filter(user.id))
 
 
-async def test_the_widest_tier_does_not_widen_the_timeline_past_in_play(session, user, make_film):
-    """`any` widens *which credits* reach the timeline, never the person branch's in-play
-    bound: a followed person's back catalogue is what that bound exists to keep out, and D-47
-    says nothing about it."""
+async def test_the_person_branch_still_stops_at_in_play(session, user, make_film):
+    """EF-2 widens *which credits* reach the timeline, never the person branch's in-play bound:
+    a followed person's back catalogue is what that bound exists to keep out."""
     from tests.fixtures.catalog import add_credit
 
     released = await make_film(
         slug="released", title="Released", release_date=TODAY - timedelta(days=1)
     )
     await add_credit(session, released, 525, credit_type="cast", credit_order=11)
-    await _follow(session, user, "person", "525", coverage="any")
+    await _follow(session, user, "person", "525")
 
     assert released.id not in await _ids(session, _filter(user.id))
 
 
-async def test_a_muted_film_is_still_subtracted_at_the_widest_tier(session, user, make_film):
+async def test_a_muted_film_is_still_subtracted_from_the_widened_person_branch(
+    session, user, make_film
+):
     """The mute is inside the builder and applies to every branch (D-45), so widening the
     person branch must not have routed around it."""
     from tests.fixtures.catalog import add_credit
 
     film = await make_film(slug="muted", title="Muted", release_date=None)
     await add_credit(session, film, 525, credit_type="cast", credit_order=11)
-    await _follow(session, user, "person", "525", coverage="any")
+    await _follow(session, user, "person", "525")
     assert film.id in await _ids(session, _filter(user.id))
 
     session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
@@ -455,55 +433,44 @@ async def test_a_muted_film_is_still_subtracted_at_the_widest_tier(session, user
     assert film.id not in await _ids(session, _filter(user.id))
 
 
-async def test_seed_grade_still_reaches_the_timeline_at_the_narrowest_tier(
-    session, user, make_film
-):
-    """The other half of "coverage never narrows the timeline": a 4th-billed credit is seed
-    grade and outside `lead`'s alert cut, and must still be on the timeline of a `lead`
-    follow."""
-    from tests.fixtures.catalog import add_credit
-
-    film = await make_film(slug="fourth", title="Fourth", release_date=None)
-    await add_credit(session, film, 525, credit_type="cast", credit_order=3)
-    await _follow(session, user, "person", "525", coverage="lead")
-
-    assert film.id in await _ids(session, _filter(user.id))
+# --- followed_people (D-49, D-50, EF-2) ------------------------------------------------------
 
 
-# --- people_followed_at_any (D-49, D-50) -----------------------------------------------------
-
-
-async def test_people_followed_at_any_names_only_the_widest_follows(session, user, make_user):
+async def test_followed_people_names_every_person_follow(session, user, make_user):
     """The set the credit history and the sweep both read. It asks the whole table rather than
     one user's rows, and it does not filter on entitlement — D-40 keeps a lapsed user's
-    follows, and the poll set does not filter either."""
-    from upmovies.app.follow_queries import people_followed_at_any
+    follows, and the poll set does not filter either.
+
+    Every *person* follow is in it since EF-1: there is no tier left to be outside. The
+    `entity_type` filter is all that is left, and the company row proves it still runs — its
+    `entity_id` is as numeric as a person id, so without the filter it would arrive as one."""
+    from upmovies.app.follow_queries import followed_people
 
     other = await make_user(email="other@example.com")
-    await _follow(session, user, "person", "525", coverage="any")
-    await _follow(session, user, "person", "526", coverage="major")
-    await _follow(session, other, "person", "527", coverage="any")
-    await _follow(session, user, "company", "528", coverage="any")
+    await _follow(session, user, "person", "525")
+    await _follow(session, user, "person", "526")
+    await _follow(session, other, "person", "527")
+    await _follow(session, user, "company", "528")
 
-    assert await _ids(session, people_followed_at_any()) == {525, 527}
+    assert await _ids(session, followed_people()) == {525, 526, 527}
 
 
-async def test_people_followed_at_any_skips_a_non_numeric_entity_id(session, user):
+async def test_followed_people_skips_a_non_numeric_entity_id(session, user):
     """The same shape guard every builder in the module carries: `entity_id` is polymorphic
     text, and a bad row must be skipped rather than abort a statement that runs for the whole
     ingest."""
-    from upmovies.app.follow_queries import people_followed_at_any
+    from upmovies.app.follow_queries import followed_people
 
-    await _follow(session, user, "person", "nm0000233", coverage="any")
-    await _follow(session, user, "person", "525", coverage="any")
+    await _follow(session, user, "person", "nm0000233")
+    await _follow(session, user, "person", "525")
 
-    assert await _ids(session, people_followed_at_any()) == {525}
+    assert await _ids(session, followed_people()) == {525}
 
 
-async def test_the_widest_tier_reaches_the_other_two_alert_builders(session, user, make_film):
-    """`covering_follows` and `covered_by_any_user_clause` read the same
+async def test_a_non_seed_credit_reaches_the_other_two_alert_builders(session, user, make_film):
+    """`covering_follows` and `covered_by_any_user_clause` used to read the same
     `_coverage_credit_clause`, and the poll set reading something the alerts do not is the
-    failure that keeps them in one builder — so `any` has to reach all three."""
+    failure that kept them in one builder — so dropping that clause has to reach all three."""
     from sqlalchemy import select as sa_select
 
     from tests.fixtures.catalog import add_credit
@@ -512,7 +479,7 @@ async def test_the_widest_tier_reaches_the_other_two_alert_builders(session, use
 
     film = await make_film(slug="minor", title="Minor", release_date=None)
     await add_credit(session, film, 525, credit_type="cast", credit_order=11)
-    await _follow(session, user, "person", "525", coverage="any")
+    await _follow(session, user, "person", "525")
 
     pairs = (
         await session.execute(

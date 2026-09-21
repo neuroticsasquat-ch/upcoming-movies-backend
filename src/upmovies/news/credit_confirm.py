@@ -48,7 +48,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.follow_queries import people_followed_at_any
+from upmovies.app.follow_queries import followed_people
 from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.catalog.queries import present_recorded_credits
 from upmovies.catalog.seed_grade import recorded_credit_key, recorded_role
@@ -144,7 +144,7 @@ async def stamp_story_confirmed_changes(
     pending = [(c, n, r) for c, n, r in pending if n in names]
     if not pending:
         return 0
-    followed = set((await session.execute(people_followed_at_any())).scalars().all())
+    followed = set((await session.execute(followed_people())).scalars().all())
     present = await present_recorded_credits(session, film_ids={film_id}, followed=followed)
     stamped = 0
     for change, _name, _role in pending:

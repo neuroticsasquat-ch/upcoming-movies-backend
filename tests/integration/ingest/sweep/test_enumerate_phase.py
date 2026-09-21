@@ -834,7 +834,7 @@ async def test_a_404_candidate_is_skipped_as_missing(session, session_factory, t
 FOLLOWED_ONLY = AdmissionTranches(enabled=True, followed=True)
 
 
-async def _follow_at_any(session, person_id: int, *, email: str = "wide@example.com"):
+async def _follow_person(session, person_id: int, *, email: str = "wide@example.com"):
     from upmovies.app import passwords
     from upmovies.app.models import Follow, User
 
@@ -851,7 +851,6 @@ async def _follow_at_any(session, person_id: int, *, email: str = "wide@example.
             entity_type="person",
             entity_id=str(person_id),
             source="manual",
-            coverage="any",
         )
     )
     await session.flush()
@@ -864,7 +863,7 @@ async def test_a_followed_person_is_enumerated_without_being_a_seed(
     """A follow is its own admission rule (D-50): nobody holds a seed-grade credit anywhere,
     so the seed query returns nothing and the whole enumeration is the follow."""
     session.add(Person(id=20, name="A Cinematographer"))
-    await _follow_at_any(session, 20)
+    await _follow_person(session, 20)
     await session.commit()
     _mock_credits(20, crew=[make_credit_entry(100, department="Camera", job="Cinematographer")])
     _mock_details(100)
@@ -883,7 +882,7 @@ async def test_a_followed_persons_candidate_needs_its_own_tranche(
 ):
     """The three seed-grade flags do not stand in for it, however wide open they are."""
     session.add(Person(id=20, name="A Cinematographer"))
-    await _follow_at_any(session, 20)
+    await _follow_person(session, 20)
     await session.commit()
     _mock_credits(20, crew=[make_credit_entry(100, department="Camera", job="Cinematographer")])
     _mock_details(100)
@@ -900,28 +899,28 @@ async def test_a_followed_persons_candidate_needs_its_own_tranche(
 
 
 @respx.mock
-async def test_a_narrower_follow_enumerates_nobody(session, session_factory, tmdb_client, run_id):
-    """Only `any` joins the enumeration set. `lead` and `major` are alert tiers over people
-    the catalog already reaches, and asking TMDB for their filmographies would be a request
-    per follow for nothing."""
+async def test_a_company_follow_enumerates_nobody(session, session_factory, tmdb_client, run_id):
+    """Only *person* follows join the enumeration set. EF-1 left the follow with no tier to
+    narrow by, so `entity_type` is the whole filter — and a studio follow names a company id,
+    which is not a person id however numeric it looks. Enumerating it would ask TMDB for the
+    filmography of whoever happens to hold person 20."""
     from upmovies.app import passwords
     from upmovies.app.models import Follow, User
 
     session.add(Person(id=20, name="A Cinematographer"))
     user = User(
-        email="narrow@example.com",
+        email="studio@example.com",
         password_hash=passwords.hash_password("hunter2hunter2"),
-        display_name="Narrow Follower",
+        display_name="Studio Follower",
     )
     session.add(user)
     await session.flush()
     session.add(
         Follow(
             user_id=user.id,
-            entity_type="person",
+            entity_type="company",
             entity_id="20",
             source="manual",
-            coverage="major",
         )
     )
     await session.commit()
@@ -940,7 +939,7 @@ async def test_a_tombstoned_followed_person_is_skipped(
     from datetime import UTC, datetime
 
     session.add(Person(id=20, name="Gone", tmdb_missing_at=datetime(2026, 1, 1, tzinfo=UTC)))
-    await _follow_at_any(session, 20)
+    await _follow_person(session, 20)
     await session.commit()
 
     result = await _run(session_factory, tmdb_client, run_id, tranches=FOLLOWED_ONLY)
@@ -955,7 +954,7 @@ async def test_a_followed_seed_person_is_enumerated_once_and_keeps_both_roles(
     """Set union, not concatenation: one request, and their seed-grade credits still yield
     their own roles so the seed tranches judge those candidates as they always did."""
     await _seed_director(session, person_id=10)
-    await _follow_at_any(session, 10)
+    await _follow_person(session, 10)
     await session.commit()
     _mock_credits(
         10,
@@ -988,7 +987,7 @@ async def test_a_follow_the_catalog_holds_no_person_row_for_is_still_enumerated(
     follow routes validate the id's shape, not its existence, and the importers write
     `entity_id` straight from their caller — so a follow with no `catalog.person` row behind
     it is exactly the case where the follow is the only evidence there is."""
-    await _follow_at_any(session, 20)
+    await _follow_person(session, 20)
     await session.commit()
     _mock_credits(20, crew=[make_credit_entry(100, department="Camera", job="Cinematographer")])
     _mock_details(100)

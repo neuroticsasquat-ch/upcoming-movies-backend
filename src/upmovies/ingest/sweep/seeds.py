@@ -10,9 +10,9 @@ strength of the directing credit that made them a seed.
 
 Since M9 the enumeration set is wider than the seed set, and the module name is now the
 narrower of the two things it holds: `load_seed_person_ids` returns the seed people **plus**
-everyone somebody follows at coverage `any` (D-50, ADR-0013 as amended). Seed grade itself is
-untouched by that — the followed half is a second admission rule beside it, not a widening of
-it — which is why the `followed` role is spelled separately everywhere it appears.
+everyone somebody follows (D-50, ADR-0013 as amended, EF-2). Seed grade itself is untouched
+by that — the followed half is a second admission rule beside it, not a widening of it —
+which is why the `followed` role is spelled separately everywhere it appears.
 
 These rules were written for the read-only probe (`scripts/probe_undated_candidates.py`,
 NEU-1073) and moved here when the sweep landed. The probe imports them rather than keeping
@@ -27,7 +27,7 @@ from datetime import date
 from sqlalchemy import select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.follow_queries import people_followed_at_any
+from upmovies.app.follow_queries import followed_people
 from upmovies.catalog.models import Film, FilmCredit, Person
 from upmovies.catalog.queries import active_film_clause, seed_grade_credit_clause
 from upmovies.catalog.seed_grade import crew_role, is_top_billed
@@ -75,14 +75,14 @@ class CandidateTally:
 async def load_seed_person_ids(
     session: AsyncSession, *, today: date, excluded_statuses: frozenset[str], dormancy_days: int
 ) -> list[int]:
-    """Distinct people the sweep enumerates: seed people, plus everyone followed at `any`.
+    """Distinct people the sweep enumerates: seed people, plus everyone followed.
 
-    **A follow is its own admission rule** (D-50, ADR-0013 as amended). Seed grade asks whether
-    a person's filmography is worth a request on the catalog's evidence; a follow at coverage
-    `any` is a user saying so directly, which is the same relevance prior ADR-0013 chose people
-    for in the first place. The two sets are unioned rather than seed grade being widened — the
-    NEU-1090 measurement stands, producers stay out — and the followed half is bounded by the
-    follow graph rather than by dormancy, because a follow does not go quiet.
+    **A follow is its own admission rule** (D-50, ADR-0013 as amended, EF-2). Seed grade asks
+    whether a person's filmography is worth a request on the catalog's evidence; a follow is a
+    user saying so directly, which is the same relevance prior ADR-0013 chose people for in the
+    first place. The two sets are unioned rather than seed grade being widened — the NEU-1090
+    measurement stands, producers stay out — and the followed half is bounded by the follow
+    graph rather than by dormancy, because a follow does not go quiet.
 
     The seed half is unchanged (spec §3.2): distinct people holding a seed-grade credit on an
     active film. Dormant films contribute no seed people (ADR-0015). This is what stops the seed set
@@ -118,7 +118,7 @@ async def load_seed_person_ids(
             ),
         )
     )
-    followed_ids = people_followed_at_any().subquery()
+    followed_ids = followed_people().subquery()
     followed = (
         select(followed_ids.c[0])
         .outerjoin(Person, Person.id == followed_ids.c[0])

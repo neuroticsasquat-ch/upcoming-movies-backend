@@ -136,43 +136,36 @@ class FilmRowOut(WatchlistFilmOut):
     and the watchlist's client builds that link itself.
 
     The studio and franchise pages (NEU-1428) return this row **bare**; the person page wraps
-    it in `PersonFilmOut` to hang that person's credits and tier off it, which is the only
+    it in `PersonFilmOut` to hang that person's credits off it, which is the only
     thing the three pages do differently."""
 
     ref: str
 
 
-CreditTier = Literal["lead", "major", "any"]
-"""The narrowest coverage tier that reaches a credit (D-48). Mirrors `app.dto.FollowCoverage`,
-and is answered by `app.follow_queries.credit_tier` — the same predicates the alert query runs,
-so the badge on a person page and the alert it promises cannot disagree."""
-
-
 class PersonCreditOut(BaseModel):
-    """One credit a person holds on one film, with the tier that reaches it.
+    """One credit a person holds on one film.
 
     A writer-director holds two of these on the same film; they are listed rather than folded,
-    because "Director · Writer" is what the page reads and folding them would lose the tier of
-    each. `credit_order` is TMDB's 0-indexed billing and is null for crew and for an unbilled
-    cast entry."""
+    because "Director · Writer" is what the page reads. `credit_order` is TMDB's 0-indexed
+    billing and is null for crew and for an unbilled cast entry.
+
+    **No `tier` since EF-1.** A follow is binary and reaches every credit, so there is no cut
+    for a badge to name — every row here is one a follow of this person delivers."""
 
     credit_type: Literal["cast", "crew"]
     job: str | None
     character: str | None
     credit_order: int | None
-    tier: CreditTier
 
 
 class PersonFilmOut(BaseModel):
     """One film on a person's page, with every credit they hold on it.
 
-    `tier` is the **narrowest** tier across `credits` — the one a follow needs to be at for
-    this row to reach the user at all — so the page can say "Lead roles reaches two of seven"
-    without the client re-deriving the rule."""
+    Every row is reached by a follow of this person (EF-2), so the row carries no tier of its
+    own any more — the list *is* what following them delivers."""
 
     film: FilmRowOut
     credits: list[PersonCreditOut]
-    tier: CreditTier
 
 
 class CompanyDetailResponse(BaseModel):
@@ -180,8 +173,8 @@ class CompanyDetailResponse(BaseModel):
 
     Same two lists as `PersonDetailResponse` and for the same reason — `upcoming` is the
     in-play set, `recent` is the alert window less it, and the back catalogue is absent by
-    design. The rows are bare `FilmRowOut`s: a studio credit has no tier and no job to name,
-    so the person row's `credits` and `tier` would be empty ceremony on every row.
+    design. The rows are bare `FilmRowOut`s: a studio credit has no job to name, so the person
+    row's `credits` would be empty ceremony on every row.
 
     `id` is the TMDB company id; stringified, it is the `entity_id` a `company` follow is keyed
     on. `ref` is canonical — the client redirects when the one it asked with differs.

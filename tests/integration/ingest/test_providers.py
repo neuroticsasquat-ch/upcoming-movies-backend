@@ -300,20 +300,26 @@ async def test_a_released_film_an_indirect_follow_reaches_is_polled_past_the_old
 
 
 @respx.mock
-async def test_a_credit_outside_the_follows_coverage_puts_nothing_in_the_poll_set(
+async def test_a_non_seed_credit_puts_the_film_in_the_poll_set(
     session, session_factory, tmdb_client, run_id, make_user
 ):
-    """The poll's set is bounded by the same coverage the alerts are (D-43): a writing credit
-    is not `lead`, so nobody is waiting on this film's offers."""
-    user = await make_user(email="writer-follower@example.com")
+    """The poll's set is bounded by the same rule the alerts are, and EF-2 removed the cut from
+    both at once: an unbilled cast credit is enough, because somebody following that person is
+    waiting to hear when this film can be watched.
+
+    The unbilled row rather than the writing credit this test used to carry: a writer was
+    always seed grade, so it only ever proved the tier, while `credit_order IS NULL` is outside
+    every cut there has ever been and is what a seed-grade term surviving here would drop."""
+    user = await make_user(email="unbilled-follower@example.com")
     film = await add_film(session, 204)
-    await add_credit(session, film, 526, credit_type="crew", job="Screenplay", department="Writing")
+    await add_credit(session, film, 526, credit_type="cast", credit_order=None)
     session.add(Follow(user_id=user.id, entity_type="person", entity_id="526", source="manual"))
     await session.commit()
+    _mock_providers(204, flatrate=[8])
 
     result = await _run(session_factory, tmdb_client, run_id)
 
-    assert result.selected == 0
+    assert (result.selected, result.polled) == (1, 1)
 
 
 @respx.mock

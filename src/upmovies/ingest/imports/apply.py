@@ -55,12 +55,11 @@ IMPORT_TOP_BILLED_ORDER = 2
 """How deep into a film's billing a person follow goes, on TMDB's 0-indexed `order`: slots 0
 and 1 (NEU-1356 §3).
 
-The third cut in the codebase, and deliberately the shallowest. `catalog.seed_grade`'s 5
-decides whose filmography the sweep *enumerates*; `follow_queries.LEAD_TOP_BILLED_ORDER`'s 3
-decides whose casting earns a **push** under the default coverage. This one decides what a
-user gets for having liked a film — an
-inference from a rating or a favorite, not a request — and a fifth-billed role in a film
-somebody enjoyed is not evidence they want that actor's next project in their timeline.
+The second cut in the codebase, and deliberately the shallower. `catalog.seed_grade`'s 5
+decides whose filmography the sweep *enumerates*. This one decides what a user gets for having
+liked a film — an inference from a rating or a favorite, not a request — and a fifth-billed
+role in a film somebody enjoyed is not evidence they want that actor's next project in their
+timeline.
 Shallower still would lose the co-lead."""
 
 CREDITS_FRESH = timedelta(days=7)
@@ -198,9 +197,10 @@ async def follow_entity(
     polymorphic text with no foreign key, so two spellings of one id are two follow rows that
     nothing will ever reconcile.
 
-    `coverage` is left to the default (`lead`), which is what an inference deserves: an import
-    creates hundreds of person follows from a ratings history, and `all` on each would alert
-    the user about every seed-grade credit of everyone they ever gave four stars to."""
+    **A follow made this way now reaches every credit** (EF-1, EF-2): there is no tier left to
+    keep an inferred follow quieter than a chosen one. That is why EF-20 deletes this path —
+    and why NEU-1432's migration deletes the rows it already wrote. It survives here only
+    until M5 lands."""
     _, _, created = await follow_service.follow(
         db,
         user=user,

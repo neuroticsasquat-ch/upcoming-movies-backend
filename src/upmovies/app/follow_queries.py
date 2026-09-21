@@ -11,29 +11,27 @@ what makes them callable from `pipeline_run` as well as from a route.
 answers both of them:
 
 - *What belongs on my timeline?* — `followed_film_ids` and `events_naming_followed_people`,
-  D-11's two halves. Every follow reaches every seed-grade credit here whatever its coverage,
-  and a person follow at `any` reaches every credit (D-47).
+  D-11's two halves.
 - *What am I waiting to hear about?* — `covered_film_ids`, and `watchlist_film_ids` once the
   mutes are taken out. **That set is the watchlist**: there is no `app.watchlist_item` any
   more, so `/me/calendar`, the iCal feed, the notify pass's alert branch and the digest's
   slate all read this and nothing else.
 
-The two differ in three deliberate ways, and only these three: a person follow's coverage
-(D-43) narrows which credits alert — and only ever *narrows*, since D-47 gave the timeline
-`any`'s reach too — the alert window (D-1414.2, D-46) bounds how long a follow
-keeps covering a film and in which statuses, and a **mute** (`app.watchlist_dismissal`)
-subtracts films from both — since D-45 a mute silences the film everywhere, so the exclusion
-lives *inside* the D-11 builders rather than at their call sites.
+**A follow is binary (EF-1), and a person follow reaches every credit (EF-2).** The `coverage`
+tier is gone from the table and from every builder here: there is no cut to apply, so the join
+from the follow to the person's credit rows *is* the predicate. That leaves the two sets
+differing in exactly two ways: the alert window (D-1414.2, D-46) bounds how long a follow keeps
+covering a film and in which statuses, and a **mute** (`app.watchlist_dismissal`) subtracts
+films from both — since D-45 a mute silences the film everywhere, so the exclusion lives
+*inside* the D-11 builders rather than at their call sites.
 
 The four branches are one per `follow.entity_type`:
 
-- **person** — films the followed person holds a credit on: *seed-grade or the follow's own
-  tier* for the timeline (`catalog.seed_grade`: director, Writer/Screenplay, top-5 billed —
-  widened to every credit at `any`), the coverage's cut for
-  alerts. The in-play/alert-window term is this branch's alone on the timeline side: following
-  a person is a standing interest in what they are making next, and their back catalogue would
-  otherwise flood it. Following a *title*, a company or a franchise is a request for that
-  specific thing, released or not.
+- **person** — every film the followed person holds any credit on, at any billing position and
+  any crew job. The in-play/alert-window term is this branch's alone on the timeline side:
+  following a person is a standing interest in what they are making next, and their back
+  catalogue would otherwise flood it. Following a *title*, a company or a franchise is a
+  request for that specific thing, released or not.
 - **company** — `catalog.film_production_company`.
 - **franchise** — `film.collection_id`.
 - **title** — the film itself, in any state. The user asked for that film.
@@ -55,38 +53,20 @@ the cast means the WHERE (the type filter and the shape guard) has already run w
 """
 
 from datetime import date, datetime
-from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import Integer, Select, and_, cast, literal, or_, select, true, union_all
+from sqlalchemy import Integer, Select, and_, cast, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Subquery
 
 from upmovies.app.models import Follow, WatchlistDismissal
 from upmovies.catalog.models import Film, FilmCredit, FilmProductionCompany
-from upmovies.catalog.queries import (
-    alert_window_clause,
-    in_play_clause,
-    seed_grade_credit_clause,
-)
-from upmovies.catalog.seed_grade import DIRECTOR_JOB, is_seed_grade
+from upmovies.catalog.queries import alert_window_clause, in_play_clause
 from upmovies.news.models import RESOLVED_MENTION_PATHS, Event, EventStory, StoryPerson
 
 _INT_ID_PATTERN = r"^[0-9]+$"
 _UUID_PATTERN = r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"
-
-LEAD_TOP_BILLED_ORDER = 3
-"""`coverage = 'lead'`'s billing cut, on TMDB's 0-indexed `order`: slots 0, 1 and 2.
-
-Not `catalog.seed_grade.TOP_BILLED_ORDER`, which is 5, and not a candidate for being unified
-with it. The two answer different questions and the numbers are load-bearing in opposite
-directions: seed grade decides whose filmography the sweep *enumerates*, where the measurement
-at NEU-1090 shows cutting to 3 discards demonstrably-shooting films at 14:1, while this decides
-whose casting is worth a **push**, where 5 would notify a user about a supporting role they did
-not follow the person for. `coverage = 'major'` (and, wider still, `any`) is how a user who
-wants more than this asks for it (D-43, D-48), which is the affordance that makes the narrow
-default safe."""
 
 
 def followed_tmdb_ids(
@@ -139,69 +119,17 @@ def muted_film_ids(user_id: UUID) -> Select[tuple[UUID]]:
     return select(WatchlistDismissal.film_id).where(WatchlistDismissal.user_id == user_id)
 
 
-def lead_credit_clause() -> ColumnElement[bool]:
-    """WHERE predicate over `catalog.film_credit` selecting `coverage = 'lead'`'s credits: a
-    director credit, or a cast credit billed in the top 3.
+def followed_people() -> Select[tuple[int]]:
+    """`SELECT DISTINCT person_id` for every person **somebody** follows (EF-2).
 
-    `credit_order IS NOT NULL` is not redundant beside `< 3`: TMDB leaves `order` off the long
-    tail of a cast list, and NULL must read as "unbilled", not as slot 0."""
-    return or_(
-        and_(FilmCredit.credit_type == "crew", FilmCredit.job == DIRECTOR_JOB),
-        and_(
-            FilmCredit.credit_type == "cast",
-            FilmCredit.credit_order.is_not(None),
-            FilmCredit.credit_order < LEAD_TOP_BILLED_ORDER,
-        ),
-    )
-
-
-def _coverage_credit_clause(coverage: ColumnElement[str]) -> ColumnElement[bool]:
-    """The credit cut a person follow's own `coverage` column asks for (D-43, D-48).
-
-    Takes the column rather than a Python value so the tier is read *per follow row*, inside
-    the one statement: a user following one director at `lead` and another at `any` is one
-    query, not two, which is what keeps the batch passes at one statement per user.
-
-    `any`'s arm is `true()` rather than a predicate over `film_credit`, and that is the whole
-    spelling of the widest tier: every caller reaches this through a join from the follow to
-    that person's credit rows, so "the credit exists" is already said by the join. An unbilled
-    cast entry (`credit_order IS NULL`) and a third-unit crew job are in, which is what `any`
-    means.
-    """
-    return or_(
-        and_(coverage == "lead", lead_credit_clause()),
-        and_(coverage == "major", seed_grade_credit_clause()),
-        and_(coverage == "any", true()),
-    )
-
-
-def credit_tier(
-    credit_type: str, job: str | None, credit_order: int | None
-) -> Literal["lead", "major", "any"]:
-    """The **narrowest** coverage tier that reaches one credit — the badge `GET /people/{ref}`
-    renders beside it.
-
-    Beside `lead_credit_clause` because the lead cut is defined here, and derived from the same
-    two predicates the alert query runs (`lead_credit_clause`, `seed_grade_credit_clause`) so
-    the badge and the alert cannot disagree: a row the page labels "Major credits" is a row a
-    `major` follow alerts on, by construction rather than by review.
-
-    Total by design — every credit belongs to some tier, because `any` reaches all of them.
-    """
-    if credit_type == "crew" and job == DIRECTOR_JOB:
-        return "lead"
-    if credit_type == "cast" and credit_order is not None and credit_order < LEAD_TOP_BILLED_ORDER:
-        return "lead"
-    return "major" if is_seed_grade(credit_type, job, credit_order) else "any"
-
-
-def people_followed_at_any() -> Select[tuple[int]]:
-    """`SELECT DISTINCT person_id` for every person **somebody** follows at coverage `any`.
-
-    The one builder in this module that asks nothing about a user: the two callers are batch
+    The one builder in this module that asks nothing about a user: the callers are batch
     passes deciding what the *system* records and enumerates, not what one person sees. The
     credit history (D-49) records a non-seed credit change when its person is in this set, and
     the sweep (D-50) enumerates these people beside the seed set.
+
+    Every live person follow, with no tier to filter on since EF-1 made the follow binary —
+    which is what makes "recorded grade" a set the user can reason about: follow someone, and
+    every credit they take is written down.
 
     **No entitlement filter**, on `covered_by_any_user_clause`'s reasoning: D-40 keeps a lapsed
     user's follows, and the poll set does not filter either. Recording a credit change for
@@ -215,7 +143,6 @@ def people_followed_at_any() -> Select[tuple[int]]:
         select(cast(Follow.entity_id, Integer))
         .where(
             Follow.entity_type == "person",
-            Follow.coverage == "any",
             Follow.entity_id.regexp_match(_INT_ID_PATTERN),
         )
         .distinct()
@@ -226,7 +153,7 @@ def _int_follows(
     entity_type: str, *, user_id: UUID | None = None, entity_id: str | None = None
 ) -> Subquery:
     """Follows of one integer-keyed type, with `entity_id` cast out as `key` and the whole row
-    beside it — `user_id`, `coverage`, `created_at` — for the branches that need more than the
+    beside it — `user_id`, `entity_id`, `created_at` — for the branches that need more than the
     id.
 
     `user_id` is optional because `covered_by_any_user_clause` asks the same question of the
@@ -237,7 +164,6 @@ def _int_follows(
         cast(Follow.entity_id, Integer).label("key"),
         Follow.user_id.label("user_id"),
         Follow.entity_id.label("entity_id"),
-        Follow.coverage.label("coverage"),
         Follow.created_at.label("created_at"),
     ).where(
         Follow.entity_type == entity_type,
@@ -281,14 +207,18 @@ def _not_muted(user_id_column: ColumnElement[UUID]) -> ColumnElement[bool]:
     )
 
 
-def _person_covered_film_ids(*, user_id: UUID, entity_id: str | None = None) -> Select[tuple[UUID]]:
-    """`SELECT film_credit.film_id` for the credits this user's person follows cover (D-43)."""
+def _person_film_ids(*, user_id: UUID, entity_id: str | None = None) -> Select[tuple[UUID]]:
+    """`SELECT film_credit.film_id` for every film this user's person follows reach (EF-2).
+
+    The join is the whole predicate: a binary follow has no cut to apply, so an unbilled cast
+    entry and a third-unit crew job are in, which is what "every credit" means.
+
+    One builder for both sets, like `_company_film_ids` beside it. It was `_person_covered_*`
+    while the alert side applied a coverage cut the timeline did not; EF-1 removed the cut, so
+    the two branches are now the same statement and spelling them twice is how they would come
+    to disagree."""
     follows = _int_follows("person", user_id=user_id, entity_id=entity_id)
-    return (
-        select(FilmCredit.film_id)
-        .join(follows, follows.c.key == FilmCredit.person_id)
-        .where(_coverage_credit_clause(follows.c.coverage))
-    )
+    return select(FilmCredit.film_id).join(follows, follows.c.key == FilmCredit.person_id)
 
 
 def _company_film_ids(user_id: UUID, *, entity_id: str | None = None) -> Select[tuple[UUID]]:
@@ -313,15 +243,13 @@ def followed_film_ids(
     is what stops the builder's meaning depending on the query it is dropped into, which is the
     whole premise of handing the same SELECT to the notify pass (NEU-1379).
 
-    **Coverage never narrows this, and only `any` widens it (D-47).** A person follow reaches
-    every seed-grade credit on the timeline whatever its tier: the tier decides what is worth
-    *interrupting* somebody for, and narrowing the timeline with it would take away the surface
-    the user would otherwise catch the beat on (D-43). `lead` and `major` are subsets of seed
-    grade, so for them this is the whole story. `any` is not a subset — it reaches a 12th-billed
-    actor the seed cut does not — and a user alerted about a casting they could then find
-    nowhere on their own timeline is the dead end D-47 closes. So the person branch reads the
-    follow *rows* rather than just their ids, and admits a credit that is seed grade **or**
-    whose follow is at `any`.
+    **The person branch is every credit (EF-2).** A follow is binary, so there is no tier to
+    narrow by and nothing left of the seed-grade cut D-11 applied here: following a person is a
+    standing interest in what they make, and a 12th-billed role is still something they made.
+    This is the interim M2→M3 delivery — M3 replaces the entity half of this builder with
+    `entity_attachment_event_ids`, an *event* selector, and this one keeps title follows only
+    (EF-3, EF-14). Until then an entity follow behaves as the old `any` tier did, which is what
+    keeps subscribers from going quiet across the two deploys.
 
     **The mute exclusion is inside the builder, not at the call sites.** D-45 as amended
     silences a muted film everywhere, and there are four consumers — the timeline route, the
@@ -332,12 +260,7 @@ def followed_film_ids(
     rather than the whole feed — the onboarding prompt D-12 asks for is the client's call to
     make off `total == 0`, not something this hides by falling back.
     """
-    person_follows = _int_follows("person", user_id=user_id)
-    person_films = (
-        select(FilmCredit.film_id)
-        .join(person_follows, person_follows.c.key == FilmCredit.person_id)
-        .where(or_(seed_grade_credit_clause(), person_follows.c.coverage == "any"))
-    )
+    person_films = _person_film_ids(user_id=user_id)
     return (
         select(Film.id)
         .where(
@@ -365,13 +288,13 @@ def covered_film_ids(
 ) -> Select[tuple[UUID]]:
     """`SELECT film.id` for every film this user's follows cover **for alerts** (D-43).
 
-    The timeline filter's three differences, all of them here: a person follow admits only the
-    credits its `coverage` names, the person, company and franchise branches are bounded by the
-    alert window rather than by in-play — a wider date bound and a status term that ends at
-    `Canceled` rather than at `Released` (D-46) — and a title follow is bounded by neither, so
-    it covers its film in **any** state and at any age. The user asked for that film, and one
-    they put on the list the week it came out is exactly the one they are waiting on the home
-    release of.
+    The timeline filter's two remaining differences, both of them here (EF-1 took the third —
+    a person follow now admits every credit on either side): the person, company and franchise
+    branches are bounded by the alert window rather than by in-play — a wider date bound and a
+    status term that ends at `Canceled` rather than at `Released` (D-46) — and a title follow
+    is bounded by neither, so it covers its film in **any** state and at any age. The user
+    asked for that film, and one they put on the list the week it came out is exactly the one
+    they are waiting on the home release of.
 
     Mutes are *not* subtracted here; `watchlist_film_ids` is that set. Kept apart because the
     want/stop service needs the unmuted answer: "does anything still cover this film" is what
@@ -394,7 +317,7 @@ def covered_film_ids(
     if wants("person"):
         branches.append(
             and_(
-                Film.id.in_(_person_covered_film_ids(user_id=user_id, entity_id=scoped_id)),
+                Film.id.in_(_person_film_ids(user_id=user_id, entity_id=scoped_id)),
                 window,
             )
         )
@@ -473,7 +396,7 @@ def covering_follows(
         .select_from(FilmCredit)
         .join(person_follows, person_follows.c.key == FilmCredit.person_id)
         .join(Film, Film.id == FilmCredit.film_id)
-        .where(_coverage_credit_clause(person_follows.c.coverage), window)
+        .where(window)
         .distinct()
     )
     company_follows = _int_follows("company", user_id=user_id)
@@ -539,7 +462,6 @@ def covered_by_any_user_clause(*, today: date, max_age_days: int) -> ColumnEleme
         .join(person_follows, person_follows.c.key == FilmCredit.person_id)
         .where(
             FilmCredit.film_id == Film.id,
-            _coverage_credit_clause(person_follows.c.coverage),
             _not_muted(person_follows.c.user_id),
         )
         .exists()

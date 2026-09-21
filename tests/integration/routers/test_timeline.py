@@ -107,14 +107,17 @@ async def test_following_a_director_shows_only_their_films(
     assert body["total"] == 1
 
 
-async def test_every_seed_grade_credit_counts_and_nothing_below_it_does(
+async def test_every_credit_counts_whatever_its_grade(
     entitled_client, session, make_film, add_event, follow
 ):
-    # The three grades `catalog/seed_grade.py` defines, one film each, plus the three that are
-    # deliberately not seed grade: a 6th-billed role, an unbilled one (TMDB leaves `order` off
-    # the long tail, which is exactly the cut) and a producer credit (D-11). The credits
-    # are written directly because `attach_credits` inserts the person per call, and this is
-    # one person credited on five films.
+    """D-11's seed-grade cut on the person branch, gone (EF-2).
+
+    The three grades `catalog/seed_grade.py` defines, one film each, plus the three that are
+    deliberately *not* seed grade: a 6th-billed role, an unbilled one (TMDB leaves `order` off
+    the long tail, which is exactly the cut) and a producer credit. All six are on the timeline
+    now — a follow is binary, and the bottom three are the ones it used to silently decline.
+    The credits are written directly because `attach_credits` inserts the person per call, and
+    this is one person credited on six films."""
     from upmovies.catalog.models import FilmCredit, Person
 
     session.add(Person(id=287, name="A Person"))
@@ -137,7 +140,7 @@ async def test_every_seed_grade_credit_counts_and_nothing_below_it_does(
     await follow("person", 287)
 
     items = (await entitled_client.get("/me/timeline")).json()["items"]
-    assert sorted(i["film_title"] for i in items) == ["Director", "Top Billed", "Writer"]
+    assert sorted(i["film_title"] for i in items) == sorted(grades)
 
 
 @pytest.mark.parametrize(

@@ -102,7 +102,8 @@ async def test_a_writer_director_is_one_row_with_two_credits(
     client, session, make_person, make_film
 ):
     """The page reads "Director · Writer" off one row, so the credits are listed rather than
-    folded — and the row's own tier is the narrowest of them."""
+    folded. The order survives the tier rank EF-1 deleted: seed grade first, then billing,
+    then job, which ties these two and breaks it alphabetically the right way round."""
     await make_person(id=525, name="Christopher Nolan")
     film = await make_film(slug="both", title="Both", release_date=None)
     await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
@@ -111,30 +112,54 @@ async def test_a_writer_director_is_one_row_with_two_credits(
 
     (row,) = (await client.get("/people/525")).json()["upcoming"]
     assert [c["job"] for c in row["credits"]] == ["Director", "Screenplay"]
-    assert [c["tier"] for c in row["credits"]] == ["lead", "major"]
-    assert row["tier"] == "lead"
+    assert "tier" not in row
+    assert all("tier" not in c for c in row["credits"])
 
 
-async def test_each_credit_carries_the_tier_that_reaches_it(
-    client, session, make_person, make_film
-):
-    """The badge and the alert query are one decision (`credit_tier`), so these are the tiers a
-    follow at each level actually delivers."""
+async def test_every_credit_is_listed_without_a_tier(client, session, make_person, make_film):
+    """EF-1 and EF-2: a follow reaches every credit, so there is no cut for a badge to name and
+    no row the page has to qualify. The 12th-billed film is the one that used to be reachable
+    only at `any`, and it is listed on the same terms as the lead role."""
     await make_person(id=525, name="An Actor")
     lead = await make_film(slug="lead", title="Lead", release_date=None)
-    major = await make_film(slug="major", title="Major", release_date=None)
+    supporting = await make_film(slug="supporting", title="Supporting", release_date=None)
     minor = await make_film(slug="minor", title="Minor", release_date=None)
     await add_credit(session, lead, 525, credit_type="cast", credit_order=0)
-    await add_credit(session, major, 525, credit_type="cast", credit_order=3)
+    await add_credit(session, supporting, 525, credit_type="cast", credit_order=3)
     await add_credit(session, minor, 525, credit_type="cast", credit_order=11)
     await session.commit()
 
     rows = (await client.get("/people/525")).json()["upcoming"]
-    assert {r["film"]["title"]: r["tier"] for r in rows} == {
-        "Lead": "lead",
-        "Major": "major",
-        "Minor": "any",
-    }
+    assert {r["film"]["title"] for r in rows} == {"Lead", "Supporting", "Minor"}
+    assert all("tier" not in r for r in rows)
+
+
+async def test_a_films_credits_read_director_then_seed_grade_then_the_rest(
+    client, session, make_person, make_film
+):
+    """`_ordered_credits`'s rule now that the tier rank is gone: director, then the rest of
+    seed grade, then everything else, with billing ordering each band.
+
+    The 2nd-billed cast credit is the case that fixes the rule rather than inheriting it — the
+    old tier rank folded it in with the director under `lead` and let `credit_order` put it
+    first, so a director who acted in their own film was billed above their own directing
+    credit while one billed 4th was not. The gaffer proves the third band is still below an
+    unbilled seed role."""
+    await make_person(id=525, name="A Busy Person")
+    film = await make_film(slug="busy", title="Busy", release_date=None)
+    await add_credit(session, film, 525, credit_type="crew", job="Gaffer", department="Lighting")
+    await add_credit(session, film, 525, credit_type="cast", credit_order=2)
+    await add_credit(session, film, 525, credit_type="crew", job="Screenplay", department="Writing")
+    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
+    await session.commit()
+
+    (row,) = (await client.get("/people/525")).json()["upcoming"]
+    assert [(c["credit_type"], c["job"], c["credit_order"]) for c in row["credits"]] == [
+        ("crew", "Director", None),
+        ("cast", None, 2),
+        ("crew", "Screenplay", None),
+        ("crew", "Gaffer", None),
+    ]
 
 
 async def test_a_row_cites_the_date_the_film_page_shows(

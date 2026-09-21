@@ -10,8 +10,8 @@ Two levels, deliberately kept apart (spec §7.3, §7.4):
   7,519-person one, and if precision does collapse we learn *which* grade caused it rather
   than staring at one undifferentiated jump.
 - **`followed`** is the fourth flag and not a fifth seed grade (D-50): it admits a candidate
-  reached *only* through a non-seed credit of somebody a user follows at coverage `any`. It is
-  on the same footing as the three because the ramp's argument is about precision, and a
+  reached *only* through a non-seed credit of somebody a user follows. It is on the same
+  footing as the three because the ramp's argument is about precision, and a
   follow is a different kind of evidence — one user's stated interest rather than the
   catalog's — so it deserves its own reading rather than being folded into the grade below it.
 
