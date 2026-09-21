@@ -411,7 +411,7 @@ _Avoid_: soft delete, archive, blacklist, dead flag.
 **Seed person**:
 Someone whose credits the sweep enumerates: anyone holding a **seed-grade** credit — director,
 writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film, plus
-every live person some user follows at coverage `any` (D-50), whose non-seed credits reach
+every live person some user follows (D-50 as widened by EF-2), whose non-seed credits reach
 candidates under the `followed` **tranche**. 7,519
 of them at a 1,435-film catalog. Producers are deliberately not seed-grade: an EP credit travels
 far and says little about whether a project is real. The set is *self-expanding* — admitting a
@@ -422,7 +422,7 @@ _Avoid_: tracked person, watched person, followed talent.
 **Tranche**:
 One admission flag per way a candidate can be reached — `SWEEP_ADMIT_DIRECTORS`,
 `SWEEP_ADMIT_WRITERS`, `SWEEP_ADMIT_CAST`, and `SWEEP_ADMIT_FOLLOWED` for a non-seed credit
-held by a person followed at `any` (D-50) — opened one at a time so a precision drop names the grade that caused it
+held by a person somebody follows (D-50, EF-2) — opened one at a time so a precision drop names the grade that caused it
 rather than arriving as one undifferentiated jump. They sit under the master `SWEEP_ENABLED`,
 which is kept separate on purpose: the master is the rollback, the tranches are the ramp, and a
 sweep that enumerates and reports while admitting nothing is the state where all four are off.
@@ -441,11 +441,12 @@ change history — same word, unrelated mechanism.
 _Avoid_: confidence threshold, minimum seeds, corroboration window (that's the other one).
 
 **Recorded grade**:
-Which credit changes the credit history writes down (D-49): every **seed-grade** credit, plus
-every credit of a person somebody follows at coverage `any`. Seed grade is a property of the
-credit; recorded grade is seed grade *or* a property of who is watching. Both sides of a
-film's diff are judged by the same rule at the same moment, so a new follow never fabricates
-an attachment.
+Which credit changes the credit history writes down (D-49, EF-2): every **seed-grade** credit,
+plus every credit of a person somebody follows, and — the one exception to "first observation
+is a baseline" — the credits, studio rows and collection a followed entity already holds on a
+film the moment it is first observed (EF-4). Seed grade is a property of the credit; recorded
+grade is seed grade *or* a property of who is watching. Both sides of a film's diff are judged
+by the same rule at the same moment, so a new follow never fabricates an attachment.
 _Avoid_: followed grade, tracked credit, widened seed grade (seed grade does not widen).
 
 **Seed grade**:
@@ -731,102 +732,98 @@ The remembered answer for `(source domain, name as written)`. Trades recycle phr
 lookups after the first month are hits; it is what keeps resolution's model spend flat.
 _Avoid_: alias table, name index.
 
-### Follows, watchlist and delivery
+### Follows, timeline and delivery
 
 **Follow**:
-A user's standing interest in an entity — a **person**, a **company**, a **franchise**, or a
-**title** — and the only thing a user maintains (D-42, ADR-0018). A follow
-produces **timeline** rows *and* alerts. Its point is that the user hears about a film they had
-never heard of, because they follow the people who made it. For the timeline, a person follow
-covers every published event on any in-play film where that person holds a seed-grade credit
-— or any credit at all, when its **coverage** is `any` (D-47); **resolution** later adds
-events that *name* them on films they are not yet credited on. For
-alerts, it covers the films its **coverage** selects.
-_Avoid_: subscription (that is billing), watchlist item (there is no such record any more),
-track, favorite.
+A user's standing interest in an entity — a **person**, a **studio**, a **franchise**, or a
+**title** — and the only thing a user maintains. It is binary: on or off, no tiers (EF-1,
+ADR-0019). What it delivers depends on the kind. A **title** follow delivers every published
+beat on that film. A person, studio or franchise follow delivers that entity's **attachment**
+stream — the cards in which it joins or leaves a film — and the film's cancellation, and
+nothing else about those films (EF-3). Its point is still that the user hears about a film
+they had never heard of, because someone they follow just signed on to it; from there they
+follow the film.
+_Avoid_: subscription (that is billing), watchlist item, coverage (retired), track, favorite.
 
-**Coverage**:
-Which of a followed person's films alert (D-43, D-48): `lead` — the person is director or in
-the top-3 billing — is the default and is what keeps a prolific actor from becoming a push
-firehose; `major` widens it to every seed-grade credit; `any` to every credit the person holds,
-at any billing or crew job. Company, franchise and title follows cover every matching film.
-Coverage never narrows the timeline: its cut is seed grade, or every credit when the coverage
-is `any` (D-47). On screen the three read Lead roles, Major credits, Every credit.
-_Avoid_: alert prefs (those were per film and are gone), tier, level, all (the old name of
-`major`, retired because it no longer meant all).
+**Attachment** (of an entity to a film):
+A person holding a credit, a studio holding a production-company row, or a film sitting in a
+collection. An entity *attaches* when the row appears and *detaches* when it goes; both are
+observed by diffing consecutive ingests (the credit history, `film_company_change`, the
+`collection_id` field change) and both card after **quarantine**. A film's *admission* counts
+as an attachment for every entity somebody follows at that moment (EF-4); for everyone else
+the first observation is the baseline. Not to be confused with **Attach** above, which is a
+story joining an existing event.
+_Avoid_: link (that is story→film), credit (only one of the three kinds), join (the SQL word).
+
+**Studio**:
+What the product calls a TMDB production company (`entity_type = company`). Following one
+delivers the studio's attachments: the films it joins or leaves, by the rebuilt
+`film_production_company` rows (EF-5). On screen always "studio"; in code always `company`.
+_Avoid_: distributor (TMDB does not distinguish), label, producer (that is a person's job).
 
 **Franchise**:
-A TMDB collection, and nothing more for now. Following a franchise matches films by
-`collection_id`; a sequel TMDB has not yet filed under its collection is missed until it is.
-_Avoid_: series, universe, saga.
+A TMDB collection, and nothing more for now (`entity_type = franchise`). Following one
+delivers the collection's attachments: a film filed under it, or moved out of it, by the
+`collection_id` field change (EF-5). A sequel TMDB has not yet filed under its collection is
+missed until it is.
+_Avoid_: series, universe, saga, collection (on screen; fine in code).
 
 **Timeline**:
-The signed-in home surface: the publication log filtered to the user's follows. Same axis as the
-feed (**publication**), same day grouping, same "what's new since I last looked" reading — it is
-the feed with a where-clause, not a different kind of surface. Anonymous readers see the global
-feed in its place.
-_Avoid_: personalized feed, my feed, stream, dashboard.
+The signed-in home surface: the publication log filtered to the user's follows. Same axis as
+the feed (**publication**), same day grouping, same "what's new since I last looked" reading —
+it is the feed with a where-clause, not a different kind of surface. The where-clause is
+`film IN (titles you follow) OR event IN (attachments of entities you follow)` (EF-3); it is
+the same clause the digest and the notify pass read. Anonymous readers see the global feed in
+its place.
+_Avoid_: personalized feed, my feed, stream, dashboard, watchlist (retired: the set of films
+you follow is just the Films filter of the follows page).
 
-**Watchlist**:
-The computed set of films the user's follows cover for alerts, minus the films they have
-**muted** (D-42, D-45). It is the set the push whitelist, the calendar, the iCal feed, the
-digest slate and the provider poll's "somebody is waiting on this film" rule all read, and it is
-a view over follows, not a record the user maintains: a film gets there by being followed as a
-title (in any state) or by being covered by a person, company or franchise follow while it is
-inside the **alert window**. This is the product's differentiator — a list seeded with films the user did not know
-existed. Volume is controlled by **coverage** and by the user's one store setting
-(`user_settings.alert_stores`, default `{stream}`, D-44), never per film.
-_Avoid_: watchlist item (the old per-film record), derived watchlist item (every entry is
-derived from a follow now), favorite, subscription.
+**Last activity** (of a follow):
+The publication time of the newest card that would reach this user through this follow — any
+beat on a followed film, an attachment or detachment or cancellation for a followed entity —
+and the third sort on the follows page (EF-15). NULL when nothing has reached them yet.
+_Avoid_: updated_at (that is the row), recent, latest event.
 
 **Alert window**:
-How long a film stays coverable through a person, company or franchise follow: from
-announcement until `PROVIDER_POLL_MAX_AGE_DAYS` after its primary release date, in any TMDB
-status but `Canceled`. Wider than **in play** in two ways, both deliberate (D-46). The date
-bound is moved back rather than cut at today, because a film that opened last month is still
-owed its home-release beat, and the bound is the provider poll's own ceiling, so the follow
-stops covering the film exactly when the catalog stops looking for offers on it. And `Released`
-is *inside* the window, because it is the state in which the beats the window exists for —
-`now_available`, the digital and physical release dates, the late trailer — actually happen;
-the window's status term is its own constant (`catalog.queries.ALERT_WINDOW_DEAD_STATUSES`),
-not `TMDB_EXCLUDED_STATUSES`, which keeps governing admission and **in play**. A **title**
-follow ignores the window entirely — the user asked for that film, in any state, at any age.
-_Avoid_: in play (that is the working set's term, and it ends on release day), in play's status
-term (`TMDB_EXCLUDED_STATUSES`, which excludes `Released` and this does not), active, upcoming.
+How long a film stays *interesting* after release: from announcement until
+`PROVIDER_POLL_MAX_AGE_DAYS` after its primary release date, in any TMDB status but
+`Canceled` (D-46; `catalog.queries.ALERT_WINDOW_DEAD_STATUSES`). It no longer governs what an
+entity follow covers — nothing does, an entity follow covers events, not films (EF-3). It
+still bounds the provider poll, an entity page's "recently released" list and which films an
+**import** may propose (EF-21). A **title** follow ignores it entirely — the user asked for
+that film, in any state, at any age.
+_Avoid_: in play (the working set's term, ending on release day), coverage window (retired
+with coverage), active, upcoming.
 
-**Mute**:
-A user's decision to stop hearing about one film (D-45): it leaves the watchlist, the calendar,
-the iCal feed, the digest slate and the timeline, and can be undone. Held in
-`app.watchlist_dismissal`, the table that used to record permanent dismissals. "Stop" on a film
-that the user follows directly also deletes that title follow; "want" clears a mute and, if
-nothing else covers the film, creates a title follow.
-_Avoid_: dismissal (the old, permanent form), unfollow (a title follow may not be why it is
-there), hide, snooze.
-
-**Watchlist calendar**:
-The release calendar narrowed to the reader's own **watchlist** —
-what a subscriber sees when they ask "what of mine is coming out?". It is the calendar with a
-where-clause, not a different kind of surface: same governing-date rule, same buckets, same
-upcoming-only window, same date-paged shape as the all-releases calendar, and none of the
-popularity/runtime cuts that keep noise off the public listing (a film on your own watchlist is
-not noise to you). It is drawn from the watchlist, which since D-42 is the follow graph's
-alert coverage minus mutes: following a director does put their lead films on it. The **iCal
-feed** is its subscribed form and holds the same films and dates;
-the only thing the feed adds is a bounded reach into the past, because a subscribed client drops
-whatever a feed stops publishing.
-_Avoid_: my calendar (the nav item is "Calendar"), follow calendar, personal feed (that is the
-timeline), subscription calendar (that is the iCal feed's delivery form, not a different set).
+**My films calendar**:
+The release calendar narrowed to the films the reader follows — what a subscriber sees when
+they ask "what of mine is coming out?". It is the calendar with a where-clause, not a
+different kind of surface: same governing-date rule, same buckets, same upcoming-only window,
+same date-paged shape as the all-releases calendar, and none of the popularity/runtime cuts
+that keep noise off the public listing. Following a director puts nothing on it (EF-14): only
+title follows do. The **iCal feed** is its subscribed form and holds the same films and dates;
+the only thing the feed adds is a bounded reach into the past, because a subscribed client
+drops whatever a feed stops publishing.
+_Avoid_: watchlist calendar (the old name), my calendar (the nav item is "Calendar"), follow
+calendar, personal feed (that is the timeline), subscription calendar (that is the iCal feed).
 
 **Push whitelist**:
-The closed set of beats allowed to interrupt a user about a watchlist title: a date assigned, a
-date moved (a **slip** especially), a home-release date, **now available**, a trailer. Everything
-else waits for the **digest**. Civilians tolerate rumour when it is labelled unconfirmed; they do
-not tolerate being woken up by it, so nothing unconfirmed is on the list.
-_Avoid_: alert types, notification settings (those are the user's prefs *over* the list).
+The closed set of beats allowed to interrupt a user, decided per *why the card reaches them*
+(EF-7). Through a **title** follow: a date assigned or moved (a **slip** especially), a
+home-release date, **now available** per the user's one store setting, a trailer, a
+cancellation, and a seed-grade cast or crew attachment or detachment. Through a person, studio
+or franchise follow: that entity's attachment or detachment, and the cancellation of a film
+it is attached to. Everything else waits for the **digest**. Nothing unconfirmed pushes: a
+story-sourced `rumored` card ("in talks") waits for its confirmation, while a catalog
+attachment that has cleared **quarantine** is confirmed for this purpose by construction
+(EF-8, EF-10).
+_Avoid_: alert types, notification settings (those are the user's prefs *over* the list),
+coverage (retired).
 
 **Digest**:
 The batched delivery of a user's timeline — daily or weekly, their choice — for everything the
-push whitelist does not cover. The weekly "your slate" mail is a digest.
+push whitelist does not cover. The weekly "your slate" mail is a digest; its slate is the
+films the user follows.
 _Avoid_: newsletter, summary email, notification.
 
 **Home-release date**:

@@ -9,6 +9,12 @@ them)
 watchlist and delivery* were added for this project. Use those terms.
 **ADR:** `docs/adr/0017-the-claim-ledger-is-the-event-table.md`
 
+> **Superseded in part (2026-09-21).** D-42 to D-50, and D-11's film-coverage half, D-13, D-45 and
+> the follow-related parts of D-27, D-31 and D-32, are superseded by *bl: Entity Follows*
+> (`docs/specs/bl-entity-follows-project-spec.md`, ADR-0019): a person, studio or franchise follow
+> delivers that entity's attach and detach cards only; the watchlist, mutes and coverage tiers are
+> removed. NEU-1420 moved to that project. Everything else here stands.
+
 This document is the project-wide spec that `/personal:implementit` falls back to for any
 ticket in the project (ADR-0004 of the personal plugin). It records the outcome of the
 project-shaping interview: every decision that the source spec left open or that the existing
