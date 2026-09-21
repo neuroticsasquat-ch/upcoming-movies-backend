@@ -251,7 +251,8 @@ Numbered `EF-n` so tickets can cite them. Each names the accepted decision it co
   user through this follow (EF-3 for entities, any beat for titles), NULL when none. Person,
   studio and franchise rows link to their pages; film rows to the film page. The frontend
   `Follow` type adopts `name` and `image_path` and **`lib/follow-labels.ts` is deleted** (the
-  NEU-1396 follow-up). *Replaces NEU-1415's grouped page and coverage radio.*
+  NEU-1396 follow-up, shipped as NEU-1422 on 2026-09-20). *Replaces NEU-1415's grouped page
+  and coverage radio.*
 - **EF-16 The film page has one button** — the film's — and every person, studio and
   franchise name links to its page. The seed-row buttons NEU-1419 kept are removed, and the
   "via …" line with them. Blocked on EF-17 so no type is stranded.
@@ -310,8 +311,9 @@ loses its buttons.
 - `/companies/search` and `/collections/search` stand; the header calls the four search
   endpoints with one debounced query and renders four groups.
 - Frontend routes: `/studio/:ref`, `/franchise/:ref`; `pages/MyFollows.tsx::tmdbUrl` deleted.
-- Frontend `Follow` type gains `name: string | null`, `image_path: string | null`;
-  `lib/follow-labels.ts` and its registry are deleted.
+- Frontend `Follow` type carries `name: string | null`, `image_path: string | null` and
+  `lib/follow-labels.ts` is gone — done by NEU-1422 (frontend #160, 2026-09-20) before this
+  project started; NEU-1431 only adds the studio and franchise links.
 
 ### M2 — The signals
 
@@ -397,7 +399,7 @@ Project `bl: Entity Follows` — https://linear.app/neuroticsasquatch/project/bl
 
 | Milestone | Story | Tickets (blocked by) |
 |---|---|---|
-| M1 | NEU-1420 | NEU-1428 backend company/collection endpoints; NEU-1429 frontend studio/franchise pages (1428); NEU-1430 frontend header search; NEU-1431 frontend follow names + delete `follow-labels.ts` (1429) |
+| M1 | NEU-1420 | NEU-1428 backend company/collection endpoints; NEU-1429 frontend studio/franchise pages (1428); NEU-1430 frontend header search; NEU-1431 frontend studio/franchise links on follows rows (1429; names already shipped by NEU-1422) |
 | M2 | NEU-1423 | NEU-1432 binary follow + recorded grade + sweep flip; NEU-1433 company change tracking + events; NEU-1434 collection field events; NEU-1435 `canceled`; NEU-1436 admission-as-attachment (1432, 1433, 1434) |
 | M3 | NEU-1424 (backend) | NEU-1437 timeline/digest clause + first association for people (1432–1435); NEU-1438 per-type push whitelist (1437); NEU-1439 remove the watchlist (1437); NEU-1440 `last_activity_at` + entity `/events` (1437) |
 | M3 | NEU-1425 (frontend) | NEU-1441 film page one button (1429, 1439); NEU-1442 follows page rebuilt (1431, 1440); NEU-1443 delete watchlist page + calendar tab (1439, 1441); NEU-1444 entity page cards, tier control gone (1429, 1440) |
