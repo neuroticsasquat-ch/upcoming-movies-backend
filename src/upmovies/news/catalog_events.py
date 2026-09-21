@@ -31,8 +31,8 @@ ONCE_PER_FILM_EVENT_TYPES = frozenset(STATUS_EVENT_TYPES.values())
 # registered wherever the vocabulary is enumerated (`public.arc._EVENT_STAGE`,
 # `link.cluster._STALE_EVENT_TYPES`, `ck_event_type`) or it ranks below everything.
 #
-# `crew` joins them with the widest coverage tier (D-49): a followed person's non-seed crew
-# credit is a crew attachment like a director's, so it cards as `crew_attached` and groups
+# `crew` joins them at recorded grade (D-49, EF-2): a followed person's non-seed crew credit
+# is a crew attachment like a director's, so it cards as `crew_attached` and groups
 # with one — a cinematographer and a director attaching in the same pass are one card, which
 # is what D-7's burst grouping already means by one beat. No new event type, so `ck_event_type`
 # is untouched. Keyed by `catalog.seed_grade.recorded_role`, which is total, so every key this

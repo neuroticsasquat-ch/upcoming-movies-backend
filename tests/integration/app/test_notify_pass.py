@@ -128,14 +128,13 @@ async def _follow_title(session, *, user_id: UUID, film_id: UUID) -> None:
     await session.commit()
 
 
-async def _follow_person(session, *, user_id: UUID, person_id: int, coverage: str = "lead") -> None:
+async def _follow_person(session, *, user_id: UUID, person_id: int) -> None:
     session.add(
         Follow(
             user_id=user_id,
             entity_type="person",
             entity_id=str(person_id),
             source="manual",
-            coverage=coverage,
         )
     )
     await session.commit()
@@ -175,7 +174,7 @@ async def test_a_title_follow_on_a_whitelist_beat_queues_an_alert_and_a_digest(
     assert (digest.kind, digest.event_id) == ("digest", event.id)
 
 
-async def test_a_person_follow_outside_its_coverage_earns_a_digest_but_no_alert(
+async def test_a_non_lead_credit_reaches_both_branches(
     session,
     session_factory,
     subscriber,
@@ -185,14 +184,19 @@ async def test_a_person_follow_outside_its_coverage_earns_a_digest_but_no_alert(
     seed_watermark,
     run_pass,
 ):
-    """Where the two branches come apart now that one row feeds both (D-43). A writing credit
-    is seed grade, so the film is on the timeline and in the digest; it is not `lead`, so the
-    default coverage does not put it on the watchlist and nothing alerts — on a whitelist beat,
-    so the only thing keeping it out of the alert branch is the tier."""
+    """Where the two branches used to come apart, and no longer do (EF-1, EF-2).
+
+    A writing credit is seed grade but was not `lead`, so under D-43's default coverage this
+    film reached the timeline and the digest while the alert branch declined it — on a
+    whitelist beat, with the tier as the only thing between them. A binary follow has no tier,
+    so one row now feeds both branches for every credit the person holds. The pair of tests
+    this replaces (`..._outside_its_coverage_...` and `test_widening_the_coverage_...`) were
+    the two sides of that difference.
+    """
     await seed_watermark()
     user = await subscriber()
-    # Dated ahead of `TODAY`, so the timeline's in-play term (D-11) is satisfied and the only
-    # thing the two branches can disagree about is the coverage tier.
+    # Dated ahead of `TODAY`, so the timeline's in-play term (D-11) is satisfied and nothing
+    # but the follow decides what the two branches see.
     film = await make_film(slug="dune", title="Dune", release_date=date(2099, 1, 1))
     await attach_credits(film, crew=[{"id": 488, "name": "A Writer", "job": "Screenplay"}])
     await _follow_person(session, user_id=user.id, person_id=488)
@@ -200,12 +204,10 @@ async def test_a_person_follow_outside_its_coverage_earns_a_digest_but_no_alert(
 
     result = await run_pass()
 
-    assert (result.alerts_queued, result.digests_queued) == (0, 1)
-    (row,) = await _rows(session)
-    assert (row.kind, row.status) == ("digest", "queued")
+    assert (result.alerts_queued, result.digests_queued) == (1, 1)
 
 
-async def test_widening_the_coverage_puts_the_same_film_in_the_alert_branch(
+async def test_an_unbilled_credit_reaches_both_branches_too(
     session,
     session_factory,
     subscriber,
@@ -215,15 +217,15 @@ async def test_widening_the_coverage_puts_the_same_film_in_the_alert_branch(
     seed_watermark,
     run_pass,
 ):
-    """The same graph at `coverage = 'major'`: the credit now covers the film for alerts too, and
-    nothing else about the pass changes."""
+    """The case no tier ever reached but `any`: a cast entry TMDB left unbilled. EF-2 makes it
+    the same as every other credit, which is the whole of "a person follow reaches any credit"
+    — and it is the row that would silently drop out if a seed-grade term survived anywhere in
+    the alert path."""
     await seed_watermark()
     user = await subscriber()
-    # Dated ahead of `TODAY`, so the timeline's in-play term (D-11) is satisfied and the only
-    # thing the two branches can disagree about is the coverage tier.
     film = await make_film(slug="dune", title="Dune", release_date=date(2099, 1, 1))
-    await attach_credits(film, crew=[{"id": 488, "name": "A Writer", "job": "Screenplay"}])
-    await _follow_person(session, user_id=user.id, person_id=488, coverage="major")
+    await attach_credits(film, cast=[{"id": 488, "name": "A Bit Player", "credit_order": 11}])
+    await _follow_person(session, user_id=user.id, person_id=488)
     await add_event(film=film, event_type="release_date", created_at=NEW)
 
     result = await run_pass()

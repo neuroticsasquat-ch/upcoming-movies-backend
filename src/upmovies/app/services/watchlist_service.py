@@ -3,8 +3,8 @@ what it holds.
 
 **Nothing here stores a watchlist.** The set is `follow_queries.watchlist_film_ids` — the films
 this user's follows cover, minus the ones they have muted — recomputed on every read, so a
-coverage narrowed, a follow deleted or a film ageing out of the alert window takes effect
-everywhere at once (ADR-0018). What the two verbs write is a **follow** and a **mute**:
+follow deleted, a mute added or a film ageing out of the alert window takes effect everywhere
+at once (ADR-0018). What the two verbs write is a **follow** and a **mute**:
 
 - **want** (`POST`) — un-mute, and create a manual title follow if nothing else covers the film.
   The user asked for this film, so they get a row of their own that says so, rather than a
@@ -58,7 +58,7 @@ class WatchlistEntry:
 
 
 def _window() -> tuple[date, int]:
-    """The two arguments every coverage query takes, resolved once per request.
+    """The two arguments every follow query takes, resolved once per request.
 
     Request-time entry points resolve their own clock and settings — `public.service
     .get_timeline` does the same — because the alternative is every route that touches the

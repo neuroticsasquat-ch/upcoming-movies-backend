@@ -179,7 +179,6 @@ async def test_the_two_lists_produce_the_expected_films_follows_and_watchlist(
     assert {f.source for f in follows} == {"tmdb_import"}
     titles = [f for f in follows if f.entity_type == "title"]
     assert len(titles) == 2
-    assert {f.coverage for f in titles} == {"lead"}
     # The two title follows are what `watchlist_created` counted (M8); `follows_created` is the
     # distinct people of the two favorites.
     assert job.follows_created == len(PROMOTED_PEOPLE)

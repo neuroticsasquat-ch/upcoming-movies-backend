@@ -8,8 +8,8 @@ from tests.fixtures.catalog import add_film
 
 
 def film_uuid() -> str:
-    """A well-formed film id that names nothing — enough to reach the coverage guard, which
-    runs before the follow is ever looked up."""
+    """A well-formed film id that names nothing: it passes `normalise_entity_id` and then
+    finds no row, which is how the routes' 404 is reached rather than their 422."""
     return str(uuid4())
 
 
@@ -275,7 +275,7 @@ async def test_following_a_director_puts_their_films_on_the_watchlist(entitled_c
         "/me/follows", json={"entity_type": "person", "entity_id": "525"}
     )
     assert r.status_code == 201
-    assert r.json()["coverage"] == "lead"
+    assert "coverage" not in r.json()
 
     items = (await entitled_client.get("/me/watchlist")).json()["items"]
     assert [(i["film"]["title"], i["followed"], i["muted"]) for i in items] == [
@@ -340,11 +340,10 @@ async def test_a_mute_survives_the_follow_that_reached_the_film(entitled_client,
     assert [i["muted"] for i in items] == [True]
 
 
-async def test_following_a_writer_covers_nothing_at_lead_and_everything_at_all(
-    entitled_client, session
-):
-    """The coverage tier, both ways (D-43). A writing credit is seed grade — it is on the
-    timeline — but it is not `lead`, so it alerts only once the user widens the follow."""
+async def test_following_a_writer_covers_the_film_outright(entitled_client, session):
+    """What the tier used to gate (D-43), and no longer does (EF-1, EF-2). A writing credit is
+    not `lead`, so this film only reached the watchlist once the user widened the follow; a
+    binary follow puts it there on the one POST."""
     from datetime import date
 
     from upmovies.catalog.models import FilmCredit, Person
@@ -368,121 +367,99 @@ async def test_following_a_writer_covers_nothing_at_lead_and_everything_at_all(
         "/me/follows", json={"entity_type": "person", "entity_id": "488"}
     )
     assert r.status_code == 201
-    assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
 
-    r = await entitled_client.patch("/me/follows/person/488", json={"coverage": "major"})
-    assert r.status_code == 200
-    assert r.json()["coverage"] == "major"
     items = (await entitled_client.get("/me/watchlist")).json()["items"]
     assert [i["film"]["title"] for i in items] == [film.title]
 
 
-async def test_coverage_can_be_asked_for_when_the_follow_is_created(entitled_client, session):
-    from upmovies.catalog.models import Person
+@pytest.mark.parametrize("entity_type", ["person", "company", "franchise", "title"])
+async def test_a_coverage_in_the_body_is_ignored_not_refused(entitled_client, session, entity_type):
+    """The M2→M3 contract (EF-1, spec §6). The backend drops the tier a deploy before the
+    frontend stops sending it, so `coverage` has to be dropped silently: 422-ing it — which is
+    what D-1414.6 did for the three non-person types, and what the DTO did for a bad value —
+    would break every follow button in the live client for the length of the gap.
 
-    session.add(Person(id=489, name="Another Writer"))
+    All four types, because the old rule was *type-dependent* and this one is not: `person`
+    accepted the field and the other three refused it, so a check surviving on either side
+    would show up here."""
+    from upmovies.catalog.models import Collection, Person, ProductionCompany
+
+    film = await add_film(session, tmdb_id=560)
+    session.add_all([Person(id=620, name="A Person"), ProductionCompany(id=620, name="A Studio")])
+    session.add(Collection(id=620, name="A Franchise"))
     await session.commit()
+    entity_id = {
+        "person": "620",
+        "company": "620",
+        "franchise": "620",
+        "title": str(film.id),
+    }[entity_type]
 
-    r = await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "489", "coverage": "major"}
-    )
-    assert r.status_code == 201
-    assert r.json()["coverage"] == "major"
-
-
-@pytest.mark.parametrize("coverage", ["lead", "major", "any"])
-async def test_the_routes_accept_all_three_tiers(entitled_client, session, coverage):
-    """D-48's vocabulary, end to end. `all` is gone: the frontend must not ship its rename
-    before this, which is why the frontend ticket is blocked by this one."""
-    from upmovies.catalog.models import Person
-
-    person_id = 600 + ["lead", "major", "any"].index(coverage)
-    session.add(Person(id=person_id, name=f"Person {person_id}"))
-    await session.commit()
-
-    created = await entitled_client.post(
-        "/me/follows",
-        json={"entity_type": "person", "entity_id": str(person_id), "coverage": coverage},
-    )
-    assert created.status_code == 201
-    assert created.json()["coverage"] == coverage
-
-    patched = await entitled_client.patch(
-        f"/me/follows/person/{person_id}", json={"coverage": "lead"}
-    )
-    assert patched.status_code == 200
-    assert patched.json()["coverage"] == "lead"
-
-
-async def test_the_retired_tier_name_is_refused(entitled_client, session):
-    """`all` was renamed to `major` (D-48) and the CHECK no longer admits it, so the DTO has to
-    refuse it at the boundary rather than let it reach a constraint violation."""
-    from upmovies.catalog.models import Person
-
-    session.add(Person(id=610, name="Person 610"))
-    await session.commit()
-
-    r = await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "610", "coverage": "all"}
-    )
-    assert r.status_code == 422
-
-
-async def test_following_again_leaves_the_coverage_alone(entitled_client, session):
-    """A follow button pressed twice is not a request to reset what the user chose on the
-    person page; the PATCH is how a tier changes."""
-    from upmovies.catalog.models import Person
-
-    session.add(Person(id=490, name="A Third Writer"))
-    await session.commit()
-
-    await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "major"}
-    )
-    again = await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "490", "coverage": "lead"}
-    )
-    assert again.status_code == 200
-    assert again.json()["coverage"] == "major"
-
-
-@pytest.mark.parametrize("entity_type", ["company", "franchise", "title"])
-async def test_coverage_on_a_non_person_follow_is_422(entitled_client, session, entity_type):
-    """Those three name one thing each, so there is nothing to narrow — and storing a value
-    nothing reads while answering 201 would tell the client it had changed something."""
-    entity_id = {"company": "1", "franchise": "1", "title": str(film_uuid())}[entity_type]
     r = await entitled_client.post(
         "/me/follows",
         json={"entity_type": entity_type, "entity_id": entity_id, "coverage": "major"},
     )
-    assert r.status_code == 422
-    # The *named* refusal, not pydantic's generic error list: the client renders this one.
-    assert r.json()["detail"] == "coverage_not_applicable"
+    assert r.status_code == 201
+    assert "coverage" not in r.json()
+
+    # And a value the old CHECK never admitted is ignored on the same terms — the field is not
+    # declared, so there is nothing left to validate it against.
+    r = await entitled_client.post(
+        "/me/follows",
+        json={"entity_type": entity_type, "entity_id": entity_id, "coverage": "everything"},
+    )
+    assert r.status_code == 200
+
+
+async def test_patching_a_follow_is_a_200_no_op(entitled_client, session):
+    """A binary follow has nothing to PATCH (EF-1). The route outlives its purpose only
+    because the live frontend still calls it across the M2→M3 gap, so it answers 200 with the
+    row unchanged rather than 404-ing or 405-ing a control the user is about to lose.
+
+    Any body at all, including none: the request model is gone with the field it carried."""
+    from upmovies.catalog.models import Person
+
+    session.add(Person(id=630, name="A Writer"))
+    await session.commit()
+    created = await entitled_client.post(
+        "/me/follows", json={"entity_type": "person", "entity_id": "630"}
+    )
+    assert created.status_code == 201
+
+    for body in ({"coverage": "major"}, {"coverage": None}, {}):
+        r = await entitled_client.patch("/me/follows/person/630", json=body)
+        assert r.status_code == 200
+        assert r.json() == created.json()
 
 
 @pytest.mark.parametrize("entity_type", ["company", "franchise", "title"])
-async def test_patching_the_coverage_of_a_non_person_follow_is_422(entitled_client, entity_type):
+async def test_patching_a_non_person_follow_is_no_longer_422(entitled_client, session, entity_type):
+    """`coverage_not_applicable` (D-1414.6) is gone with the tier it guarded. These three used
+    to be refused outright; now they 404 like any other follow that does not exist, which is
+    the only thing left for the route to be wrong about."""
     entity_id = {"company": "1", "franchise": "1", "title": str(film_uuid())}[entity_type]
-    r = await entitled_client.patch(
-        f"/me/follows/{entity_type}/{entity_id}", json={"coverage": "major"}
-    )
-    assert r.status_code == 422
-    assert r.json()["detail"] == "coverage_not_applicable"
-
-
-async def test_patching_a_follow_that_does_not_exist_is_404(entitled_client):
-    r = await entitled_client.patch("/me/follows/person/999", json={"coverage": "major"})
+    r = await entitled_client.patch(f"/me/follows/{entity_type}/{entity_id}", json={})
     assert r.status_code == 404
     assert r.json()["detail"] == "follow_not_found"
 
 
-@pytest.mark.parametrize("payload", [{"coverage": "everything"}, {"coverage": None}, {}])
-async def test_a_malformed_coverage_patch_is_422(entitled_client, payload):
-    r = await entitled_client.patch("/me/follows/person/999", json=payload)
+async def test_patching_a_follow_that_does_not_exist_is_404(entitled_client):
+    r = await entitled_client.patch("/me/follows/person/999", json={})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "follow_not_found"
+
+
+async def test_patching_a_malformed_entity_id_is_422(entitled_client):
+    """The one refusal the route keeps: the id is a path parameter, not a body field, and a
+    non-numeric person id is a request that cannot name a row."""
+    r = await entitled_client.patch("/me/follows/person/nm0000233", json={})
     assert r.status_code == 422
+    assert r.json()["detail"] == "invalid_entity_id"
 
 
-async def test_patching_the_coverage_requires_the_csrf_header(entitled_client, session):
+async def test_patching_a_follow_requires_the_csrf_header(entitled_client, session):
+    """A no-op behind CSRF on purpose: the guard belongs to the *method*, and a route that
+    dropped it while it happened to write nothing would be a hole the day it writes again."""
     from upmovies.catalog.models import Person
 
     session.add(Person(id=491, name="A Fourth Writer"))
@@ -490,13 +467,13 @@ async def test_patching_the_coverage_requires_the_csrf_header(entitled_client, s
     await entitled_client.post("/me/follows", json={"entity_type": "person", "entity_id": "491"})
 
     del entitled_client.headers["X-CSRF-Token"]
-    r = await entitled_client.patch("/me/follows/person/491", json={"coverage": "major"})
+    r = await entitled_client.patch("/me/follows/person/491", json={})
     assert r.status_code == 403
     assert r.json()["detail"] == "csrf_invalid"
 
 
-async def test_patching_the_coverage_is_403_for_an_unentitled_user(authed_client):
-    r = await authed_client.patch("/me/follows/person/1", json={"coverage": "major"})
+async def test_patching_a_follow_is_403_for_an_unentitled_user(authed_client):
+    r = await authed_client.patch("/me/follows/person/1", json={})
     assert r.status_code == 403
     assert r.json()["detail"] == "entitlement_required"
 

@@ -8,10 +8,10 @@ in hand, and writes it to `catalog.film_credit_change` for NEU-1083 to card.
 
 **Recorded grade is seed grade *or* a follow** (D-49). A credit is written down when it is
 seed grade — director, Writer/Screenplay, top-5 billed — or when its person is somebody a user
-follows at coverage `any`. Seed grade is a property of the credit; recorded grade is that, or a
-property of who is watching. The catalog already holds every credit of every film it has, so a
-wider follow reaches existing minor credits through the timeline and the alert query the moment
-it is made; what this adds is the *future* changes, and only for people somebody asked for.
+follows. Seed grade is a property of the credit; recorded grade is that, or a property of who
+is watching. The catalog already holds every credit of every film it has, so a new follow
+reaches existing minor credits through the timeline and the alert query the moment it is made;
+what this adds is the *future* changes, and only for people somebody asked for.
 
 **Both sides of the diff are judged by the same followed set at the same moment.** The set is
 loaded once per `upsert_film` and passed to both `load_recorded_credits` and
@@ -46,7 +46,7 @@ from uuid import UUID
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.follow_queries import people_followed_at_any
+from upmovies.app.follow_queries import followed_people
 from upmovies.catalog.models import Film, FilmCredit, FilmCreditChange
 from upmovies.catalog.seed_grade import is_seed_grade
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
@@ -171,14 +171,14 @@ def _ordered(credits: set[RecordedCredit]) -> list[RecordedCredit]:
 
 
 async def load_followed_person_ids(session: AsyncSession) -> set[int]:
-    """The people somebody follows at coverage `any` — recorded grade's second half (D-49).
+    """The people somebody follows — recorded grade's second half (D-49, EF-2).
 
     One query per `upsert_film`, read before the rebuild so both sides of the diff are judged
     by the same answer. `ingest` reading `app` has precedent in `ingest.providers`: the follow
     graph is what decides how much of TMDB is worth writing down, so the ingest path has to be
     able to ask.
     """
-    return set((await session.execute(people_followed_at_any())).scalars().all())
+    return set((await session.execute(followed_people())).scalars().all())
 
 
 async def record_credit_changes(

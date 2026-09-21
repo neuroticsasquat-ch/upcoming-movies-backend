@@ -18,16 +18,17 @@ would be pointless without it.
 
 M8 widened that rule to reach a film followed only through a **person, company or franchise**,
 which the previous note said it could not. That was the D-13 derivation's limitation, and there
-is no derivation any more: a person follow covers the director-or-top-3 credits its `coverage`
-names (or every seed-grade credit at `all`), a company follow its films, a franchise follow its
-collection. So a followed director's next film is polled for its trailer now, which is the beat
-this poll exists to catch. What keeps that from costing a back catalogue is the alert window
-(`catalog.queries.alert_window_clause`) bounding the three indirect branches, and `lead` being
-the default coverage — and it is bounded in the same shape for the provider poll beside it,
-because the two passes share the one selection query on purpose. That window ends at `Canceled`
-rather than at `Released` (D-46), so a released film a person follow reaches is polled until the
-window's far end: the trailer that goes up after a film opens, and the streaming debut beside
-it, are exactly what this poll was missing while `Released` cut the film out.
+is no derivation any more: a person follow covers every credit that person holds (EF-2), a
+company follow its films, a franchise follow its collection. So a followed director's next film
+is polled for its trailer now, which is the beat this poll exists to catch. What keeps that
+from costing a back catalogue is the alert window (`catalog.queries.alert_window_clause`)
+bounding the three indirect branches — the whole bound, now that EF-1 has taken the coverage
+tier that used to narrow the person one — and it is bounded in the same shape for the provider
+poll beside it, because the two passes share the one selection query on purpose. That window
+ends at `Canceled` rather than at `Released` (D-46), so a released film a person follow reaches
+is polled until the window's far end: the trailer that goes up after a film opens, and the
+streaming debut beside it, are exactly what this poll was missing while `Released` cut the
+film out.
 
 **First observation is a baseline, never an event** (ADR-0014). The marker is
 `film.videos_observed_at`, not "does this film have ledger rows": the ordinary first read of an

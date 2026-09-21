@@ -132,9 +132,11 @@ async def test_films_split_into_upcoming_and_recent_and_never_both(
 
 
 @pytest.mark.parametrize("kind", KINDS)
-async def test_a_row_carries_no_credits_and_no_tier(client, make_entity, make_film, kind):
-    """The studio and franchise rows are the person page's row *without* `credits` and `tier`
-    (EF-17): neither type has a job to name or a coverage tier to badge."""
+async def test_a_row_carries_no_credits(client, make_entity, make_film, kind):
+    """The studio and franchise rows are the person page's row *without* `credits` (EF-17):
+    neither type has a job to name. Neither carries a `tier` — but nor does the person row any
+    more (EF-1), so that assertion is now about the shape being bare, not about the
+    difference."""
     path, attach = await make_entity(kind, id=174, name="Warner Bros. Pictures")
     await attach(await make_film(slug="only", title="Only", release_date=None))
 

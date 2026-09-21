@@ -139,13 +139,19 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
     audience would name, and taking the earliest subject across the whole film would drop it.
 
     **Rule 2 is the computed watchlist, asked of everybody at once** (D-1414.3):
-    `follow_queries.covered_by_any_user_clause` — a film any user's follows cover, at that
-    follow's coverage, inside the alert window, and that they have not muted. One predicate
-    shared with the alerts, so the poll cannot come to a different answer about what somebody
-    is waiting on than the pass that tells them about it. It reaches further than the two
-    `EXISTS` it replaces: a film followed only through its director is polled now, which is
-    what makes a `now_available` beat possible for it at all. What bounds that reach is the
-    alert window's date ceiling and `coverage = 'lead'` being the default.
+    `follow_queries.covered_by_any_user_clause` — a film any user's follows cover, inside the
+    alert window, and that they have not muted. One predicate shared with the alerts, so the
+    poll cannot come to a different answer about what somebody is waiting on than the pass that
+    tells them about it. It reaches further than the two `EXISTS` it replaces: a film followed
+    only through its director is polled now, which is what makes a `now_available` beat
+    possible for it at all.
+
+    **The alert window's date ceiling is the only bound left** (EF-1, EF-2). A person follow
+    used to be cut to the credits its `coverage` named, and `lead` being the default is what
+    kept the indirect reach small; a binary follow reaches every credit, so every film of every
+    followed person — at any billing position, any crew job — is in this set while it is inside
+    the window. That is a real widening of the poll's request volume and is the thing to watch
+    on the first pass after NEU-1432 deploys.
 
     The window's status term is not rule 1's absence of one *or* in-play's: it ends at
     `Canceled` (D-46), so a `Released` film an indirect follow reaches stays in the set until

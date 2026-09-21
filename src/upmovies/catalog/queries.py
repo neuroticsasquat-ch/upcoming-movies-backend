@@ -172,8 +172,8 @@ async def present_recorded_credits(
     the same rows on every pass for as long as a hold lasts.
 
     **Recorded grade, not seed grade** (D-49): a credit is here when it is seed grade *or* its
-    person is in `followed` — the people somebody follows at coverage `any`
-    (`app.follow_queries.people_followed_at_any`). That is the same rule `credit_history`
+    person is in `followed` — everyone somebody follows
+    (`app.follow_queries.followed_people`, EF-2). That is the same rule `credit_history`
     applied when it wrote the change row, which is what makes this answer the question the
     callers actually ask: "is the credit this row recorded still there, under the same role?"
     A default of no followed people keeps every caller that only ever asks about seed grade —
@@ -192,7 +192,7 @@ async def present_recorded_credits(
     a change was recorded under: passing a stale one is how this and `credit_history` would
     come to mean two different things by "recorded", and the next ingest would then write a
     removal for a credit this had just published an attachment for. The cost is the narrow
-    case where a follow is narrowed while its credit is still in quarantine: the pending
+    case where the follow is *dropped* while its credit is still in quarantine: the pending
     attachment is held from then on and ages out uncarded, which is the same end state as the
     reverted edit beside it and the coherent one — the credit has stopped being recorded, so
     there is nothing left to announce.

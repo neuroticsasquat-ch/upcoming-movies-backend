@@ -49,7 +49,6 @@ def watchlist(session):
                 entity_type="title",
                 entity_id=str(film.id),
                 source=source,
-                coverage="lead",
             )
         )
         await session.commit()
@@ -225,7 +224,6 @@ async def test_a_film_reached_through_a_director_follow_is_in_the_feed(
             entity_type="person",
             entity_id="900",
             source="manual",
-            coverage="lead",
         )
     )
     await session.commit()

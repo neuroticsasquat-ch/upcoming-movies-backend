@@ -6,8 +6,8 @@ either — because the decision is a fan-out over *every* user, and a route only
 the one who made the request.
 
 **Two branches, one graph (M8).** Both read `app.follow_queries`, at its two grains: the alert
-branch takes `watchlist_film_ids` — what this user's follows *cover*, at each person follow's
-coverage, minus their mutes — and admits only D-32's whitelist; the digest branch takes the
+branch takes `watchlist_film_ids` — what this user's follows *cover*, minus their mutes — and
+admits only D-32's whitelist; the digest branch takes the
 D-11 builders `/me/timeline` hands to the feed, which is what keeps "in my digest" and "on my
 timeline" from drifting into two answers. A film in both sets earns both rows: an alert and a
 digest line are different deliveries of the same news, not duplicates of one
@@ -287,7 +287,7 @@ async def alert_event_ids(
     """The window's events this user's **watchlist** earns an alert for (D-32, D-42).
 
     The watchlist is `follow_queries.watchlist_film_ids` and nothing else: the films this
-    user's follows cover at their coverage, inside the alert window, minus their mutes. Taking
+    user's follows cover, inside the alert window, minus their mutes. Taking
     the builder rather than restating the rule is what keeps this pass, `/me/watchlist`, the
     calendar and the slate agreeing about one set.
 

@@ -456,8 +456,8 @@ async def load_slate(
 ) -> tuple[SlateDay, ...]:
     """The upcoming US dates for this user's watchlist, soonest first (D-33).
 
-    The watchlist is `follow_queries.watchlist_film_ids` — what their follows cover at their
-    coverage, minus their mutes (D-42, D-45) — so a film they have silenced never reaches the
+    The watchlist is `follow_queries.watchlist_film_ids` — what their follows cover, minus
+    their mutes (D-42, D-45) — so a film they have silenced never reaches the
     slate, and a film reached only through a followed director does.
 
     One governing date per (film, release type): the earliest `film_release_date` row in the

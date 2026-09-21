@@ -24,7 +24,7 @@ from uuid import UUID
 
 import httpx
 
-from upmovies.app.follow_queries import people_followed_at_any
+from upmovies.app.follow_queries import followed_people
 from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import format_skip_detail, record_progress
 from upmovies.ingest.sweep.admission import AdmissionTranches
@@ -144,7 +144,7 @@ async def run_sweep_enumerate(
         # The followed half of that set, read back separately: `load_seed_person_ids` returns
         # one flat union, and `seed_attachments` needs to know *which* of the people in it a
         # follow put there — only they contribute `followed` attachments (D-50).
-        followed_ids = set((await s.execute(people_followed_at_any())).scalars().all())
+        followed_ids = set((await s.execute(followed_people())).scalars().all())
         known_tmdb_ids = await load_known_film_tmdb_ids(s)
     result.seed_people = len(seed_ids)
     log.info(

@@ -85,24 +85,16 @@ async def create(
     entity_type: str,
     entity_id: str,
     source: str,
-    coverage: str,
 ) -> Follow:
     follow = Follow(
         user_id=user_id,
         entity_type=entity_type,
         entity_id=entity_id,
         source=source,
-        coverage=coverage,
     )
     db.add(follow)
     await db.flush()
     return follow
-
-
-async def set_coverage(db: AsyncSession, follow: Follow, *, coverage: str) -> None:
-    """Replace the coverage on the loaded row. Caller commits."""
-    follow.coverage = coverage
-    await db.flush()
 
 
 async def list_for_user(db: AsyncSession, user_id: UUID) -> list[Follow]:

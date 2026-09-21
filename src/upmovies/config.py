@@ -254,9 +254,9 @@ class Settings(BaseSettings):
     sweep_admit_writers: bool = Field(default=False, alias="SWEEP_ADMIT_WRITERS")
     sweep_admit_cast: bool = Field(default=False, alias="SWEEP_ADMIT_CAST")
     # The fourth tranche (D-50), and the only one that is not a seed grade: it admits a
-    # candidate reached *only* through a non-seed credit of somebody a user follows at coverage
-    # `any`. Off by default like the three above, and for the same reason — opening it is an
-    # env change rather than a deploy — but it does not belong in their ramp order, because it
+    # candidate reached *only* through a non-seed credit of somebody a user follows (EF-2).
+    # Off by default like the three above, and for the same reason — opening it is an env
+    # change rather than a deploy — but it does not belong in their ramp order, because it
     # is not a wider cut of the same evidence. A follow is one user saying this person is worth
     # a request; the ramp exists to attribute a precision drop to a seed grade, and this flag's
     # reading is about the follow graph instead. The credit *history* half of the same decision

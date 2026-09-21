@@ -1,4 +1,4 @@
-"""Following, unfollowing, and a person follow's coverage (D-10, D-43).
+"""Following and unfollowing (D-10). A follow is binary — there is nothing else to set (EF-1).
 
 A follow is the only thing a user keeps (M8, ADR-0018): it feeds the timeline *and* the
 alerts, and the watchlist is a query over it (`app.follow_queries`). Nothing is derived from
@@ -12,7 +12,7 @@ existence check."""
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.errors import NotFound
-from upmovies.app.models import DEFAULT_COVERAGE, Follow, User
+from upmovies.app.models import Follow, User
 from upmovies.app.repos import follow_repo
 from upmovies.app.repos.follow_repo import EntityLabel
 
@@ -24,19 +24,12 @@ async def follow(
     entity_type: str,
     entity_id: str,
     source: str = "manual",
-    coverage: str | None = None,
 ) -> tuple[Follow, EntityLabel | None, bool]:
     """Follow `entity_id`, commit, and say what it is called and whether the row is new.
 
-    `coverage` is the person tier (D-43); `None` takes the column's default. It is written on
-    every row, whatever the type, so the column can be NOT NULL and the coverage query can read
-    it without a CASE — for the other three types it is stored and never read.
-
-    Idempotent: a second follow of the same entity returns the existing row **untouched**,
-    coverage included. Its `source` and `created_at` record the *first* time the user showed
-    interest, an import re-run must not rewrite a manual follow as an imported one (D-15), and
-    changing a tier is `set_coverage`'s job — a follow button pressed again is not a request to
-    reset what the user chose on the person page.
+    Idempotent: a second follow of the same entity returns the existing row **untouched**. Its
+    `source` and `created_at` record the *first* time the user showed interest, and an import
+    re-run must not rewrite a manual follow as an imported one (D-15).
 
     `NotFound` if the catalog has no such entity: a follow of a thing that does not exist would
     match nothing forever."""
@@ -54,7 +47,6 @@ async def follow(
         entity_type=entity_type,
         entity_id=entity_id,
         source=source,
-        coverage=DEFAULT_COVERAGE if coverage is None else coverage,
     )
     await db.commit()
     return created, label, True
@@ -69,28 +61,18 @@ async def list_follows(db: AsyncSession, *, user: User) -> list[tuple[Follow, En
     return [(f, labels.get((f.entity_type, f.entity_id))) for f in follows]
 
 
-async def set_coverage(
-    db: AsyncSession, *, user: User, entity_type: str, entity_id: str, coverage: str
+async def get_follow(
+    db: AsyncSession, *, user: User, entity_type: str, entity_id: str
 ) -> tuple[Follow, EntityLabel | None]:
-    """Set which of a followed person's credits alert, and commit (D-43). `NotFound` if there
-    is no such follow.
+    """One follow and its label, or `NotFound`. Reads only — nothing is committed.
 
-    Takes effect on the next read of every surface at once, because nothing stores what the
-    follow covers: narrowing `all` to `lead` drops the films it was only reaching through a
-    fourth-billed credit from the watchlist, the calendar and the poll set, which is precisely
-    the reconciliation a materialised watchlist could never do.
-
-    The caller is what refuses this for a non-person follow (`422 coverage_not_applicable`),
-    where the request model already knows the type. The value is stored on those rows and never
-    read, so writing one would be neither wrong nor meaningful — and answering as though it had
-    done something would be the lie."""
+    What is left of `set_coverage` now the tier is gone (EF-1): the PATCH route still answers
+    with the row, so it still has to find it, and a row that is not there is still a 404."""
     existing = await follow_repo.get(
         db, user_id=user.id, entity_type=entity_type, entity_id=entity_id
     )
     if existing is None:
         raise NotFound()
-    await follow_repo.set_coverage(db, existing, coverage=coverage)
-    await db.commit()
     label = await follow_repo.get_entity_label(db, entity_type=entity_type, entity_id=entity_id)
     return existing, label
 

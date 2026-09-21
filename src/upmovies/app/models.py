@@ -172,22 +172,6 @@ class EmailToken(Base):
 
 FOLLOW_ENTITY_TYPES = ("person", "company", "franchise", "title")
 FOLLOW_SOURCES = ("manual", "letterboxd_import", "tmdb_import", "derived")
-FOLLOW_COVERAGES = ("lead", "major", "any")
-"""Which of a followed *person*'s credits alert (D-43, D-48, M9).
-
-`lead` is the director-or-top-3 cut D-13 spent on the watchlist; `major` is every seed-grade
-credit; `any` is every credit the person holds, at any billing position and any crew job.
-
-**`major` is what `all` was called until NEU-1416**, renamed the day the wider tier landed: a
-tier called "all" sitting beside one that reaches more is exactly the vocabulary drift
-`CONTEXT.md` exists to stop. The migration rewrites the rows, and nothing else in the codebase
-spells the old value.
-
-`any` is the one tier that also widens the **timeline** (D-47). Coverage is otherwise read for
-alerts alone — `app.follow_queries._coverage_credit_clause` and the three builders over it —
-but a user alerted about a 12th-billed casting they could not then find on their timeline is a
-dead end, so `followed_film_ids` reads the column too."""
-DEFAULT_COVERAGE = "lead"  # D-43; mirrored by the column's server default
 ALERT_STORES = ("buy", "rent", "stream")
 DEFAULT_ALERT_STORES = ("stream",)  # D-44; mirrored by the column's server default
 
@@ -203,12 +187,11 @@ class Follow(Base):
     watchlist is no longer a table but a query over this one (`app.follow_queries`), so a row
     here is both "show me this on my timeline" and "tell me when something happens to it".
 
-    `coverage` is the one preference it carries, and it is read for `entity_type = 'person'`
-    only — which credits of that person alert: `lead` (director or top-3 billing), `major`
-    (every seed-grade credit) or `any` (every credit at all). It is stored on every row so the
-    column is NOT NULL and the coverage query can read it without a CASE on the type; the other
-    three types name one thing each, and there is nothing to narrow. Timeline coverage (D-11) is
-    unchanged by it except at `any`, which widens the timeline too (D-47).
+    **The row carries no preference at all (EF-1).** A follow is binary: the user follows the
+    entity or they do not, and every credit of a followed person reaches them (EF-2). The
+    `coverage` tier D-43 spent here is dropped — a tier control was one more thing to get
+    wrong on the way to the thing the user actually asked for, and the narrow default was
+    silently deciding what they would never hear about.
     The store preference is *not* here: it is one setting per user
     (`UserSettings.alert_stores`, D-44), because a user who wants to hear about streaming
     wants that for everything they follow.
@@ -218,8 +201,9 @@ class Follow(Base):
     and `catalog.collection` use them as primary keys), while a title is a `catalog.film` row,
     whose id is our UUID. One polymorphic column, rendered as the id the API already exposes for
     that entity, beats four nullable FK columns with a CHECK that exactly one is set: the row is
-    read by entity type every time anyway (timeline filter, coverage query), and the DTO normalises
-    the value on the way in so `"012"` and `"12"` cannot become two follows. The cost is that
+    read by entity type every time anyway (the timeline filter, the sweep's followed set), and
+    the DTO normalises the value on the way in so `"012"` and `"12"` cannot become two follows.
+    The cost is that
     the catalog cannot cascade a deletion into this table — acceptable, because films are never
     deleted (spec §4.4) and people, companies and collections are only ever upserted."""
 
@@ -229,8 +213,7 @@ class Follow(Base):
             f"entity_type IN ({_in_list(FOLLOW_ENTITY_TYPES)})", name="ck_follow_entity_type"
         ),
         CheckConstraint(f"source IN ({_in_list(FOLLOW_SOURCES)})", name="ck_follow_source"),
-        CheckConstraint(f"coverage IN ({_in_list(FOLLOW_COVERAGES)})", name="ck_follow_coverage"),
-        # The coverage query (D-43) and the timeline (D-11) ask "who follows this entity?",
+        # The sweep's followed set (EF-2) and the timeline (D-11) ask "who follows this entity?",
         # the reverse of the primary key's "what does this user follow?".
         Index("ix_follow_entity", "entity_type", "entity_id"),
         {"schema": "app"},
@@ -242,9 +225,6 @@ class Follow(Base):
     entity_type: Mapped[str] = mapped_column(Text, primary_key=True)
     entity_id: Mapped[str] = mapped_column(Text, primary_key=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
-    coverage: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text(f"'{DEFAULT_COVERAGE}'")
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
