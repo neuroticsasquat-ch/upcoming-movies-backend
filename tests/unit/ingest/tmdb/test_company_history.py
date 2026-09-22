@@ -10,6 +10,7 @@ from upmovies.ingest.tmdb.company_history import (
     COMPANY_ADDED,
     COMPANY_REMOVED,
     CompanyChange,
+    admission_company_attachments,
     companies_from_details,
     diff_companies,
 )
@@ -68,3 +69,38 @@ def test_companies_from_details_reads_the_payload_ids():
 
 def test_companies_from_details_is_empty_for_a_payload_with_none():
     assert companies_from_details(_details(2, [])) == set()
+
+
+# --- admission is an attachment for a followed studio (EF-4, D-1436.2) -----------------------
+
+
+def test_admission_writes_an_added_row_for_a_followed_company():
+    """The one exception to the baseline rule above: a film entering the catalog already
+    carrying a followed studio is the beat that follow was made for."""
+    assert admission_company_attachments({1, 2}, followed={2}) == [
+        CompanyChange(company_id=2, change=COMPANY_ADDED)
+    ]
+
+
+def test_admission_writes_nothing_for_an_unfollowed_company():
+    assert admission_company_attachments({1, 2}, followed=set()) == []
+
+
+def test_admission_ignores_a_followed_company_that_is_not_on_the_film():
+    """The set is the intersection, not the follow graph: a studio somebody follows that is
+    not in the payload has attached to nothing."""
+    assert admission_company_attachments({1}, followed={2, 3}) == []
+
+
+def test_admission_rows_are_sorted_by_id():
+    assert admission_company_attachments({9, 4, 7}, followed={4, 7, 9}) == [
+        CompanyChange(company_id=4, change=COMPANY_ADDED),
+        CompanyChange(company_id=7, change=COMPANY_ADDED),
+        CompanyChange(company_id=9, change=COMPANY_ADDED),
+    ]
+
+
+def test_the_diff_is_still_a_baseline_however_it_is_called():
+    """The property the exception must not have cost: `diff_companies` knows nothing about the
+    follow graph, so `previous=None` returns nothing whatever it is handed."""
+    assert diff_companies(previous=None, current={1, 2, 3}) == []

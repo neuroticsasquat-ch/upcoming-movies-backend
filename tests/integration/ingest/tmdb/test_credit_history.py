@@ -5,9 +5,12 @@ in production — that the rule survives the delete-and-reinsert rebuild, which 
 destroys and recreates every credit row on every ingest.
 """
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import select
 
 from tests.fixtures.tmdb import make_details
+from upmovies.app.models import Follow
 from upmovies.catalog.models import Film, FilmCreditChange, FilmFieldChange
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
@@ -232,3 +235,141 @@ async def test_history_accumulates_across_ingests(session):
     changes = await _changes(session, 9008)
     assert [c.change for c in changes] == ["added", "removed"]
     assert all(c.changed_at is not None for c in changes)
+
+
+# --- admission is an attachment for a followed person (EF-4, NEU-1436) -----------------------
+
+
+async def _follow_person(session, user, person_id: int) -> None:
+    session.add(
+        Follow(user_id=user.id, entity_type="person", entity_id=str(person_id), source="manual")
+    )
+    await session.commit()
+
+
+async def test_admitting_a_film_with_a_followed_director_writes_an_added_row(session, make_user):
+    """EF-4's headline. The baseline rule would swallow the one attachment the follow was made
+    for: the followed director's *next* film, entering the catalog with them already on it."""
+    user = await make_user(email="follower@example.com")
+    await _follow_person(session, user, 10)
+
+    await upsert_film(
+        session,
+        _details(9020, cast=[_cast(1, 0), _cast(2, 1)], crew=[_crew(10, "Director")]),
+    )
+    await session.commit()
+
+    changes = await _changes(session, 9020)
+    assert [(c.person_id, c.credit_type, c.job, c.change) for c in changes] == [
+        (10, "crew", "Director", "added")
+    ]
+    assert changes[0].changed_at is not None
+    assert await _observed_at(session, 9020) is not None
+
+
+async def test_admitting_the_same_film_with_nobody_following_writes_nothing(session):
+    """The same payload, no follows: still a baseline. The exception is keyed on the follow
+    graph and nothing else."""
+    await upsert_film(
+        session,
+        _details(9021, cast=[_cast(1, 0), _cast(2, 1)], crew=[_crew(10, "Director")]),
+    )
+    await session.commit()
+
+    assert await _changes(session, 9021) == []
+
+
+async def test_admission_writes_one_row_per_job_for_a_followed_writer_director(session, make_user):
+    """Two recorded credits, so two rows. They card once — `crew_attached` groups per film,
+    type and pass (D-7)."""
+    user = await make_user(email="follower@example.com")
+    await _follow_person(session, user, 10)
+
+    await upsert_film(
+        session,
+        _details(9022, crew=[_crew(10, "Director"), _crew(10, "Screenplay", "Writing")]),
+    )
+    await session.commit()
+
+    changes = await _changes(session, 9022)
+    assert sorted((c.job, c.change) for c in changes) == [
+        ("Director", "added"),
+        ("Screenplay", "added"),
+    ]
+
+
+async def test_admission_writes_a_followed_persons_non_seed_credit(session, make_user):
+    """Recorded grade, not seed grade (D-49): a followed gaffer's credit is written down on
+    admission exactly as a followed director's is, while the unfollowed gaffer beside them
+    stays baseline."""
+    user = await make_user(email="follower@example.com")
+    await _follow_person(session, user, 13)
+
+    await upsert_film(
+        session,
+        _details(
+            9023,
+            crew=[_crew(13, "Gaffer", "Lighting"), _crew(14, "Best Boy", "Lighting")],
+        ),
+    )
+    await session.commit()
+
+    changes = await _changes(session, 9023)
+    assert [(c.person_id, c.job, c.change) for c in changes] == [(13, "Gaffer", "added")]
+
+
+async def test_a_follow_created_after_admission_fabricates_nothing(session, make_user):
+    """D-49, through the admission path. The film was admitted while nobody followed anyone,
+    so it baselined. The follow is made, and the very next ingest brings the identical
+    credits: both sides of the diff are judged by the same followed set at the same moment, so
+    the credit that never moved is in `previous` and in `current` alike and nothing is
+    written. Without that, the user would be told a director "attached" to a film they had
+    been on all along."""
+    details = _details(9024, cast=[_cast(1, 0)], crew=[_crew(10, "Director")])
+    await upsert_film(session, details)
+    await session.commit()
+    assert await _changes(session, 9024) == []
+
+    user = await make_user(email="follower@example.com")
+    await _follow_person(session, user, 10)
+
+    await upsert_film(session, details)
+    await session.commit()
+
+    assert await _changes(session, 9024) == []
+
+
+async def test_a_film_admitted_with_no_credits_baselines_then_cards_the_followed_arrival(
+    session, make_user
+):
+    """The observed-marker rule is untouched by the exception. A speculative entry admitted
+    with an empty credits payload has never been observed, so nothing is written for it — and
+    the followed director arriving next ingest is an ordinary diff `added`, not an admission
+    one."""
+    user = await make_user(email="follower@example.com")
+    await _follow_person(session, user, 10)
+
+    await upsert_film(session, _details(9025))
+    await session.commit()
+    assert await _changes(session, 9025) == []
+
+    await upsert_film(session, _details(9025, crew=[_crew(10, "Director")]))
+    await session.commit()
+
+    changes = await _changes(session, 9025)
+    assert [(c.person_id, c.change) for c in changes] == [(10, "added")]
+
+
+async def test_a_lapsed_users_follow_still_records_an_admission(session, make_user):
+    """No entitlement filter anywhere on this path (D-1436.5). The row costs nothing and is
+    exactly what should already be there when they come back — and the observation cannot be
+    backfilled once it is gone."""
+    lapsed = await make_user(
+        email="lapsed@example.com", entitled_until=datetime.now(UTC) - timedelta(days=30)
+    )
+    await _follow_person(session, lapsed, 10)
+
+    await upsert_film(session, _details(9026, crew=[_crew(10, "Director")]))
+    await session.commit()
+
+    assert [c.change for c in await _changes(session, 9026)] == ["added"]

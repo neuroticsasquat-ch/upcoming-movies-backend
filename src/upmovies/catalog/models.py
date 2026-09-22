@@ -349,6 +349,18 @@ class Person(Base):
     worth missing until someone refreshes by hand."""
 
 
+STATUS_FIELD = "status"
+COLLECTION_FIELD = "collection_id"
+"""The two `catalog.film` columns whose `film_field_change` history is read as a beat.
+
+They live here, beside the table whose `field` column holds them, because both ends of that
+history need them and the two ends sit on opposite sides of the ingest package:
+`ingest.sweep.field_events` and `ingest.sweep.collection_events` read the rows, and
+`ingest.tmdb.collection_history` writes the one row the `BEFORE UPDATE` trigger cannot (EF-4).
+The reader's `TRACKED_FIELDS` composes them and stays where it is.
+"""
+
+
 class FilmFieldChange(Base):
     """Append-only history of changed `catalog.film` column values, written by the
     `film_field_change_trg` trigger (see the trigger SQL below). Enables deterministic

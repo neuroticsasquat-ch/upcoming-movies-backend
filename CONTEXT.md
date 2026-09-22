@@ -576,10 +576,14 @@ _Avoid_: story-sourced (that is one event's provenance, not a day's rollup), sou
 **First observation**:
 The first time the sweep reads a newly admitted film's credits. It is recorded as a **baseline
 and emits no events** — a hard rule of the credit-history contract rather than something left to
-fall out of the implementation. `catalog.film_field_change` gets the same protection by accident
-(it is a `BEFORE UPDATE` trigger, so inserts write no history), and the credit history is being
-built from scratch, where the accident does not repeat. Without the rule, admitting 3,000 films
-would emit tens of thousands of false "attached to direct" events on day one.
+fall out of the implementation — **except for entities somebody follows at that moment** (EF-4,
+NEU-1436), whose credits, production-company rows and collection are recorded as
+**attachments**. `catalog.film_field_change` gets the same protection by accident (it is a
+`BEFORE UPDATE` trigger, so inserts write no history), and the credit history is being built
+from scratch, where the accident does not repeat — which is also why the followed-franchise
+exception has to write that trigger's row for itself. Without the rule, admitting 3,000 films
+would emit tens of thousands of false "attached to direct" events on day one; without the
+exception, the one attachment a follow was made for would be the one that never cards.
 _Avoid_: initial sync, backfill, seeding (that's the person set).
 
 **Dormant**:

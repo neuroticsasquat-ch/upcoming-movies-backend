@@ -388,3 +388,90 @@ async def test_the_binary_follow_migration_deletes_exactly_the_imported_person_f
             assert column == 0
     finally:
         await engine.dispose()
+
+
+# --- the credits_observed_at backfill (NEU-1436) --------------------------------------------
+
+_BEFORE_CREDITS_BACKFILL = "d3f5a81c6b47"
+"""The revision immediately before `e2b7d41c9f08`, which stamps `film.credits_observed_at` on
+every film already holding credits (EF-4, D-1436.6)."""
+
+
+@pytest.fixture
+async def credits_backfill_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision short of the backfill, on the `m8_db_url`
+    pattern and for its reason: the thing under test is the transition."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_credits_backfill")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            _alembic(url, "upgrade", _BEFORE_CREDITS_BACKFILL)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def test_the_backfill_stamps_only_films_that_hold_credits(credits_backfill_db_url: str):
+    """`957421e2651e` added `credits_observed_at` without stamping the catalog, which was
+    harmless while a first observation was silent. From NEU-1436 on it is not: an unstamped
+    film would card every credit of every followed person on its next read as a fresh
+    attachment.
+
+    A film holding *no* credit rows is left NULL, deliberately — it was admitted with an empty
+    payload and has genuinely never been observed, so its first credits are still a baseline.
+    That is the distinction the marker exists to preserve, and a blanket `UPDATE` would lose
+    it. A film already stamped keeps its own timestamp rather than being moved forward.
+    """
+    engine = create_async_engine(credits_backfill_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO catalog.film (id, tmdb_id, title, credits_observed_at) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 9001, 'Has Credits', NULL),
+                  ('22222222-2222-2222-2222-222222222222', 9002, 'No Credits', NULL),
+                  ('33333333-3333-3333-3333-333333333333', 9003, 'Already Observed',
+                   '2026-01-01T00:00:00+00:00')
+                """)
+            )
+            await conn.execute(
+                text("INSERT INTO catalog.person (id, name) VALUES (100, 'Someone')")
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO catalog.film_credit
+                    (credit_id, film_id, person_id, credit_type, job)
+                VALUES ('c-1', '11111111-1111-1111-1111-111111111111', 100, 'crew', 'Director'),
+                       ('c-2', '33333333-3333-3333-3333-333333333333', 100, 'crew', 'Director')
+                """)
+            )
+
+        _alembic(credits_backfill_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text("SELECT tmdb_id, credits_observed_at FROM catalog.film ORDER BY tmdb_id")
+                )
+            ).all()
+            stamped = {tmdb_id: observed_at for tmdb_id, observed_at in rows}
+            assert stamped[9001] is not None
+            assert stamped[9002] is None
+            assert stamped[9003].year == 2026 and stamped[9003].month == 1
+
+            # The column is on `FILM_FIELD_CHANGE_DENYLIST`, so the UPDATE writes no history:
+            # a row here would card as a public event about our own bookkeeping and make the
+            # whole catalog look active to `dormant_film_clause` on the day of the deploy.
+            history = await conn.scalar(text("SELECT count(*) FROM catalog.film_field_change"))
+            assert history == 0
+    finally:
+        await engine.dispose()

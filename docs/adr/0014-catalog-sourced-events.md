@@ -46,6 +46,32 @@ protection by accident — it is a `BEFORE UPDATE` trigger, so inserts write no 
 accidents do not survive a rewrite. Without the rule, admitting 3,000 films would emit tens of
 thousands of false "attached to direct" events on day one.
 
+> **Amendment — 2026-09-22 (NEU-1436).** The baseline rule has **one exception**: an entity
+> **somebody follows at the moment of the observation** (EF-4, ADR-0019 decision 4). Under the
+> entity-follow model the rule swallowed the most valuable attachment there is — somebody
+> follows a director to hear about the director's *next* film, and that film enters the
+> catalog with the director already on it, so the beat the follow was made for was the one
+> beat that never carded. On a film's first observation, every credit, production-company row
+> and collection held by a followed entity is now written as `added`; everything else on the
+> new film stays a baseline. The rows are ordinary history and card as ordinary `casting` /
+> `crew_attached` / `company_attached` / `collection_attached` events, through the same
+> quarantine, burst grouping and sanity holds, with `occurred_at` at the observation.
+>
+> Two properties make it safe. The exception is **keyed on the follow set read at the
+> observation**, the same set both sides of an ordinary diff are judged by, so a follow created
+> *after* admission finds the credit present on both sides of the next diff and fabricates
+> nothing. And it is a **separate function** (`admission_attachments` and its company
+> counterpart) rather than a branch inside the diff, so the baseline rule itself stays one
+> unconditional statement.
+>
+> The **collection case writes a synthetic `film_field_change` row** (`collection_id`,
+> `NULL → id`) from the admission path, because the accident this decision relies on cuts the
+> other way there: `film_field_change_trg` is `BEFORE UPDATE`, so a film *inserted* into a
+> followed collection writes no history for NEU-1434's reader to find. The row is
+> indistinguishable from a trigger-written one on purpose — one carding rule, not two — and
+> the coupling is the documented cost: if the trigger is ever rewritten to fire on insert, that
+> row becomes a duplicate and goes with it. See `docs/specs/NEU-1436-admission-is-an-attachment.md`.
+
 **Presentation.** `EventOut.summary` is a required `str` and every read path joins `EventSummary`,
 so an event without a summary row is invisible everywhere. A catalog-sourced event therefore
 writes a real `EventSummary` row with a **deterministic** body, produced by the event-creating
