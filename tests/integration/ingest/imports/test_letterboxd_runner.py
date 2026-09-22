@@ -13,7 +13,7 @@ from sqlalchemy import select
 from tests.fixtures.catalog import add_film
 from tests.fixtures.letterboxd import export_zip, ratings_csv, watchlist_csv
 from tests.fixtures.tmdb import make_details
-from upmovies.app.models import Follow, ImportJob, WatchlistDismissal
+from upmovies.app.models import Follow, ImportJob
 from upmovies.app.repos import import_job_repo
 from upmovies.catalog.models import Film, Person
 from upmovies.config import get_settings
@@ -303,14 +303,12 @@ async def test_a_second_run_reads_a_fresh_films_credits_out_of_the_catalog(
 
 
 @respx.mock
-async def test_an_import_follows_a_muted_film_and_leaves_the_mute_alone(
+async def test_an_import_follows_a_film_the_catalog_already_holds(
     session, session_factory, user, export
 ):
-    """Both facts are the user's and the import overrules neither (D-1414.9): they listed the
-    film, so the follow is created; they silenced it, so it stays silent and shows on
-    `/me/watchlist` as `muted: true` for them to undo."""
+    """The follow is the whole of what an import writes for a listed film (EF-14): the mute it
+    used to have to leave alone (D-1414.9) went with the watchlist it corrected."""
     film = await add_film(session, tmdb_id=1001, title="Dune", slug="dune")
-    session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
     await session.commit()
 
     _mock_tmdb()
@@ -318,7 +316,6 @@ async def test_an_import_follows_a_muted_film_and_leaves_the_mute_alone(
 
     assert job.watchlist_created == 2
     assert str(film.id) in {f.entity_id for f in await _rows(session, Follow)}
-    assert [m.film_id for m in await _rows(session, WatchlistDismissal)] == [film.id]
 
 
 # --- the crash -----------------------------------------------------------------------------

@@ -178,11 +178,15 @@ class Settings(BaseSettings):
     # while its US theatrical governing date is between these two ages, in days. The floor
     # keeps the poll off films still in their theatrical window, where a home release is not
     # yet plausible and a daily request would buy nothing; the ceiling is where a film that
-    # never got one stops costing a request a day forever. A film somebody's follows cover is
-    # polled regardless of both — somebody is waiting on that answer. `max_age_days` is also
-    # the **alert window** (`catalog.queries.alert_window_clause`, D-1414.2, D-46): a follow
-    # covers a film for exactly as long as this poll still looks for offers on it, so tuning
-    # this moves both together, deliberately.
+    # never got one stops costing a request a day forever. A film somebody follows by title is
+    # polled regardless of both — somebody is waiting on that answer (EF-14).
+    #
+    # `max_age_days` is also the **alert window** (`catalog.queries.alert_window_clause`,
+    # D-1414.2, D-46), and the two no longer describe one quantity. EF-14 severed that: a
+    # follow covers nothing by date any more, so what the window bounds now is which films an
+    # entity page lists as recently released and which an import may propose (EF-21). Tuning
+    # this still moves both, so it is still one number to reason about — but the second half of
+    # it is a catalog cut, not a delivery rule.
     #
     # The ceiling is 365 and is **no longer a placeholder** (D-1417.2, NEU-1417). The default
     # alert store is `stream`, so the window has to reach the streaming debut rather than the

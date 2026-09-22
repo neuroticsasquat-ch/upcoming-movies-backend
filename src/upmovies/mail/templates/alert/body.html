@@ -11,7 +11,7 @@
             {% if items | length == 1 %}
             Something moved on a film you are watching.
             {% else %}
-            {{ items | length }} films on your watchlist moved.
+            {{ items | length }} films you follow moved.
             {% endif %}
           </p>
           {% for item in items %}
@@ -36,7 +36,7 @@
           </table>
           {% endfor %}
           <p style="margin:0;font-size:14px;line-height:1.5;color:#555555;">
-            You are getting this because these films are on your {{ product_name }} watchlist.
+            You are getting this because you follow these films on {{ product_name }}.
             <a href="{{ settings_url }}" style="color:#1a56db;">Choose which films and which
             updates you hear about</a> — or stop them altogether.
           </p>

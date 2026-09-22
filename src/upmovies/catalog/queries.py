@@ -87,7 +87,7 @@ ALERT_WINDOW_DEAD_STATUSES: frozenset[str] = frozenset({"Canceled"})
 
 
 def alert_window_clause(*, today: date, max_age_days: int) -> ColumnElement[bool]:
-    """WHERE predicate selecting films a follow still covers *for alerts* (D-43, D-46) — released
+    """WHERE predicate selecting films still inside the **alert window** (D-46) — released
     up to `max_age_days` ago, undated, or still to come, and not called off.
 
     `in_play_clause` with its release bound moved back by `max_age_days` instead of cutting at
@@ -119,7 +119,7 @@ def alert_window_clause(*, today: date, max_age_days: int) -> ColumnElement[bool
     `Released` film is skipped at ingest (`ingest.tmdb.filters.classify_skip`), so a film is only
     here because it was admitted before release and aged in place, and a company follow cannot
     reach twenty years of output. The date bound is therefore a ceiling on how long a followed
-    film keeps costing a poll a day and keeps a place on the watchlist, not a defence against a
+    film keeps costing a poll a day and keeps a place on an entity page, not a defence against a
     flood that is already in the catalog.
 
     The NULL guards are `in_play_clause`'s, for the same reason: `NULL NOT IN (...)` is NULL,

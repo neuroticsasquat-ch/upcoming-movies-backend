@@ -5,8 +5,9 @@ The scoped set carries most of the weight. It is two independent rules — a the
 inside the age window, or *anybody's* follows covering the film (D-1414.3) — and the second is
 not an optimisation of the first: a film somebody follows by title that never had a US
 theatrical date has nothing to age, so rule 1 alone would never poll it and the user would never
-hear that it landed. Rule 2 is the computed watchlist asked of every user at once, so it reaches
-a film followed only through its director too, and drops one every covering user has muted.
+hear that it landed. Rule 2 is "somebody follows this film by title", asked of every user at
+once (EF-14): a film reached only through a followed director is not in it, because no surface
+delivers that film's beats to them, and a film leaves the set when its last follower unfollows.
 
 The write is the other half, and it is two tables with opposite lifetimes over one read: the
 ledger (`availability_first_seen`) is insert-only and is what `now_available` will card off
@@ -19,11 +20,12 @@ from datetime import UTC, date, datetime, timedelta
 import httpx
 import pytest
 import respx
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
 from tests.fixtures.catalog import add_credit, add_film
 from tests.fixtures.tmdb import make_provider, make_watch_providers
-from upmovies.app.models import Follow, WatchlistDismissal
+from upmovies.app.models import Follow
 from upmovies.catalog.models import (
     AvailabilityFirstSeen,
     Film,
@@ -256,16 +258,24 @@ async def test_a_person_follow_reaching_no_credit_puts_nothing_in_the_poll_set(
 
 
 @respx.mock
-async def test_a_film_covered_only_through_a_director_follow_is_polled(
+async def test_a_film_reached_only_through_a_director_follow_is_not_polled(
     session, session_factory, tmdb_client, run_id, make_user
 ):
-    """What M8 widened (D-1414.3). The old rule reached this film only where D-13 had already
-    derived a watchlist item; now the poll reads the same coverage the alerts do, so a followed
-    director's next film is polled for the offer that will card its `now_available` beat."""
+    """The narrowing EF-14 intends. Rule 2 used to read the whole coverage graph; it now reads
+    title follows alone, because an entity follow delivers that person's attachment cards and
+    never the film's other beats (EF-3) — so the `now_available` card this poll would buy has
+    no reader. Following the film itself is what asks for it, and the next case does."""
     user = await make_user(email="director-follower@example.com")
     film = await add_film(session, 203)
     await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
     session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
+    await session.commit()
+
+    assert (await _run(session_factory, tmdb_client, run_id)).selected == 0
+
+    session.add(
+        Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+    )
     await session.commit()
     _mock_providers(203, flatrate=[8])
 
@@ -275,22 +285,23 @@ async def test_a_film_covered_only_through_a_director_follow_is_polled(
 
 
 @respx.mock
-async def test_a_released_film_an_indirect_follow_reaches_is_polled_past_the_old_ceiling(
+async def test_a_title_follow_polls_a_long_released_film_with_no_theatrical_row(
     session, session_factory, tmdb_client, run_id, make_user
 ):
-    """The reach D-46 added. 250 days past its primary date and marked `Released`, with no US
-    theatrical row to put it in rule 1 — under NEU-1414's window the status term cut it out on
-    release day, and its streaming debut went unpolled and uncarded. The window now ends at
-    `Canceled`, so rule 2 keeps it until the date ceiling; nobody following it still means no
-    request."""
+    """The reach rule 2 exists for, and the one EF-14 keeps. 250 days past its primary date and
+    marked `Released`, with no US theatrical row to put it in rule 1 — so rule 1 will never ask,
+    and its streaming debut would go unpolled and uncarded. A title follow carries no window and
+    no status term at all (EF-14), so the film is polled for as long as somebody is waiting;
+    nobody following it still means no request."""
     user = await make_user(email="late-streamer@example.com")
     film = await add_film(session, 209, status="Released", release_date=TODAY - timedelta(days=250))
-    await add_credit(session, film, 527, credit_type="crew", job="Director", department="Directing")
     await session.commit()
 
     assert (await _run(session_factory, tmdb_client, run_id)).selected == 0
 
-    session.add(Follow(user_id=user.id, entity_type="person", entity_id="527", source="manual"))
+    session.add(
+        Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+    )
     await session.commit()
     _mock_providers(209, flatrate=[8])
 
@@ -300,48 +311,29 @@ async def test_a_released_film_an_indirect_follow_reaches_is_polled_past_the_old
 
 
 @respx.mock
-async def test_a_non_seed_credit_puts_the_film_in_the_poll_set(
+async def test_a_film_the_last_follower_drops_leaves_the_poll_set(
     session, session_factory, tmdb_client, run_id, make_user
 ):
-    """The poll's set is bounded by the same rule the alerts are, and EF-2 removed the cut from
-    both at once: an unbilled cast credit is enough, because somebody following that person is
-    waiting to hear when this film can be watched.
-
-    The unbilled row rather than the writing credit this test used to carry: a writer was
-    always seed grade, so it only ever proved the tier, while `credit_order IS NULL` is outside
-    every cut there has ever been and is what a seed-grade term surviving here would drop."""
-    user = await make_user(email="unbilled-follower@example.com")
-    film = await add_film(session, 204)
-    await add_credit(session, film, 526, credit_type="cast", credit_order=None)
-    session.add(Follow(user_id=user.id, entity_type="person", entity_id="526", source="manual"))
-    await session.commit()
-    _mock_providers(204, flatrate=[8])
-
-    result = await _run(session_factory, tmdb_client, run_id)
-
-    assert (result.selected, result.polled) == (1, 1)
-
-
-@respx.mock
-async def test_a_film_every_covering_user_has_muted_leaves_the_poll_set(
-    session, session_factory, tmdb_client, run_id, make_user
-):
-    """The mute is per covering *user*, not per film: the film stays in the set while anybody
-    who covers it is still listening, and leaves it when the last of them stops."""
-    muter = await make_user(email="muter@example.com")
-    waiter = await make_user(email="waiter@example.com")
+    """Rule 2 asks the whole follow table (EF-14): the film stays in the set while anybody is
+    still waiting on it, and leaves it when the last of them unfollows."""
+    first = await make_user(email="first@example.com")
+    second = await make_user(email="second@example.com")
     film = await add_film(session, 205, status="Released")
-    for user in (muter, waiter):
+    for user in (first, second):
         session.add(
             Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
         )
-    session.add(WatchlistDismissal(user_id=muter.id, film_id=film.id))
     await session.commit()
     _mock_providers(205, flatrate=[8])
 
     assert (await _run(session_factory, tmdb_client, run_id)).selected == 1
 
-    session.add(WatchlistDismissal(user_id=waiter.id, film_id=film.id))
+    await session.execute(sa_delete(Follow).where(Follow.user_id == first.id))
+    await session.commit()
+
+    assert (await _run(session_factory, tmdb_client, run_id)).selected == 1
+
+    await session.execute(sa_delete(Follow).where(Follow.user_id == second.id))
     await session.commit()
 
     assert (await _run(session_factory, tmdb_client, run_id)).selected == 0

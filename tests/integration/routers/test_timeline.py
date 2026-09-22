@@ -17,10 +17,11 @@ matches on.
 from datetime import UTC, date, datetime
 
 import pytest
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
 from tests.fixtures.public import ref
-from upmovies.app.models import WatchlistDismissal
+from upmovies.app.models import Follow
 from upmovies.news.models import EventStory, Story, StoryPerson
 from upmovies.news.subject_key import (
     collection_subject_token,
@@ -462,46 +463,58 @@ async def test_a_mention_of_somebody_already_credited_adds_nothing(
     assert (await entitled_client.get("/me/timeline")).json()["items"] == []
 
 
-async def test_a_muted_film_leaves_the_timeline(
+async def test_unfollowing_a_film_takes_it_off_the_timeline(
     entitled_client, session, make_film, add_event, follow
 ):
-    """D-45 as amended in M8: "not interested in this film" silences it everywhere, so the
-    timeline drops its events beside the calendar and the alerts. The follow is untouched —
-    un-muting restores the film on every surface at once (D-40). NEU-1439 takes the whole
-    mechanism away."""
-    muted = await make_film(slug="muted", title="Muted")
+    """EF-14: the mute that used to silence a film without touching its follow (D-45) is gone
+    with the watchlist it corrected, and unfollowing is the whole of the mechanism now. The
+    other followed film is untouched — this removes one row, not a user's timeline."""
+    dropped = await make_film(slug="dropped", title="Dropped")
     kept = await make_film(slug="kept", title="Kept")
-    for film in (muted, kept):
+    for film in (dropped, kept):
         await add_event(film=film, summary="a beat", created_at=datetime(2026, 6, 3, tzinfo=UTC))
         await follow("title", str(film.id))
 
     body = (await entitled_client.get("/me/timeline")).json()
-    assert sorted(i["film_ref"] for i in body["items"]) == sorted([ref(kept), ref(muted)])
+    assert sorted(i["film_ref"] for i in body["items"]) == sorted([ref(kept), ref(dropped)])
 
-    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=muted.id))
+    await session.execute(
+        sa_delete(Follow).where(
+            Follow.user_id == entitled_client.user.id,
+            Follow.entity_type == "title",
+            Follow.entity_id == str(dropped.id),
+        )
+    )
     await session.commit()
 
     body = (await entitled_client.get("/me/timeline")).json()
     assert [i["film_ref"] for i in body["items"]] == [ref(kept)]
 
 
-async def test_a_muted_film_drops_an_attachment_card_too(
+async def test_unfollowing_a_film_leaves_its_attachment_cards_for_the_person_follower(
     entitled_client, session, make_film, make_person, catalog_card, follow
 ):
-    """The case the mute would otherwise miss: this card reaches the timeline through the
-    *person*, not the film, so without the exclusion inside the builder a muted film would keep
-    leaking onto the timeline through every attachment anyone made to it."""
+    """The case the mute used to take with it, now pinned the other way (EF-14, EF-3). This
+    card reaches the timeline through the *person*, so the film going off the user's own list
+    says nothing about it: they still follow the director, and this is still the director
+    signing on to something."""
     await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
-    film = await make_film(slug="muted", title="Muted")
+    film = await make_film(slug="attached", title="Attached")
     await catalog_card(film, event_type="casting", names=(DIRECTOR_NAME,))
     await follow("person", DIRECTOR)
+    await follow("title", str(film.id))
 
     assert (await entitled_client.get("/me/timeline")).json()["total"] == 1
 
-    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=film.id))
+    await session.execute(
+        sa_delete(Follow).where(
+            Follow.user_id == entitled_client.user.id,
+            Follow.entity_type == "title",
+        )
+    )
     await session.commit()
 
-    assert (await entitled_client.get("/me/timeline")).json()["total"] == 0
+    assert (await entitled_client.get("/me/timeline")).json()["total"] == 1
 
 
 @pytest.mark.parametrize(

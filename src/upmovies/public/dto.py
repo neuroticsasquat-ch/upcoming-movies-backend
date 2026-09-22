@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from upmovies.app.dto import WatchlistFilmOut
+from upmovies.app.dto import HeadlineReleaseOut
 
 
 class SourceOut(BaseModel):
@@ -124,21 +124,33 @@ class ReleaseDateOut(BaseModel):
     certification: str | None
 
 
-class FilmRowOut(WatchlistFilmOut):
-    """One film cited on an entity page — person, studio or franchise. `WatchlistFilmOut` plus
-    the URL ref: the watchlist row's shape, as the spec asks, so a film cited on an entity page
-    and the same film on the watchlist cannot show different dates.
+class FilmRowOut(BaseModel):
+    """One film cited on an entity page — person, studio or franchise.
 
-    It subclasses rather than restating the five fields: the reason `WatchlistFilmOut` carries
-    `headline_release` instead of `release_date` (NEU-1397 — the film page never displays
-    TMDB's primary date) is a rule about citing films anywhere, and a copy here would be a
-    second place for it to be got wrong. `ref` is added because this row links to the film page
-    and the watchlist's client builds that link itself.
+    The row shape `catalog.headline_release` feeds: enough of the film to render it without a
+    second request per item, and the film page for the rest. It was the watchlist row's shape
+    before EF-14 retired the watchlist, and it is unchanged by that — the same fields, cited the
+    same way, so a film on an entity page and the same film anywhere else cannot show different
+    dates.
+
+    There is deliberately no `release_date`: it used to be `catalog.film.release_date`, TMDB's
+    primary date, which the film page never displays — so a row could cite a date that the page
+    it links to did not show (NEU-1397). `headline_release` is the displayable answer, and it is
+    null only for a film with no displayable release row and no primary date.
+
+    `ref` is the film page's URL segment, carried rather than rebuilt: a client assembling it
+    from `tmdb_id` and `slug` is a client that gets it wrong for a film with no slug.
 
     The studio and franchise pages (NEU-1428) return this row **bare**; the person page wraps
-    it in `PersonFilmOut` to hang that person's credits off it, which is the only
-    thing the three pages do differently."""
+    it in `PersonFilmOut` to hang that person's credits off it, which is the only thing the
+    three pages do differently."""
 
+    id: UUID
+    tmdb_id: int
+    slug: str | None
+    title: str
+    poster_path: str | None
+    headline_release: HeadlineReleaseOut | None
     ref: str
 
 
@@ -299,8 +311,8 @@ class DayGroup(BaseModel):
 
 class FilmDetailResponse(BaseModel):
     ref: str
-    # `catalog.film`'s UUID — the id `/me/watchlist` takes and the `title` entity id the follow
-    # graph keys on (D-10). Opaque, and every route that accepts it is behind cookie auth, CSRF
+    # `catalog.film`'s UUID — the `title` entity id the follow graph keys on (D-10). Opaque,
+    # and every route that accepts it is behind cookie auth, CSRF
     # and `require_entitled()`, so exposing it on this public endpoint grants nothing.
     id: UUID
     title: str

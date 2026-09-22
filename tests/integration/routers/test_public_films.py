@@ -1615,7 +1615,7 @@ async def test_detail_carries_entity_ids_for_follows(
     client, make_film, add_event, make_collection, attach_companies, attach_credits
 ):
     """Every follow affordance on the film page keys on an id (D-10): the film's own UUID for
-    the `title` follow and the watchlist toggle, TMDB person ids for cast and crew, the TMDB
+    the `title` follow button, TMDB person ids for cast and crew, the TMDB
     collection id for `franchise`, and TMDB company ids for `company`. Each must match the row
     it was sourced from."""
     col = await make_collection(id=77, name="The Franchise Collection")

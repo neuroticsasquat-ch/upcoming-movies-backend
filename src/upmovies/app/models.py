@@ -165,10 +165,10 @@ class EmailToken(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-# The follow graph and the watchlist (M3, D-10 to D-14). Three tables, all keyed by the user
-# and the thing, with no surrogate ids: nothing outside these rows ever needs to name one, the
-# routes address them by `(entity_type, entity_id)` or `film_id`, and the composite key *is* the
-# "unique per (user, type, id)" rule rather than a second constraint beside it.
+# The follow graph (M3, D-10, EF-14). One table now, keyed by the user and the thing, with no
+# surrogate id: nothing outside these rows ever needs to name one, the routes address them by
+# `(entity_type, entity_id)`, and the composite key *is* the "unique per (user, type, id)" rule
+# rather than a second constraint beside it.
 
 FOLLOW_ENTITY_TYPES = ("person", "company", "franchise", "title")
 FOLLOW_SOURCES = ("manual", "letterboxd_import", "tmdb_import", "derived")
@@ -183,9 +183,10 @@ def _in_list(values: tuple[str, ...]) -> str:
 class Follow(Base):
     """A user's standing interest in a person, company, franchise or title (D-10, D-42).
 
-    **The only thing a user keeps** (M8, ADR-0018). It feeds the timeline *and* the alerts: the
-    watchlist is no longer a table but a query over this one (`app.follow_queries`), so a row
-    here is both "show me this on my timeline" and "tell me when something happens to it".
+    **The only thing a user keeps** (M8, ADR-0018, EF-14). It feeds the timeline, the alerts,
+    the calendar and the iCal feed — every one of them a query over this table
+    (`app.follow_queries`) — so a row here is both "show me this on my timeline" and "tell me
+    when something happens to it", and deleting it is the only way to stop either.
 
     **The row carries no preference at all (EF-1).** A follow is binary: the user follows the
     entity or they do not, and every credit of a followed person reaches them (EF-2). The
@@ -225,34 +226,6 @@ class Follow(Base):
     entity_type: Mapped[str] = mapped_column(Text, primary_key=True)
     entity_id: Mapped[str] = mapped_column(Text, primary_key=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
-    )
-
-
-class WatchlistDismissal(Base):
-    """A **mute**: the user is not interested in this film, whatever their follows say (D-45).
-
-    The table name is D-13's and outlived the record it described — the thing it now holds is
-    what `CONTEXT.md` calls a mute, and every caller says so. It is the one row that *subtracts*
-    from the computed watchlist (`app.follow_queries.watchlist_film_ids`), and since D-45 it
-    silences the film everywhere: the timeline and the digest's timeline section drop its events
-    too, including events that only name a followed person on it.
-
-    Reversible and non-destructive, which is the pair that matters. Un-muting is deleting this
-    row and restores the film on every surface at once, because nothing was deleted to mute it
-    (a mute never touches a follow, D-40). A film nothing covers any more keeps its mute
-    harmlessly: it subtracts from a set it is no longer in."""
-
-    __tablename__ = "watchlist_dismissal"
-    __table_args__ = {"schema": "app"}
-
-    user_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), primary_key=True
-    )
-    film_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), primary_key=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -400,8 +373,8 @@ class UserSettings(Base):
     `alert_stores` is the subset of `{buy, rent, stream}` availability beats this user is
     alerted on, product-wide (D-44). One setting rather than the per-item `alert_prefs` M8
     replaced: the question "do I care about rentals?" is a property of the person, not of each
-    film they follow, and a per-film answer had nowhere to live once the watchlist stopped
-    being a table. An empty array is allowed and means no store alerts at all — the D-32
+    film they follow, and a per-film answer had nowhere to live once the follow became the
+    only row. An empty array is allowed and means no store alerts at all — the D-32
     whitelist beats (a date assigned or moved, a new trailer) are always on and are deliberately
     not representable here, so they cannot be switched off.
 

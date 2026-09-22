@@ -11,8 +11,9 @@ as the timeline OR-s them, which is what keeps "in my digest" and "on my timelin
 drifting into two answers. The digest is that set; the alert branch is that set cut by EF-7's
 per-reach push sets and EF-8's confirmation rule. A card in both earns both rows: an alert and
 a digest line are different deliveries of the same news, not duplicates of one
-(`app.models.Notification`). A **muted** film earns neither — the exclusion is inside the
-builders, so it reaches this pass without a rule of its own (D-45, until NEU-1439).
+(`app.models.Notification`). An **unfollowed** film earns neither, and there is nothing
+else that subtracts: the mute went with the watchlist it corrected (EF-14), so this pass reads
+exactly what the follow builders select and needs no rule of its own.
 
 **The push rule is a function of the reach, not of the beat** (EF-7). D-32's one closed list
 was a property of the event; two follows can reach the same card for different reasons and be
@@ -331,7 +332,7 @@ def deliverable_events(since: datetime, *, include_upgrades: bool = False) -> Se
       in a mail. Hidden types are never summarized, so this and `visible_events()` overlap —
       but only the join states the sender's actual precondition.
     - `visible_events()`, so the `other` catch-all bucket (`news.visibility`) stays out.
-    - `region_visible()`, so an Indian release-date change does not mail every watchlist holder
+    - `region_visible()`, so an Indian release-date change does not mail every follower
       about a date no surface will show them — D-32 is "US theatrical or home-release". This is
       the term that needs `Film` in the query.
     - `Film.slug.is_not(None)`, because a film with no slug has no page to link to.

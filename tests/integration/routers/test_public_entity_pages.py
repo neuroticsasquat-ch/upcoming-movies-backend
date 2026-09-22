@@ -150,7 +150,7 @@ async def test_a_row_carries_no_credits(client, make_entity, make_film, kind):
 async def test_a_row_cites_the_date_the_film_page_shows(
     client, make_entity, make_film, add_release_date, kind
 ):
-    """`headline_release`, not `catalog.film.release_date` — the watchlist row's rule
+    """`headline_release`, not `catalog.film.release_date` — the film row's rule
     (NEU-1397), inherited by sharing its shape rather than restated."""
     path, attach = await make_entity(kind, id=174, name="Warner Bros. Pictures")
     film = await make_film(slug="dated", title="Dated", release_date=TODAY + timedelta(days=30))

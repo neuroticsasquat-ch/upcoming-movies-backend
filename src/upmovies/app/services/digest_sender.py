@@ -16,9 +16,9 @@ day, then the film's events in the order they happened. A backfill that lands as
 on the feed lands as one tall day here too, deliberately.
 
 **The weekly send is the "your slate" mail (D-33).** Before the timeline section it lists the
-upcoming US dates — theatrical, digital and physical — for every film on the user's watchlist
-in the next `SLATE_WINDOW_DAYS`. The watchlist is the computed set (`app.follow_queries
-.watchlist_film_ids`, M8), joined to `film_release_date` directly rather than to notification
+upcoming US dates — theatrical, digital and physical — for every film the user follows by
+title in the next `SLATE_WINDOW_DAYS` (`app.follow_queries.title_follow_film_ids`, EF-14),
+joined to `film_release_date` directly rather than to notification
 rows: a date that has not *moved* produces
 no event, and the slate's job is to say what is coming, not what changed. Each film's date per
 release type is the governing one — the earliest row in the (film, US, type) subject, the same
@@ -31,7 +31,7 @@ is worse than no digest, and it is the ordinary case for a quiet week.
 **The access gate is re-read here, and it covers the slate** (D-37, D-39). The decision pass
 already suppressed rows for unentitled and unverified users, so on the row side this is belt
 and braces against a grant that lapsed after the rows were queued. The slate side is the case
-that makes it necessary rather than merely consistent: the slate is built from the watchlist,
+that makes it necessary rather than merely consistent: the slate is built from the follows,
 which D-40 keeps intact when a grant lapses, so without this check an unentitled user with
 nothing queued would still receive a slate mail every week. The gate is one answer per user —
 `entitled_user_clause()` AND `verified_user_clause()`, the two named rules every other pass
@@ -62,7 +62,7 @@ from sqlalchemy import Date, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.entitlements import entitled_user_clause
-from upmovies.app.follow_queries import watchlist_film_ids
+from upmovies.app.follow_queries import title_follow_film_ids
 from upmovies.app.models import (
     DEFAULT_DIGEST_CADENCE,
     Follow,
@@ -218,7 +218,7 @@ class SlateItem:
 
 @dataclass(frozen=True)
 class SlateDay:
-    """One date on the slate and everything the user's watchlist has on it."""
+    """One date on the slate and everything the user's followed films have on it."""
 
     day: date
     items: tuple[SlateItem, ...]
@@ -459,11 +459,12 @@ def _event_key(
 async def load_slate(
     session: AsyncSession, *, user_id: UUID, today: date, settings: Settings
 ) -> tuple[SlateDay, ...]:
-    """The upcoming US dates for this user's watchlist, soonest first (D-33).
+    """The upcoming US dates for the films this user follows, soonest first (D-33).
 
-    The watchlist is `follow_queries.watchlist_film_ids` — what their follows cover, minus
-    their mutes (D-42, D-45) — so a film they have silenced never reaches the
-    slate, and a film reached only through a followed director does.
+    The set is `follow_queries.title_follow_film_ids` — the films they asked for by name, and
+    only those (EF-14). A followed director contributes nothing: an entity follow delivers that
+    entity's attachment cards, not a place on a date list (EF-3). The same set the my-films
+    calendar and the `.ics` feed read, so the three cannot disagree about what is coming.
 
     One governing date per (film, release type): the earliest `film_release_date` row in the
     subject, cast to a UTC calendar date — the same collapse `public.service.get_calendar`
@@ -473,8 +474,8 @@ async def load_slate(
     the count runs out is the first one left off.
 
     The calendar's popularity, runtime and adult cuts are deliberately absent. Those keep noise
-    off a public listing; a film the user put on their own watchlist is not noise to them. A
-    film with no slug is skipped for the reason the decision pass skips it — no page to link.
+    off a public listing; a film the user followed by name is not noise to them. A film with no
+    slug is skipped for the reason the decision pass skips it — no page to link.
     """
     governing = (
         select(
@@ -485,13 +486,7 @@ async def load_slate(
             ),
         )
         .where(
-            FilmReleaseDate.film_id.in_(
-                watchlist_film_ids(
-                    user_id=user_id,
-                    today=today,
-                    max_age_days=settings.provider_poll_max_age_days,
-                )
-            ),
+            FilmReleaseDate.film_id.in_(title_follow_film_ids(user_id)),
             FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
             FilmReleaseDate.release_type.in_(SLATE_RELEASE_TYPES),
         )
@@ -549,7 +544,7 @@ async def load_batch(
     """Everything one user's digest would carry on this cadence.
 
     The slate is loaded only for a weekly send *and* only for a user the gate admits: for a
-    refused user the answer is already "no mail", and reading their watchlist would be work in
+    refused user the answer is already "no mail", and reading their follows would be work in
     service of a section that must not be sent (D-39)."""
     days, unsendable = await load_timeline(session, user_id=recipient.user_id, settings=settings)
     slate: tuple[SlateDay, ...] = ()

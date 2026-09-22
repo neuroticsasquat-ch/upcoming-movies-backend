@@ -19,13 +19,13 @@ second definition of "gave up".
 
 1. the film's US theatrical governing date is between `min_age_days` and `max_age_days` old —
    the window where a home release is plausible but not yet ancient history; and
-2. *anybody* follows the title or has it on their watchlist — somebody is waiting on this
-   answer, so it is polled whether or not its date says it is due, and whether or not it has a
-   theatrical date at all.
+2. *anybody* follows the film by title (EF-14) — somebody is waiting on this answer, so it is
+   polled whether or not its date says it is due, and whether or not it has a theatrical date
+   at all.
 
-Rule 2 is not an optimisation of rule 1, it is the reason the feature feels alive: a
-watchlisted film that went straight to streaming has no theatrical date to age, and rule 1
-alone would never poll it.
+Rule 2 is not an optimisation of rule 1, it is the reason the feature feels alive: a followed
+film that went straight to streaming has no theatrical date to age, and rule 1 alone would
+never poll it.
 
 **Insert-only ledger, delete-and-rebuild snapshot.** Each poll writes new
 `availability_first_seen` rows for offers it has never seen before and rebuilds
@@ -53,7 +53,7 @@ from sqlalchemy import ColumnElement, Date, and_, cast, delete, func, literal, o
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.follow_queries import covered_by_any_user_clause
+from upmovies.app.follow_queries import title_followed_by_any_user_clause
 from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     AvailabilityFirstSeen,
@@ -138,25 +138,24 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
     limited 210 days ago and wide 150 days ago is squarely in the window on the beat an
     audience would name, and taking the earliest subject across the whole film would drop it.
 
-    **Rule 2 is the computed watchlist, asked of everybody at once** (D-1414.3):
-    `follow_queries.covered_by_any_user_clause` — a film any user's follows cover, inside the
-    alert window, and that they have not muted. One predicate shared with the alerts, so the
-    poll cannot come to a different answer about what somebody is waiting on than the pass that
-    tells them about it. It reaches further than the two `EXISTS` it replaces: a film followed
-    only through its director is polled now, which is what makes a `now_available` beat
-    possible for it at all.
+    **Rule 2 is "somebody follows this film by title", asked of everybody at once** (D-1414.3,
+    EF-14): `follow_queries.title_followed_by_any_user_clause`. One predicate shared with the
+    delivery side, so the poll cannot come to a different answer about what somebody is waiting
+    on than the surfaces that tell them about it.
 
-    **The alert window's date ceiling is the only bound left** (EF-1, EF-2). A person follow
-    used to be cut to the credits its `coverage` named, and `lead` being the default is what
-    kept the indirect reach small; a binary follow reaches every credit, so every film of every
-    followed person — at any billing position, any crew job — is in this set while it is inside
-    the window. That is a real widening of the poll's request volume and is the thing to watch
-    on the first pass after NEU-1432 deploys.
+    **It carries no window, no status term and no mute**, because a title follow carries none:
+    the user named that film, and a film they followed the week it came out is exactly the one
+    whose streaming debut they are waiting on. There is nothing here for a date bound to
+    protect against — the branch selects one film per follow rather than a person's whole
+    filmography.
 
-    The window's status term is not rule 1's absence of one *or* in-play's: it ends at
-    `Canceled` (D-46), so a `Released` film an indirect follow reaches stays in the set until
-    the date ceiling. That agrees with rule 1, which has never filtered on status — a film past
-    its theatrical date is `Released`, and that is the state in which looking for offers pays.
+    **This is a narrowing, and an intended one.** `covered_by_any_user_clause` also polled a
+    film reached only through a followed person, company or franchise, bounded by the alert
+    window to keep that from dragging in a back catalogue. Under EF-3 an entity follow delivers
+    attachment cards and never a film, so nobody is waiting on those films any more and a
+    `now_available` beat for one would reach no reader. Rule 1 still polls everything inside
+    its theatrical date window regardless of who follows what, which is where the bulk of the
+    request volume was and still is.
 
     Tombstoned films are excluded. Their theatrical date keeps ageing inside the window, so
     without this a deleted id costs a request every day until it falls out the far end — and it
@@ -189,7 +188,7 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
         Film.tmdb_missing_at.is_(None),
         or_(
             theatrical_due,
-            covered_by_any_user_clause(today=today, max_age_days=max_age_days),
+            title_followed_by_any_user_clause(),
         ),
     )
 

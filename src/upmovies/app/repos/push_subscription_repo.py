@@ -23,7 +23,7 @@ async def upsert(
     `ON CONFLICT (endpoint) DO UPDATE` rather than `DO NOTHING`, and the update includes
     `user_id`, which is the case worth stating: a browser profile is one endpoint, so when a
     second account subscribes from a machine the first one used, the row has to *move*. Leaving
-    it would push the first user's watchlist alerts to whoever is signed in now — and a
+    it would push the first user's alerts to whoever is signed in now — and a
     notification, unlike a mail, is read on a lock screen by whoever is holding the phone.
 
     The keys are refreshed on the same statement because a browser re-subscribing after a

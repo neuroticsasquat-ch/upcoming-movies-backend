@@ -130,9 +130,9 @@ async def apply_watchlist_film(
     watchlist item this used to write first — and the ordering rule that went with it — are
     gone with the table.
 
-    **A mute the user has on file is left alone.** They listed the film, so the follow is
-    created; they silenced it, so it stays silenced, and `GET /me/watchlist` shows it as
-    `muted: true` for them to undo. The old code skipped the *item* on a dismissal, which was
+    **There is nothing beside the follow to reconcile** (EF-14): the mute that used to
+    survive an import went with the watchlist it corrected, so a listed film is a title follow
+    and that is the whole of it. The old code skipped the *item* on a dismissal, which was
     the same judgement about the same two facts — an import is not a reason to un-silence
     something — and the film would end up off the watchlist either way."""
     film_id = await film_id_for(db, client, tmdb_id)

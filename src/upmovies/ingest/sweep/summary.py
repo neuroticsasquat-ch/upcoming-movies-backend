@@ -55,8 +55,8 @@ end of the rolling window and its beat is simply gone. A steady `0 new, 0 cleare
 is the healthy state; `expired` rising without `new` rising is the shape of a threshold set
 too tight.
 
-There is no watchlist clause any more (M8, ADR-0018): the sweep's derivation phase is gone with
-the table it wrote to, because the watchlist is computed from the follow graph on every read
+There is no watchlist clause any more (M8, ADR-0018, EF-14): the sweep's derivation phase is
+gone with the tables it wrote to, because every surface reads the follow graph directly
 and has nothing to maintain between passes.
 
 The attachment clause is here because nowhere else keeps it: the histogram is built on every

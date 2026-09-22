@@ -12,6 +12,7 @@ from upmovies.app.dto import (
     FollowEntityType,
     FollowListResponse,
     FollowOut,
+    headline_release_out,
     normalise_entity_id,
 )
 from upmovies.app.entitlements import require_entitled
@@ -19,6 +20,7 @@ from upmovies.app.errors import NotFound
 from upmovies.app.models import Follow, User
 from upmovies.app.repos.follow_repo import EntityLabel
 from upmovies.app.services import follow_service
+from upmovies.catalog.headline_release import HeadlineRelease
 from upmovies.deps import get_session, require_csrf
 
 entitled = require_entitled()
@@ -26,14 +28,22 @@ entitled = require_entitled()
 router = APIRouter(prefix="/me/follows", tags=["me"], dependencies=[Depends(entitled)])
 
 
-def _to_out(follow: Follow, label: EntityLabel | None) -> FollowOut:
+def _to_out(
+    follow: Follow, label: EntityLabel | None, headline: HeadlineRelease | None
+) -> FollowOut:
     """`label` is `None` for a follow the catalog cannot resolve; the row is still returned, with
-    nulls, because nothing here deletes user graph rows (D-40)."""
+    nulls, because nothing here deletes user graph rows (D-40).
+
+    `headline` has no default: every route that builds a `FollowOut` has to say what it did
+    about the date, so a title row cannot quietly come back null from one route and filled from
+    another (EF-14). The list route batches them; the single-row routes ask
+    `follow_service.headline_for`."""
     return FollowOut(
         entity_type=follow.entity_type,
         entity_id=follow.entity_id,
         name=None if label is None else label.name,
         image_path=None if label is None else label.image_path,
+        headline_release=headline_release_out(headline),
         source=follow.source,
         created_at=follow.created_at,
     )
@@ -44,8 +54,10 @@ async def list_follows(
     user: User = Depends(entitled),
     db: AsyncSession = Depends(get_session),
 ) -> FollowListResponse:
-    items = await follow_service.list_follows(db, user=user)
-    return FollowListResponse(items=[_to_out(f, label) for f, label in items])
+    rows = await follow_service.list_follows(db, user=user)
+    return FollowListResponse(
+        items=[_to_out(r.follow, r.label, r.headline) for r in rows],
+    )
 
 
 @router.post(
@@ -78,7 +90,7 @@ async def create_follow(
         ) from None
     if not created:
         response.status_code = status.HTTP_200_OK
-    return _to_out(follow, label)
+    return _to_out(follow, label, await follow_service.headline_for(db, follow))
 
 
 @router.patch(
@@ -116,7 +128,7 @@ async def update_follow(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="follow_not_found"
         ) from None
-    return _to_out(follow, label)
+    return _to_out(follow, label, await follow_service.headline_for(db, follow))
 
 
 @router.delete(

@@ -458,15 +458,24 @@ async def test_an_in_play_followed_film_is_polled(
 
 
 @respx.mock
-async def test_a_film_covered_only_through_a_director_follow_is_polled(
+async def test_a_film_reached_only_through_a_director_follow_is_not_polled(
     session, session_factory, tmdb_client, run_id, make_user
 ):
-    """What M8 widened here: a followed director's next film is exactly the one whose teaser
-    the user is waiting for, and the old set reached it only where D-13 had derived an item."""
+    """EF-14 narrowed rule 2 back to title follows, and the videos poll shares that set on
+    purpose. A person follower gets the director's attach card (EF-3), not the film's trailer —
+    the trailer card would be published for a film whose only interested party cannot see it.
+    Following the film is what asks for the teaser."""
     user = await make_user(email="watcher@example.com")
     film = await add_film(session, 121, status="In Production")
     await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
     session.add(Follow(user_id=user.id, entity_type="person", entity_id="525", source="manual"))
+    await session.commit()
+
+    assert (await _run(session_factory, tmdb_client, run_id)).selected == 0
+
+    session.add(
+        Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+    )
     await session.commit()
     _mock_videos(121, [])
 

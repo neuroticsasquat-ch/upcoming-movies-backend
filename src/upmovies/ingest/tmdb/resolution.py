@@ -6,7 +6,7 @@ interesting half is the *rule*, and a rule that can only be exercised through a 
 call and a database is a rule nobody adjusts with confidence.
 
 **Never guesses.** An unmatched row is reported to the user, who can add the film by hand in
-seconds; a wrong match is a follow and a watchlist item for a film they have never heard of,
+seconds; a wrong match is a follow for a film they have never heard of,
 and they have no way to tell it came from a bad match rather than a bug. So both rules below
 require the folded title to be *equal*, not similar and not a substring — this is deliberately
 not `link.retrieval`'s job, where a story mentioning a film is a substring question scored

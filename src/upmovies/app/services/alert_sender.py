@@ -6,7 +6,7 @@ the queue in a table at all: deciding is a fan-out over every user and sending i
 over a provider, and a provider having a bad minute must not cost the decisions — the rows are
 already committed, so the next run picks up exactly what did not go out.
 
-**One mail per user per run, not one per event.** A user who watchlists three films that all
+**One mail per user per run, not one per event.** A user who follows three films that all
 moved on the same day is owed one mail about three films, not three mails in ninety seconds.
 So the backlog is read grouped by user, every row in a group rides on one send, and the
 `Notification` rows in that group share its outcome. That is also what makes the failure
@@ -198,7 +198,7 @@ def settings_url(base_url: str) -> str:
     where `digest_cadence` and the alert preferences live (D-33, D-14).
 
     A settings link rather than a one-click unsubscribe token because an alert is not a
-    broadcast — every one of them is something this reader put on their watchlist, so the
+    broadcast — every one of them is something this reader's own follows reached, so the
     useful control is *which* beats and *which* films, not an all-or-nothing opt-out."""
     return f"{base_url.rstrip('/')}/settings"
 

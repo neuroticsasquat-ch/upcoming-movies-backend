@@ -14,7 +14,7 @@ import respx
 from sqlalchemy import select
 
 from tests.fixtures.tmdb import make_details
-from upmovies.app.models import Follow, ImportJob, WatchlistDismissal
+from upmovies.app.models import Follow, ImportJob
 from upmovies.app.repos import import_job_repo
 from upmovies.catalog.models import Film, Person
 from upmovies.config import get_settings
@@ -262,20 +262,16 @@ async def test_re_running_the_same_account_creates_nothing_new(session, session_
 
 
 @respx.mock
-async def test_an_import_follows_a_muted_film_and_leaves_the_mute_alone(
-    session, session_factory, user
-):
-    # Exactly as for the Letterboxd import (D-1414.9): the import overrules neither fact.
+async def test_a_second_import_leaves_the_follow_it_already_wrote(session, session_factory, user):
+    # Exactly as for the Letterboxd import: the follow is idempotent, and it is now the whole
+    # of what an import writes for a listed film (EF-14).
     _mock_tmdb()
     await _run(session, session_factory, user)
     film = (await session.execute(select(Film).where(Film.tmdb_id == 1001))).scalar_one()
-    session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
-    await session.commit()
 
     await _run(session, session_factory, user)
 
     assert str(film.id) in {f.entity_id for f in await _rows(session, Follow)}
-    assert [m.film_id for m in await _rows(session, WatchlistDismissal)] == [film.id]
 
 
 # --- the session ------------------------------------------------------------------------------
