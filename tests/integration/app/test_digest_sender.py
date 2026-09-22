@@ -715,6 +715,7 @@ def test_every_visible_event_type_has_a_digest_label_and_an_unknown_one_still_re
     `other`, which is never queued — must read as something better than 'Update'."""
     visible = (
         "announced",
+        "canceled",
         "casting",
         "collection_attached",
         "collection_removed",

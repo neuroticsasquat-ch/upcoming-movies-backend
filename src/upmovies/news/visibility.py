@@ -26,6 +26,10 @@ from upmovies.news.models import Event
 # joining or leaving a film is the whole of what that follow delivers (EF-3), so hiding it
 # would leave the follow with nothing to show; the types are listed here only to record that
 # the question was asked and answered.
+#
+# `canceled` is not here either (EF-6, NEU-1435), and least of all: it is the one beat every
+# follow type carries — the film's own followers and every follower of an entity attached to
+# it — so hiding it would hide the thing the project exists to deliver.
 HIDDEN_EVENT_TYPES = ("other",)
 
 

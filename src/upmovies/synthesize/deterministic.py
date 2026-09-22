@@ -303,6 +303,23 @@ _STATUS_BODIES = {
     "In Production": "Shooting has started.",
     "Post Production": "Shooting has wrapped.",
     "Released": "The film has been released.",
+    # Rendered for real since EF-6 (NEU-1435): the status mapping cards `Canceled`, so this
+    # body is now a card on the feed rather than the total-renderer insurance it was written
+    # as. Kept word for word, which is where it departs from the illustrative phrasing in the
+    # EF-6 spec line ("*Dune: Part Three* has been cancelled"), on two counts.
+    #
+    # The film is not named, for the reason recorded at the top of this dict and applied again
+    # by the studio and franchise bodies: the card renders under the film's own title on the
+    # feed, the film page and in both mails, so naming it again is the redundancy the
+    # summarizer prompt already tells the model to avoid. The spec line reads as a description
+    # of the beat rather than as the literal template.
+    #
+    # The spelling is the **US** one, against the spec line's "cancelled", and that is the one
+    # departure here that is a product decision rather than a house rule: this string shipped
+    # with NEU-1080 and is what every other body in this dict was written beside, so changing
+    # it is a copy change across the deterministic set — with a `TEMPLATE_VERSION` bump — and
+    # not something to do in passing. Left alone deliberately; no bump, because the wording did
+    # not move.
     "Canceled": "The film has been canceled.",
     "Planned": "The film is now listed as planned.",
     "Rumored": "The film is now listed as rumored.",
