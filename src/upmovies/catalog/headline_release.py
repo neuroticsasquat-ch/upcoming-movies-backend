@@ -1,6 +1,7 @@
 """The **headline release**: the one date a film row leads with where there is room for one.
 
-A watchlist row, a timeline row, an iCal entry — each shows a film once, with a single date.
+A follows-page row, an entity page's film row, a timeline row, an iCal entry — each shows a
+film once, with a single date.
 That date has to be a date this site would actually display, or the row disagrees with the film
 page it links to. `catalog.film.release_date` cannot do the job: it is TMDB's *primary* date,
 the earliest release in any country of any type, and the film page never lists it (see
@@ -11,8 +12,8 @@ So the headline release is a **choice among the film's governing release dates**
 half of the cut `release_grade` defines (`THEATRICAL_RELEASE_TYPES`) — not a new quantity:
 
 1. the earliest **upcoming** governing date (`kind="upcoming"`), today counting as upcoming;
-2. failing that, the most recent **past** one (`kind="released"`) — a watchlist is partly a
-   record of things already out, and "No date yet" on a released film is wrong;
+2. failing that, the most recent **past** one (`kind="released"`) — a list of followed films
+   is partly a record of things already out, and "No date yet" on a released film is wrong;
 3. failing that, the **primary** date (`kind="primary"`, no country or bucket), which mirrors
    the film page's own unlabelled fallback in `public.service.get_film` so the two surfaces
    never disagree. The caller is expected to mark it unconfirmed rather than pass it off as a
@@ -83,7 +84,7 @@ async def headline_releases(
     Two, not one per film: this serves list endpoints, so the region test is expressed in SQL
     (`iso_3166_1 = 'US' OR iso_3166_1 = ANY(film.origin_country)` — `displayable_regions`'
     semantics) rather than as a Python filter over fetched rows, and the whole batch resolves in
-    one round trip per statement however long the watchlist is. The second statement runs only
+    one round trip per statement however long the list is. The second statement runs only
     for the ids the first left unresolved.
 
     Films with neither a displayable release row nor a primary date are **absent** from the

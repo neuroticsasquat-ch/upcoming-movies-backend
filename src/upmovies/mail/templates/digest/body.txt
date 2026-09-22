@@ -1,7 +1,7 @@
 Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
 
 {% if slate %}
-YOUR SLATE — the next {{ slate_window_days }} days on your watchlist
+YOUR SLATE — the next {{ slate_window_days }} days of films you follow
 
 {% for day in slate %}
 {{ day.heading }}
@@ -28,7 +28,7 @@ NEW ON YOUR TIMELINE
 {% endfor %}
 {% endif %}
 You are getting this {{ cadence }} digest because you follow people, companies, franchises and
-films on {{ product_name }}, and because films on your watchlist have dates coming up. Change
+films on {{ product_name }}, and because films you follow have dates coming up. Change
 how often it arrives — or stop it — here:
 
 {{ settings_url }}

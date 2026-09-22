@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-from upmovies.catalog.headline_release import HeadlineReleaseKind
+from upmovies.catalog.headline_release import HeadlineRelease, HeadlineReleaseKind
 
 
 class SignupRequest(BaseModel):
@@ -181,7 +181,40 @@ class EntitlementGrantRequest(BaseModel):
         return v.replace(tzinfo=UTC) if v.tzinfo is None else v
 
 
-# --- follows and the watchlist (M3, D-10 to D-14) ---------------------------------------------
+class HeadlineReleaseOut(BaseModel):
+    """The one date a film row leads with, and enough context to render it honestly.
+
+    `kind` is the difference between a date this site lists and TMDB's primary date, which it
+    does not (`catalog.headline_release`): `upcoming` and `released` come from a displayable
+    subject and carry that subject's `country` and `bucket`, while `primary` is the last-resort
+    fallback and carries neither, so a client can mark it unconfirmed. The bucket identifiers
+    are lowercase `limited`/`wide` — display labels are the frontend's business."""
+
+    date: date
+    kind: HeadlineReleaseKind
+    country: str | None
+    bucket: str | None
+
+
+def headline_release_out(headline: HeadlineRelease | None) -> HeadlineReleaseOut | None:
+    """The catalog's answer as the wire field, passing `None` through.
+
+    Here rather than in one of the two readers — the entity pages' film rows and the follows
+    page's title rows — because both spell the same four fields and a second copy is how one of
+    them would come to drop `bucket`."""
+    return (
+        None
+        if headline is None
+        else HeadlineReleaseOut(
+            date=headline.date,
+            kind=headline.kind,
+            country=headline.country,
+            bucket=headline.bucket,
+        )
+    )
+
+
+# --- follows (M3, D-10, EF-1) ------------------------------------------------------------------
 
 FollowEntityType = Literal["person", "company", "franchise", "title"]
 AlertStore = Literal["buy", "rent", "stream"]
@@ -226,12 +259,22 @@ class FollowOut(BaseModel):
     `name` and `image_path` are nullable and that is load-bearing: a follow can outlive the
     entity it names (a person purged from TMDB, a row written before a backfill), and D-40 says
     nothing here deletes user graph rows. An unresolvable follow is listed with nulls rather
-    than filtered out."""
+    than filtered out.
+
+    `headline_release` is **title rows only** and null on every other type (EF-14). A followed
+    film has one date worth leading with and the follows page shows it; a followed person does
+    not have a date of their own, and inventing one — the next release they are credited on,
+    say — would be the indirect reach this project has just taken away, smuggled back in as a
+    column. It is the same field `public.dto.FilmRowOut` carries, filled from the same batch
+    query (`catalog.headline_release`), so a film's date on the follows page and on an entity
+    page cannot disagree. Null for a title row too when the film has no displayable release row
+    and no primary date."""
 
     entity_type: str
     entity_id: str
     name: str | None
     image_path: str | None
+    headline_release: HeadlineReleaseOut | None
     source: str
     created_at: datetime
 
@@ -244,85 +287,6 @@ def normalise_alert_stores(stores: list[str]) -> list[str]:
     """Canonical order, no duplicates, so two store lists that mean the same thing compare
     equal and the row reads the same however the client spelled it."""
     return [s for s in ("buy", "rent", "stream") if s in stores]
-
-
-class HeadlineReleaseOut(BaseModel):
-    """The one date a film row leads with, and enough context to render it honestly.
-
-    `kind` is the difference between a date this site lists and TMDB's primary date, which it
-    does not (`catalog.headline_release`): `upcoming` and `released` come from a displayable
-    subject and carry that subject's `country` and `bucket`, while `primary` is the last-resort
-    fallback and carries neither, so a client can mark it unconfirmed. The bucket identifiers
-    are lowercase `limited`/`wide` — display labels are the frontend's business."""
-
-    date: date
-    kind: HeadlineReleaseKind
-    country: str | None
-    bucket: str | None
-
-
-class WatchlistFilmOut(BaseModel):
-    """Enough of the film to render a watchlist row without a second request per item. The
-    film page is the place for the rest.
-
-    There is deliberately no `release_date`: it used to be `catalog.film.release_date`, TMDB's
-    primary date, which the film page never displays — so a row could cite a date that the page
-    it links to did not show (NEU-1397). `headline_release` is the displayable answer, and it is
-    null only for a film with no displayable release row and no primary date."""
-
-    id: UUID
-    tmdb_id: int
-    slug: str | None
-    title: str
-    poster_path: str | None
-    headline_release: HeadlineReleaseOut | None
-
-
-class WatchlistCreateRequest(BaseModel):
-    """**Want** this film (D-1414.5). No preferences: the stores an availability alert is worth
-    are one setting per user now (`UserSettingsUpdateRequest.alert_stores`, D-44), not a choice
-    per film."""
-
-    film_id: UUID
-
-
-class WatchlistCoverOut(BaseModel):
-    """One follow that puts a film on the watchlist.
-
-    `name` is nullable on the terms `FollowOut` gives: a follow can outlive the entity it names
-    and D-40 keeps the row, so an unresolvable cover is rendered with a null name rather than
-    dropped — which would make a film look uncovered when something covers it."""
-
-    entity_type: str
-    entity_id: str
-    name: str | None
-
-
-class WatchlistItemOut(BaseModel):
-    """One film on the computed watchlist (D-42), and how it got there.
-
-    `covered_by` is every follow that covers the film, the direct title follow first and the
-    rest oldest first, which is the order the film page's "via Christopher Nolan" line reads
-    from (NEU-1405). `followed` says whether one of them is that direct title follow — the
-    difference between a film the user asked for and one their follows reached.
-
-    `muted` is on the item rather than a reason to omit it: a muted film is listed, marked, and
-    un-mutable from the list, because the user looking at their watchlist is exactly who wants
-    to undo one.
-
-    `created_at` is the earliest of the covering follows' — when this film first started being
-    covered, which is what the list sorts on. There is no `source`: nothing records who put the
-    film here, because nothing *put* it here."""
-
-    film: WatchlistFilmOut
-    covered_by: list[WatchlistCoverOut]
-    followed: bool
-    muted: bool
-    created_at: datetime
-
-
-class WatchlistListResponse(BaseModel):
-    items: list[WatchlistItemOut]
 
 
 # The imports (D-15, D-16). The job row as the owner polls it — every field of `app.import_job`

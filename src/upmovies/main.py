@@ -40,7 +40,6 @@ from upmovies.routers import (
     timeline,
     user_settings,
     users_admin,
-    watchlist,
 )
 
 if dsn := os.environ.get("SENTRY_DSN"):
@@ -125,7 +124,6 @@ def create_app() -> FastAPI:
     app.include_router(follows.router)
     app.include_router(user_settings.router)
     app.include_router(push.router)
-    app.include_router(watchlist.router)
     app.include_router(imports.router)
     app.include_router(imports_tmdb.router)
     app.include_router(timeline.router)

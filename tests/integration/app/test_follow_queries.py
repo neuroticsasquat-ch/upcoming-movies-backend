@@ -1,5 +1,5 @@
 """`app.follow_queries`' builders run *outside* a request — the timeline's two filters, and
-what is left of M8's coverage queries beside them.
+the poll set's clause beside them.
 
 `tests/integration/routers/test_timeline.py` covers what the filters select through the route;
 this file covers the rule in detail and the property the route can never show — that each is a
@@ -12,18 +12,16 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
 from upmovies.app.follow_queries import (
-    covered_by_any_user_clause,
-    covered_film_ids,
-    covering_follows,
     entity_attachment_event_ids,
     first_association_clause,
     title_follow_film_ids,
-    watchlist_film_ids,
+    title_followed_by_any_user_clause,
 )
-from upmovies.app.models import Follow, User, WatchlistDismissal
+from upmovies.app.models import Follow, User
 from upmovies.catalog.models import Film
 from upmovies.news.models import EventStory, Story, StoryPerson
 from upmovies.news.subject_key import (
@@ -188,14 +186,20 @@ async def test_an_entity_follow_puts_no_film_in_the_title_filter(
     assert await _ids(session, _titles(user.id)) == set()
 
 
-async def test_a_muted_title_followed_film_is_absent(session, user, make_film):
-    """D-45 as amended: the exclusion is inside the builder, so every consumer honours it
-    without a rule of its own. NEU-1439 takes it out with the table."""
-    film = await make_film(slug="muted", title="Muted")
+async def test_unfollowing_is_the_only_way_a_film_leaves_the_title_filter(session, user, make_film):
+    """EF-14: nothing subtracts from this set. The mute that used to (D-45) went with the
+    watchlist it corrected, and the correction to a list of films you named is to unname one."""
+    film = await make_film(slug="followed", title="Followed")
     await _follow(session, user, "title", str(film.id))
     assert await _ids(session, _titles(user.id)) == {film.id}
 
-    session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
+    await session.execute(
+        sa_delete(Follow).where(
+            Follow.user_id == user.id,
+            Follow.entity_type == "title",
+            Follow.entity_id == str(film.id),
+        )
+    )
     await session.commit()
 
     assert await _ids(session, _titles(user.id)) == set()
@@ -280,14 +284,23 @@ async def test_a_superseded_attach_card_is_not_selected(session, user, make_film
     assert await _ids(session, _events(user.id)) == {correction.id}
 
 
-async def test_a_card_on_a_muted_film_is_not_selected(session, user, make_film, attach_card):
-    """The mute is applied once, at the top of the builder, rather than per branch."""
-    film = await make_film(slug="muted", title="Muted")
+async def test_unfollowing_the_person_is_the_only_way_their_card_stops_being_selected(
+    session, user, make_film, attach_card
+):
+    """EF-14: nothing subtracts from the event builder either. These are cards about a person
+    that happen to name a film, so a film-level exclusion never belonged here."""
+    film = await make_film(slug="attached", title="Attached")
     await attach_card(film)
     await _follow(session, user, "person", str(DIRECTOR))
     assert await _ids(session, _events(user.id)) != set()
 
-    session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
+    await session.execute(
+        sa_delete(Follow).where(
+            Follow.user_id == user.id,
+            Follow.entity_type == "person",
+            Follow.entity_id == str(DIRECTOR),
+        )
+    )
     await session.commit()
 
     assert await _ids(session, _events(user.id)) == set()
@@ -741,188 +754,113 @@ async def test_the_clause_is_not_reached_by_a_non_person_narrowing(session, user
     )
 
 
-# --- M8: what a follow covers for alerts (D-42, D-43, D-45) ---------------------------------
+# --- title_followed_by_any_user_clause: the poll set's rule 2 (D-1414.3, EF-14) --------------
 
 MAX_AGE_DAYS = 365
 """`PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned here: the alert window rides on it, and a
-boundary test whose boundary moves with the environment is not a boundary test."""
+boundary test whose boundary moves with the environment is not a boundary test. No builder in
+this module takes it any more — it is the *poll's* own theatrical window that still does — and
+the cases below use it to prove exactly that."""
 
 
-def _covered(user_id, **overrides):
-    kwargs = {"user_id": user_id, "today": TODAY, "max_age_days": MAX_AGE_DAYS}
-    return covered_film_ids(**{**kwargs, **overrides})
+def _polled():
+    return select(Film.id).where(title_followed_by_any_user_clause())
 
 
-_EVERY_CREDIT_SHAPE = [
-    {"credit_type": "crew", "job": "Director", "department": "Directing"},
-    {"credit_type": "crew", "job": "Screenplay", "department": "Writing"},
-    {"credit_type": "cast", "credit_order": 0},
-    {"credit_type": "cast", "credit_order": 3},
-    {"credit_type": "cast", "credit_order": 5},
-    {"credit_type": "cast", "credit_order": None},
-    {"credit_type": "crew", "job": "Gaffer", "department": "Lighting"},
-]
-"""One credit of every shape the three deleted tiers used to sort between.
+async def test_a_film_anybody_follows_by_title_is_polled(session, user, make_user, make_film):
+    followed = await make_film(slug="followed", title="Followed")
+    other_film = await make_film(slug="other", title="Other")
+    other = await make_user(email="other@example.com")
+    await _follow(session, other, "title", str(followed.id))
 
-Kept as a list rather than collapsed to a single case because it is the whole content of EF-2:
-the rows at the bottom — a 6th-billed role, an unbilled one, a crew job that is neither
-directing nor writing — are exactly the ones `lead` and `major` declined, and a seed-grade
-term creeping back into any builder would show up here and nowhere else. `credit_order = None`
-is TMDB's long tail and must read as "unbilled", never as slot 0."""
-
-
-@pytest.mark.parametrize("credit", _EVERY_CREDIT_SHAPE)
-async def test_every_credit_of_a_followed_person_alerts(session, user, make_film, credit):
-    """EF-1 and EF-2: the follow is binary, so there is no cut between the credits a person
-    holds and the ones that reach their follower. This replaces D-43 and D-48's tier table."""
-    from tests.fixtures.catalog import add_credit
-
-    film = await make_film(slug="covered", title="Covered")
-    await add_credit(session, film, 525, **credit)
-    await _follow(session, user, "person", "525")
-
-    assert film.id in await _ids(session, _covered(user.id))
+    assert await _ids(session, _polled()) == {followed.id}
+    assert other_film.id not in await _ids(session, _polled())
 
 
 @pytest.mark.parametrize(
-    ("release_date", "status", "covered"),
+    ("release_date", "status"),
     [
-        (TODAY - timedelta(days=MAX_AGE_DAYS), "In Production", True),
-        (TODAY - timedelta(days=MAX_AGE_DAYS + 1), "In Production", False),
-        (None, "In Production", True),
-        (None, None, True),
-        (TODAY + timedelta(days=30), "Canceled", False),
-        (TODAY - timedelta(days=1), "Released", True),
-        (TODAY - timedelta(days=MAX_AGE_DAYS), "Released", True),
-        (TODAY - timedelta(days=MAX_AGE_DAYS + 1), "Released", False),
+        pytest.param(TODAY + timedelta(days=30), "Post Production", id="upcoming"),
+        pytest.param(TODAY - timedelta(days=1), "Released", id="just released"),
+        pytest.param(TODAY - timedelta(days=MAX_AGE_DAYS + 1), "Released", id="past the window"),
+        pytest.param(TODAY - timedelta(days=MAX_AGE_DAYS * 5), "Released", id="long gone"),
+        pytest.param(TODAY + timedelta(days=30), "Canceled", id="canceled"),
+        pytest.param(None, None, id="undated"),
     ],
 )
-async def test_the_alert_window_bounds_an_indirect_follow(
-    session, user, make_film, release_date, status, covered
+async def test_a_title_follow_is_polled_in_any_state_and_at_any_age(
+    session, user, make_film, release_date, status
 ):
-    """The window is inclusive at its far end — a film exactly `max_age_days` old is still
-    covered, one a day older is not, and an undated one always is — while `Canceled` drops the
-    film whatever its date says.
-
-    The `Released` cases are the ones to read twice (D-46): `Released` is **inside** the window
-    and rides the date bound exactly like any other status, because it is the state the
-    home-release beats land in. The window's status term is `ALERT_WINDOW_DEAD_STATUSES`, not
-    `TMDB_EXCLUDED_STATUSES` — `Released` being in the latter is what this pins as no longer
-    relevant here. Only `Canceled` is out."""
-    from tests.fixtures.catalog import add_credit
-
-    film = await make_film(slug="windowed", title="Windowed", release_date=release_date)
+    """The clause carries no window and no status term, because a title follow carries none
+    (EF-14). The `past the window` and `long gone` cases are the ones that changed: under
+    `covered_by_any_user_clause` a title follow was already unbounded, and what this pins is
+    that collapsing the four branches to one did not quietly acquire the bound the other three
+    needed."""
+    film = await make_film(slug="aged", title="Aged", release_date=release_date)
     film.status = status
     await session.commit()
-    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
-    await _follow(session, user, "person", "525")
+    await _follow(session, user, "title", str(film.id))
 
-    assert (film.id in await _ids(session, _covered(user.id))) is covered
+    assert await _ids(session, _polled()) == {film.id}
 
 
-async def test_a_released_film_is_covered_for_alerts_but_reaches_no_timeline(
-    session, user, make_film
+@pytest.mark.parametrize("entity_type", ["person", "company", "franchise"])
+async def test_an_entity_follow_polls_nothing(
+    session, user, make_film, make_collection, attach_companies, entity_type
 ):
-    """The two questions differ on purpose, and this pins the difference rather than assuming
-    it. One person follow, one recently-released film: the alert window holds it, because that
-    is where the `now_available` beat is about to land — and the timeline's film half holds
-    nothing at all now, because a person follow no longer reaches films (EF-3). What it reaches
-    is the film's attachment cards, and this film has none."""
+    """The narrowing EF-14 intends, pinned. `covered_by_any_user_clause` polled a film reached
+    only through a followed person, studio or franchise; an entity follow now delivers that
+    entity's attachment cards and never the film's other beats (EF-3), so a `now_available` or
+    `trailer` card for such a film would reach nobody and buying it would be work for no
+    reader.
+
+    The three attachments are real, as in `test_an_entity_follow_puts_no_film_in_the_title_filter`
+    next door: what is pinned is that being attached is not being waited on."""
     from tests.fixtures.catalog import add_credit
 
+    await make_collection(id=COLLECTION, name="A Franchise")
     film = await make_film(
-        slug="just-out", title="Just Out", release_date=TODAY - timedelta(days=30)
+        slug="indirect",
+        title="Indirect",
+        collection_id=COLLECTION,
+        release_date=TODAY + timedelta(days=30),
     )
-    film.status = "Released"
-    await session.commit()
-    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
-    await _follow(session, user, "person", "525")
+    await add_credit(session, film, DIRECTOR, credit_type="crew", job="Director")
+    await attach_companies(film, [(COMPANY, "A Studio")])
+    entity_id = {"person": DIRECTOR, "company": COMPANY, "franchise": COLLECTION}[entity_type]
+    await _follow(session, user, entity_type, str(entity_id))
 
-    assert await _ids(session, _covered(user.id)) == {film.id}
-    assert await _ids(session, _titles(user.id)) == set()
-    assert await _ids(session, _events(user.id)) == set()
+    assert await _ids(session, _polled()) == set()
 
 
-async def test_a_title_follow_covers_its_film_in_any_state(session, user, make_film):
-    """The window is the *indirect* branches'. The user asked for this film by name, and one
-    they added the week it came out is exactly the one they are waiting on the home release
-    of."""
-    film = await make_film(
-        slug="old", title="Old", release_date=TODAY - timedelta(days=MAX_AGE_DAYS * 5)
-    )
-    film.status = "Released"
-    await session.commit()
-    await _follow(session, user, "title", str(film.id))
-
-    assert await _ids(session, _covered(user.id)) == {film.id}
-
-
-async def test_the_watchlist_is_the_covered_set_minus_the_mutes(session, user, make_film):
-    covered = await make_film(slug="covered", title="Covered")
-    muted = await make_film(slug="muted", title="Muted")
-    await _follow(session, user, "title", str(covered.id))
-    await _follow(session, user, "title", str(muted.id))
-    session.add(WatchlistDismissal(user_id=user.id, film_id=muted.id))
-    await session.commit()
-
-    watchlist = watchlist_film_ids(user_id=user.id, today=TODAY, max_age_days=MAX_AGE_DAYS)
-    assert await _ids(session, _covered(user.id)) == {covered.id, muted.id}
-    assert await _ids(session, watchlist) == {covered.id}
-
-
-async def test_only_narrows_the_graph_to_one_follow(session, user, make_film):
-    """What the want/stop service asks: "does anything *else* cover this film?"."""
-    film = await make_film(slug="both", title="Both")
-    await _follow(session, user, "title", str(film.id))
-
-    assert await _ids(session, _covered(user.id, only=("title", str(film.id)))) == {film.id}
-    assert await _ids(session, _covered(user.id, only=("company", "1"))) == set()
-
-
-async def test_covering_follows_pairs_a_film_with_every_follow_that_reaches_it(
-    session, user, make_film
-):
-    """One pair per (film, follow), and exactly one even when the person holds two qualifying
-    credits on the film — a director who is also top-billed is one reason, not two."""
-    from tests.fixtures.catalog import add_credit
-
-    film = await make_film(slug="double", title="Double")
-    await add_credit(session, film, 525, credit_type="crew", job="Director", department="Directing")
-    await add_credit(session, film, 525, credit_type="cast", credit_order=0)
-    await _follow(session, user, "person", "525")
-    await _follow(session, user, "title", str(film.id))
-
-    rows = (
-        await session.execute(
-            covering_follows(user_id=user.id, today=TODAY, max_age_days=MAX_AGE_DAYS)
-        )
-    ).all()
-    assert sorted((row.film_id, row.entity_type) for row in rows) == sorted(
-        [(film.id, "person"), (film.id, "title")]
-    )
-
-
-async def test_covered_by_any_user_holds_while_one_uncovering_user_remains(
+async def test_one_user_unfollowing_leaves_another_users_poll_standing(
     session, user, make_user, make_film
 ):
-    """The provider poll's rule 2 (D-1414.3). The mute is per covering user: a film ten people
-    follow and one has muted is still owed a poll."""
+    """The clause asks the whole table, so a film two people follow keeps its poll when one of
+    them lets go — and loses it only when the last follow does."""
     other = await make_user(email="other@example.com")
     film = await make_film(slug="polled", title="Polled")
     await _follow(session, user, "title", str(film.id))
     await _follow(session, other, "title", str(film.id))
+    assert await _ids(session, _polled()) == {film.id}
 
-    clause = covered_by_any_user_clause(today=TODAY, max_age_days=MAX_AGE_DAYS)
-    polled = select(Film.id).where(clause)
-    assert await _ids(session, polled) == {film.id}
-
-    session.add(WatchlistDismissal(user_id=user.id, film_id=film.id))
+    await session.execute(sa_delete(Follow).where(Follow.user_id == user.id))
     await session.commit()
-    assert await _ids(session, polled) == {film.id}
+    assert await _ids(session, _polled()) == {film.id}
 
-    session.add(WatchlistDismissal(user_id=other.id, film_id=film.id))
+    await session.execute(sa_delete(Follow).where(Follow.user_id == other.id))
     await session.commit()
-    assert await _ids(session, polled) == set()
+    assert await _ids(session, _polled()) == set()
+
+
+async def test_a_non_uuid_title_follow_does_not_fail_the_poll_set(session, user, make_film):
+    """The shape guard, asked of the whole table rather than one user: one malformed row must
+    not abort a statement the entire provider poll is built from."""
+    film = await make_film(slug="followed", title="Followed")
+    await _follow(session, user, "title", "tt0816692")
+    await _follow(session, user, "title", str(film.id))
+
+    assert await _ids(session, _polled()) == {film.id}
 
 
 # --- followed_people (D-49, D-50, EF-2) ------------------------------------------------------
@@ -959,34 +897,17 @@ async def test_followed_people_skips_a_non_numeric_entity_id(session, user):
     assert await _ids(session, followed_people()) == {525}
 
 
-async def test_a_non_seed_credit_reaches_the_other_two_alert_builders(session, user, make_film):
+async def test_a_non_seed_credit_reaches_the_event_builder(session, user, make_film, attach_card):
     """`covering_follows` and `covered_by_any_user_clause` used to read the same
-    `_coverage_credit_clause`, and the poll set reading something the alerts do not is the
-    failure that kept them in one builder — so dropping that clause has to reach all three."""
-    from sqlalchemy import select as sa_select
-
-    from tests.fixtures.catalog import add_credit
-    from upmovies.app.follow_queries import covered_by_any_user_clause
-    from upmovies.catalog.models import Film as FilmModel
-
+    `_coverage_credit_clause` beside the timeline, and the poll set reading something the
+    alerts did not is the failure that kept them in one builder. Both are gone (EF-14), and
+    what survives of the rule is this: a person follow has no credit cut at all, so an
+    11th-billed role reaches its follower's cards exactly as a director's does."""
     film = await make_film(slug="minor", title="Minor", release_date=None)
-    await add_credit(session, film, 525, credit_type="cast", credit_order=11)
-    await _follow(session, user, "person", "525")
+    await attach_card(film)
+    await _follow(session, user, "person", str(DIRECTOR))
 
-    pairs = (
-        await session.execute(
-            covering_follows(user_id=user.id, today=TODAY, max_age_days=MAX_AGE_DAYS)
-        )
-    ).all()
-    assert [(r.film_id, r.entity_type, r.entity_id) for r in pairs] == [(film.id, "person", "525")]
-
-    polled = await _ids(
-        session,
-        sa_select(FilmModel.id).where(
-            covered_by_any_user_clause(today=TODAY, max_age_days=MAX_AGE_DAYS)
-        ),
-    )
-    assert film.id in polled
+    assert await _ids(session, _events(user.id)) != set()
 
 
 # --- followed_companies / followed_franchises (EF-4, D-1436.5) -------------------------------

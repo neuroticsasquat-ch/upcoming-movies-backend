@@ -142,9 +142,9 @@ async def entity_labels(
     does not hold simply has no key here; the caller renders it with nulls and keeps the row
     (D-40).
 
-    Takes the pairs rather than `Follow` rows because the watchlist asks the same question of
-    the *covering* follows it read as bare columns (`follow_queries.covering_follows`), and a
-    second grouped lookup spelled over there is how the two lists would come to label the same
+    Takes the pairs rather than `Follow` rows so a caller holding `(entity_type, entity_id)`
+    columns read straight out of a query can ask the same question without rehydrating them —
+    a second grouped lookup spelled elsewhere is how two lists would come to label the same
     person differently."""
     ids_by_type: dict[str, dict[int | UUID, list[str]]] = defaultdict(lambda: defaultdict(list))
     for entity_type, entity_id in entities:

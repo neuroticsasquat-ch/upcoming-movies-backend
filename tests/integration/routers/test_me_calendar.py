@@ -1,4 +1,5 @@
-"""`GET /me/calendar` — the release calendar narrowed to the caller's watchlist (D-34, D-39).
+"""`GET /me/calendar` — the my films calendar, narrowed to the caller's title follows (D-34,
+D-39, EF-14).
 
 The shape, paging and ordering are the public `/calendar`'s exactly, so the frontend can render
 both tabs through one component; the only thing that differs is which films. That set is the
@@ -11,11 +12,12 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import delete as sa_delete
 
 from tests.fixtures.ical import events, prop_dt, prop_text
 from tests.fixtures.public import ref
 from tests.fixtures.users import ENTITLED_UNTIL, _build_authed_client
-from upmovies.app.models import Follow, WatchlistDismissal
+from upmovies.app.models import Follow
 
 _FUTURE = datetime(2099, 7, 4, 0, 0, tzinfo=UTC)
 _LATER = datetime(2099, 9, 1, 0, 0, tzinfo=UTC)
@@ -24,12 +26,12 @@ _PAST = datetime(2000, 1, 1, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def watchlist(session):
-    """Put a film on a user's watchlist — which, since M8, is following it by title.
+def follow_film(session):
+    """Follow a film by title — the whole of what puts it on this calendar (EF-14).
 
-    Writes the row rather than posting to `/me/watchlist` because what is under test here is
-    the calendar's film set, and a fixture that went through the route would be testing the
-    want verb twice."""
+    Writes the row rather than posting to `/me/follows` because what is under test here is the
+    calendar's film set, and a fixture that went through the route would be testing the follow
+    verb twice."""
 
     async def _add(*, user, film, source: str = "manual") -> None:
         session.add(
@@ -48,7 +50,7 @@ def watchlist(session):
 @pytest.fixture
 async def make_entitled_client(session, make_user):
     """A second (third, …) signed-in subscriber, for the leakage tests. `entitled_client`
-    gives one; these tests need two watchlists to tell apart."""
+    gives one; these tests need two users to tell apart."""
     clients: list[AsyncClient] = []
 
     async def _make(*, email: str) -> AsyncClient:
@@ -76,13 +78,13 @@ async def test_me_calendar_requires_auth(client):
 
 
 async def test_me_calendar_is_403_for_an_unentitled_user(
-    authed_client, make_film, add_release_date, watchlist
+    authed_client, make_film, add_release_date, follow_film
 ):
-    # A populated watchlist, so the refusal is the gate and not an empty set: 403 rather than
+    # A followed film, so the refusal is the gate and not an empty set: 403 rather than
     # an empty collection is what lets the client render the D-41 locked panel (D-39).
     film = await make_film(slug="a-film", title="A Film")
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=authed_client.user, film=film)
+    await follow_film(user=authed_client.user, film=film)
 
     r = await authed_client.get("/me/calendar")
 
@@ -93,7 +95,7 @@ async def test_me_calendar_is_403_for_an_unentitled_user(
 # --- the envelope --------------------------------------------------------------------------
 
 
-async def test_an_empty_watchlist_is_an_empty_page_not_an_error(entitled_client):
+async def test_following_no_films_is_an_empty_page_not_an_error(entitled_client):
     r = await entitled_client.get("/me/calendar")
 
     assert r.status_code == 200
@@ -103,8 +105,8 @@ async def test_an_empty_watchlist_is_an_empty_page_not_an_error(entitled_client)
 # --- which films ---------------------------------------------------------------------------
 
 
-async def test_only_the_callers_watchlist_reaches_their_calendar(
-    entitled_client, make_entitled_client, make_film, add_release_date, watchlist
+async def test_only_the_callers_own_follows_reach_their_calendar(
+    entitled_client, make_entitled_client, make_film, add_release_date, follow_film
 ):
     other = await make_entitled_client(email="other@example.com")
     mine = await make_film(slug="mine", title="My Film")
@@ -112,8 +114,8 @@ async def test_only_the_callers_watchlist_reaches_their_calendar(
     unwatched = await make_film(slug="nobodys", title="Nobody's Film")
     for film in (mine, theirs, unwatched):
         await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=entitled_client.user, film=mine)
-    await watchlist(user=other.user, film=theirs)
+    await follow_film(user=entitled_client.user, film=mine)
+    await follow_film(user=other.user, film=theirs)
 
     ours = (await entitled_client.get("/me/calendar")).json()
     yours = (await other.get("/me/calendar")).json()
@@ -122,11 +124,11 @@ async def test_only_the_callers_watchlist_reaches_their_calendar(
     assert _refs(yours) == [ref(theirs)]
 
 
-async def test_a_film_reached_through_a_director_follow_is_on_the_calendar(
+async def test_a_film_reached_only_through_a_director_follow_is_not_on_the_calendar(
     entitled_client, session, make_film, add_release_date, attach_credits
 ):
-    # M8 (D-42): the watchlist is what the user's follows cover, so following a director puts
-    # their in-window films here. This is the assertion that used to say the opposite.
+    # EF-14, the cutover: an entity follow delivers that entity's attachment cards, not a place
+    # on a date list (EF-3). This is the assertion that used to say the opposite, twice over.
     film = await make_film(slug="followed", title="Followed Film")
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
     await attach_credits(film, crew=[{"id": 900, "name": "A Director", "job": "Director"}])
@@ -140,14 +142,14 @@ async def test_a_film_reached_through_a_director_follow_is_on_the_calendar(
     )
     await session.commit()
 
-    assert _refs((await entitled_client.get("/me/calendar")).json()) == [ref(film)]
+    assert _refs((await entitled_client.get("/me/calendar")).json()) == []
 
 
-async def test_a_released_film_a_company_follow_reaches_is_on_the_calendar(
+async def test_a_released_film_a_company_follow_reaches_is_not_on_the_calendar(
     entitled_client, session, make_film, add_release_date, attach_companies
 ):
-    # D-46: `Released` is inside the alert window now, so an indirectly covered film keeps its
-    # place on the calendar for the home-release dates that are still to come.
+    # The same rule at the other end of the alert window: the window bounded what an *indirect*
+    # follow covered, and there is no indirect coverage left for it to bound (EF-14).
     film = await make_film(
         slug="opened",
         title="Opened Film",
@@ -166,39 +168,58 @@ async def test_a_released_film_a_company_follow_reaches_is_on_the_calendar(
     )
     await session.commit()
 
+    assert _refs((await entitled_client.get("/me/calendar")).json()) == []
+
+
+async def test_a_title_follow_puts_a_long_released_film_on_the_calendar(
+    entitled_client, make_film, add_release_date, follow_film
+):
+    # The other half of EF-14: a title follow carries no window and no status term at all, so
+    # the film the user named years ago keeps its place for the home-release date still to come.
+    film = await make_film(
+        slug="opened",
+        title="Opened Film",
+        status="Released",
+        release_date=date.today() - timedelta(days=300),
+    )
+    await add_release_date(film=film, release_date=_FUTURE, release_type=4)
+    await follow_film(user=entitled_client.user, film=film)
+
     assert _refs((await entitled_client.get("/me/calendar")).json()) == [ref(film)]
 
 
-async def test_a_muted_film_leaves_the_calendar(
-    entitled_client, session, make_film, add_release_date, watchlist
+async def test_unfollowing_takes_a_film_off_the_calendar(
+    entitled_client, session, make_film, add_release_date, follow_film
 ):
-    # D-45: a mute silences the film everywhere the watchlist is read, and this page is one of
-    # them. The follow it was reached through is untouched.
-    film = await make_film(slug="muted", title="Muted Film")
+    # EF-14: unfollowing is the only way a film leaves this page now — the mute that used to do
+    # it (D-45) went with the watchlist it corrected.
+    film = await make_film(slug="dropped", title="Dropped Film")
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=entitled_client.user, film=film)
-    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=film.id))
+    await follow_film(user=entitled_client.user, film=film)
+    assert _refs((await entitled_client.get("/me/calendar")).json()) == [ref(film)]
+
+    await session.execute(sa_delete(Follow).where(Follow.user_id == entitled_client.user.id))
     await session.commit()
 
     assert _refs((await entitled_client.get("/me/calendar")).json()) == []
 
 
-async def test_a_watchlist_film_with_no_slug_is_absent(
-    entitled_client, make_film, add_release_date, watchlist
+async def test_a_followed_film_with_no_slug_is_absent(
+    entitled_client, make_film, add_release_date, follow_film
 ):
     # No page to link to, as on every other public surface.
     film = await make_film(slug=None, title="No Page Film")
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=entitled_client.user, film=film)
+    await follow_film(user=entitled_client.user, film=film)
 
     assert _refs((await entitled_client.get("/me/calendar")).json()) == []
 
 
 async def test_the_public_calendars_noise_cuts_do_not_apply(
-    entitled_client, client, make_film, add_release_date, watchlist
+    entitled_client, client, make_film, add_release_date, follow_film
 ):
     # The popularity, runtime and adult filters keep noise off a public listing. A film the
-    # user put on their own watchlist is not noise to them (D-1411.2) — and applying the cuts
+    # user followed by name is not noise to them (D-1411.2) — and applying the cuts
     # here would make this page disagree with the same user's subscribed `.ics`.
     #
     # One film per cut rather than one film tripping all three: a single film would be held off
@@ -209,7 +230,7 @@ async def test_the_public_calendars_noise_cuts_do_not_apply(
     adult = await make_film(slug="adult", title="Adult Film", popularity=10.0, adult=True)
     for film in (unpopular, short, adult):
         await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-        await watchlist(user=entitled_client.user, film=film)
+        await follow_film(user=entitled_client.user, film=film)
 
     assert set(_refs((await entitled_client.get("/me/calendar")).json())) == {
         ref(unpopular),
@@ -222,26 +243,26 @@ async def test_the_public_calendars_noise_cuts_do_not_apply(
 # --- the window ----------------------------------------------------------------------------
 
 
-async def test_a_watchlist_film_whose_only_date_is_past_is_absent(
-    entitled_client, make_film, add_release_date, watchlist
+async def test_a_followed_film_whose_only_date_is_past_is_absent(
+    entitled_client, make_film, add_release_date, follow_film
 ):
     # Upcoming-only, like the public calendar and unlike the `.ics` feed's past window
     # (D-1411.1): the page opens on what is coming, not on last year.
     film = await make_film(slug="released", title="Released Film")
     await add_release_date(film=film, release_date=_PAST, release_type=3)
-    await watchlist(user=entitled_client.user, film=film)
+    await follow_film(user=entitled_client.user, film=film)
 
     assert _refs((await entitled_client.get("/me/calendar")).json()) == []
 
 
 async def test_a_past_limited_date_drops_while_the_future_wide_date_stays(
-    entitled_client, make_film, add_release_date, watchlist
+    entitled_client, make_film, add_release_date, follow_film
 ):
     # The buckets are independent subjects: one being past does not take the other with it.
     film = await make_film(slug="two-buckets", title="Two Buckets")
     await add_release_date(film=film, release_date=_PAST, release_type=2)
     await add_release_date(film=film, release_date=_FUTURE, release_type=3)
-    await watchlist(user=entitled_client.user, film=film)
+    await follow_film(user=entitled_client.user, film=film)
 
     body = (await entitled_client.get("/me/calendar")).json()
 
@@ -252,7 +273,7 @@ async def test_a_past_limited_date_drops_while_the_future_wide_date_stays(
 
 
 async def test_the_dates_are_the_ics_feeds_dates(
-    entitled_client, client, make_film, add_release_date, watchlist
+    entitled_client, client, make_film, add_release_date, follow_film
 ):
     """The claim the ticket exists to protect: the on-screen calendar and the subscribed one
     carry the same subjects on the same days, including the governing-date collapse."""
@@ -266,7 +287,7 @@ async def test_the_dates_are_the_ics_feeds_dates(
     # earliest in the subject (NEU-1206), and both surfaces must collapse it the same way.
     await add_release_date(film=film, release_date=_LATEST, release_type=5)
     await add_release_date(film=film, release_date=_LATEST - timedelta(days=7), release_type=5)
-    await watchlist(user=entitled_client.user, film=film)
+    await follow_film(user=entitled_client.user, film=film)
 
     token = (await entitled_client.get("/me/settings")).json()["ical_token"]
     feed = (await client.get(f"/calendar/{token}.ics")).text
@@ -295,7 +316,7 @@ async def test_the_dates_are_the_ics_feeds_dates(
 
 
 async def test_paging_counts_dates_not_film_rows(
-    entitled_client, make_film, add_release_date, watchlist
+    entitled_client, make_film, add_release_date, follow_film
 ):
     soonest = await make_film(slug="soonest", title="Soonest")
     alongside = await make_film(slug="alongside", title="Alongside")
@@ -308,7 +329,7 @@ async def test_paging_counts_dates_not_film_rows(
         (last, _LATEST),
     ):
         await add_release_date(film=film, release_date=when, release_type=3)
-        await watchlist(user=entitled_client.user, film=film)
+        await follow_film(user=entitled_client.user, film=film)
 
     page_one = (await entitled_client.get("/me/calendar?limit=2")).json()
     page_two = (await entitled_client.get("/me/calendar?limit=2&offset=2")).json()
@@ -320,7 +341,7 @@ async def test_paging_counts_dates_not_film_rows(
 
 
 async def test_ordering_within_a_date_is_the_public_routes(
-    entitled_client, make_film, add_release_date, watchlist
+    entitled_client, make_film, add_release_date, follow_film
 ):
     # wide, limited, digital, physical; within a bucket, more popular first.
     wide = await make_film(slug="wide", title="Wide", popularity=1.0)
@@ -336,7 +357,7 @@ async def test_ordering_within_a_date_is_the_public_routes(
         (physical, 5),
     ):
         await add_release_date(film=film, release_date=_FUTURE, release_type=release_type)
-        await watchlist(user=entitled_client.user, film=film)
+        await follow_film(user=entitled_client.user, film=film)
 
     body = (await entitled_client.get("/me/calendar")).json()
 
@@ -357,7 +378,7 @@ async def test_an_item_carries_the_public_routes_decoration(
     client,
     make_film,
     add_release_date,
-    watchlist,
+    follow_film,
     attach_credits,
     attach_genres,
 ):
@@ -378,7 +399,7 @@ async def test_an_item_carries_the_public_routes_decoration(
         crew=[{"id": 3, "name": "The Director", "job": "Director"}],
     )
     await attach_genres(film, [(18, "Drama"), (35, "Comedy")])
-    await watchlist(user=entitled_client.user, film=film)
+    await follow_film(user=entitled_client.user, film=film)
 
     (mine,) = (await entitled_client.get("/me/calendar")).json()["items"]
     (public,) = (await client.get("/calendar")).json()["items"]

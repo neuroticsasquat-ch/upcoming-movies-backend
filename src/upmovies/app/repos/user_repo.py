@@ -93,6 +93,6 @@ async def set_entitled_until(
     One setter for all three because they are one write: a grant and an extension differ only
     in what was there before, and a revoke is `None` (D-38 — a past timestamp ends a grant just
     as well, and nothing here deletes a row). Deliberately touches nothing else: follows,
-    mutes, settings and the iCal token survive a revoke untouched, so a later grant restores
-    the account exactly as it was (D-40)."""
+    settings and the iCal token survive a revoke untouched, so a later grant restores the
+    account exactly as it was (D-40)."""
     user.entitled_until = entitled_until

@@ -1,4 +1,4 @@
-"""The `alert` template's copy (NEU-1380): what a watchlist alert actually says, and the two
+"""The `alert` template's copy (NEU-1380): what a follow alert actually says, and the two
 shapes it has to render — one film, and several in one mail.
 
 Beside `test_templates.py` rather than inside it because that file asserts the *rendering
@@ -52,7 +52,7 @@ def test_several_alerts_in_one_mail_count_themselves_in_the_subject():
     naming one of them in the subject would misrepresent the other two."""
     envelope = _alert([DUNE, HEAT])
 
-    assert envelope.subject == "2 updates from your watchlist"
+    assert envelope.subject == "2 updates from your follows"
 
 
 def test_every_item_carries_its_title_summary_and_film_link_in_both_parts():
@@ -93,8 +93,8 @@ def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
 
     assert SETTINGS_URL in envelope.text
     assert SETTINGS_URL in envelope.html
-    assert "watchlist" in envelope.text
-    assert "watchlist" in envelope.html
+    assert "you follow these films" in envelope.text
+    assert "you follow these films" in envelope.html
 
 
 def test_display_name_is_optional_the_way_every_other_template_makes_it():
@@ -116,6 +116,6 @@ def test_a_title_with_markup_in_it_escapes_in_html_and_not_in_text():
 def test_an_alert_with_no_items_is_a_mail_with_nothing_to_say():
     """Not reachable through `alert_sender.send_batch`, which returns early on an empty batch —
     asserted so that a future caller which does not gets a loud failure rather than a mail
-    saying '0 updates from your watchlist'."""
+    saying '0 updates from your follows'."""
     with pytest.raises(MailError):
         _alert([])

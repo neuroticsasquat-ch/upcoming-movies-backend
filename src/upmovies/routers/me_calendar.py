@@ -1,9 +1,10 @@
-"""`GET /me/calendar`: the release calendar narrowed to the caller's watchlist (D-34, D-39).
+"""`GET /me/calendar`: the **my films calendar** (D-34, D-39) — the release calendar narrowed
+to the films the caller follows by title.
 
 `CalendarResponse` exactly as `/calendar` answers it, with the same `limit`/`offset` bounds and
-the same date-paging, so the tabbed calendar page can render "my watchlist" and "all releases"
+the same date-paging, so the tabbed calendar page can render "My films" and "All releases"
 through one component and one set of grouping helpers. What differs is the film set, and only
-that: the caller's computed watchlist (M8), drawn the way the subscribed `.ics` feed draws it.
+that: the caller's title follows (EF-14), drawn the way the subscribed `.ics` feed draws them.
 
 Shaped like `routers/timeline.py` rather than living beside `/calendar` in `routers/public.py`:
 the gate is applied once at the router, so a second `/me/calendar/*` route added later cannot
@@ -35,9 +36,7 @@ async def get_my_calendar(
     user: User = Depends(entitled),
     session: AsyncSession = Depends(get_session),
 ) -> CalendarResponse:
-    """An empty watchlist, or one with nothing upcoming, is a 200 with no items — never an
+    """Following no films, or none with anything upcoming, is a 200 with no items — never an
     error. The refusals are the gate's: 401 with no session, 403 `entitlement_required`
     without a live grant (D-39)."""
-    return await service.get_watchlist_calendar(
-        session, user_id=user.id, limit=limit, offset=offset
-    )
+    return await service.get_my_films_calendar(session, user_id=user.id, limit=limit, offset=offset)

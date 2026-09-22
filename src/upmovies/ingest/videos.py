@@ -9,26 +9,19 @@ create. They stay two passes rather than one loop because a TMDB outage on one e
 not cost the other its whole pass — the abort guards are per phase, the way the sweep's are.
 
 **The scoped set is `providers.load_poll_set`, unchanged**, and it already carries D-35's
-"plus films somebody is waiting on": that set's second rule is the computed watchlist asked of
-every user at once (`follow_queries.covered_by_any_user_clause`, D-1414.3), which has no
-release-date floor, so a followed film two years from release is in it. This matters more here
-than it does for providers — a trailer precedes a theatrical date by months, so for videos the
+"plus films somebody is waiting on": that set's second rule is "somebody follows this film by
+title", asked of every user at once (`follow_queries.title_followed_by_any_user_clause`,
+D-1414.3, EF-14), which has no release-date floor and no ceiling, so a followed film two years
+from release is in it and so is one that came out last year. This matters more here than it
+does for providers — a trailer precedes a theatrical date by months, so for videos the
 followed-but-unreleased film is the *typical* subject rather than the exception, and the poll
 would be pointless without it.
 
-M8 widened that rule to reach a film followed only through a **person, company or franchise**,
-which the previous note said it could not. That was the D-13 derivation's limitation, and there
-is no derivation any more: a person follow covers every credit that person holds (EF-2), a
-company follow its films, a franchise follow its collection. So a followed director's next film
-is polled for its trailer now, which is the beat this poll exists to catch. What keeps that
-from costing a back catalogue is the alert window (`catalog.queries.alert_window_clause`)
-bounding the three indirect branches — the whole bound, now that EF-1 has taken the coverage
-tier that used to narrow the person one — and it is bounded in the same shape for the provider
-poll beside it, because the two passes share the one selection query on purpose. That window
-ends at `Canceled` rather than at `Released` (D-46), so a released film a person follow reaches
-is polled until the window's far end: the trailer that goes up after a film opens, and the
-streaming debut beside it, are exactly what this poll was missing while `Released` cut the
-film out.
+EF-14 narrowed that rule back to title follows. A film reached only through a followed person,
+company or franchise is no longer polled for its trailer, because an entity follow delivers
+that entity's attachment cards and never the film's other beats (EF-3): the trailer card would
+be published for a film whose only interested party cannot see it. A user who wants a director's
+next film's trailer follows the film — which is what the attach card they *do* get is for.
 
 **First observation is a baseline, never an event** (ADR-0014). The marker is
 `film.videos_observed_at`, not "does this film have ledger rows": the ordinary first read of an

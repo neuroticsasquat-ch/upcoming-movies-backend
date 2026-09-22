@@ -137,7 +137,7 @@ async def test_a_shared_browser_moves_the_registration_to_the_second_user(
     entitled_client, session, configured, make_user
 ):
     """One browser profile is one endpoint. When a second account subscribes from it the row
-    has to move: two rows would push the first user's watchlist alerts to whoever is signed in
+    has to move: two rows would push the first user's alerts to whoever is signed in
     now, and a notification is read on a lock screen by whoever is holding the phone."""
     await entitled_client.post("/me/push", json=_subscribe_body())
     other = await make_user(email="other@example.com", entitled_until=ENTITLED_UNTIL)

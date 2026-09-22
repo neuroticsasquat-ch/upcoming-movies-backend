@@ -246,12 +246,114 @@ async def test_list_does_not_require_csrf_header(entitled_client):
     assert r.status_code == 200
 
 
-# --- what a follow covers for alerts (D-42, D-43) -------------------------------------------
+# --- headline_release on title rows (EF-14, EF-15) ------------------------------------------
 
 
-async def test_following_a_director_puts_their_films_on_the_watchlist(entitled_client, session):
-    """No derivation, no second row: the watchlist is a query over the follow that was just
-    made, so the film is on the list by the time the client asks (D-42)."""
+async def test_a_title_row_carries_the_films_headline_release(entitled_client, session):
+    """EF-14: the follows page shows a followed film's date, from the one batch query every
+    film row on this site reads (`catalog.headline_release`). The row that used to carry it was
+    the watchlist's; this is where it lives now."""
+    from datetime import UTC, date, datetime
+
+    from upmovies.catalog.models import FilmReleaseDate
+
+    film = await add_film(session, tmdb_id=560, release_date=date(2099, 1, 1))
+    session.add(
+        FilmReleaseDate(
+            film_id=film.id,
+            iso_3166_1="US",
+            release_type=3,
+            release_date=datetime(2099, 3, 4, tzinfo=UTC),
+        )
+    )
+    await session.commit()
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+
+    rows = (await entitled_client.get("/me/follows")).json()["items"]
+    assert [r["headline_release"] for r in rows] == [
+        {"date": "2099-03-04", "kind": "upcoming", "country": "US", "bucket": "wide"}
+    ]
+
+
+async def test_the_follow_button_answers_with_the_same_date_the_list_does(entitled_client, session):
+    """One row, one truth. The film page follows through this route and reconciles its cache
+    from the response (NEU-1405), so a write that answered `null` while `GET /me/follows`
+    answered with a real date would render "No date yet" on the film the user just followed."""
+    from datetime import UTC, date, datetime
+
+    from upmovies.catalog.models import FilmReleaseDate
+
+    film = await add_film(session, tmdb_id=562, release_date=date(2099, 1, 1))
+    session.add(
+        FilmReleaseDate(
+            film_id=film.id,
+            iso_3166_1="US",
+            release_type=3,
+            release_date=datetime(2099, 3, 4, tzinfo=UTC),
+        )
+    )
+    await session.commit()
+
+    written = await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+    assert written.status_code == 201
+
+    listed = (await entitled_client.get("/me/follows")).json()["items"]
+    assert written.json()["headline_release"] == listed[0]["headline_release"]
+    assert written.json()["headline_release"]["date"] == "2099-03-04"
+
+
+async def test_a_title_row_with_no_displayable_date_carries_null(entitled_client, session):
+    """The absence is a null, not a missing key: a film with no displayable release row and no
+    primary date has no headline release, and the page renders "No date yet"."""
+    film = await add_film(session, tmdb_id=561, release_date=None)
+    await session.commit()
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+
+    rows = (await entitled_client.get("/me/follows")).json()["items"]
+    assert [r["headline_release"] for r in rows] == [None]
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "entity_id"),
+    [("person", "525"), ("company", "711"), ("franchise", "10")],
+)
+async def test_an_entity_row_carries_no_headline_release(
+    entitled_client, session, entity_type, entity_id
+):
+    """EF-14: only a film has a date worth leading with. Answering a person row with, say, the
+    next release they are credited on would be the indirect reach this project has just taken
+    away, smuggled back in as a column."""
+    from upmovies.catalog.models import Collection, Person, ProductionCompany
+
+    session.add_all(
+        [
+            Person(id=525, name="Christopher Nolan"),
+            ProductionCompany(id=711, name="A Studio"),
+            Collection(id=10, name="A Franchise"),
+        ]
+    )
+    await session.commit()
+
+    await entitled_client.post(
+        "/me/follows", json={"entity_type": entity_type, "entity_id": entity_id}
+    )
+
+    rows = (await entitled_client.get("/me/follows")).json()["items"]
+    assert [r["headline_release"] for r in rows] == [None]
+
+
+async def test_following_a_director_puts_no_film_on_the_list(entitled_client, session):
+    """EF-14 and EF-3, the cutover, from the route the frontend actually reads. A person follow
+    is one row naming a person — it does not put that person's films anywhere, and there is no
+    longer an endpoint that would list them."""
     from datetime import date
 
     from upmovies.catalog.models import FilmCredit, Person
@@ -275,101 +377,22 @@ async def test_following_a_director_puts_their_films_on_the_watchlist(entitled_c
         "/me/follows", json={"entity_type": "person", "entity_id": "525"}
     )
     assert r.status_code == 201
-    assert "coverage" not in r.json()
 
-    items = (await entitled_client.get("/me/watchlist")).json()["items"]
-    assert [(i["film"]["title"], i["followed"], i["muted"]) for i in items] == [
-        (film.title, False, False)
-    ]
-    assert items[0]["covered_by"] == [
-        {"entity_type": "person", "entity_id": "525", "name": "Christopher Nolan"}
-    ]
+    rows = (await entitled_client.get("/me/follows")).json()["items"]
+    assert [(r["entity_type"], r["entity_id"]) for r in rows] == [("person", "525")]
 
 
-async def test_unfollowing_takes_the_film_off_the_list_again(entitled_client, session):
-    """The other direction the materialised list could never do: nothing deleted a derived item
-    when its follow went (ADR-0018), and now there is nothing to delete."""
-    from datetime import date
-
-    from upmovies.catalog.models import Collection
-
-    session.add(Collection(id=10, name="A Franchise"))
-    film = await add_film(session, tmdb_id=552, release_date=date(2099, 1, 1), collection_id=10)
-    await session.commit()
-
-    await entitled_client.post("/me/follows", json={"entity_type": "franchise", "entity_id": "10"})
-    assert [
-        i["film"]["id"] for i in (await entitled_client.get("/me/watchlist")).json()["items"]
-    ] == [str(film.id)]
-
-    r = await entitled_client.delete("/me/follows/franchise/10")
-    assert r.status_code == 204
-    assert (await entitled_client.get("/me/watchlist")).json()["items"] == []
+@pytest.mark.parametrize("path", ["/me/watchlist", "/me/watchlist/"])
+async def test_the_watchlist_routes_are_gone(entitled_client, path):
+    """EF-14: `GET`, `POST` and `DELETE /me/watchlist` are removed outright, not left answering
+    an empty list — a client still calling them should find out, and the M3 frontend ticket is
+    what stops calling them."""
+    assert (await entitled_client.get(path)).status_code == 404
+    assert (await entitled_client.post(path, json={"film_id": str(uuid4())})).status_code == 404
 
 
-async def test_a_mute_survives_the_follow_that_reached_the_film(entitled_client, session):
-    """Stop → unfollow → follow something else that reaches the same film. The mute is still on
-    file, so the film stays silent: D-40 keeps it, and un-muting is the user's to do."""
-    from datetime import date
-
-    from upmovies.catalog.models import Collection
-
-    session.add(Collection(id=11, name="Another Franchise"))
-    film = await add_film(session, tmdb_id=553, release_date=date(2099, 1, 1), collection_id=11)
-    await session.commit()
-
-    await entitled_client.post(
-        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
-    )
-    assert len((await entitled_client.get("/me/watchlist")).json()["items"]) == 1
-
-    # Nothing else covers it yet, so stopping deletes the title follow and answers 204.
-    assert (await entitled_client.delete(f"/me/watchlist/{film.id}")).status_code == 204
-
-    await entitled_client.post(
-        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
-    )
-    items = (await entitled_client.get("/me/watchlist")).json()["items"]
-    assert [i["muted"] for i in items] == [False]
-
-    # Now with a mute on file: stop while a franchise follow also covers it, then unfollow the
-    # title and reach the film again through the franchise.
-    await entitled_client.post("/me/follows", json={"entity_type": "franchise", "entity_id": "11"})
-    assert (await entitled_client.delete(f"/me/watchlist/{film.id}")).status_code == 200
-    items = (await entitled_client.get("/me/watchlist")).json()["items"]
-    assert [i["muted"] for i in items] == [True]
-
-
-async def test_following_a_writer_covers_the_film_outright(entitled_client, session):
-    """What the tier used to gate (D-43), and no longer does (EF-1, EF-2). A writing credit is
-    not `lead`, so this film only reached the watchlist once the user widened the follow; a
-    binary follow puts it there on the one POST."""
-    from datetime import date
-
-    from upmovies.catalog.models import FilmCredit, Person
-
-    film = await add_film(session, tmdb_id=554, release_date=date(2099, 1, 1))
-    session.add(Person(id=488, name="A Writer"))
-    await session.flush()
-    session.add(
-        FilmCredit(
-            credit_id="c-554-488",
-            film_id=film.id,
-            person_id=488,
-            credit_type="crew",
-            job="Screenplay",
-            department="Writing",
-        )
-    )
-    await session.commit()
-
-    r = await entitled_client.post(
-        "/me/follows", json={"entity_type": "person", "entity_id": "488"}
-    )
-    assert r.status_code == 201
-
-    items = (await entitled_client.get("/me/watchlist")).json()["items"]
-    assert [i["film"]["title"] for i in items] == [film.title]
+async def test_the_watchlist_delete_route_is_gone(entitled_client):
+    assert (await entitled_client.delete(f"/me/watchlist/{uuid4()}")).status_code == 404
 
 
 @pytest.mark.parametrize("entity_type", ["person", "company", "franchise", "title"])

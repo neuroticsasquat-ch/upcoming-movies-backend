@@ -165,7 +165,7 @@ async def test_a_films_credits_read_director_then_seed_grade_then_the_rest(
 async def test_a_row_cites_the_date_the_film_page_shows(
     client, session, make_person, make_film, add_release_date
 ):
-    """`headline_release`, not `catalog.film.release_date` — the watchlist row's rule
+    """`headline_release`, not `catalog.film.release_date` — the film row's rule
     (NEU-1397), inherited by sharing its shape rather than restated."""
     await make_person(id=525, name="Christopher Nolan")
     film = await make_film(slug="dated", title="Dated", release_date=TODAY + timedelta(days=30))

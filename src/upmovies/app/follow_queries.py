@@ -26,11 +26,16 @@ the two grains itself; the notify pass OR-s them in its own statement. Reusing t
 rather than restating the rule is the point — a digest that quietly covered less than the
 timeline it summarises is the drift this module exists to prevent.
 
-**An entity follow has no window and no in-play term.** There is nothing to bound: it selects
-events, published now, one per attachment. The alert window survives below for the *other*
-question — `covered_film_ids` and what is left of the computed watchlist (D-42, D-43), which
-NEU-1439 deletes with its last callers. Mutes are honoured inside both new builders until that
-ticket drops `app.watchlist_dismissal`.
+**Neither kind of follow has a window, an in-play term or a mute** (EF-14). An entity follow
+selects events, published now, one per attachment, so there is nothing to bound; a title follow
+selects the film the user named, in any state and at any age. The alert window is gone from this
+module with `covered_film_ids` and the computed watchlist it fed (D-42, D-43). It survives in
+`catalog.queries` for the one question that is still about films and dates — which films an
+entity page lists as recently released, and which an import may propose (EF-21) — and the
+provider poll's own date window is rule 1's, spelled in `ingest.providers` and never this
+module's. `app.watchlist_dismissal` is dropped, so there
+is no set that subtracts: the correction to a list of titles you followed by name is unfollowing
+one.
 
 **A followed person is matched to a card by normalized name, in SQL (D-1437.3).**
 `Event.subject_key` carries `normalize_name(person.name)` tokens and never person ids, and the
@@ -49,13 +54,11 @@ timeline would 500, and the batch passes would fail for every user over one bad 
 the cast means the WHERE (the type filter and the shape guard) has already run when it happens.
 """
 
-from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import (
     Integer,
     Select,
-    and_,
     any_,
     cast,
     false,
@@ -70,7 +73,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Subquery
 
-from upmovies.app.models import Follow, WatchlistDismissal
+from upmovies.app.models import Follow
 from upmovies.catalog.models import (
     Film,
     FilmCredit,
@@ -78,7 +81,6 @@ from upmovies.catalog.models import (
     FilmProductionCompany,
     Person,
 )
-from upmovies.catalog.queries import alert_window_clause
 from upmovies.news.catalog_events import (
     CANCELED_EVENT_TYPE,
     COLLECTION_EVENT_TYPES,
@@ -170,15 +172,6 @@ def followed_film_uuids(user_id: UUID, *, entity_id: str | None = None) -> Selec
     return stmt if entity_id is None else stmt.where(Follow.entity_id == entity_id)
 
 
-def muted_film_ids(user_id: UUID) -> Select[tuple[UUID]]:
-    """`SELECT film_id` for every film this user has muted (D-45).
-
-    The one set that *subtracts*. Written to be used as `Film.id.not_in(muted_film_ids(u))` —
-    or `Event.film_id.not_in(...)`, which is safe because `news.event.film_id` is NOT NULL and
-    a `NOT IN` over a nullable column would drop every row instead."""
-    return select(WatchlistDismissal.film_id).where(WatchlistDismissal.user_id == user_id)
-
-
 def _followed_by_anyone(entity_type: str) -> Select[tuple[int]]:
     """`SELECT DISTINCT` the TMDB ids **somebody** follows under one integer-keyed type.
 
@@ -250,36 +243,14 @@ def followed_franchises() -> Select[tuple[int]]:
     return _followed_by_anyone("franchise")
 
 
-def _int_follows(
-    entity_type: str, *, user_id: UUID | None = None, entity_id: str | None = None
-) -> Subquery:
-    """Follows of one integer-keyed type, with `entity_id` cast out as `key` and the whole row
-    beside it — `user_id`, `entity_id`, `created_at` — for the branches that need more than the
-    id.
-
-    `user_id` is optional because `covered_by_any_user_clause` asks the same question of the
-    whole table: the provider poll wants "does *anybody* cover this film", and spelling those
-    branches a second time is how they would come to disagree with the per-user ones. The cast
-    is in the SELECT list, guarded in the WHERE, per the module docstring."""
-    stmt = select(
-        cast(Follow.entity_id, Integer).label("key"),
-        Follow.user_id.label("user_id"),
-        Follow.entity_id.label("entity_id"),
-        Follow.created_at.label("created_at"),
-    ).where(
-        Follow.entity_type == entity_type,
-        Follow.entity_id.regexp_match(_INT_ID_PATTERN),
-    )
-    if user_id is not None:
-        stmt = stmt.where(Follow.user_id == user_id)
-    if entity_id is not None:
-        stmt = stmt.where(Follow.entity_id == entity_id)
-    return stmt.subquery()
-
-
 def _title_follows(*, user_id: UUID | None = None) -> Subquery:
-    """Title follows, with the film UUID cast out as `key`. `_int_follows` for the one type
-    whose id is not an integer, and so needs its own pattern and its own cast."""
+    """Title follows, with the film UUID cast out as `key` and the whole row beside it.
+
+    The one follow type whose id is not an integer, so it needs its own pattern and its own
+    cast. `user_id` is optional because `title_followed_by_any_user_clause` asks the same
+    question of the whole table: the provider poll wants "is *anybody* waiting on this film",
+    and spelling that branch a second time is how it would come to disagree with the per-user
+    one."""
     stmt = select(
         cast(Follow.entity_id, PGUUID(as_uuid=True)).label("key"),
         Follow.user_id.label("user_id"),
@@ -294,44 +265,8 @@ def _title_follows(*, user_id: UUID | None = None) -> Subquery:
     return stmt.subquery()
 
 
-def _not_muted(user_id_column: ColumnElement[UUID]) -> ColumnElement[bool]:
-    """ "this follow's owner has not muted the film in the enclosing query" — the per-user half
-    of `covered_by_any_user_clause`, correlated to the outer `catalog.film`."""
-    return ~(
-        select(literal(1))
-        .select_from(WatchlistDismissal)
-        .where(
-            WatchlistDismissal.user_id == user_id_column,
-            WatchlistDismissal.film_id == Film.id,
-        )
-        .exists()
-    )
-
-
-def _person_film_ids(*, user_id: UUID, entity_id: str | None = None) -> Select[tuple[UUID]]:
-    """`SELECT film_credit.film_id` for every film this user's person follows reach (EF-2).
-
-    The join is the whole predicate: a binary follow has no cut to apply, so an unbilled cast
-    entry and a third-unit crew job are in, which is what "every credit" means.
-
-    The alert side's builder alone since M3 took the entity half of the timeline away from
-    films (EF-3): the remaining callers are `covered_film_ids` and what is left of the computed
-    watchlist, all of which NEU-1439 deletes."""
-    follows = _int_follows("person", user_id=user_id, entity_id=entity_id)
-    return select(FilmCredit.film_id).join(follows, follows.c.key == FilmCredit.person_id)
-
-
-def _company_film_ids(user_id: UUID, *, entity_id: str | None = None) -> Select[tuple[UUID]]:
-    return select(FilmProductionCompany.film_id).where(
-        FilmProductionCompany.company_id.in_(
-            followed_tmdb_ids(user_id, "company", entity_id=entity_id)
-        )
-    )
-
-
 def title_follow_film_ids(user_id: UUID) -> Select[tuple[UUID]]:
-    """`SELECT film.id` for every film this user follows **by title**, in any state, minus the
-    ones they have muted (D-45).
+    """`SELECT film.id` for every film this user follows **by title**, in any state.
 
     Written to be used as `Film.id.in_(title_follow_film_ids(u))` — or, on the timeline and in
     the notify pass, as `Event.film_id.in_(...)`, which is safe because `news.event.film_id` is
@@ -344,20 +279,16 @@ def title_follow_film_ids(user_id: UUID) -> Select[tuple[UUID]]:
     follows select events, through `entity_attachment_event_ids`, and widening this builder to
     cover them is what would pull a followed director's whole slate back onto the timeline.
 
-    The mute term is the one thing NEU-1439 removes from it, when the table goes.
+    Nothing subtracts from it either (EF-14). The mute used to, and the film it silenced was
+    one the user had not chosen — reached through a followed director — which is a state that
+    can no longer arise: this set holds exactly what the user asked for by name, so the way to
+    leave it is to unfollow.
 
     `correlate(None)` for the reason the module docstring gives: the timeline's enclosing query
     selects from `catalog.film` too, and SQLAlchemy would otherwise auto-correlate this
     subquery's own `film` to the outer one and render it without a FROM.
     """
-    return (
-        select(Film.id)
-        .where(
-            Film.id.in_(followed_film_uuids(user_id)),
-            Film.id.not_in(muted_film_ids(user_id)),
-        )
-        .correlate(None)
-    )
+    return select(Film.id).where(Film.id.in_(followed_film_uuids(user_id))).correlate(None)
 
 
 def follow_reach(user_id: UUID) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
@@ -411,7 +342,7 @@ def entity_attachment_event_ids(
     user_id: UUID, *, only: tuple[str, str] | None = None
 ) -> Select[tuple[UUID]]:
     """`SELECT event.id` for every published card this user's **person, studio and franchise**
-    follows deliver (EF-3, EF-13), minus the events on films they have muted.
+    follows deliver (EF-3, EF-13).
 
     Written to be used as `Event.id.in_(entity_attachment_event_ids(u))`, OR-ed against
     `title_follow_film_ids` rather than folded into it: an attachment card makes *that event*
@@ -439,13 +370,15 @@ def entity_attachment_event_ids(
     user following both the film's studio and its director sees one `canceled` card, and a
     catalog casting card matched by name is matched again by a resolved mention of the story
     that promoted it. Spelled as a `UNION ALL` of the branches wrapped in an `IN`, which
-    de-duplicates on the primary key and is where the mute exclusion then lives: once, at the
-    top, rather than in five branches that could each forget it.
+    de-duplicates on the primary key once at the top rather than five times over.
 
-    `only` narrows the graph to one `(entity_type, entity_id)`, in `covered_film_ids`' shape.
-    Nothing in this ticket passes it; it is the seam NEU-1440's `last_activity_at` needs — "the
-    newest card that reaches this user through *this* follow" — and it costs one `if` per
-    branch.
+    Nothing subtracts from the result (EF-14): the mute this used to exclude is gone with the
+    watchlist it corrected, and it never fitted here anyway — a mute silenced a *film*, while
+    these are cards about an entity that happen to name one.
+
+    `only` narrows the graph to one `(entity_type, entity_id)`. Nothing in this ticket passes
+    it; it is the seam NEU-1440's `last_activity_at` needs — "the newest card that reaches this
+    user through *this* follow" — and it costs one `if` per branch.
     """
 
     def wants(entity_type: str) -> bool:
@@ -466,14 +399,7 @@ def entity_attachment_event_ids(
     if not branches:
         return _no_events()
     reached = union_all(*branches).subquery("entity_attachment")
-    return (
-        select(Event.id)
-        .where(
-            Event.id.in_(select(reached.c.id)),
-            Event.film_id.not_in(muted_film_ids(user_id)),
-        )
-        .correlate(None)
-    )
+    return select(Event.id).where(Event.id.in_(select(reached.c.id))).correlate(None)
 
 
 def _names_a_followed_person(user_id: UUID, *, entity_id: str | None = None) -> ColumnElement[bool]:
@@ -687,8 +613,7 @@ def first_association_clause(
     published `credit_removed` for `P` on `F` since the last attach card — and it selects
     nothing at M3, because `STORY_DETACH_MENTION_TYPES` is empty. See that constant.
 
-    Mutes are not applied here: `entity_attachment_event_ids` subtracts them once, at the top.
-    And the two arms need no `DISTINCT` between them: each selects one row per event and they
+    The two arms need no `DISTINCT` between them: each selects one row per event and they
     are disjoint by `event_type`, so the `UNION ALL` cannot repeat an id. The caller's own
     de-duplication covers the branches that *can* overlap.
     """
@@ -920,223 +845,30 @@ def _credit_carded_by_this_event(mention: type[StoryPerson]) -> ColumnElement[bo
     )
 
 
-def covered_film_ids(
-    *,
-    user_id: UUID,
-    today: date,
-    max_age_days: int,
-    only: tuple[str, str] | None = None,
-) -> Select[tuple[UUID]]:
-    """`SELECT film.id` for every film this user's follows cover **for alerts** (D-43).
+def title_followed_by_any_user_clause() -> ColumnElement[bool]:
+    """WHERE predicate over `catalog.film`: **somebody** follows this film by title (EF-14).
 
-    **Kept for NEU-1439 to delete with its last callers** — the calendar, the iCal feed, the
-    digest's slate, `/me/watchlist` and the want/stop service (D-1437.8). It is no longer the
-    other half of the timeline: since M3 an entity follow reaches events rather than films
-    (EF-3, `entity_attachment_event_ids`), so nothing here describes what anybody sees on their
-    timeline any more.
+    D-27's rule 2, and what is left of it: the provider and video polls poll a film nobody has
+    a theatrical date reason to poll when a user is waiting on it, and waiting on it now means
+    having followed it by name. It selects over the same follow rows `title_follow_film_ids`
+    does — the same `entity_type` filter and the same UUID shape guard, asked of the whole table
+    rather than of one user — so the poll cannot come to a different answer about what somebody
+    is waiting on than the pass that tells them about it.
 
-    The person, company and franchise branches are bounded by the alert window — a wider date
-    bound and a status term that ends at `Canceled` rather than at `Released` (D-46) — and a
-    title follow is bounded by neither, so it covers its film in **any** state and at any age.
-    The user asked for that film, and one they put on the list the week it came out is exactly
-    the one they are waiting on the home release of.
+    **No window, no status term, no mute, and no arguments** — the three branches that needed
+    them are gone. `covered_by_any_user_clause` had to bound its person, company and franchise
+    branches by the alert window or a single followed director would have dragged a whole back
+    catalogue into the poll; a title follow is one film the user named, so there is nothing to
+    bound and nothing for `today` or `max_age_days` to do here. The theatrical rule beside it in
+    `ingest.providers.poll_set_clause` still carries its own date window, which is where the
+    poll's volume is actually decided.
 
-    Mutes are *not* subtracted here; `watchlist_film_ids` is that set. Kept apart because the
-    want/stop service needs the unmuted answer: "does anything still cover this film" is what
-    decides between muting it and answering `204` (D-1414.5).
-
-    `only` narrows the graph to one `(entity_type, entity_id)`, dropping the other three
-    branches from the statement rather than feeding them an empty id list.
-
-    A query builder rather than a query, in this module's shape and for its reason: the batch
-    halves hand it to a statement built in `pipeline_run`, where there is no session to hand it.
-    `correlate(None)` keeps the subquery standalone whatever FROM list it lands in.
+    That makes this set strictly smaller than the one it replaces, and deliberately so: a film
+    reached only through a followed person is no longer something anybody is waiting on, because
+    no surface delivers it to them any more. Polling it would be buying offers for a card with
+    no reader.
     """
-    window = alert_window_clause(today=today, max_age_days=max_age_days)
-    branches: list[ColumnElement[bool]] = []
-    scoped_id = None if only is None else only[1]
-
-    def wants(entity_type: str) -> bool:
-        return only is None or only[0] == entity_type
-
-    if wants("person"):
-        branches.append(
-            and_(
-                Film.id.in_(_person_film_ids(user_id=user_id, entity_id=scoped_id)),
-                window,
-            )
-        )
-    if wants("company"):
-        branches.append(and_(Film.id.in_(_company_film_ids(user_id, entity_id=scoped_id)), window))
-    if wants("franchise"):
-        branches.append(
-            and_(
-                Film.collection_id.in_(
-                    followed_tmdb_ids(user_id, "franchise", entity_id=scoped_id)
-                ),
-                window,
-            )
-        )
-    if wants("title"):
-        branches.append(Film.id.in_(followed_film_uuids(user_id, entity_id=scoped_id)))
-    return select(Film.id).where(or_(*branches)).correlate(None)
-
-
-def watchlist_film_ids(
-    *,
-    user_id: UUID,
-    today: date,
-    max_age_days: int,
-) -> Select[tuple[UUID]]:
-    """**The watchlist** (D-42): `covered_film_ids` minus the films this user has muted.
-
-    One definition, one builder. `/me/calendar`, the `.ics` feed, the alert branch of the
-    notify pass, the digest's slate and the weekly digest's recipient rule read this and
-    nothing else — which is what makes "what is on my watchlist" a question with one answer
-    now that nothing materialises it.
-    """
-    return covered_film_ids(
-        user_id=user_id,
-        today=today,
-        max_age_days=max_age_days,
-    ).where(Film.id.not_in(muted_film_ids(user_id)))
-
-
-def covering_follows(
-    *,
-    user_id: UUID,
-    today: date,
-    max_age_days: int,
-    film_id: UUID | None = None,
-) -> Select[tuple[UUID, str, str, datetime]]:
-    """Every `(film_id, entity_type, entity_id, created_at)` pair where one of this user's
-    follows covers a film — `covered_film_ids` keeping the follow that did it.
-
-    `GET /me/watchlist` is one query over this: group by film in Python, and each item's
-    `covered_by`, `followed` and `created_at` fall out of its pairs (D-1414.5). Muted films
-    come back like any other; the route marks them rather than dropping them, because a user
-    looking at their watchlist is exactly who wants to un-mute one.
-
-    `film_id` narrows it to one film, for the want/stop routes answering with the item they
-    just changed — the same pairs, so the single item cannot describe itself differently from
-    the way the list would.
-
-    A union of the four branches rather than one join against an OR, because each branch
-    matches through a different key and the id casts have to stay in their SELECT lists (see
-    the module docstring). Only the person branch can pair one follow with one film twice — a
-    director who is also top-billed holds two qualifying credits — so only it is
-    `DISTINCT`, and the union is `UNION ALL`: the other three match at most one row each by
-    construction, and a dedupe across the whole set would be a sort over every pair to catch
-    duplicates that cannot exist.
-    """
-    window = alert_window_clause(today=today, max_age_days=max_age_days)
-    person_follows = _int_follows("person", user_id=user_id)
-    person = (
-        select(
-            FilmCredit.film_id.label("film_id"),
-            literal("person").label("entity_type"),
-            person_follows.c.entity_id.label("entity_id"),
-            person_follows.c.created_at.label("created_at"),
-        )
-        .select_from(FilmCredit)
-        .join(person_follows, person_follows.c.key == FilmCredit.person_id)
-        .join(Film, Film.id == FilmCredit.film_id)
-        .where(window)
-        .distinct()
-    )
-    company_follows = _int_follows("company", user_id=user_id)
-    company = (
-        select(
-            FilmProductionCompany.film_id,
-            literal("company"),
-            company_follows.c.entity_id,
-            company_follows.c.created_at,
-        )
-        .select_from(FilmProductionCompany)
-        .join(company_follows, company_follows.c.key == FilmProductionCompany.company_id)
-        .join(Film, Film.id == FilmProductionCompany.film_id)
-        .where(window)
-    )
-    franchise_follows = _int_follows("franchise", user_id=user_id)
-    franchise = (
-        select(
-            Film.id,
-            literal("franchise"),
-            franchise_follows.c.entity_id,
-            franchise_follows.c.created_at,
-        )
-        .select_from(Film)
-        .join(franchise_follows, franchise_follows.c.key == Film.collection_id)
-        .where(window)
-    )
-    title_follows = _title_follows(user_id=user_id)
-    title = (
-        select(Film.id, literal("title"), title_follows.c.entity_id, title_follows.c.created_at)
-        .select_from(Film)
-        .join(title_follows, title_follows.c.key == Film.id)
-    )
-    pairs = union_all(person, company, franchise, title).subquery("covering")
-    stmt = select(
-        pairs.c.film_id, pairs.c.entity_type, pairs.c.entity_id, pairs.c.created_at
-    ).correlate(None)
-    return stmt if film_id is None else stmt.where(pairs.c.film_id == film_id)
-
-
-def covered_by_any_user_clause(*, today: date, max_age_days: int) -> ColumnElement[bool]:
-    """WHERE predicate over `catalog.film`: **somebody** covers this film and has not muted it.
-
-    The provider and video polls' rule 2 (D-1414.3). The same four branches as
-    `covered_film_ids`, spelled from the same helpers and with the same alert window, asked of
-    the whole follow table instead of one user's rows — which is what stops the poll from
-    reading a set the alerts do not, or the other way round.
-
-    That window admits a `Released` film until the date bound's far end (D-46), so a film
-    somebody reached through its director keeps being polled through the months its streaming
-    debut actually lands in. That is the whole point of polling it; `Released` is where the
-    answer arrives, not where it stops being worth asking.
-
-    The mute test is per *covering user*, not per film: a film ten people follow and one of
-    them has muted is still owed a poll, because the other nine are waiting on it. Only when
-    every user who covers it has muted it does it leave the set.
-    """
-    window = alert_window_clause(today=today, max_age_days=max_age_days)
-    person_follows = _int_follows("person")
-    person = (
-        select(literal(1))
-        .select_from(FilmCredit)
-        .join(person_follows, person_follows.c.key == FilmCredit.person_id)
-        .where(
-            FilmCredit.film_id == Film.id,
-            _not_muted(person_follows.c.user_id),
-        )
-        .exists()
-    )
-    company_follows = _int_follows("company")
-    company = (
-        select(literal(1))
-        .select_from(FilmProductionCompany)
-        .join(company_follows, company_follows.c.key == FilmProductionCompany.company_id)
-        .where(
-            FilmProductionCompany.film_id == Film.id,
-            _not_muted(company_follows.c.user_id),
-        )
-        .exists()
-    )
-    franchise_follows = _int_follows("franchise")
-    franchise = (
-        select(literal(1))
-        .select_from(franchise_follows)
-        .where(
-            franchise_follows.c.key == Film.collection_id,
-            _not_muted(franchise_follows.c.user_id),
-        )
-        .exists()
-    )
     title_follows = _title_follows()
-    title = (
-        select(literal(1))
-        .select_from(title_follows)
-        .where(title_follows.c.key == Film.id, _not_muted(title_follows.c.user_id))
-        .exists()
+    return (
+        select(literal(1)).select_from(title_follows).where(title_follows.c.key == Film.id).exists()
     )
-    return or_(and_(window, or_(person, company, franchise)), title)

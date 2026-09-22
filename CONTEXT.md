@@ -343,8 +343,8 @@ across the film's displayable subjects; failing that, the most recent *past* one
 out); failing that, the **primary release date**, carried with a marker so the reader knows it is
 unconfirmed rather than a date this site would list. It names its **kind** (upcoming / released /
 primary) and, for the two displayable kinds, the subject (country, bucket) it came from. The
-watchlist row shows it today (NEU-1397); timeline and iCal rows are expected to. A film with no
-displayable row and no primary date has none.
+follows page and entity-page rows show it today (NEU-1397); timeline and iCal rows are expected
+to. A film with no displayable row and no primary date has none.
 _Avoid_: next release date (wrong for a released film), release date (ambiguous between the
 primary scalar and the per-row TMDB value), US date (origin-country dates qualify too).
 

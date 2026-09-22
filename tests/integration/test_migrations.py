@@ -262,14 +262,15 @@ async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m
                 "2024-02-03",
                 "2023-12-01",
             ]
-            # The mute survives (D-40), on a film nothing copied.
-            mutes = (
-                (await conn.execute(text("SELECT film_id FROM app.watchlist_dismissal")))
-                .scalars()
-                .all()
+            # The mute seeded above does *not* survive to head: `b4c8e2f17a93` drops the
+            # table with the watchlist it corrected (EF-14), and the rows go with it because
+            # there is nothing to migrate them to — turning one into an unfollow would delete a
+            # follow the user made deliberately, which is what D-40 forbids.
+            dismissals = await conn.scalar(
+                text("SELECT to_regclass('app.watchlist_dismissal') IS NOT NULL")
             )
-            assert [str(film_id) for film_id in mutes] == ["44444444-4444-4444-4444-444444444444"]
-            # And the table is gone.
+            assert dismissals is False
+            # And `watchlist_item` is gone, as it was at M8.
             exists = await conn.scalar(text("SELECT to_regclass('app.watchlist_item') IS NOT NULL"))
             assert exists is False
             stores = await conn.scalar(
@@ -386,6 +387,100 @@ async def test_the_binary_follow_migration_deletes_exactly_the_imported_person_f
                 )
             )
             assert column == 0
+    finally:
+        await engine.dispose()
+
+
+# --- the watchlist_dismissal drop (NEU-1439) ------------------------------------------------
+
+_BEFORE_DISMISSAL_DROP = "e2b7d41c9f08"
+"""The revision immediately before `b4c8e2f17a93`, which drops `app.watchlist_dismissal`
+(EF-14)."""
+
+
+@pytest.fixture
+async def dismissal_drop_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision short of the drop, on the `m8_db_url` pattern and
+    for its reason: the thing under test is the transition."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_dismissal_drop")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            _alembic(url, "upgrade", _BEFORE_DISMISSAL_DROP)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def test_the_dismissal_drop_takes_the_mutes_and_leaves_every_follow(
+    dismissal_drop_db_url: str,
+):
+    """EF-14: the table goes, and the follow graph is untouched.
+
+    The follow is the half worth asserting. A mute and a title follow on the same film were two
+    rows saying opposite things, and the tempting migration — "a mute means they did not want
+    it, so drop the follow too" — would delete a row the user created deliberately, which is
+    exactly what D-40 keeps out of this. The user sees that film again; that is the state EF-14
+    defines, not data loss the migration should have prevented."""
+    engine = create_async_engine(dismissal_drop_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO app."user" (id, email, password_hash, display_name)
+                VALUES ('11111111-1111-1111-1111-111111111111', 'ef14@example.com', 'x', 'EF14')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO catalog.film (id, tmdb_id, title)
+                VALUES ('22222222-2222-2222-2222-222222222222', 9101, 'Silenced')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.follow (user_id, entity_type, entity_id, source) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 'title',
+                   '22222222-2222-2222-2222-222222222222', 'manual'),
+                  ('11111111-1111-1111-1111-111111111111', 'person', '525', 'manual')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.watchlist_dismissal (user_id, film_id)
+                VALUES ('11111111-1111-1111-1111-111111111111',
+                        '22222222-2222-2222-2222-222222222222')
+                """)
+            )
+
+        _alembic(dismissal_drop_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            exists = await conn.scalar(
+                text("SELECT to_regclass('app.watchlist_dismissal') IS NOT NULL")
+            )
+            assert exists is False
+            follows = (
+                await conn.execute(
+                    text(
+                        "SELECT entity_type, entity_id FROM app.follow "
+                        "ORDER BY entity_type, entity_id"
+                    )
+                )
+            ).all()
+            assert [tuple(row) for row in follows] == [
+                ("person", "525"),
+                ("title", "22222222-2222-2222-2222-222222222222"),
+            ]
     finally:
         await engine.dispose()
 

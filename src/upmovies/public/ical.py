@@ -30,7 +30,7 @@ from datetime import UTC, date, datetime, timedelta
 PRODID = "-//backlotter//calendar//EN"
 """Identifies the software that wrote the object (§3.7.3). Free-form, but it must be there."""
 
-CALENDAR_NAME = "backlotter — your watchlist"
+CALENDAR_NAME = "backlotter — your films"
 """`X-WR-CALNAME`: the name a client shows for a subscribed feed. Not in RFC 5545 at all, but
 it is what Google, Apple and Outlook all read, and the alternative is a calendar named after
 its URL."""
@@ -53,7 +53,7 @@ BUCKET_SUMMARY_SUFFIX: dict[str, str] = {
 
 @dataclass(frozen=True)
 class CalendarFeedEvent:
-    """One all-day VEVENT: a film on the subscriber's watchlist reaching one release bucket.
+    """One all-day VEVENT: a film the subscriber follows reaching one release bucket.
 
     `film_id` and `bucket` are the UID's two halves (D-34), and the UID is what makes a date
     *move* rather than duplicate: the same subject re-published with a new DTSTART updates the
@@ -77,8 +77,8 @@ def render_calendar(events: Sequence[CalendarFeedEvent], *, base_url: str) -> st
     """The whole VCALENDAR document, ready to serve.
 
     An empty `events` renders the envelope with no components. RFC 5545 §3.4 reads as requiring
-    at least one, but the alternative here is worse: a subscriber whose watchlist is empty (or
-    holds nothing with a US date yet) needs their calendar client to keep the subscription and
+    at least one, but the alternative here is worse: a subscriber who follows no films (or none
+    with a US date yet) needs their calendar client to keep the subscription and
     poll it again, and every client does that for an empty feed while several drop a
     subscription that 404s.
     """

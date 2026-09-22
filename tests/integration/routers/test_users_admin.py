@@ -194,7 +194,7 @@ async def test_grant_and_revoke_404_an_unknown_user(admin_authed_client):
 async def test_revoking_suppresses_and_never_destroys(admin_authed_client, session, make_user):
     """D-40: losing entitlement leaves the account's rows exactly as they were.
 
-    The follow, watchlist and dismissal tables arrive in M3, so what is asserted here is every
+    The follow table arrives in M3, so what is asserted here is every
     per-user row that exists today — the session that keeps them signed in and a mailed token —
     plus the account's own columns. The rule this pins down is that revoking writes one column
     and nothing else."""

@@ -679,7 +679,7 @@ async def test_sweep_stage_runs_every_phase_and_reports_every_counter(session, m
     assert "credits: 2 carded from 4 attachments" in row.detail
     assert "credit removals: 0 carded from 1 detachments" in row.detail
     assert "release dates: 3 carded from 11 changes" in row.detail
-    # No watchlist clause: the derivation phase went with the table it maintained (M8).
+    # No watchlist clause: the derivation phase went with the tables it maintained (M8, EF-14).
     assert "watchlist" not in row.detail
 
 

@@ -184,7 +184,7 @@ async def test_several_alerts_for_one_user_ride_on_one_mail(
     assert (result.mails_sent, result.sent) == (1, 3)
     assert len(mailbox.sent) == 1
     (envelope,) = mailbox.sent
-    assert envelope.subject == "3 updates from your watchlist"
+    assert envelope.subject == "3 updates from your follows"
     for title in ("Dune", "Heat 2", "Tron"):
         assert title in envelope.text
     assert [row.status for row in await _rows(session)] == ["sent"] * 3

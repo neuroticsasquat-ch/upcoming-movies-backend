@@ -170,7 +170,7 @@ def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
     for part in (envelope.text, envelope.html):
         assert SETTINGS_URL in part
         assert "follow" in part
-        assert "watchlist" in part
+        assert "films you follow" in part
         assert "weekly digest" in part
 
 

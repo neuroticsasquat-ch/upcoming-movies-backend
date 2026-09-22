@@ -208,7 +208,7 @@ async def get_calendar_feed(
     token: str,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """The subscriber's watchlist release dates as an iCalendar feed (D-34).
+    """The release dates of the films the subscriber follows, as an iCalendar feed (D-34).
 
     No cookie and no `require_entitled()`: the token *is* the credential, so the gate is applied
     to the token's owner inside the query, and every way of not having a feed — unknown token,
@@ -217,7 +217,7 @@ async def get_calendar_feed(
     real account (D-39). A lapsed subscriber's client therefore keeps the subscription and simply
     stops receiving events, and a renewed grant resumes it on the same URL (D-40).
 
-    `private` in `Cache-Control` because the URL's whole content is one person's watchlist: a
+    `private` in `Cache-Control` because the URL's whole content is one person's follows: a
     shared cache holding it would serve one subscriber's films to another. An hour of freshness
     is more than a release date needs — clients poll on their own schedule anyway, and the
     ceiling on how stale this can be is the daily ingest.

@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select, update
 
 from upmovies.app.models import (
@@ -17,7 +18,6 @@ from upmovies.app.models import (
     Notification,
     PushSubscription,
     UserSettings,
-    WatchlistDismissal,
 )
 from upmovies.app.services.notify_service import (
     NotifyResult,
@@ -159,17 +159,12 @@ async def _set_alert_stores(session, *, user_id: UUID, alert_stores: list[str]) 
     await session.commit()
 
 
-async def _mute(session, *, user_id: UUID, film_id: UUID) -> None:
-    session.add(WatchlistDismissal(user_id=user_id, film_id=film_id))
-    await session.commit()
-
-
 async def test_a_title_follow_on_a_whitelist_beat_queues_an_alert_and_a_digest(
     session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
 ):
-    """Both branches from one row, which is M8's whole shape: the film is on this user's
-    watchlist *and* on their timeline, and an alert and a digest line are different deliveries
-    of the same news (`app.models.Notification`)."""
+    """Both branches from one row, which is EF-14's whole shape: the film is on this user's
+    calendar *and* on their timeline because they follow it, and an alert and a digest line are
+    different deliveries of the same news (`app.models.Notification`)."""
     await seed_watermark()
     user = await subscriber()
     film = await make_film(slug="dune", title="Dune")
@@ -370,23 +365,24 @@ async def test_a_title_follow_is_not_interrupted_by_a_studio_joining(
     assert (result.alerts_queued, result.digests_queued) == (0, 1)
 
 
-async def test_a_muted_film_earns_neither_kind(
+async def test_unfollowing_the_film_earns_neither_kind(
     session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
 ):
-    """D-45 as amended: a mute silences the film everywhere, so it leaves the digest branch
-    beside the alert one. The follow is untouched — this is reversible (D-40)."""
+    """EF-14: the mute that used to silence a film without touching its follow is gone with the
+    watchlist it corrected, so the only way a followed film stops earning deliveries is the
+    follow itself going. Both branches drop together, as they did under the mute."""
     await seed_watermark()
     user = await subscriber()
     film = await make_film(slug="dune", title="Dune")
     await _follow_title(session, user_id=user.id, film_id=film.id)
-    await _mute(session, user_id=user.id, film_id=film.id)
     await add_event(film=film, event_type="release_date", created_at=NEW)
+    await session.execute(sa_delete(Follow).where(Follow.user_id == user.id))
+    await session.commit()
 
     result = await run_pass()
 
     assert (result.alerts_queued, result.digests_queued) == (0, 0)
     assert await _rows(session) == []
-    assert (await session.execute(select(Follow))).scalars().all() != []
 
 
 async def test_a_beat_in_neither_push_set_queues_no_alert(

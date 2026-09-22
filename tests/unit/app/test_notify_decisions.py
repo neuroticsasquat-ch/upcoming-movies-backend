@@ -30,7 +30,7 @@ def test_every_monetization_type_maps_to_a_real_alert_store():
     """The bridge between the two vocabularies, pinned from both ends (D-44, D-28).
 
     A fourth offer kind added to the poll with no store beside it would not fail: it would
-    card `now_available` events that quietly match nobody's watchlist. Likewise a store
+    card `now_available` events that quietly match nobody's follows. Likewise a store
     renamed on the user-facing side. Both are a failing assertion here instead."""
     assert set(ALERT_STORE_BY_MONETIZATION) == set(MONETIZATION_TYPES)
     assert set(ALERT_STORE_BY_MONETIZATION.values()) == set(ALERT_STORES)

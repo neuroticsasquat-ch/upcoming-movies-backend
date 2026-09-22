@@ -50,11 +50,11 @@ def test_the_envelope_parses_and_carries_the_required_properties():
     assert cal["version"] == "2.0"
     assert cal["prodid"] == "-//backlotter//calendar//EN"
     assert cal["calscale"] == "GREGORIAN"
-    assert str(cal["x-wr-calname"]) == "backlotter — your watchlist"
+    assert str(cal["x-wr-calname"]) == "backlotter — your films"
 
 
 def test_an_empty_feed_is_still_a_parseable_calendar():
-    # A subscriber with an empty watchlist must get a feed their client keeps polling, not a
+    # A subscriber who follows no films must get a feed their client keeps polling, not a
     # refusal — see `render_calendar`.
     cal = Calendar.from_ical(_render([]))
 

@@ -20,12 +20,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.dto import HeadlineReleaseOut
+from upmovies.app.dto import headline_release_out
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import (
     entity_attachment_event_ids,
     title_follow_film_ids,
-    watchlist_film_ids,
 )
 from upmovies.app.models import User, UserSettings
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
@@ -440,23 +439,10 @@ async def get_popular_people(session: AsyncSession, *, limit: int) -> PopularPeo
     return PopularPeopleResponse(items=_person_search_items(list(people)), limit=limit)
 
 
-def _headline_out(headline: HeadlineRelease | None) -> HeadlineReleaseOut | None:
-    return (
-        None
-        if headline is None
-        else HeadlineReleaseOut(
-            date=headline.date,
-            kind=headline.kind,
-            country=headline.country,
-            bucket=headline.bucket,
-        )
-    )
-
-
 def _film_row_out(film: Film, headline: HeadlineRelease | None) -> FilmRowOut:
-    """One film cited on an entity page (person, studio or franchise), in the watchlist row's
-    shape. One function because it is one row — a studio page and a person page disagreeing
-    about a film's date would be the exact bug `WatchlistFilmOut` exists to prevent."""
+    """One film cited on an entity page (person, studio or franchise). One function because it
+    is one row — a studio page and a person page disagreeing about a film's date would be the
+    exact bug `FilmRowOut` exists to prevent."""
     return FilmRowOut(
         ref=film_ref(film.tmdb_id, film.title),
         id=film.id,
@@ -464,7 +450,7 @@ def _film_row_out(film: Film, headline: HeadlineRelease | None) -> FilmRowOut:
         slug=film.slug,
         title=film.title,
         poster_path=film.poster_path,
-        headline_release=_headline_out(headline),
+        headline_release=headline_release_out(headline),
     )
 
 
@@ -1511,9 +1497,10 @@ async def get_timeline(
     `top_event_type` can read lower here than on `/feed` for the same film and day. The shape
     and the ordering are the feed's; the contents are what this user follows.
 
-    **A muted film is absent from both halves** (D-45, until NEU-1439). The exclusion lives
-    inside the two builders rather than here, so the digest section that summarises this
-    timeline cannot disagree with it about what the user silenced.
+    **Nothing subtracts from either half** (EF-14). A mute used to, from inside the two
+    builders; it went with the watchlist it corrected, and the only way off this timeline now
+    is to unfollow — which takes the film out of the builder itself, so the digest section that
+    summarises this timeline still cannot disagree with it about what the user asked for.
 
     Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
     and the feed are the same product surface — same DTO, same `created_at` day grouping, same
@@ -1663,7 +1650,7 @@ def _calendar_type_rank(release_type: ColumnElement[int]) -> ColumnElement[int]:
     return case(_CALENDAR_TYPE_RANK, value=release_type, else_=len(_CALENDAR_BUCKET_ORDER))
 
 
-def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None) -> CTE:
+def _calendar_governing_cte(*, name: str, title_follow_user_id: UUID | None = None) -> CTE:
     """The governing release date per (film, category): the earliest date in the subject,
     collapsed *before* any window filter (NEU-1206).
 
@@ -1672,10 +1659,11 @@ def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None)
     displayable in, so widening the bucket map widens both calendars without a second region
     rule (D-26).
 
-    `watchlist_user_id` narrows the set to that user's computed watchlist (M8): the films their
-    follows cover, minus the ones they have muted. It belongs here rather than in a later
-    predicate for the reason `get_ical_feed` puts it here: the collapse is per subject, so a
-    user filter applied after it would be collapsing over rows the caller cannot see.
+    `title_follow_user_id` narrows the set to the films that user follows **by title** (EF-14)
+    — the whole of "my films" now that nothing indirect reaches a film. It belongs here rather
+    than in a later predicate for the reason `get_ical_feed` puts it here: the collapse is per
+    subject, so a user filter applied after it would be collapsing over rows the caller cannot
+    see.
     """
     governing = select(
         FilmReleaseDate.film_id.label("film_id"),
@@ -1684,16 +1672,9 @@ def _calendar_governing_cte(*, name: str, watchlist_user_id: UUID | None = None)
             "governing_date"
         ),
     )
-    if watchlist_user_id is not None:
-        settings = get_settings()
+    if title_follow_user_id is not None:
         governing = governing.where(
-            FilmReleaseDate.film_id.in_(
-                watchlist_film_ids(
-                    user_id=watchlist_user_id,
-                    today=datetime.now(tz=UTC).date(),
-                    max_age_days=settings.provider_poll_max_age_days,
-                )
-            )
+            FilmReleaseDate.film_id.in_(title_follow_film_ids(title_follow_user_id))
         )
     return (
         governing.where(
@@ -1716,7 +1697,7 @@ async def _calendar_page(
     """One page of a calendar, from a governing CTE and the predicates that decide which of its
     rows the caller may see.
 
-    The public calendar and the caller's own (`get_watchlist_calendar`) differ in exactly those
+    The public calendar and the caller's own (`get_my_films_calendar`) differ in exactly those
     two inputs — which films, and which cuts. Paging by date, within-date ordering and the
     decoration are spelled once, here, because the frontend renders both through one component
     and one set of grouping helpers: a page whose shape or ordering drifted would be a second
@@ -1794,7 +1775,7 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     governing = _calendar_governing_cte(name="governing")
     # The noise cuts that keep a public listing clean. They are the public route's alone: the
-    # watchlist calendar next door deliberately carries none of them (D-1411.2).
+    # my-films calendar next door deliberately carries none of them (D-1411.2).
     visible = (
         governing.c.governing_date >= today,
         Film.slug.is_not(None),
@@ -1807,10 +1788,11 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
     )
 
 
-async def get_watchlist_calendar(
+async def get_my_films_calendar(
     session: AsyncSession, *, user_id: UUID, limit: int, offset: int
 ) -> CalendarResponse:
-    """`GET /me/calendar`: the release calendar narrowed to this user's watchlist (D-34, D-39).
+    """`GET /me/calendar`: the **my films calendar** (D-34, D-39) — the release calendar
+    narrowed to the films this user follows.
 
     Same response shape, same date-paging, same buckets, same governing-date rule and the same
     upcoming-only window as `get_calendar` — the frontend renders both tabs through one
@@ -1818,15 +1800,17 @@ async def get_watchlist_calendar(
 
     That set is the `.ics` feed's, not the public listing's, and for the feed's reasons:
 
-    - **The computed watchlist** (D-42): every film this user's follows cover, minus the ones
-      they have muted. Following a director puts their in-window films
-      here — that is the point of the merged model, and exactly the film the user would
-      otherwise miss — while a muted film leaves this page and the `.ics` feed together.
+    - **Title follows, and only title follows** (EF-14): the films the user asked for by name,
+      in any state and at any age. Following a director puts **nothing** here — an entity
+      follow delivers that entity's attachment cards, not a place on a date list (EF-3), and a
+      director's back catalogue arriving on the user's calendar is precisely what the cutover
+      removed. There is no set that subtracts either: the way a film leaves this page is
+      unfollowing it, which takes it off the `.ics` feed in the same breath.
     - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
-      user has on their own watchlist is not noise to them, and applying the cuts here would
-      make this page disagree with the same user's subscribed calendar — the bug this endpoint
-      exists to prevent (D-1411.2). Only the slug rule survives, for the reason every surface
-      applies it: a row links to the film's page and there is no page to link.
+      user followed by name is not noise to them, and applying the cuts here would make this
+      page disagree with the same user's subscribed calendar — the bug this endpoint exists to
+      prevent (D-1411.2). Only the slug rule survives, for the reason every surface applies it:
+      a row links to the film's page and there is no page to link.
 
     The window is `get_calendar`'s `>= today`, *not* the feed's reach into the past (D-1411.1).
     That reach exists for a client reason — a subscribed calendar drops every event a feed stops
@@ -1834,7 +1818,7 @@ async def get_watchlist_calendar(
     soonest-first over a past window would open page one on releases a year gone.
     """
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    governing = _calendar_governing_cte(name="watchlist_governing", watchlist_user_id=user_id)
+    governing = _calendar_governing_cte(name="my_films_governing", title_follow_user_id=user_id)
     visible = (governing.c.governing_date >= today, Film.slug.is_not(None))
     return await _calendar_page(
         session, governing=governing, visible=visible, limit=limit, offset=offset
@@ -1861,21 +1845,22 @@ async def get_ical_feed(
     What the feed holds, and why it is not the public calendar's query with a user filter bolted
     on:
 
-    - **The computed watchlist** (D-42): every film this user's follows cover, minus the ones
-      they have muted. The watchlist is the surface that is allowed to
-      reach out to the user, and a calendar the user subscribed to is that — a film reached
-      through a followed director is exactly the one they would otherwise miss, and a muted one
-      leaves this feed and `/me/calendar` together.
+    - **Title follows, and only title follows** (EF-14): the films this user asked for by
+      name, in any state and at any age — the same set `/me/calendar` draws, because the two
+      are one surface in two formats and a feed that disagreed with the page would be the bug
+      D-1411.2 exists to prevent. A followed director contributes nothing: an entity follow
+      delivers cards, not dates (EF-3). Unfollowing a film is what takes it off this feed and
+      off `/me/calendar` together.
     - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
-      user has on their own watchlist is not noise to them — the same reasoning
+      user followed by name is not noise to them — the same reasoning
       `digest_sender.load_slate` records for the slate.
     - **No upcoming-only filter**, unlike `get_calendar` — but a bounded reach backwards. A
       subscribed feed is the client's whole view of this calendar: a client re-fetching it drops
       every event the feed stopped publishing, so filtering to future dates would quietly erase
       each release from the user's calendar the day after it happened. Everything future is
       therefore published in full, and the past is cut at `ICAL_PAST_WINDOW_DAYS`. The cut is
-      what keeps the document bounded by something other than the watchlist: an imported
-      watchlist runs to thousands of films (D-15, D-16), each with up to four buckets, and this
+      what keeps the document bounded by something other than the follow graph: an imported
+      library runs to thousands of films (D-15, D-16), each with up to four buckets, and this
       is a document re-fetched on the client's schedule rather than a paginated read. A release
       a year gone is not a date anyone scrolls back to; a release last month is exactly the one
       the previous paragraph exists to protect.
@@ -1894,7 +1879,6 @@ async def get_ical_feed(
     # for the same reason: the cutoff must be the same instant for every row of one response.
     today = datetime.now(tz=UTC).date()
     earliest = today - timedelta(days=ICAL_PAST_WINDOW_DAYS)
-    settings = get_settings()
 
     # The governing date per (film, bucket): the earliest row in the subject, collapsed exactly
     # as `get_calendar` collapses it (NEU-1206), over the same displayable types in the same
@@ -1908,13 +1892,7 @@ async def get_ical_feed(
             ),
         )
         .where(
-            FilmReleaseDate.film_id.in_(
-                watchlist_film_ids(
-                    user_id=user_id,
-                    today=today,
-                    max_age_days=settings.provider_poll_max_age_days,
-                )
-            ),
+            FilmReleaseDate.film_id.in_(title_follow_film_ids(user_id)),
             FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
             FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
         )
@@ -1929,9 +1907,9 @@ async def get_ical_feed(
     #
     # Correlated per row rather than a grouped subquery joined in: the change table is
     # append-only and unbounded, so grouping it whole would make every calendar fetch pay for
-    # the history of the entire catalog to read a handful of watchlisted films out of it. This
+    # the history of the entire catalog to read a handful of followed films out of it. This
     # way each row is one index seek on `ix_catalog_film_release_date_change_lookup`, and the
-    # work is bounded by the size of the user's watchlist.
+    # work is bounded by how many films the user follows.
     last_moved = (
         select(func.max(FilmReleaseDateChange.changed_at))
         .where(
