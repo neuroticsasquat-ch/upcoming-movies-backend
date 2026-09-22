@@ -8,18 +8,42 @@ the one who made the request.
 **Two branches, one clause (EF-3, EF-7).** Both read the same two builders `/me/timeline`
 hands to the feed — `title_follow_film_ids` and `entity_attachment_event_ids` — OR-ed exactly
 as the timeline OR-s them, which is what keeps "in my digest" and "on my timeline" from
-drifting into two answers. The digest is that set; the alert branch is that set cut to
-`confidence = 'confirmed'` and to D-32's whitelist. A card in both earns both rows: an alert
-and a digest line are different deliveries of the same news, not duplicates of one
+drifting into two answers. The digest is that set; the alert branch is that set cut by EF-7's
+per-reach push sets and EF-8's confirmation rule. A card in both earns both rows: an alert and
+a digest line are different deliveries of the same news, not duplicates of one
 (`app.models.Notification`). A **muted** film earns neither — the exclusion is inside the
 builders, so it reaches this pass without a rule of its own (D-45, until NEU-1439).
 
-**The interim push rule** (D-1437.7). Cutting the shared clause to the old whitelist and to
-confirmed cards means an entity follower earns no push at all from this pass — nothing in
-`PUSH_WHITELIST` is an attach type — and that `canceled`, which is confirmed, does not push
-either, because it is not in the whitelist. Both are deliberate and pinned by tests: NEU-1438
-replaces the whitelist and the confidence term with EF-7's per-reach sets and EF-8's provenance
-rule, and it must not have to touch the clause to do it.
+**The push rule is a function of the reach, not of the beat** (EF-7). D-32's one closed list
+was a property of the event; two follows can reach the same card for different reasons and be
+owed different things by it, so the alert branch asks `follow_reach` for the two halves of the
+clause as separate booleans and decides per half:
+
+- reached by a **title** follow → `TITLE_PUSH_TYPES`, with two narrowings: `now_available`
+  still answers to `user_settings.alert_stores` (D-44), and the three credit beats push only
+  when the card names a **seed-grade** role on that film (EF-9 — a 12th-billed addition is
+  digest-only).
+- reached by an **entity** follow → `ENTITY_PUSH_TYPES`. No seed-grade cut: you followed that
+  person, studio or franchise, and `entity_attachment_event_ids` has already established that
+  this card names them (or is the `canceled` card of a film they are attached to).
+
+A user who holds both follows on one card passes on whichever arm admits it, and still earns
+exactly one row per `(user, event, channel)` — the decisions are ids, de-duplicated by the
+unique key rather than by the branch.
+
+**Confirmation means two different things** (EF-8, EF-10, EF-11). Everything outside the
+attach and detach types waits for `confidence = 'confirmed'` as before. Those types do not,
+because every *catalog* attachment card is `rumored` on its face — any TMDB editor can add a
+credit — and is published only after D-3's quarantine window, which is the confirmation. So a
+`provenance = 'catalog'` attach or detach card counts as confirmed by construction, and the
+card that waits is the story-backed `rumored` one: "in talks", "circling". A confirmed trade
+story pushes immediately (EF-11).
+
+**A confidence flip has to reopen the window** (EF-10). When the rumored story card is later
+upgraded in place — a confirmed story clustering onto it (D-6), or D-5's stamp — the upgrade is
+what queues the push, and the card's `created_at` is long past. So the alert branch alone reads
+a window that reopens on `updated_at`, narrowly. Nothing writes that flip yet; the arm and its
+terms are in `deliverable_events`, which says what is and is not true about it.
 
 **Push is a second channel on the alert branch, not a third branch** (D-36). A user with a
 `push_subscription` row gets the same whitelisted events queued twice, `channel = 'email'` and
@@ -51,12 +75,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, Text, and_, cast, exists, func, select
+from sqlalchemy import Select, Text, and_, any_, cast, exists, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from upmovies.app.entitlements import entitled_user_clause
-from upmovies.app.follow_queries import follow_scope
+from upmovies.app.follow_queries import follow_reach, follow_scope
 from upmovies.app.models import (
     DEFAULT_ALERT_STORES,
     Follow,
@@ -66,11 +91,21 @@ from upmovies.app.models import (
     UserSettings,
 )
 from upmovies.app.verification import verified_user_clause
-from upmovies.catalog.models import Film
+from upmovies.catalog.models import Film, FilmCredit, FilmCreditChange, Person
+from upmovies.catalog.queries import seed_grade_credit_clause
+from upmovies.catalog.seed_grade import DIRECTOR_JOB, WRITER_JOBS
 from upmovies.ingest.runs import last_successful_run_started_at, record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
+from upmovies.news.catalog_events import (
+    CANCELED_EVENT_TYPE,
+    COLLECTION_EVENT_TYPES,
+    COMPANY_EVENT_TYPES,
+    CREDIT_REMOVED_EVENT_TYPE,
+    PERSON_ATTACHMENT_EVENT_TYPES,
+)
 from upmovies.news.models import Event, EventSummary
+from upmovies.news.subject_key import sql_normalized_name
 from upmovies.news.visibility import region_visible, visible_events
 
 log = logging.getLogger(__name__)
@@ -80,7 +115,7 @@ NOTIFY_RUN_KIND = "notify"
 so the name is part of the contract rather than a label."""
 
 ALWAYS_ON_ALERT_TYPES = frozenset({"release_date", "trailer"})
-"""The whitelist beats no setting can switch off (D-32, beside `UserSettings.alert_stores`).
+"""The title-follow beats no setting can switch off (D-32, beside `UserSettings.alert_stores`).
 A date assigned or moved and a new trailer are *why* the film is on the list."""
 
 NOW_AVAILABLE_EVENT_TYPE = "now_available"
@@ -92,14 +127,51 @@ Decision = tuple[UUID, str, str]
 """One row this pass may write: `(event_id, kind, channel)` — the unique key minus the user,
 which every decision in a batch shares."""
 
-PUSH_WHITELIST = tuple(sorted(ALWAYS_ON_ALERT_TYPES | {NOW_AVAILABLE_EVENT_TYPE}))
-"""D-32 in full. Everything outside it is digest material, and nothing `unconfirmed` is in it at
-all — `alert_event_ids` applies that floor beside this list, since the shared window stopped
-carrying it (D-1437.7).
+ATTACHMENT_PUSH_TYPES: tuple[str, ...] = tuple(
+    sorted({*PERSON_ATTACHMENT_EVENT_TYPES, *COMPANY_EVENT_TYPES, *COLLECTION_EVENT_TYPES})
+)
+"""Every card that says an entity joined or left a film — the types EF-8's provenance rule and
+the widened alert window both key on.
 
-It holds no attach or detach type and no `canceled`, so it is also the reason an entity follow
-earns no push from this pass. NEU-1438 replaces it with EF-7's two sets, `TITLE_PUSH_TYPES` and
-`ENTITY_PUSH_TYPES`, applied per *why* the card reached the user."""
+`canceled` is deliberately **not** here although both push sets carry it: a cancellation is a
+film-status beat that happens to reach entity followers, it is `confirmed` when it is carded,
+and nothing ever upgrades one in place. Sorted, because it is rendered into an `IN`."""
+
+SEED_GRADE_TITLE_TYPES = frozenset(PERSON_ATTACHMENT_EVENT_TYPES)
+"""The three credit beats EF-9 puts a seed-grade floor under, *on the title-follow arm only*.
+
+The floor is about proportion, not confidence: a film's follower asked about the film, and the
+12th-billed addition TMDB recorded overnight is not worth a lock screen. The same card reaching
+that performer's own follower is exactly what they asked for, so the entity arm has no such
+cut."""
+
+TITLE_PUSH_TYPES = frozenset(
+    {
+        *ALWAYS_ON_ALERT_TYPES,
+        NOW_AVAILABLE_EVENT_TYPE,
+        CANCELED_EVENT_TYPE,
+        *SEED_GRADE_TITLE_TYPES,
+    }
+)
+"""What may interrupt somebody about a film they follow **by title** (EF-7).
+
+D-32's closed list plus the two things the cutover added: the film being called off, and the
+credit beats — the latter under `SEED_GRADE_TITLE_TYPES`' floor. No studio or franchise type:
+which company financed a film you follow is timeline news, not an interrupt."""
+
+ENTITY_PUSH_TYPES = frozenset({*ATTACHMENT_PUSH_TYPES, CANCELED_EVENT_TYPE})
+"""What may interrupt somebody about a person, studio or franchise they follow (EF-7).
+
+The attachment stream itself and the cancellation of a film the entity is on — which is the
+whole of what an entity follow delivers (`entity_attachment_event_ids`), so this set is that
+builder's vocabulary and not a narrowing of it. Nothing about the film's own life reaches here:
+a release date, a trailer or a streaming debut is the *film's* news and belongs to whoever
+followed the film (EF-3)."""
+
+PUSH_TYPES: tuple[str, ...] = tuple(sorted(TITLE_PUSH_TYPES | ENTITY_PUSH_TYPES))
+"""The union, for the one `IN` that cuts the alert query down before Python decides per reach.
+A type outside it can never push by either arm, so asking the database first is what keeps the
+Python filter over a handful of rows rather than over the window."""
 
 ALERT_STORE_BY_MONETIZATION = {"flatrate": "stream", "rent": "rent", "buy": "buy"}
 """The one place `catalog.MONETIZATION_TYPES` and `app.models.ALERT_STORES` meet.
@@ -196,7 +268,7 @@ def now_available_matches_stores(
     )
 
 
-def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
+def deliverable_events(since: datetime, *, include_upgrades: bool = False) -> Select[tuple[UUID]]:
     """`SELECT event.id` for every event this pass may tell *anyone* about.
 
     Written to be used as `Event.id.in_(deliverable_events(since))`, so both branches and the
@@ -207,6 +279,41 @@ def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
     TMDB recorded last week is news to the reader today, and dating the window by `occurred_at`
     would mail nobody about it. `status = 'published'` leaves out a superseded card in favour of
     the correction that replaced it.
+
+    **`include_upgrades` reopens it on `updated_at`, for one narrow set of cards** (EF-10). The
+    alert branch is the only caller that passes it, and it has to: a story-backed attachment
+    card published `rumored` — "in talks" — earns no push, and the push is owed when the
+    association *confirms*, which upgrades the card in place rather than writing a second one.
+    Its `created_at` is by then several runs old, so a window on publication alone would mean
+    the push EF-10 promises could never arrive at all.
+
+    The reopened arm is `attachment type AND provenance = 'story' AND confidence = 'confirmed'`,
+    and every term is load-bearing, because `updated_at` moves for reasons that are not
+    upgrades. `news.event.updated_at` carries a `server_default` and **no `onupdate`**, so it
+    moves only where something sets it — today that is `link.cluster`'s three attach paths
+    (`attach`, `dedup_attach`, `catalog_attach`), each of which is a *second outlet joining an
+    existing card*, which usually changes nothing about the card at all. Without the two extra
+    terms that alone would reopen every catalog attachment ever published, and a user who
+    followed the entity last week would be pushed about an attachment from last year the moment
+    a trade restated it. Narrowed this way the arm names exactly the cards whose push
+    eligibility can have just flipped from no to yes: a catalog card was eligible the day it
+    published (EF-8) and a still-`rumored` story card is not eligible now.
+
+    **What is not yet true.** Nothing in the codebase writes that flip. `link.cluster` bumps
+    `updated_at` on its attach paths but never touches `Event.confidence`, and D-5's stamp
+    (`news.credit_confirm`) writes `film_credit_change.carded_by_event_id` and deliberately
+    leaves the card alone. So this arm is armed and currently catches nothing: the promotion
+    that upgrades a `rumored` story card to `confirmed` is owed work in the link stage, not
+    here. It is spelled now, and pinned by a test that performs the flip by hand, so that
+    whoever lands the promotion does not also have to discover that the pass would have ignored
+    it — which is the failure EF-10 describes and the one that would show up as silence.
+
+    Re-considering an event is cheap and idempotent — `queue_decisions` writes through
+    `uq_notification_user_event_kind_channel`, so a card that already alerted this user earns
+    nothing the second time, which is what makes "one push per attachment" (EF-10) a property
+    of the key rather than of this window's precision. The digest branch and the
+    `events_considered` counter stay on publication, because a digest line is owed when the
+    card appears and a second one for the same card is not news.
 
     **No confidence floor** (D-1437.7). It used to sit here, on the grounds that a `rumored`
     event was not digest material either — but every catalog attach and detach card is
@@ -233,12 +340,20 @@ def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
     into select from `news.event` themselves, and the builder's meaning must not depend on the
     one it lands in.
     """
+    published_since = Event.created_at > since
+    upgraded_since = and_(
+        Event.event_type.in_(ATTACHMENT_PUSH_TYPES),
+        Event.provenance == "story",
+        Event.confidence == "confirmed",
+        Event.updated_at > since,
+    )
+    window = or_(published_since, upgraded_since) if include_upgrades else published_since
     return (
         select(Event.id)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
         .where(
-            Event.created_at > since,
+            window,
             Event.status == "published",
             Film.slug.is_not(None),
             visible_events(),
@@ -288,41 +403,172 @@ async def load_recipients(session: AsyncSession) -> list[Recipient]:
     ]
 
 
+def names_a_seed_grade_credit() -> ColumnElement[bool]:
+    """EXISTS predicate over the enclosing `news.event`: somebody this credit card names holds,
+    or demonstrably held, a **seed-grade** role on this film (EF-9).
+
+    A credit card carries names and nothing else — `subject_key` is a list of normalized names
+    (`news.subject_key`), and the role it was built from is rendered into the summary prose and
+    never stored. So the grade has to be read back off the catalog, by the same name match
+    `app.follow_queries._names_a_followed_person` uses, and there are two places to read it:
+
+    - `catalog.film_credit`, under `catalog.queries.seed_grade_credit_clause` — the SQL
+      spelling of `seed_grade.is_seed_grade`, reused rather than re-spelled for the reason that
+      function's docstring gives. This is the arm that answers an *attachment*, and the one
+      that puts EF-9's floor where the spec puts it: top-5 billing is a `film_credit` column, so
+      a 12th-billed addition fails here and stays digest-only.
+    - `catalog.film_credit_change`, **on a `credit_removed` card only**. `film_credit` is
+      delete-and-rebuilt on every ingest, so a removed credit is simply gone from it and the
+      first arm would answer no for every detachment — quietly taking that type back out of
+      `TITLE_PUSH_TYPES`. The history is what remembers, and it records `credit_type` and `job`
+      but no billing. Scoped to detachments rather than applied to all three types because it
+      is a *fallback for a credit that is gone*: on an attachment the live row is present and
+      authoritative, and letting the history answer there too would pass a 12th-billed casting
+      card on the strength of an unrelated writing credit the same person once held on the film.
+
+    That asymmetry is the one thing to know about this predicate: a **director or writer**
+    leaving a film you follow pushes, and a **top-billed performer** leaving it does not,
+    because nothing stores the billing of a credit TMDB has deleted. It errs toward silence,
+    which is the right direction for a channel whose whole cost is interrupting somebody, and
+    it is the seam to widen if `film_credit_change` ever records billing — until then EF-7's
+    `credit_removed` on the title arm is met for the crew grades and not for the cast one.
+
+    `correlate(Event)` so the predicate stays a correlated EXISTS against whichever statement
+    it is dropped into — the same shape, and for the same reason, as the follow builders."""
+    seed_crew_jobs = tuple(sorted({DIRECTOR_JOB, *WRITER_JOBS}))
+    holds = (
+        select(literal(1))
+        .select_from(FilmCredit)
+        .join(Person, Person.id == FilmCredit.person_id)
+        .where(
+            FilmCredit.film_id == Event.film_id,
+            sql_normalized_name(Person.name) == any_(Event.subject_key),
+            seed_grade_credit_clause(),
+        )
+        .correlate(Event)
+        .exists()
+    )
+    held = (
+        select(literal(1))
+        .select_from(FilmCreditChange)
+        .join(Person, Person.id == FilmCreditChange.person_id)
+        .where(
+            FilmCreditChange.film_id == Event.film_id,
+            sql_normalized_name(Person.name) == any_(Event.subject_key),
+            FilmCreditChange.credit_type == "crew",
+            FilmCreditChange.job.in_(seed_crew_jobs),
+        )
+        .correlate(Event)
+        .exists()
+    )
+    return or_(holds, and_(Event.event_type == CREDIT_REMOVED_EVENT_TYPE, held))
+
+
+def confirmed_enough_to_push(event_type: str, confidence: str, provenance: str) -> bool:
+    """EF-8: whether this card is confirmed *for push purposes*.
+
+    Outside the attach and detach types the answer is D-32's, unchanged: `confirmed` or
+    nothing. Inside them `provenance` decides instead, because `confidence` does not mean there
+    what it means elsewhere — every catalog attachment card is written `rumored` on the grounds
+    that any TMDB editor can add a credit, and then published only after D-3's quarantine
+    window has passed without the credit being reverted. Surviving quarantine *is* the
+    confirmation, so a `catalog` card on the timeline is already the confirmed one and waiting
+    for a `confidence` flip that nothing will ever write would silence the attachment stream
+    entirely.
+
+    What is left waiting is the card EF-10 means: story-backed and `rumored` — "in talks",
+    "circling". Its push arrives when it is upgraded in place, which is why the alert branch
+    reads a window that reopens on `updated_at` (`deliverable_events`). A story-backed
+    `confirmed` attachment pushes on the spot (EF-11)."""
+    if event_type in ATTACHMENT_PUSH_TYPES:
+        return provenance == "catalog" or confidence == "confirmed"
+    return confidence == "confirmed"
+
+
+def alert_reaches(
+    event_type: str,
+    *,
+    via_title: bool,
+    via_entity: bool,
+    names_seed_role: bool,
+    subject_key: Sequence[str] | None,
+    alert_stores: Sequence[str],
+) -> bool:
+    """EF-7: whether this card may interrupt this user, given *why* it reached them.
+
+    Pure, and takes the reach as two booleans rather than a user id, because the interesting
+    cases are the ones where both are true — the follower of a film *and* of its director — and
+    a signature that could only carry one reach would have to pick which of them to answer as.
+    The arms are tried in turn and either admits: the entity arm first, since it is the one with
+    no further narrowing to apply.
+
+    The seed-grade flag is passed in rather than computed, because answering it means reading
+    the catalog (`names_a_seed_grade_credit`) and this pass asks the question of every event in
+    the window for every user — so it is selected once, in SQL, beside the row."""
+    if via_entity and event_type in ENTITY_PUSH_TYPES:
+        return True
+    if not via_title or event_type not in TITLE_PUSH_TYPES:
+        return False
+    if event_type == NOW_AVAILABLE_EVENT_TYPE:
+        return now_available_matches_stores(subject_key, alert_stores)
+    if event_type in SEED_GRADE_TITLE_TYPES:
+        return names_seed_role
+    return True
+
+
 async def alert_event_ids(
     session: AsyncSession,
     *,
     recipient: Recipient,
     since: datetime,
 ) -> list[UUID]:
-    """The window's events this user earns an **alert** for — the interim push rule (D-1437.7).
+    """The window's events this user earns an **alert** for (EF-7, EF-8, EF-9, EF-10, EF-11).
 
-    The same clause the digest reads (`follow_scope`), cut to `confidence = 'confirmed'` and to
-    D-32's whitelist. That is deliberately not EF-7 yet: an entity follower earns nothing here,
-    because no attach or detach type is in `PUSH_WHITELIST`, and a cancellation earns nothing
-    either. NEU-1438 is where "which beats may interrupt you" becomes a function of *why* the
-    card reached you; keeping the interim rule as two extra terms on the shared clause is what
-    lets it do that without touching the clause.
+    The same two builders the digest reads, taken apart rather than OR-ed (`follow_reach`), so
+    the per-reach decision the module docstring describes has something to decide over. The OR
+    is still the scope — a card neither half reaches is not selected — it is just also carried
+    into the SELECT as two labelled booleans.
 
-    The whitelist is applied in SQL; the `now_available` store check is not, because it
-    compares two arrays through a vocabulary mapping and reads far better as one named
-    predicate than as a `CASE` over `unnest`. The SQL half has already cut the rows to this
-    user's follows and this window, so what Python filters is a handful of events, not the
-    ledger."""
+    What SQL does and what Python does, and why the line falls there: SQL cuts the window, the
+    scope, and the type list, and answers the one question Python cannot afford to ask per row —
+    whether the card names a seed-grade role, which is a join against the catalog. Python then
+    applies the three rules that are a handful of comparisons over a handful of rows, and that
+    read as prose rather than as a `CASE`: the per-reach sets, the `alert_stores` check (two
+    arrays through a vocabulary mapping), and EF-8's confirmation rule.
+
+    Ordered by publication, so a batch's decisions are written in the order the cards appeared
+    even when the window reopened for an upgrade dated later."""
+    via_title, via_entity = follow_reach(recipient.user_id)
     rows = await session.execute(
-        select(Event.id, Event.event_type, Event.subject_key)
+        select(
+            Event.id,
+            Event.event_type,
+            Event.subject_key,
+            Event.confidence,
+            Event.provenance,
+            via_title.label("via_title"),
+            via_entity.label("via_entity"),
+            names_a_seed_grade_credit().label("names_seed_role"),
+        )
         .where(
-            Event.id.in_(deliverable_events(since)),
-            Event.confidence == "confirmed",
-            Event.event_type.in_(PUSH_WHITELIST),
-            follow_scope(recipient.user_id),
+            Event.id.in_(deliverable_events(since, include_upgrades=True)),
+            Event.event_type.in_(PUSH_TYPES),
+            or_(via_title, via_entity),
         )
         .order_by(Event.created_at, Event.id)
     )
     return [
         row.id
         for row in rows
-        if row.event_type in ALWAYS_ON_ALERT_TYPES
-        or now_available_matches_stores(row.subject_key, recipient.alert_stores)
+        if confirmed_enough_to_push(row.event_type, row.confidence, row.provenance)
+        and alert_reaches(
+            row.event_type,
+            via_title=row.via_title,
+            via_entity=row.via_entity,
+            names_seed_role=row.names_seed_role,
+            subject_key=row.subject_key,
+            alert_stores=recipient.alert_stores,
+        )
     ]
 
 
@@ -400,8 +646,9 @@ async def decide_for_user(
 
     The alert branch produces two rows per event for a user with a registered browser (D-36):
     the same event, the same `alert` kind, once per channel. Deliberately derived from the one
-    list rather than queried twice — "the push whitelist" is D-32's list, and a push branch
-    that selected its own events would be free to drift from the mail that accompanies it."""
+    list rather than queried twice — since EF-7 "what may push" is a per-reach decision rather
+    than a list, and a push branch that selected its own events would be free to come to a
+    different answer than the mail that accompanies it."""
     alerts = await alert_event_ids(session, recipient=recipient, since=since)
     digests = await digest_event_ids(session, user_id=recipient.user_id, since=since)
     decisions: list[Decision] = [(event_id, "alert", EMAIL_CHANNEL) for event_id in alerts]

@@ -360,6 +360,25 @@ def title_follow_film_ids(user_id: UUID) -> Select[tuple[UUID]]:
     )
 
 
+def follow_reach(user_id: UUID) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    """The two halves of `follow_scope`, kept apart: `(via a title follow, via an entity
+    follow)` over `news.event`.
+
+    Every reader that only asks *whether* a card reaches this user wants them OR-ed, and that
+    is `follow_scope`. The notify pass's **alert** branch asks the harder question EF-7 poses —
+    *why* the card reached them — because the push sets differ by reach: a 12th-billed casting
+    card is digest-only for the film's follower and an interrupt for the performer's, and the
+    same row can be both at once for a user who follows the two. So it selects these as two
+    labelled booleans beside the event and decides per reach in Python.
+
+    Returned as a pair rather than as two builders because they are one decomposition and
+    reading one without the other is how the OR silently loses a term."""
+    return (
+        Event.film_id.in_(title_follow_film_ids(user_id)),
+        Event.id.in_(entity_attachment_event_ids(user_id)),
+    )
+
+
 def follow_scope(user_id: UUID) -> ColumnElement[bool]:
     """WHERE predicate over `news.event`: this user's follows deliver this card (EF-3).
 
@@ -370,14 +389,15 @@ def follow_scope(user_id: UUID) -> ColumnElement[bool]:
     apply to four statements (the day count, the day window, the film-day rows and the event
     fetch) rather than one.
 
+    `or_` over `follow_reach` rather than its own pair of `IN`s, so the scope and the reach can
+    never come to different answers about what a follow delivers — the alert branch decides
+    per reach (EF-7) and the digest branch over the whole scope, and the two must agree that a
+    card reaching nobody reaches neither.
+
     Lives here, beside the two builders, so there is one place to look for "what does a follow
-    deliver" — NEU-1438 rewrites the alert branch over this predicate and NEU-1440 reads the
-    builders under it, and a clause with a home in `notify_service` is one they would each
-    re-spell."""
-    return or_(
-        Event.film_id.in_(title_follow_film_ids(user_id)),
-        Event.id.in_(entity_attachment_event_ids(user_id)),
-    )
+    deliver" — NEU-1440 reads the builders under it, and a clause with a home in
+    `notify_service` is one they would each re-spell."""
+    return or_(*follow_reach(user_id))
 
 
 def _no_events() -> Select[tuple[UUID]]:

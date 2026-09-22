@@ -165,6 +165,7 @@ def add_event(session: AsyncSession):
         confidence: str = "confirmed",
         occurred_at: datetime = datetime(2025, 3, 1, tzinfo=UTC),
         created_at: datetime | None = None,
+        updated_at: datetime | None = None,
         summary: str | None = "A neutral summary.",
         sources: tuple[dict, ...] = (),
         region: str | None = None,
@@ -175,6 +176,12 @@ def add_event(session: AsyncSession):
         superseded_by: UUID | None = None,
         subject_key: list[str] | None = None,
     ) -> Event:
+        """`updated_at` defaults to `created_at`, as it does in production: the column carries a
+        `server_default` and no `onupdate`, so a freshly written card has the two equal and only
+        an in-place edit (`link.cluster`'s attach paths) moves them apart. Leaving it at `now()`
+        while back-dating `created_at` would make every historical fixture card look like one
+        edited moments ago — which the notify pass's alert window reads as a confidence upgrade
+        (EF-10, `notify_service.deliverable_events`). Pass it explicitly to model that edit."""
         event = Event(
             film_id=film.id,
             event_type=event_type,
@@ -188,6 +195,10 @@ def add_event(session: AsyncSession):
         )
         if created_at is not None:
             event.created_at = created_at
+        if updated_at is not None:
+            event.updated_at = updated_at
+        elif created_at is not None:
+            event.updated_at = created_at
         session.add(event)
         await session.flush()  # populate event.id
         if summary is not None:

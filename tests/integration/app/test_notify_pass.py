@@ -24,10 +24,15 @@ from upmovies.app.services.notify_service import (
     notify_detail,
     run_notify_pass,
 )
+from upmovies.catalog.models import FilmCreditChange, Person
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
-from upmovies.news.models import Story, StoryPerson
-from upmovies.news.subject_key import normalize_name
+from upmovies.news.models import Event, Story, StoryPerson
+from upmovies.news.subject_key import (
+    COLLECTION_SUBJECT_PREFIX,
+    COMPANY_SUBJECT_PREFIX,
+    normalize_name,
+)
 
 WATERMARK = datetime(2026, 9, 17, 3, 0, tzinfo=UTC)
 """When the last successful notify run began. Events created after it are this pass's work."""
@@ -181,7 +186,7 @@ async def test_a_title_follow_on_a_whitelist_beat_queues_an_alert_and_a_digest(
     assert (digest.kind, digest.event_id) == ("digest", event.id)
 
 
-async def test_a_followed_persons_attachment_card_is_a_digest_line_and_not_an_alert(
+async def test_a_followed_persons_attachment_card_alerts_and_lines_the_digest(
     session,
     session_factory,
     subscriber,
@@ -192,13 +197,14 @@ async def test_a_followed_persons_attachment_card_is_a_digest_line_and_not_an_al
     seed_watermark,
     run_pass,
 ):
-    """What an entity follow earns from this pass, in full (EF-3, D-1437.7): the attachment
-    card, in the digest, and nothing interrupting anybody.
+    """What an entity follow earns from this pass, in full (EF-3, EF-7, EF-8): the attachment
+    card, as an alert *and* as a digest line.
 
     The card is `rumored`, which is what every catalog attachment is until its quarantine
-    clears — and the reason the shared selector lost its confidence floor. With the floor still
-    in place this row would be the only thing the follow delivers and the digest would carry
-    none of it (EF-7). The non-follower is the control: one card, one recipient."""
+    clears. Under the interim rule (D-1437.7) that made it digest-only; EF-8 is that surviving
+    quarantine *is* the confirmation for a `provenance = catalog` card, so this is the row the
+    follow exists to deliver and it is allowed to interrupt. The non-follower is the control:
+    one card, one recipient."""
     await seed_watermark()
     user = await subscriber()
     stranger = await subscriber(email="stranger@example.com")
@@ -216,9 +222,11 @@ async def test_a_followed_persons_attachment_card_is_a_digest_line_and_not_an_al
 
     result = await run_pass()
 
-    assert (result.alerts_queued, result.digests_queued, result.push_alerts_queued) == (0, 1, 0)
-    (row,) = await _rows(session)
-    assert (row.user_id, row.event_id, row.kind) == (user.id, card.id, "digest")
+    assert (result.alerts_queued, result.digests_queued, result.push_alerts_queued) == (1, 1, 0)
+    assert {(row.user_id, row.event_id, row.kind) for row in await _rows(session)} == {
+        (user.id, card.id, "alert"),
+        (user.id, card.id, "digest"),
+    }
 
 
 async def test_a_person_follow_no_longer_reaches_the_films_own_beats(
@@ -259,7 +267,7 @@ async def test_a_person_follow_no_longer_reaches_the_films_own_beats(
         pytest.param("canceled", "confirmed", id="a cancellation"),
     ],
 )
-async def test_an_entity_follower_earns_no_alert_from_any_card(
+async def test_an_entity_follower_is_alerted_by_every_card_their_follow_delivers(
     session,
     session_factory,
     subscriber,
@@ -271,12 +279,13 @@ async def test_an_entity_follower_earns_no_alert_from_any_card(
     event_type,
     confidence,
 ):
-    """The interim push rule, pinned so NEU-1438 flips it deliberately (D-1437.7).
+    """EF-7's entity arm, against the four cards that reach it (the studio and franchise pair
+    are `test_a_company_follower_is_alerted_by_the_studio_joining` below).
 
-    Nothing an entity follow delivers is in `PUSH_WHITELIST`: the three credit beats are
-    outside it, and `canceled` — which *is* confirmed, so the confidence term does not explain
-    its absence — is outside it too. Every one of these is a digest line and none of them is an
-    alert. EF-7 gives entity follows their own push set; this is the state before it."""
+    `ENTITY_PUSH_TYPES` is the vocabulary of `entity_attachment_event_ids` rather than a
+    narrowing of it, so the interesting assertion is that *nothing* an entity follow delivers is
+    digest-only. The three attach and detach cards are `rumored` catalog cards and push on
+    EF-8's provenance rule; `canceled` is confirmed and pushes on the ordinary floor."""
     await seed_watermark()
     user = await subscriber()
     film = await make_film(slug="dune", title="Dune")
@@ -295,8 +304,70 @@ async def test_an_entity_follower_earns_no_alert_from_any_card(
 
     result = await run_pass()
 
-    assert (result.alerts_queued, result.push_alerts_queued) == (0, 0)
-    assert [row.kind for row in await _rows(session)] == ["digest"]
+    assert (result.alerts_queued, result.push_alerts_queued) == (1, 0)
+    assert sorted(row.kind for row in await _rows(session)) == ["alert", "digest"]
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["company_attached", "company_removed", "collection_attached", "collection_removed"],
+)
+async def test_a_company_follower_is_alerted_by_the_studio_joining(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    seed_watermark,
+    run_pass,
+    event_type,
+):
+    """The organisation half of the entity arm (EF-7). These four types are in
+    `ENTITY_PUSH_TYPES` and in no title arm at all, which is the asymmetry the split exists
+    for — see `test_a_title_follow_is_not_interrupted_by_a_studio_joining`."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    entity_type = "company" if event_type.startswith("company") else "franchise"
+    prefix = COMPANY_SUBJECT_PREFIX if entity_type == "company" else COLLECTION_SUBJECT_PREFIX
+    session.add(Follow(user_id=user.id, entity_type=entity_type, entity_id="33", source="manual"))
+    await session.commit()
+    await add_event(
+        film=film,
+        event_type=event_type,
+        provenance="catalog",
+        confidence="rumored",
+        subject_key=[f"{prefix}33"],
+        created_at=NEW,
+    )
+
+    result = await run_pass()
+
+    assert result.alerts_queued == 1
+    assert sorted(row.kind for row in await _rows(session)) == ["alert", "digest"]
+
+
+async def test_a_title_follow_is_not_interrupted_by_a_studio_joining(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """The other side of that asymmetry (EF-7). Which company financed a film you follow is
+    timeline news; it is the *studio's* followers it interrupts."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await add_event(
+        film=film,
+        event_type="company_attached",
+        provenance="catalog",
+        confidence="rumored",
+        subject_key=[f"{COMPANY_SUBJECT_PREFIX}33"],
+        created_at=NEW,
+    )
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (0, 1)
 
 
 async def test_a_muted_film_earns_neither_kind(
@@ -318,21 +389,138 @@ async def test_a_muted_film_earns_neither_kind(
     assert (await session.execute(select(Follow))).scalars().all() != []
 
 
-async def test_a_beat_outside_the_whitelist_queues_no_alert(
+async def test_a_beat_in_neither_push_set_queues_no_alert(
     session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
 ):
-    """D-32 is a closed list: a casting announcement is digest material, never an alert — the
-    beat is what decides, not how the film got onto the list."""
+    """EF-7 replaced D-32's closed list with two sets, but it did not open the vocabulary: a
+    type in neither arm is digest material however the card reached the user."""
     await seed_watermark()
     user = await subscriber()
     film = await make_film(slug="dune", title="Dune")
     await _follow_title(session, user_id=user.id, film_id=film.id)
-    await add_event(film=film, event_type="casting", created_at=NEW)
+    await add_event(film=film, event_type="production_start", created_at=NEW)
 
     result = await run_pass()
 
     assert (result.alerts_queued, result.digests_queued) == (0, 1)
     assert [row.kind for row in await _rows(session)] == ["digest"]
+
+
+async def test_a_title_follow_is_alerted_by_a_seed_grade_casting_card(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    attach_credits,
+    seed_watermark,
+    run_pass,
+):
+    """EF-9's admitting side. The performer is 2nd billed, so the card names a seed-grade role
+    on the film and is worth interrupting the film's follower about."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await attach_credits(film, cast=[{"id": 91, "name": "A Lead", "credit_order": 1}])
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await _attach_card(add_event, film, person_name="A Lead", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (1, 1)
+
+
+async def test_a_title_follow_is_not_alerted_by_a_twelfth_billed_addition(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    attach_credits,
+    seed_watermark,
+    run_pass,
+):
+    """EF-9's whole point: the same card, the same follow, one billing position apart from the
+    test above. A 12th-billed addition reaches the timeline and the digest, not a lock screen.
+
+    The performer's *own* follower is not in this test — that reach has no seed-grade floor,
+    and `test_an_entity_follower_is_alerted_by_every_card_their_follow_delivers` covers it."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await attach_credits(film, cast=[{"id": 92, "name": "A Bit Part", "credit_order": 11}])
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await _attach_card(add_event, film, person_name="A Bit Part", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (0, 1)
+
+
+async def test_a_title_follow_is_not_alerted_by_a_non_seed_crew_addition(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    attach_credits,
+    seed_watermark,
+    run_pass,
+):
+    """The crew half of the same floor. A gaffer joining cards as `crew_attached` beside a
+    director (`CREDIT_ROLE_EVENT_TYPES`), so the event type cannot tell them apart and the
+    grade has to be read off the credit."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await attach_credits(film, crew=[{"id": 93, "name": "A Gaffer", "job": "Gaffer"}])
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await _attach_card(
+        add_event, film, person_name="A Gaffer", event_type="crew_attached", created_at=NEW
+    )
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (0, 1)
+
+
+async def test_a_title_follow_is_alerted_by_a_directors_departure(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    seed_watermark,
+    run_pass,
+):
+    """A detachment is graded off `catalog.film_credit_change`, not off `film_credit`: that
+    table is delete-and-rebuilt every ingest, so the credit this card is *about* is gone from it
+    by the time the pass runs (`names_a_seed_grade_credit`). The history is what remembers the
+    job, so a director leaving still interrupts the film's follower."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    session.add(Person(id=94, name="A Director"))
+    await session.flush()
+    session.add(
+        FilmCreditChange(
+            film_id=film.id,
+            person_id=94,
+            credit_type="crew",
+            job="Director",
+            change="removed",
+            changed_at=NEW,
+        )
+    )
+    await session.commit()
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await _attach_card(
+        add_event, film, person_name="A Director", event_type="credit_removed", created_at=NEW
+    )
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (1, 1)
 
 
 async def test_now_available_alerts_only_the_stores_the_user_wants(
@@ -517,6 +705,213 @@ async def test_re_deciding_the_same_window_writes_nothing_twice(
     assert (second.alerts_queued, second.digests_queued) == (0, 0)
     assert second.events_considered == 1, "the window really was re-read"
     assert len(await _rows(session)) == 2
+
+
+async def test_a_rumored_story_attachment_waits_and_pushes_on_its_upgrade(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    make_person,
+    seed_watermark,
+    run_pass,
+    move_watermark,
+):
+    """EF-10 end to end, and the reason the alert branch reads a widened window.
+
+    A trade says the director is "in talks": a story-backed `rumored` attach card. It lines the
+    digest and interrupts nobody. Days later the association confirms and the card is upgraded
+    **in place** (D-6) rather than re-carded, so its `created_at` is now behind the watermark
+    and only `updated_at` moved. The upgrade is what queues the push — and it queues exactly
+    one, because the second pass's digest row is the first pass's row and the unique key
+    declines it."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await make_person(id=488, name="A Director")
+    await _follow_person(session, user_id=user.id, person_id=488)
+    card = await add_event(
+        film=film,
+        event_type="crew_attached",
+        provenance="story",
+        confidence="rumored",
+        subject_key=[normalize_name("A Director")],
+        created_at=NEW,
+    )
+
+    waiting = await run_pass()
+
+    assert (waiting.alerts_queued, waiting.digests_queued) == (0, 1)
+
+    await move_watermark(BETWEEN)
+    await session.execute(
+        update(Event).where(Event.id == card.id).values(confidence="confirmed", updated_at=LATER)
+    )
+    await session.commit()
+
+    upgraded = await run_pass()
+
+    assert (upgraded.alerts_queued, upgraded.digests_queued) == (1, 0)
+    assert upgraded.events_considered == 0, (
+        "the counter stays on publication; only the alert branch reopens the window"
+    )
+    assert sorted(row.kind for row in await _rows(session)) == ["alert", "digest"]
+
+
+async def test_an_upgrade_that_never_comes_never_pushes(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    make_person,
+    seed_watermark,
+    run_pass,
+    move_watermark,
+):
+    """The control for the test above. The card is touched in the later window — a second
+    outlet attaching to it bumps `updated_at` (`link.cluster`) — but it is still "in talks", so
+    re-considering it must change nothing. Without this, the widened window would read as
+    "anything edited recently pushes"."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await make_person(id=488, name="A Director")
+    await _follow_person(session, user_id=user.id, person_id=488)
+    card = await add_event(
+        film=film,
+        event_type="crew_attached",
+        provenance="story",
+        confidence="rumored",
+        subject_key=[normalize_name("A Director")],
+        created_at=NEW,
+    )
+
+    await run_pass()
+    await move_watermark(BETWEEN)
+    await session.execute(update(Event).where(Event.id == card.id).values(updated_at=LATER))
+    await session.commit()
+
+    second = await run_pass()
+
+    assert (second.alerts_queued, second.digests_queued) == (0, 0)
+    assert [row.kind for row in await _rows(session)] == ["digest"]
+
+
+async def test_a_catalog_attachment_touched_later_is_not_reconsidered(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    make_person,
+    seed_watermark,
+    run_pass,
+    move_watermark,
+):
+    """The bound on the reopened window. A second outlet clustering onto an existing card bumps
+    its `updated_at` and changes nothing else (`link.cluster`), and catalog cards were pushable
+    the day they published (EF-8) — so reopening on `updated_at` alone would push an attachment
+    of any age at a follower who arrived after it.
+
+    Here the follow is created *after* the first pass, so the card has alerted nobody and the
+    unique key cannot mask the difference: if the arm admitted this row the follower would be
+    interrupted about last window's news."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await make_person(id=488, name="A Director")
+    card = await _attach_card(
+        add_event, film, person_name="A Director", event_type="crew_attached", created_at=NEW
+    )
+
+    await run_pass()
+    await move_watermark(BETWEEN)
+    await _follow_person(session, user_id=user.id, person_id=488)
+    await session.execute(update(Event).where(Event.id == card.id).values(updated_at=LATER))
+    await session.commit()
+
+    second = await run_pass()
+
+    assert (second.alerts_queued, second.digests_queued) == (0, 0)
+    assert await _rows(session) == []
+
+
+async def test_an_unrelated_casting_card_is_not_graded_by_an_old_writing_credit(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    attach_credits,
+    seed_watermark,
+    run_pass,
+):
+    """The `film_credit_change` arm of the seed-grade floor is a fallback for a credit that is
+    *gone*, so it answers `credit_removed` and nothing else.
+
+    This performer is 12th billed now and once held a writing credit on the same film. On an
+    attachment the live row is present and authoritative: the card is about the bit part, and
+    grading it off the old writing credit would pass exactly the addition EF-9 excludes."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await attach_credits(film, cast=[{"id": 95, "name": "A Bit Part", "credit_order": 11}])
+    session.add(
+        FilmCreditChange(
+            film_id=film.id,
+            person_id=95,
+            credit_type="crew",
+            job="Screenplay",
+            change="removed",
+            changed_at=OLD,
+        )
+    )
+    await session.commit()
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await _attach_card(add_event, film, person_name="A Bit Part", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (0, 1)
+
+
+async def test_a_card_both_follows_reach_earns_one_row_per_channel_and_no_more(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    attach_credits,
+    seed_watermark,
+    run_pass,
+):
+    """EF-7's closing clause. The user follows the film *and* its director, so the attachment
+    card reaches them twice over — through `title_follow_film_ids` and through
+    `entity_attachment_event_ids`. Both arms admit it, and they are arms of one decision: the
+    branch produces event **ids**, so the reach that admitted the card leaves no trace in what
+    is written."""
+    await seed_watermark()
+    user = await subscriber()
+    await _register_push(session, user_id=user.id)
+    film = await make_film(slug="dune", title="Dune")
+    await attach_credits(film, crew=[{"id": 488, "name": "A Director", "job": "Director"}])
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await _follow_person(session, user_id=user.id, person_id=488)
+    card = await _attach_card(
+        add_event, film, person_name="A Director", event_type="crew_attached", created_at=NEW
+    )
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.push_alerts_queued, result.digests_queued) == (1, 1, 1)
+    assert sorted((row.kind, row.channel) for row in await _rows(session)) == [
+        ("alert", "email"),
+        ("alert", "push"),
+        ("digest", "email"),
+    ]
+    assert {row.event_id for row in await _rows(session)} == {card.id}
 
 
 async def test_the_first_run_ever_establishes_the_watermark_and_queues_nothing(
@@ -903,30 +1298,37 @@ async def test_a_digest_is_never_queued_by_push(
     session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
 ):
     """A follow produces timeline material, and the timeline is a mail. Only the alert branch
-    has a push half."""
+    has a push half.
+
+    Asserted on a beat that *does* push, so the absence read here is the digest row's missing
+    twin rather than a card nothing would have pushed anyway."""
     await seed_watermark()
     user = await subscriber()
     await _register_push(session, user_id=user.id)
     film = await make_film(slug="dune", title="Dune")
     await _follow_title(session, user_id=user.id, film_id=film.id)
-    await add_event(film=film, event_type="casting", created_at=NEW)
+    await add_event(film=film, event_type="release_date", created_at=NEW)
 
     result = await run_pass()
 
-    assert (result.digests_queued, result.push_alerts_queued) == (1, 0)
-    assert [(row.kind, row.channel) for row in await _rows(session)] == [("digest", "email")]
+    assert (result.digests_queued, result.push_alerts_queued) == (1, 1)
+    assert {(row.kind, row.channel) for row in await _rows(session)} == {
+        ("alert", "email"),
+        ("alert", "push"),
+        ("digest", "email"),
+    }
 
 
-async def test_a_beat_outside_the_whitelist_queues_no_push_either(
+async def test_a_beat_in_neither_push_set_queues_no_push_either(
     session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
 ):
-    """The push branch inherits D-32 rather than restating it."""
+    """The push branch inherits the alert branch's decision rather than restating it."""
     await seed_watermark()
     user = await subscriber()
     await _register_push(session, user_id=user.id)
     film = await make_film(slug="dune", title="Dune")
     await _follow_title(session, user_id=user.id, film_id=film.id)
-    await add_event(film=film, event_type="casting", created_at=NEW)
+    await add_event(film=film, event_type="production_start", created_at=NEW)
 
     result = await run_pass()
 
