@@ -12,8 +12,9 @@ import unicodedata
 from collections.abc import Collection
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from upmovies.news.models import Event
 
@@ -26,8 +27,49 @@ def normalize_name(name: str) -> str:
     return " ".join(folded.split())
 
 
-_COMPANY_SUBJECT_PREFIX = "company:"
-_COLLECTION_SUBJECT_PREFIX = "collection:"
+def sql_normalized_name(
+    column: ColumnElement[str] | InstrumentedAttribute[str],
+) -> ColumnElement[str]:
+    """`normalize_name` as a SQL expression over a name column (D-1437.3).
+
+    The delivery half matches a followed person to a card by name, because `subject_key`
+    carries normalized names and never person ids — so "is this card about somebody I follow"
+    is a comparison between `catalog.person.name` and those tokens, and it has to happen in
+    the database: `app.follow_queries` hands its builders to the notify pass, which asks the
+    question of every user at once and has no Python-side name list to compare against.
+
+    Kept beside `normalize_name` rather than in the builder that reads it, for this module's
+    founding reason: two normalizations are two different answers to "is this the same
+    person", and the second one would only show up as a card that reached nobody.
+    `tests/integration/news/test_sql_normalized_name.py` pins the two spellings against one
+    fixture list.
+
+    The operations are `normalize_name`'s, in its order — NFKC, fold, collapse whitespace,
+    trim — and the trim comes *after* the collapse rather than before it, because `btrim`'s
+    default character set is the space alone: a tab-padded name trimmed first would keep a
+    leading space once the collapse turned the tab into one.
+
+    **Known divergences, accepted, three of them.** Python's `casefold()` full-folds where
+    SQL's `lower()` does not — `ß` becomes `ss` on the Python side and stays `ß` here, and a
+    Greek *final* sigma becomes a medial one there and stays final here. And `str.split()`
+    counts U+0085 NEL as whitespace where Postgres's ``\\s`` class does not, so a name carrying
+    one collapses on one side only (every other separator agrees, tab, newline, NBSP, line
+    separator, vertical tab and the Ogham space mark included). A person whose TMDB name carries
+    such a character is missed
+    by the name branch until the name is spelled the same on both sides; a story-backed card
+    about them still reaches their followers through the resolved-mention branch, which
+    matches on `person_id`. The fix is not a wider fold — it is id tokens in `subject_key`,
+    which M2 deliberately did not add (D-1437.3).
+    """
+    return func.btrim(
+        func.regexp_replace(func.lower(func.normalize(column, text("NFKC"))), r"\s+", " ", "g")
+    )
+
+
+COMPANY_SUBJECT_PREFIX = "company:"
+COLLECTION_SUBJECT_PREFIX = "collection:"
+"""The two token namespaces, public so the delivery half can build the token it matches on
+rather than restating the prefix (EF-3, NEU-1437)."""
 
 
 def _prefixed_ids_in(subject_key: list[str] | None, prefix: str) -> list[int]:
@@ -64,12 +106,12 @@ def company_subject_token(company_id: int) -> str:
     Prefixed for the reason `youtube:<key>` is: `subject_key` is one column shared by every
     event type, and a bare `20` beside a casting card's names would be ambiguous on its face.
     """
-    return f"{_COMPANY_SUBJECT_PREFIX}{company_id}"
+    return f"{COMPANY_SUBJECT_PREFIX}{company_id}"
 
 
 def company_ids_in(subject_key: list[str] | None) -> list[int]:
     """The company ids a card's `subject_key` names, in the order it holds them."""
-    return _prefixed_ids_in(subject_key, _COMPANY_SUBJECT_PREFIX)
+    return _prefixed_ids_in(subject_key, COMPANY_SUBJECT_PREFIX)
 
 
 def collection_subject_token(collection_id: int) -> str:
@@ -82,12 +124,12 @@ def collection_subject_token(collection_id: int) -> str:
     name two different franchises, and two collections can share a display name where they
     cannot share an id.
     """
-    return f"{_COLLECTION_SUBJECT_PREFIX}{collection_id}"
+    return f"{COLLECTION_SUBJECT_PREFIX}{collection_id}"
 
 
 def collection_ids_in(subject_key: list[str] | None) -> list[int]:
     """The collection ids a card's `subject_key` names, in the order it holds them."""
-    return _prefixed_ids_in(subject_key, _COLLECTION_SUBJECT_PREFIX)
+    return _prefixed_ids_in(subject_key, COLLECTION_SUBJECT_PREFIX)
 
 
 async def recorded_subject_names(

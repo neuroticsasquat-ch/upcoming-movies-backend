@@ -1234,19 +1234,6 @@ async def test_notify_stage_finalizes_the_run_with_its_detail_line(session, monk
     )
 
 
-async def test_notify_stage_passes_the_excluded_statuses_from_settings(session, monkeypatch):
-    """The follow filter's in-play term reads them, so a pass run with the wrong set would
-    quietly change whose timeline the digest covers."""
-    captured = _stub_notify(monkeypatch)
-    settings = get_settings().model_copy(update={"tmdb_excluded_statuses_raw": "Canceled"})
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, settings)
-
-    assert captured["excluded_statuses"] == frozenset({"Canceled"})
-
-
 async def test_notify_stage_fails_the_run_when_the_pass_aborted(session, monkeypatch):
     _stub_notify(
         monkeypatch, NotifyResult(failures=10, aborted=True, abort_error="aborted after 10")

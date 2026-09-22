@@ -299,8 +299,13 @@ class StoryPerson(Base):
 
 # The two `story_person.path` values that name somebody a follow can match (D-25) — beside the
 # constraint that spells the whole vocabulary, rather than in the resolver that writes it, so the
-# timeline's filter (`app.follow_queries.events_naming_followed_people`) can read the rule without
+# timeline's filter (`app.follow_queries.first_association_clause`) can read the rule without
 # importing the scoring pass and, with it, the TMDB client onto a public read path.
+#
+# A resolved mention no longer puts its event on a follower's timeline by itself (EF-3): it does
+# so only as the mentioned entity's first association with the film, or its first detachment
+# from it (EF-13). The paths are still the cut that decides whether a mention names anybody at
+# all.
 RESOLVED_MENTION_PATHS = ("accepted", "tiebreak")
 
 

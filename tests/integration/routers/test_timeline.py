@@ -1,10 +1,17 @@
-"""`GET /me/timeline` (D-11, D-12): `/feed/grouped` filtered by the user's follows, behind the
+"""`GET /me/timeline` (EF-3, D-12): `/feed/grouped` filtered by the user's follows, behind the
 entitlement gate (D-39).
 
-Films are created undated (`release_date=None`) wherever a person follow is in play, because
-`make_film`'s default release date is a fixed day in 2026 that the suite will walk past — a
-person follow only reaches films still *in play*, so a dated fixture would start passing or
-failing on the calendar rather than on the rule under test.
+The filter is two builders OR-ed by the grouped feed: a **title** follow selects its film, and
+a person, studio or franchise follow selects the *cards* in which that entity attaches to or
+detaches from a film, plus that film's cancellation. So a test about an entity follow has to
+create the card, not just the credit — an attached director with nothing carded reaches nothing,
+which is the cutover in one sentence.
+
+Nothing here depends on a film's status or age any more (EF-14): the in-play cut that made these
+fixtures date-sensitive was the old person branch's, and it is gone. The cards the sweep writes
+are created the way it writes them — `provenance='catalog'`, `confidence='rumored'`, a
+normalized name or an id token in `subject_key` — because that is what the delivery half
+matches on.
 """
 
 from datetime import UTC, date, datetime
@@ -14,7 +21,15 @@ from sqlalchemy import select
 
 from tests.fixtures.public import ref
 from upmovies.app.models import WatchlistDismissal
-from upmovies.news.models import EventStory, StoryPerson
+from upmovies.news.models import EventStory, Story, StoryPerson
+from upmovies.news.subject_key import (
+    collection_subject_token,
+    company_subject_token,
+    normalize_name,
+)
+
+DIRECTOR = 525
+DIRECTOR_NAME = "C. Nolan"
 
 
 @pytest.fixture
@@ -35,13 +50,31 @@ def follow(entitled_client):
 def name_in_story(session):
     """Write the resolver's own row (D-24): one person named in the story behind an event.
 
+    `features` carries the extraction-time `event_type` — the beat the person was named in
+    connection with — which is half of EF-13's first-association rule: a mention typed
+    `casting` on an attach card is an association, and the same mention typed anything else is
+    an interview.
+
     Takes the event rather than the story because that is the direction the timeline reads in,
-    and `add_event(sources=...)` is what puts a story there in the first place.
+    and `add_event(sources=...)` is what puts a story there in the first place. `story` names
+    one of a card's several stories, for the second-outlet case.
     """
 
-    async def _name(event, *, person_id: int | None, path: str, name: str = "A Person") -> None:
-        story_id = await session.scalar(
-            select(EventStory.story_id).where(EventStory.event_id == event.id)
+    async def _name(
+        event,
+        *,
+        person_id: int | None,
+        path: str,
+        name: str = "A Person",
+        event_type: str | None = "casting",
+        story: Story | None = None,
+    ) -> None:
+        story_id = (
+            story.id
+            if story is not None
+            else await session.scalar(
+                select(EventStory.story_id).where(EventStory.event_id == event.id)
+            )
         )
         session.add(
             StoryPerson(
@@ -49,12 +82,51 @@ def name_in_story(session):
                 person_id=person_id,
                 name_as_written=name,
                 path=path,
+                features={"title_mentioned": None, "event_type": event_type},
                 prompt_version="1",
             )
         )
         await session.commit()
 
     return _name
+
+
+@pytest.fixture
+def second_outlet(session):
+    """Another story on a card that already exists — what attaching means (CONTEXT.md
+    **Attach**), and what must not produce a second row."""
+
+    async def _attach(event, *, url: str) -> Story:
+        story = Story(source="Variety", url=url, title="The same casting")
+        session.add(story)
+        await session.flush()
+        session.add(EventStory(event_id=event.id, story_id=story.id))
+        await session.commit()
+        return story
+
+    return _attach
+
+
+@pytest.fixture
+def catalog_card(add_event):
+    """A card as the sweep writes one: catalog-sourced, `rumored` until quarantine clears, and
+    identifying its subject in `subject_key`."""
+
+    async def _card(
+        film, *, event_type: str, names: tuple[str, ...] = (), tokens: tuple[str, ...] = (), **kw
+    ):
+        subject_key = [normalize_name(n) for n in names] + list(tokens)
+        kw.setdefault("provenance", "catalog")
+        kw.setdefault("confidence", "rumored")
+        kw.setdefault("created_at", datetime(2026, 6, 3, tzinfo=UTC))
+        return await add_event(
+            film=film,
+            event_type=event_type,
+            subject_key=subject_key or None,
+            **kw,
+        )
+
+    return _card
 
 
 # --- the gate ------------------------------------------------------------------------------
@@ -88,87 +160,75 @@ async def test_timeline_of_an_empty_follow_graph_is_empty(entitled_client, make_
     assert body["total"] == 0
 
 
-async def test_following_a_director_shows_only_their_films(
-    entitled_client, make_film, add_event, attach_credits, follow
+async def test_following_a_director_shows_their_attachment_and_not_the_films_other_beats(
+    entitled_client, make_film, make_person, catalog_card, follow
 ):
-    theirs = await make_film(slug="theirs", title="Theirs", release_date=None)
-    someone_elses = await make_film(slug="not-theirs", title="Not Theirs", release_date=None)
-    await attach_credits(theirs, crew=[{"id": 525, "name": "C. Nolan", "job": "Director"}])
-    await attach_credits(
-        someone_elses, crew=[{"id": 1032, "name": "M. Scorsese", "job": "Director"}]
-    )
-    await add_event(film=theirs, summary="theirs", created_at=datetime(2026, 6, 3, tzinfo=UTC))
-    await add_event(film=someone_elses, summary="not", created_at=datetime(2026, 6, 3, tzinfo=UTC))
+    """The ticket's first case, and the cutover in one test (EF-3). Under D-11 this follow
+    reached the film and everything on it; now it reaches the card in which the director joined
+    it, and the trailer of the same film on the same day is somebody else's business — the
+    film's own followers'."""
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
+    theirs = await make_film(slug="theirs", title="Theirs")
+    someone_elses = await make_film(slug="not-theirs", title="Not Theirs")
+    await catalog_card(theirs, event_type="crew_attached", names=(DIRECTOR_NAME,))
+    await catalog_card(theirs, event_type="trailer")
+    await catalog_card(someone_elses, event_type="crew_attached", names=("M. Scorsese",))
 
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
     body = (await entitled_client.get("/me/timeline")).json()
     assert [i["film_ref"] for i in body["items"]] == [ref(theirs)]
-    assert body["total"] == 1
+    assert [i["event_count"] for i in body["items"]] == [1]
+    # `event_types` rather than `events`: a catalog-sourced row ships its beats as titles only
+    # (NEU-1208), so the row's own aggregate is where the scoped set shows.
+    assert [i["event_types"] for i in body["items"]] == [["crew_attached"]]
 
 
-async def test_every_credit_counts_whatever_its_grade(
-    entitled_client, session, make_film, add_event, follow
+async def test_a_title_follower_sees_both(
+    entitled_client, make_film, make_person, catalog_card, follow
 ):
-    """D-11's seed-grade cut on the person branch, gone (EF-2).
+    """The other half of the same day: the film's own follower gets the attachment *and* the
+    trailer, because a title follow delivers everything about its film."""
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
+    film = await make_film(slug="theirs", title="Theirs")
+    await catalog_card(film, event_type="crew_attached", names=(DIRECTOR_NAME,))
+    await catalog_card(film, event_type="trailer")
 
-    The three grades `catalog/seed_grade.py` defines, one film each, plus the three that are
-    deliberately *not* seed grade: a 6th-billed role, an unbilled one (TMDB leaves `order` off
-    the long tail, which is exactly the cut) and a producer credit. All six are on the timeline
-    now — a follow is binary, and the bottom three are the ones it used to silently decline.
-    The credits are written directly because `attach_credits` inserts the person per call, and
-    this is one person credited on six films."""
-    from upmovies.catalog.models import FilmCredit, Person
+    await follow("title", film.id)
 
-    session.add(Person(id=287, name="A Person"))
-    await session.flush()
-
-    grades = {
-        "Director": {"credit_type": "crew", "job": "Director", "department": "Directing"},
-        "Writer": {"credit_type": "crew", "job": "Screenplay", "department": "Writing"},
-        "Top Billed": {"credit_type": "cast", "credit_order": 4},
-        "Sixth Billed": {"credit_type": "cast", "credit_order": 5},
-        "Unbilled": {"credit_type": "cast", "credit_order": None},
-        "Producer": {"credit_type": "crew", "job": "Producer", "department": "Production"},
-    }
-    for title, credit in grades.items():
-        film = await make_film(slug=title.lower().replace(" ", "-"), title=title, release_date=None)
-        session.add(FilmCredit(credit_id=f"c-{film.id}", film_id=film.id, person_id=287, **credit))
-        await add_event(film=film, summary="s", created_at=datetime(2026, 6, 3, tzinfo=UTC))
-    await session.commit()
-
-    await follow("person", 287)
-
-    items = (await entitled_client.get("/me/timeline")).json()["items"]
-    assert sorted(i["film_title"] for i in items) == sorted(grades)
+    body = (await entitled_client.get("/me/timeline")).json()
+    assert [i["event_count"] for i in body["items"]] == [2]
 
 
 @pytest.mark.parametrize(
     "out_of_play",
     [
-        pytest.param({"release_date": date(2020, 1, 1)}, id="already released"),
+        pytest.param({"release_date": date(2020, 1, 1), "status": "Released"}, id="released"),
         pytest.param({"status": "Canceled", "release_date": None}, id="canceled"),
     ],
 )
-async def test_a_person_follow_does_not_reach_films_out_of_play(
-    entitled_client, make_film, add_event, attach_credits, follow, out_of_play
+async def test_a_person_follow_reaches_an_attachment_whatever_the_films_state(
+    entitled_client, make_film, make_person, catalog_card, follow, out_of_play
 ):
-    # D-11 scopes a person follow to films in play: following a director is an interest in what
-    # they are making next, not in their back catalogue.
+    """D-11 scoped a person follow to films *in play*, because a follow that reached films
+    would otherwise flood the timeline with a director's back catalogue. An entity follow
+    reaches events instead, one per attachment, so there is nothing left to flood with and no
+    bound left to apply (EF-3): somebody joining a cancelled film's crew, or a released film's,
+    is still news about them."""
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
     film = await make_film(slug="old", **out_of_play)
-    await attach_credits(film, crew=[{"id": 525, "name": "C. Nolan", "job": "Director"}])
-    await add_event(film=film, summary="a")
+    await catalog_card(film, event_type="casting", names=(DIRECTOR_NAME,))
 
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
-    assert (await entitled_client.get("/me/timeline")).json()["items"] == []
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(film)]
 
 
 async def test_a_title_follow_reaches_a_released_film(
     entitled_client, make_film, add_event, follow
 ):
-    # The in-play cut belongs to the person branch alone — following a title is a request for
-    # that specific film, whatever state it is in.
+    # Following a title is a request for that specific film, whatever state it is in (EF-14).
     film = await make_film(slug="released", status="Released", release_date=date(2020, 1, 1))
     await add_event(film=film, summary="a")
 
@@ -178,14 +238,41 @@ async def test_a_title_follow_reaches_a_released_film(
     assert [i["film_ref"] for i in items] == [ref(film)]
 
 
-async def test_a_company_follow_reaches_a_released_film(
-    entitled_client, make_film, add_event, attach_companies, follow
+async def test_a_company_follow_reaches_its_attachment_cards_and_nothing_else(
+    entitled_client, session, make_film, attach_companies, catalog_card, follow
 ):
-    # As with a title: only the person branch carries the in-play cut, so a company's back
-    # catalogue still reaches the timeline.
+    """The studio half of EF-3, over the id tokens NEU-1433's cards carry. The company is
+    attached to both films and only one of them carded it; the release-date beat on the carded
+    film is the control.
+
+    The second join row is written directly because `attach_companies` inserts the company
+    itself, and this is one company on two films."""
+    from upmovies.catalog.models import FilmProductionCompany
+
+    theirs = await make_film(slug="theirs", title="Theirs")
+    quiet = await make_film(slug="quiet", title="Quiet")
+    await attach_companies(theirs, [(508, "Regency")])
+    session.add(FilmProductionCompany(film_id=quiet.id, company_id=508))
+    await session.commit()
+    await catalog_card(theirs, event_type="company_attached", tokens=(company_subject_token(508),))
+    await catalog_card(theirs, event_type="release_date")
+    await catalog_card(quiet, event_type="trailer")
+
+    await follow("company", 508)
+
+    body = (await entitled_client.get("/me/timeline")).json()
+    assert [i["film_ref"] for i in body["items"]] == [ref(theirs)]
+    assert [i["event_types"] for i in body["items"]] == [["company_attached"]]
+
+
+async def test_a_company_follow_reaches_a_released_films_card(
+    entitled_client, make_film, attach_companies, catalog_card, follow
+):
+    # No window on the event half, as for a person follow: a studio joining a re-release is
+    # still the studio's news.
     film = await make_film(slug="released", status="Released", release_date=date(2020, 1, 1))
     await attach_companies(film, [(508, "Regency")])
-    await add_event(film=film, summary="a")
+    await catalog_card(film, event_type="company_attached", tokens=(company_subject_token(508),))
 
     await follow("company", 508)
 
@@ -193,82 +280,186 @@ async def test_a_company_follow_reaches_a_released_film(
     assert [i["film_ref"] for i in items] == [ref(film)]
 
 
-async def test_a_company_follow_reaches_its_films(
-    entitled_client, make_film, add_event, attach_companies, follow
+async def test_a_franchise_follow_reaches_its_collection_cards(
+    entitled_client, make_film, add_event, make_collection, catalog_card, follow
 ):
-    theirs = await make_film(slug="theirs", title="Theirs")
-    someone_elses = await make_film(slug="other", title="Other")
-    await attach_companies(theirs, [(508, "Regency")])
-    await attach_companies(someone_elses, [(4, "Paramount")])
-    await add_event(film=theirs, summary="a")
-    await add_event(film=someone_elses, summary="b")
-
-    await follow("company", 508)
-
-    items = (await entitled_client.get("/me/timeline")).json()["items"]
-    assert [i["film_ref"] for i in items] == [ref(theirs)]
-
-
-async def test_a_franchise_follow_reaches_its_collection(
-    entitled_client, make_film, add_event, make_collection, follow
-):
+    """The franchise half: the follow says `franchise`, the token says `collection` (CONTEXT.md
+    **Franchise**). A film already sitting in the collection with nothing carded reaches
+    nobody — being in a franchise is not news, joining one is."""
     await make_collection(id=10, name="A Collection")
-    inside = await make_film(slug="inside", title="Inside", collection_id=10)
-    outside = await make_film(slug="outside", title="Outside")
-    await add_event(film=inside, summary="a")
-    await add_event(film=outside, summary="b")
+    joined = await make_film(slug="joined", title="Joined", collection_id=10)
+    already_in = await make_film(slug="already-in", title="Already In", collection_id=10)
+    await catalog_card(
+        joined, event_type="collection_attached", tokens=(collection_subject_token(10),)
+    )
+    await add_event(film=already_in, summary="a trailer", event_type="trailer")
 
     await follow("franchise", 10)
 
     items = (await entitled_client.get("/me/timeline")).json()["items"]
-    assert [i["film_ref"] for i in items] == [ref(inside)]
+    assert [i["film_ref"] for i in items] == [ref(joined)]
 
 
-async def test_a_film_matched_by_two_follows_appears_once(
-    entitled_client, make_film, add_event, attach_companies, follow
+async def test_a_cancellation_reaches_a_company_follower(
+    entitled_client, make_film, attach_companies, catalog_card, follow
 ):
-    film = await make_film(slug="both", title="Both")
+    """The ticket's fifth case (EF-6). The `canceled` card carries no `subject_key` at all, so
+    its branch asks who is *currently attached* to the film — which is why a studio follower
+    hears that a film they are on has been called off."""
+    film = await make_film(slug="called-off", title="Called Off")
     await attach_companies(film, [(508, "Regency")])
-    await add_event(film=film, summary="a")
+    await catalog_card(film, event_type="canceled", confidence="confirmed")
 
     await follow("company", 508)
-    await follow("title", film.id)
+
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(film)]
+    assert [i["event_types"] for i in items] == [["canceled"]]
+
+
+@pytest.mark.parametrize(
+    "credit",
+    [
+        pytest.param({"credit_order": 39}, id="40th-billed cast"),
+        pytest.param({"credit_order": None}, id="unbilled cast"),
+    ],
+)
+async def test_a_cancellation_reaches_a_person_follower_at_any_credit(
+    entitled_client, make_film, attach_credits, catalog_card, follow, credit
+):
+    """A follow is binary (EF-1), so "attached" means any credit — the rows the retired tiers
+    declined are exactly the ones to check."""
+    film = await make_film(slug="called-off", title="Called Off")
+    await attach_credits(film, cast=[{"id": DIRECTOR, "name": DIRECTOR_NAME, **credit}])
+    await catalog_card(film, event_type="canceled", confidence="confirmed")
+
+    await follow("person", DIRECTOR)
 
     items = (await entitled_client.get("/me/timeline")).json()["items"]
     assert [i["film_ref"] for i in items] == [ref(film)]
 
 
-# --- events naming a resolved followed person (M4, D-11's second half) ------------------------
+async def test_a_card_matched_by_two_follows_appears_once(
+    entitled_client, make_film, attach_companies, catalog_card, follow
+):
+    """Both halves of the clause reach this card — the film by title, the card by its company
+    token — and the union is de-duplicated, so it is one row carrying one event."""
+    film = await make_film(slug="both", title="Both")
+    await attach_companies(film, [(508, "Regency")])
+    await catalog_card(film, event_type="company_attached", tokens=(company_subject_token(508),))
+
+    await follow("company", 508)
+    await follow("title", film.id)
+
+    body = (await entitled_client.get("/me/timeline")).json()
+    assert [i["film_ref"] for i in body["items"]] == [ref(film)]
+    assert [i["event_count"] for i in body["items"]] == [1]
 
 
-async def test_a_resolved_mention_reaches_the_timeline_without_a_credit(
+# --- first association: a story mention reaches an entity follower once (EF-13) ---------------
+
+
+async def test_a_first_association_reaches_the_timeline_without_a_credit(
     entitled_client, make_film, add_event, make_person, follow, name_in_story
 ):
-    # D-11 after M4: an event whose story names a person the user follows, on a film that person
-    # holds no credit on. `catalog.film_credit` is empty here, so the credit branch cannot see
-    # this film at all — the event branch is the only thing that can put it on the timeline.
-    uncredited = await make_film(slug="uncredited", title="Uncredited", release_date=None)
-    unrelated = await make_film(slug="unrelated", title="Unrelated", release_date=None)
-    await make_person(id=525, name="C. Nolan")
+    """EF-13's whole point: the trades say somebody has signed on to a film they were not on
+    before, days before TMDB holds a credit. `catalog.film_credit` is empty here, so nothing
+    but the resolved mention can put this card on the timeline — and the story about the
+    unrelated film, naming nobody followed, must not."""
+    uncredited = await make_film(slug="uncredited", title="Uncredited")
+    unrelated = await make_film(slug="unrelated", title="Unrelated")
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
     named = await add_event(
         film=uncredited,
+        event_type="casting",
         summary="names them",
         created_at=datetime(2026, 6, 3, tzinfo=UTC),
         sources=({"url": "https://deadline.com/a"},),
     )
     await add_event(
         film=unrelated,
+        event_type="casting",
         summary="names nobody",
         created_at=datetime(2026, 6, 3, tzinfo=UTC),
         sources=({"url": "https://deadline.com/b"},),
     )
-    await name_in_story(named, person_id=525, path="accepted")
+    await name_in_story(named, person_id=DIRECTOR, path="accepted")
 
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
     body = (await entitled_client.get("/me/timeline")).json()
     assert [i["film_ref"] for i in body["items"]] == [ref(uncredited)]
     assert body["total"] == 1
+
+
+async def test_a_second_outlet_on_the_same_card_adds_no_row(
+    entitled_client, make_film, add_event, make_person, follow, name_in_story, second_outlet
+):
+    """The ticket's third case. The second trade to run the casting *attaches* to the card the
+    first one formed, so there is one event — and one row, with one event in it. This is the
+    row count that would double if the clause selected mentions rather than first
+    associations."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
+    card = await add_event(
+        film=film,
+        event_type="casting",
+        summary="the scoop",
+        created_at=datetime(2026, 6, 3, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/a"},),
+    )
+    await name_in_story(card, person_id=DIRECTOR, path="accepted")
+    story = await second_outlet(card, url="https://variety.com/b")
+    await name_in_story(card, person_id=DIRECTOR, path="accepted", story=story)
+
+    await follow("person", DIRECTOR)
+
+    body = (await entitled_client.get("/me/timeline")).json()
+    assert body["total"] == 1
+    assert [i["event_count"] for i in body["items"]] == [1]
+
+
+async def test_an_interview_mention_adds_nothing(
+    entitled_client, make_film, add_event, make_person, follow, name_in_story
+):
+    """The ticket's fourth case. The person is resolved and the card is an attach card; what
+    the mention is not is an attachment — they were named in connection with another beat, so
+    their followers hear nothing."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
+    card = await add_event(
+        film=film,
+        event_type="casting",
+        summary="an interview that mentions the film's casting",
+        created_at=datetime(2026, 6, 3, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/a"},),
+    )
+    await name_in_story(card, person_id=DIRECTOR, path="accepted", event_type="other")
+
+    await follow("person", DIRECTOR)
+
+    assert (await entitled_client.get("/me/timeline")).json()["items"] == []
+
+
+async def test_a_mention_of_somebody_already_credited_adds_nothing(
+    entitled_client, make_film, add_event, attach_credits, follow, name_in_story
+):
+    """The term that does most of the work in production: the director of a film is named in
+    every story about it, and none of those namings is news about them joining it."""
+    film = await make_film(slug="credited", title="Credited")
+    await attach_credits(film, crew=[{"id": DIRECTOR, "name": DIRECTOR_NAME, "job": "Director"}])
+    card = await add_event(
+        film=film,
+        event_type="casting",
+        summary="a casting story that names the director too",
+        created_at=datetime(2026, 6, 3, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/a"},),
+    )
+    await name_in_story(card, person_id=DIRECTOR, path="accepted")
+
+    await follow("person", DIRECTOR)
+
+    assert (await entitled_client.get("/me/timeline")).json()["items"] == []
 
 
 async def test_a_muted_film_leaves_the_timeline(
@@ -276,9 +467,10 @@ async def test_a_muted_film_leaves_the_timeline(
 ):
     """D-45 as amended in M8: "not interested in this film" silences it everywhere, so the
     timeline drops its events beside the calendar and the alerts. The follow is untouched —
-    un-muting restores the film on every surface at once (D-40)."""
-    muted = await make_film(slug="muted", title="Muted", release_date=None)
-    kept = await make_film(slug="kept", title="Kept", release_date=None)
+    un-muting restores the film on every surface at once (D-40). NEU-1439 takes the whole
+    mechanism away."""
+    muted = await make_film(slug="muted", title="Muted")
+    kept = await make_film(slug="kept", title="Kept")
     for film in (muted, kept):
         await add_event(film=film, summary="a beat", created_at=datetime(2026, 6, 3, tzinfo=UTC))
         await follow("title", str(film.id))
@@ -293,26 +485,20 @@ async def test_a_muted_film_leaves_the_timeline(
     assert [i["film_ref"] for i in body["items"]] == [ref(kept)]
 
 
-async def test_a_muted_film_drops_a_mention_only_event_too(
-    entitled_client, session, make_film, add_event, make_person, follow, name_in_story
+async def test_a_muted_film_drops_an_attachment_card_too(
+    entitled_client, session, make_film, make_person, catalog_card, follow
 ):
-    """The case the mute would otherwise miss. D-11's second half reaches this event through
-    the *person*, not the film — so without the exclusion inside the builder, a muted film
-    would keep leaking onto the timeline through every story that names somebody on it."""
-    uncredited = await make_film(slug="uncredited", title="Uncredited", release_date=None)
-    await make_person(id=525, name="C. Nolan")
-    named = await add_event(
-        film=uncredited,
-        summary="names them",
-        created_at=datetime(2026, 6, 3, tzinfo=UTC),
-        sources=({"url": "https://deadline.com/a"},),
-    )
-    await name_in_story(named, person_id=525, path="accepted")
-    await follow("person", 525)
+    """The case the mute would otherwise miss: this card reaches the timeline through the
+    *person*, not the film, so without the exclusion inside the builder a muted film would keep
+    leaking onto the timeline through every attachment anyone made to it."""
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
+    film = await make_film(slug="muted", title="Muted")
+    await catalog_card(film, event_type="casting", names=(DIRECTOR_NAME,))
+    await follow("person", DIRECTOR)
 
     assert (await entitled_client.get("/me/timeline")).json()["total"] == 1
 
-    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=uncredited.id))
+    session.add(WatchlistDismissal(user_id=entitled_client.user.id, film_id=film.id))
     await session.commit()
 
     assert (await entitled_client.get("/me/timeline")).json()["total"] == 0
@@ -321,10 +507,10 @@ async def test_a_muted_film_drops_a_mention_only_event_too(
 @pytest.mark.parametrize(
     ("path", "person_id", "reaches"),
     [
-        pytest.param("accepted", 525, True, id="accepted"),
-        pytest.param("tiebreak", 525, True, id="tiebreak the resolve stage decided"),
+        pytest.param("accepted", DIRECTOR, True, id="accepted"),
+        pytest.param("tiebreak", DIRECTOR, True, id="tiebreak the resolve stage decided"),
         pytest.param("tiebreak", None, False, id="tiebreak nobody named"),
-        pytest.param("unlinked", 525, False, id="unlinked"),
+        pytest.param("unlinked", DIRECTOR, False, id="unlinked"),
         pytest.param("not_in_tmdb", None, False, id="not_in_tmdb"),
     ],
 )
@@ -345,29 +531,31 @@ async def test_only_a_resolved_path_matches_a_person_follow(
     #
     # The `unlinked` row is given a person id it would never be written with, so that the rule
     # under test is the *path* and not the null — the one arrangement that tells the two apart.
-    film = await make_film(slug="uncredited", title="Uncredited", release_date=None)
-    await make_person(id=525, name="C. Nolan")
+    film = await make_film(slug="uncredited", title="Uncredited")
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
     event = await add_event(
         film=film,
+        event_type="casting",
         summary="a mention",
         created_at=datetime(2026, 6, 3, tzinfo=UTC),
         sources=({"url": "https://deadline.com/a"},),
     )
     await name_in_story(event, person_id=person_id, path=path)
 
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
     items = (await entitled_client.get("/me/timeline")).json()["items"]
     assert [i["film_ref"] for i in items] == ([ref(film)] if reaches else [])
 
 
-async def test_a_mention_ships_its_own_event_and_not_the_films_others(
-    entitled_client, make_film, add_event, make_person, follow, name_in_story
+async def test_an_attachment_ships_its_own_event_and_not_the_films_others(
+    entitled_client, make_film, make_person, add_event, follow, name_in_story
 ):
-    # The scope the event branch has to keep: a person named in one story about a film they are
-    # not credited on makes *that event* timeline-worthy, not everything that film did that day.
-    film = await make_film(slug="uncredited", title="Uncredited", release_date=None)
-    await make_person(id=525, name="C. Nolan")
+    # The scope the event half has to keep: an attachment makes *that event* timeline-worthy,
+    # not everything that film did that day. Story-formed cards here, so the day's events are
+    # shipped in full and the assertion can read the summaries rather than the beat names.
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
+    film = await make_film(slug="uncredited", title="Uncredited")
     named = await add_event(
         film=film,
         event_type="casting",
@@ -382,9 +570,9 @@ async def test_a_mention_ships_its_own_event_and_not_the_films_others(
         created_at=datetime(2026, 6, 3, tzinfo=UTC),
         sources=({"url": "https://deadline.com/b"},),
     )
-    await name_in_story(named, person_id=525, path="accepted")
+    await name_in_story(named, person_id=DIRECTOR, path="accepted")
 
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
     items = (await entitled_client.get("/me/timeline")).json()["items"]
     assert [i["event_count"] for i in items] == [1]
@@ -395,7 +583,7 @@ async def test_a_followed_film_still_ships_every_event_of_its_day(
     entitled_client, make_film, add_event, follow
 ):
     # The mirror of the test above, and what the OR must not cost: a film that matched on the
-    # *film* branch ships its whole day, mentions or no mentions.
+    # *film* branch ships its whole day, attachments or no attachments.
     film = await make_film(slug="followed", title="Followed")
     for event_type in ("casting", "trailer"):
         await add_event(
@@ -412,32 +600,26 @@ async def test_a_followed_film_still_ships_every_event_of_its_day(
     assert [i["event_count"] for i in items] == [2]
 
 
-async def test_a_mention_adds_its_day_to_the_timeline(
-    entitled_client, make_film, add_event, make_person, follow, name_in_story
+async def test_an_attachment_adds_its_day_to_the_timeline(
+    entitled_client, make_film, make_person, add_event, catalog_card, follow
 ):
     # The event scope reaches the day count and the day window, not only the rows inside them: a
-    # day whose only qualifying thing was a story naming a followed person is a page of the
-    # timeline, and a day on that same film where nobody followed was named is not.
+    # day whose only qualifying thing was an attachment of a followed person is a page of the
+    # timeline, and a day on that same film where nothing of theirs happened is not.
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
     followed = await make_film(slug="followed", title="Followed")
-    uncredited = await make_film(slug="uncredited", title="Uncredited", release_date=None)
-    await make_person(id=525, name="C. Nolan")
+    theirs = await make_film(slug="theirs", title="Theirs")
     await add_event(film=followed, summary="mine", created_at=datetime(2026, 6, 1, tzinfo=UTC))
-    named = await add_event(
-        film=uncredited,
-        summary="names them",
+    await catalog_card(
+        theirs,
+        event_type="casting",
+        names=(DIRECTOR_NAME,),
         created_at=datetime(2026, 6, 2, tzinfo=UTC),
-        sources=({"url": "https://deadline.com/a"},),
     )
-    await add_event(
-        film=uncredited,
-        summary="names nobody",
-        created_at=datetime(2026, 6, 3, tzinfo=UTC),
-        sources=({"url": "https://deadline.com/b"},),
-    )
-    await name_in_story(named, person_id=525, path="accepted")
+    await catalog_card(theirs, event_type="trailer", created_at=datetime(2026, 6, 3, tzinfo=UTC))
 
     await follow("title", followed.id)
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
     body = (await entitled_client.get("/me/timeline?limit=1")).json()
     assert body["total"] == 2
@@ -447,22 +629,16 @@ async def test_a_mention_adds_its_day_to_the_timeline(
     assert [i["day"] for i in page_two["items"]] == ["2026-06-01"]
 
 
-async def test_a_mention_of_somebody_elses_followed_person_does_not_reach_this_user(
-    entitled_client, make_film, add_event, make_person, follow, name_in_story
+async def test_a_card_naming_somebody_elses_followed_person_does_not_reach_this_user(
+    entitled_client, make_film, make_person, catalog_card, follow
 ):
-    # The event branch is scoped to its own user's follows, like every other branch.
-    film = await make_film(slug="uncredited", title="Uncredited", release_date=None)
-    await make_person(id=525, name="C. Nolan")
+    # The event half is scoped to its own user's follows, like every other branch.
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
     await make_person(id=1032, name="M. Scorsese")
-    event = await add_event(
-        film=film,
-        summary="names the other one",
-        created_at=datetime(2026, 6, 3, tzinfo=UTC),
-        sources=({"url": "https://deadline.com/a"},),
-    )
-    await name_in_story(event, person_id=1032, path="accepted")
+    film = await make_film(slug="theirs", title="Theirs")
+    await catalog_card(film, event_type="casting", names=("M. Scorsese",))
 
-    await follow("person", 525)
+    await follow("person", DIRECTOR)
 
     assert (await entitled_client.get("/me/timeline")).json()["items"] == []
 

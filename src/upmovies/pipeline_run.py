@@ -556,12 +556,12 @@ async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
     status, the error and the detail line belong to whoever opened the run (§6.2).
     """
     try:
+        # No `today`, no status set and no age bound: since M3 the pass reads the timeline's own
+        # clause, which has no window to bound (EF-3, NEU-1437). `PROVIDER_POLL_MAX_AGE_DAYS`
+        # still reaches the digest slate and the provider poll, through their own callers.
         decided = await run_notify_pass(
             session_factory=_session_factory,
             run_id=run_id,
-            today=date.today(),
-            excluded_statuses=settings.tmdb_excluded_statuses,
-            max_age_days=settings.provider_poll_max_age_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
         detail = notify_detail(decided)
