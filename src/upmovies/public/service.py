@@ -17,6 +17,7 @@ from sqlalchemy import (
     nulls_last,
     or_,
     select,
+    tuple_,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,7 @@ from upmovies.app.dto import headline_release_out
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import (
     entity_attachment_event_ids,
+    entity_event_ids,
     title_follow_film_ids,
 )
 from upmovies.app.models import User, UserSettings
@@ -67,7 +69,8 @@ from upmovies.catalog.seed_grade import DIRECTOR_JOB, is_seed_grade
 from upmovies.config import get_settings
 from upmovies.news.catalog_events import video_key_of
 from upmovies.news.models import Event, EventStory, EventSummary, Story
-from upmovies.news.visibility import region_visible, visible_events
+from upmovies.news.visibility import feed_visible, region_visible, visible_events
+from upmovies.pagination import decode_cursor, encode_cursor
 from upmovies.public.arc import (
     derive_arc_stage,
     event_stage_rank,
@@ -89,6 +92,7 @@ from upmovies.public.dto import (
     CompanySearchResponse,
     CrewMemberOut,
     DayGroup,
+    EntityEventsResponse,
     EventOut,
     FeedDayItem,
     FeedDayResponse,
@@ -708,6 +712,97 @@ async def get_collection_detail(session: AsyncSession, ref: str) -> CollectionDe
     )
 
 
+ENTITY_EVENTS_PAGE_SIZE = 20
+"""The entity pages' card list is a page of 20 (EF-18, §6 M3).
+
+A default rather than a fixed count: the ceiling below is the abuse bound every list route in
+this router carries, and the page the product specifies is what a client that says nothing
+gets."""
+
+_ENTITY_EVENT_LOOKUPS: dict[str, tuple[Any, Any, Any]] = {
+    "person": (Person, parse_person_ref, _LIVE_PERSON),
+    "company": (ProductionCompany, parse_company_ref, None),
+    "franchise": (Collection, parse_collection_ref, None),
+}
+"""How each entity page resolves the `ref` in its URL: the catalog row to prove exists, the
+parser for `<id>-<slug>`, and the extra term the detail route applies.
+
+Keyed by the **follow** graph's word, which is what `follow_queries` takes — a franchise is
+`franchise` here and `catalog.Collection` beside it (CONTEXT.md **Franchise**). The existence
+rules are the detail routes', deliberately: a `ref` that 404s on `/people/{ref}` and 200s on
+`/people/{ref}/events` would be a page whose two halves disagree about whether it exists, and
+the tombstone term is the case that actually arises (`_LIVE_PERSON` — TMDB has deleted them,
+so they are not a follow target anywhere)."""
+
+
+async def get_entity_events(
+    session: AsyncSession,
+    *,
+    entity_type: str,
+    ref: str,
+    limit: int,
+    cursor: str | None,
+) -> EntityEventsResponse | None:
+    """One page of an entity's own attach, detach and `canceled` cards (EF-18), or `None` for a
+    `ref` the catalog does not hold.
+
+    **What a follow of this entity would deliver**, which is why the selection is
+    `follow_queries.entity_event_ids` and not a query of this module's own: the page sits
+    beside the follow button and its promise is "this is what you would get". A second
+    spelling here would be a promise that goes stale the first time EF-3's rule moves — and it
+    has moved twice already this project.
+
+    Public, like the rest of this router: the page renders for an anonymous visitor and the
+    follow button is the thing that asks for an account.
+
+    Newest first by `created_at`, which is the feed's axis (ADR-0016) and not the film page's
+    `occurred_at`: this list answers "what has happened with them lately", so it orders by when
+    we carded a beat rather than by when the beat is dated. Ties break on `id` so the keyset
+    cannot drop or repeat a card, and one row beyond the page is fetched to learn whether there
+    is a next one without counting a list that is still growing.
+    """
+    model, parse_ref, extra = _ENTITY_EVENT_LOOKUPS[entity_type]
+    entity_id = parse_ref(ref)
+    if entity_id is None:
+        return None
+    terms = [model.id == entity_id] + ([] if extra is None else [extra])
+    if not await session.scalar(select(exists().where(*terms))):
+        return None
+
+    filters: list[ColumnElement[bool]] = [
+        Event.id.in_(entity_event_ids(entity_type, entity_id)),
+        *feed_visible(),
+    ]
+    if cursor is not None:
+        created_at, event_id = decode_cursor(cursor)
+        filters.append(tuple_(Event.created_at, Event.id) < (created_at, event_id))
+
+    rows = (
+        await session.execute(
+            select(Event, EventSummary.summary, EventSummary.edited_at)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .join(Film, Film.id == Event.film_id)
+            .where(*filters)
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(limit + 1)
+        )
+    ).all()
+
+    page = rows[:limit]
+    sources = await _sources_by_event(session, [event.id for event, _summary, _edited in page])
+    next_cursor = None
+    if len(rows) > limit and page:
+        last = page[-1][0]
+        next_cursor = encode_cursor(last.created_at, last.id)
+    return EntityEventsResponse(
+        items=[
+            _event_out(event, summary, edited_at, sources.get(event.id, []))
+            for event, summary, edited_at in page
+        ],
+        next_cursor=next_cursor,
+    )
+
+
 async def get_company_search(
     session: AsyncSession, *, q: str, limit: int, offset: int
 ) -> CompanySearchResponse:
@@ -835,6 +930,65 @@ async def _where_to_watch(
     )
 
 
+async def _sources_by_event(
+    session: AsyncSession, event_ids: list[UUID]
+) -> dict[UUID, list[Story]]:
+    """`{event_id: [story]}` for a page of cards, oldest story first.
+
+    One statement for the page rather than one per card, and one spelling for the three
+    surfaces that render `SourceOut` lists — the flat feed, the film page and the entity pages'
+    `/events` (EF-18). The order is the `sources` order the card shows: published first, then
+    by id so an outlet with no date still lands somewhere stable.
+    """
+    if not event_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(EventStory.event_id, Story)
+            .join(Story, Story.id == EventStory.story_id)
+            .where(EventStory.event_id.in_(event_ids))
+            .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
+        )
+    ).all()
+    by_event: dict[UUID, list[Story]] = {}
+    for event_id, story in rows:
+        by_event.setdefault(event_id, []).append(story)
+    return by_event
+
+
+def _event_out(
+    event: Any, summary: str | None, edited_at: datetime | None, sources: list[Story]
+) -> EventOut:
+    """One card as the API renders it, wherever it is rendered.
+
+    `summary` is typed nullable because the column is, and is never null here: every caller
+    joins `news.event_summary` inner, which is what makes the join part of "the feed's
+    visibility terms" rather than a convenience.
+    """
+    return EventOut(
+        event_id=event.id,
+        event_type=event.event_type,
+        confidence=event.confidence,
+        created_at=event.created_at,
+        occurred_at=event.occurred_at,
+        summary=summary,  # type: ignore  — guaranteed non-null by the EventSummary join
+        summary_edited=edited_at is not None,
+        provenance=event.provenance,
+        status=event.status,
+        superseded_by=event.superseded_by,
+        video_key=video_key_of(event.event_type, event.subject_key),
+        sources=[
+            SourceOut(
+                url=source_url(story),
+                source=outlet_label(story),
+                title=story.title,
+                published_at=story.published_at,
+            )
+            for story in cap_sources(sources)
+        ],
+    )
+
+
 async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse | None:
     """Resolve a film by URL ref (`<tmdb_id>-<title-slug>`), falling back to the legacy immutable
     `film.slug` for URLs minted before NEU-1143.
@@ -868,43 +1022,9 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _edited_at, _has_story in summarized]
-    sources_by_event: dict[UUID, list[Story]] = {}
-    if event_ids:
-        source_rows = (
-            await session.execute(
-                select(EventStory.event_id, Story)
-                .join(Story, Story.id == EventStory.story_id)
-                .where(EventStory.event_id.in_(event_ids))
-                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
-            )
-        ).all()
-        for event_id, story in source_rows:
-            sources_by_event.setdefault(event_id, []).append(story)
-
-    def _to_event_out(event: Any, summary: str | None, edited_at: datetime | None) -> EventOut:
-        return EventOut(
-            event_id=event.id,
-            event_type=event.event_type,
-            confidence=event.confidence,
-            created_at=event.created_at,
-            occurred_at=event.occurred_at,
-            summary=summary,  # type: ignore  — guaranteed non-null by visible_events() filter
-            summary_edited=edited_at is not None,
-            provenance=event.provenance,
-            status=event.status,
-            superseded_by=event.superseded_by,
-            video_key=video_key_of(event.event_type, event.subject_key),
-            sources=[
-                SourceOut(
-                    url=source_url(story),
-                    source=outlet_label(story),
-                    title=story.title,
-                    published_at=story.published_at,
-                )
-                for story in cap_sources(sources_by_event.get(event.id, []))
-            ],
-        )
+    sources_by_event = await _sources_by_event(
+        session, [event.id for event, _summary, _edited_at, _has_story in summarized]
+    )
 
     # Group events by UTC day key, split by has_story (NEU-1201).
     day_groups: list[DayGroup] = []
@@ -912,7 +1032,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     for event, summary, edited_at, has_story in summarized:
         utc = event.occurred_at.astimezone(UTC)
         day_key = date(utc.year, utc.month, utc.day)
-        eout = _to_event_out(event, summary, edited_at)
+        eout = _event_out(event, summary, edited_at, sources_by_event.get(event.id, []))
         news_list, tmdb_list = day_events.setdefault(day_key, ([], []))
         (news_list if has_story else tmdb_list).append(eout)
     for day_key in sorted(day_events, reverse=True):
@@ -1214,33 +1334,23 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None), visible_events(), region_visible())
+        .where(*feed_visible())
     )
     rows = (
         await session.execute(
             select(Event, EventSummary.summary, Film.tmdb_id, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Film.slug.is_not(None), visible_events(), region_visible())
+            .where(*feed_visible())
             .order_by(Event.created_at.desc(), Event.id.asc())
             .limit(limit)
             .offset(offset)
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _tmdb_id, _title in rows]
-    sources_by_event: dict[UUID, list[Story]] = {}
-    if event_ids:
-        source_rows = (
-            await session.execute(
-                select(EventStory.event_id, Story)
-                .join(Story, Story.id == EventStory.story_id)
-                .where(EventStory.event_id.in_(event_ids))
-                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
-            )
-        ).all()
-        for event_id, story in source_rows:
-            sources_by_event.setdefault(event_id, []).append(story)
+    sources_by_event = await _sources_by_event(
+        session, [event.id for event, _summary, _tmdb_id, _title in rows]
+    )
 
     items: list[FeedItem] = []
     for event, summary, tmdb_id, title in rows:
@@ -1317,7 +1427,7 @@ async def get_feed_grouped(
     # (ADR-0016). A backfill or a new catalog tranche therefore lands as one tall day — that is
     # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
-    visible = (Film.slug.is_not(None), visible_events(), region_visible())
+    visible = feed_visible()
     scoped = _feed_scope(film_filter, event_filter)
 
     distinct_days = (

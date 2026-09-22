@@ -15,6 +15,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.errors import NotFound
+from upmovies.app.follow_queries import follow_last_activity
 from upmovies.app.models import Follow, User
 from upmovies.app.repos import follow_repo
 from upmovies.app.repos.follow_repo import EntityLabel
@@ -22,16 +23,17 @@ from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 
 
 class FollowRow(NamedTuple):
-    """One row of the follows page: the follow, what the catalog calls it, and — for a title
-    row only — the film's headline release (EF-14, EF-15).
+    """One row of the follows page: the follow, what the catalog calls it, the newest card it
+    has delivered, and — for a title row only — the film's headline release (EF-14, EF-15).
 
-    A row type rather than a widening tuple because the page's columns are still arriving:
-    NEU-1440 hangs `last_activity_at` off the same rows, and a caller unpacking a 2-tuple
-    positionally is what makes each addition a rewrite of every call site."""
+    A row type rather than a widening tuple because the page's columns kept arriving: a caller
+    unpacking a 2-tuple positionally is what would make each addition a rewrite of every call
+    site."""
 
     follow: Follow
     label: EntityLabel | None
     headline: HeadlineRelease | None
+    last_activity: datetime | None
 
 
 async def follow(
@@ -88,14 +90,48 @@ async def list_follows(db: AsyncSession, *, user: User) -> list[FollowRow]:
     headlines = await headline_releases(
         db, [i for i in film_ids if i is not None], today=datetime.now(tz=UTC).date()
     )
+    activity = await _last_activity(db, user_id=user.id)
     return [
         FollowRow(
             follow=f,
             label=labels.get((f.entity_type, f.entity_id)),
             headline=None if film_id is None else headlines.get(film_id),
+            last_activity=activity.get((f.entity_type, f.entity_id)),
         )
         for f, film_id in zip(follows, film_ids, strict=True)
     ]
+
+
+async def _last_activity(
+    db: AsyncSession, *, user_id: UUID, only: tuple[str, str] | None = None
+) -> dict[tuple[str, str], datetime]:
+    """`{(entity_type, entity_id): last_activity_at}` for this user's follows, or for the one
+    `only` names (EF-15).
+
+    **One statement whichever it is** (`follow_queries.follow_last_activity`), which is the
+    whole reason the column is computed in SQL: the list route needs it for every row before it
+    can draw the first one, and a query per row would be a round trip per follow on a page an
+    imported library fills with hundreds.
+
+    A follow that has delivered nothing is absent from the mapping, and the caller's `.get`
+    turns that into the null `FollowOut` documents. Missing and NULL are the same answer here —
+    "nothing yet" — so there is nothing for an outer join to add."""
+    rows = (await db.execute(follow_last_activity(user_id, only=only))).all()
+    return {(entity_type, entity_id): at for entity_type, entity_id, at in rows}
+
+
+async def last_activity_for(db: AsyncSession, follow: Follow) -> datetime | None:
+    """The newest card a single follow has delivered, for the three single-row routes.
+
+    What `headline_for` is to the date column: the write responses have to carry the same
+    fields `GET /me/follows` does (EF-15), because the client reconciles its cache from them —
+    a follow button that answered with a null `last_activity_at` while the list answered with a
+    real one would sort the row to the bottom until the next fetch.
+
+    Reads the same builder the list route batches, narrowed to one row, so a follow's date
+    cannot depend on which route reported it."""
+    key = (follow.entity_type, follow.entity_id)
+    return (await _last_activity(db, user_id=follow.user_id, only=key)).get(key)
 
 
 async def headline_for(db: AsyncSession, follow: Follow) -> HeadlineRelease | None:

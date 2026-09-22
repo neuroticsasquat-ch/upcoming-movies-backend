@@ -11,11 +11,7 @@ under `resolution`, and `candidates` holding the whole ranked shortlist rather t
 winner. A near-miss the scorer rejected is the most useful thing on the page.
 """
 
-import base64
-import binascii
 from dataclasses import dataclass
-from datetime import datetime
-from uuid import UUID
 
 from sqlalchemy import ColumnElement, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,10 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.link.resolve.scoring import Path
 from upmovies.news.models import Story, StoryPerson
-
-
-class InvalidCursor(ValueError):
-    """The `cursor` query parameter was not one this module minted."""
+from upmovies.pagination import InvalidCursor as InvalidCursor
+from upmovies.pagination import decode_cursor as decode_cursor
+from upmovies.pagination import encode_cursor as encode_cursor
 
 
 @dataclass(frozen=True)
@@ -54,36 +49,6 @@ class DecisionPage:
 
     rows: list[DecisionRow]
     next_cursor: str | None
-
-
-def encode_cursor(resolved_at: datetime, mention_id: UUID) -> str:
-    """Pack a row's sort key into the opaque token the next request sends back.
-
-    Opaque (base64) rather than the raw timestamp: the ordering key is this module's business,
-    and a client that learns to construct one will keep constructing it after the key changes.
-    """
-    raw = f"{resolved_at.isoformat()}|{mention_id}"
-    return base64.urlsafe_b64encode(raw.encode()).decode()
-
-
-def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
-    """Unpack a cursor, or raise `InvalidCursor`.
-
-    Every malformed shape lands on the same exception, because from the caller's side they
-    are one mistake: a token this module did not mint. The caller turns that into a 400.
-    """
-    try:
-        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
-        timestamp, _, mention_id = raw.partition("|")
-        resolved_at = datetime.fromisoformat(timestamp)
-        if resolved_at.tzinfo is None:
-            # `resolved_at` is `timestamptz`; a naive value would compare at whatever instant
-            # the driver assumed and quietly page from the wrong place. `encode_cursor` never
-            # mints one, so this is a forgery, which is the same mistake as the rest.
-            raise ValueError("naive timestamp")
-        return resolved_at, UUID(mention_id)
-    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
-        raise InvalidCursor(cursor) from exc
 
 
 def _decided() -> list[ColumnElement[bool]]:

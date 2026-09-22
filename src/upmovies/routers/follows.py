@@ -4,6 +4,8 @@ Every route carries `require_entitled()`, applied once at the router so a route 
 cannot forget it; the handlers that need the user take the same dependency object, which FastAPI
 resolves once per request. Cookie session plus CSRF on the writes, like `/me` next door."""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,15 +31,18 @@ router = APIRouter(prefix="/me/follows", tags=["me"], dependencies=[Depends(enti
 
 
 def _to_out(
-    follow: Follow, label: EntityLabel | None, headline: HeadlineRelease | None
+    follow: Follow,
+    label: EntityLabel | None,
+    headline: HeadlineRelease | None,
+    last_activity: datetime | None,
 ) -> FollowOut:
     """`label` is `None` for a follow the catalog cannot resolve; the row is still returned, with
     nulls, because nothing here deletes user graph rows (D-40).
 
-    `headline` has no default: every route that builds a `FollowOut` has to say what it did
-    about the date, so a title row cannot quietly come back null from one route and filled from
-    another (EF-14). The list route batches them; the single-row routes ask
-    `follow_service.headline_for`."""
+    `headline` and `last_activity` have no defaults: every route that builds a `FollowOut` has
+    to say what it did about each, so a row cannot quietly come back null from one route and
+    filled from another (EF-14, EF-15). The list route batches both; the single-row routes ask
+    `follow_service.headline_for` and `follow_service.last_activity_for`."""
     return FollowOut(
         entity_type=follow.entity_type,
         entity_id=follow.entity_id,
@@ -46,6 +51,7 @@ def _to_out(
         headline_release=headline_release_out(headline),
         source=follow.source,
         created_at=follow.created_at,
+        last_activity_at=last_activity,
     )
 
 
@@ -56,7 +62,7 @@ async def list_follows(
 ) -> FollowListResponse:
     rows = await follow_service.list_follows(db, user=user)
     return FollowListResponse(
-        items=[_to_out(r.follow, r.label, r.headline) for r in rows],
+        items=[_to_out(r.follow, r.label, r.headline, r.last_activity) for r in rows],
     )
 
 
@@ -90,7 +96,12 @@ async def create_follow(
         ) from None
     if not created:
         response.status_code = status.HTTP_200_OK
-    return _to_out(follow, label, await follow_service.headline_for(db, follow))
+    return _to_out(
+        follow,
+        label,
+        await follow_service.headline_for(db, follow),
+        await follow_service.last_activity_for(db, follow),
+    )
 
 
 @router.patch(
@@ -128,7 +139,12 @@ async def update_follow(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="follow_not_found"
         ) from None
-    return _to_out(follow, label, await follow_service.headline_for(db, follow))
+    return _to_out(
+        follow,
+        label,
+        await follow_service.headline_for(db, follow),
+        await follow_service.last_activity_for(db, follow),
+    )
 
 
 @router.delete(
