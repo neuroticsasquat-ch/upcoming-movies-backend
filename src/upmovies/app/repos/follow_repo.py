@@ -57,9 +57,9 @@ def _entity_key(entity_type: str, entity_id: str) -> int | UUID | None:
     The range check is the half that is easy to miss: an id past int32 parses fine in Python and
     passes `normalise_entity_id`'s positive-integer test, then fails in asyncpg as it is bound
     against an `Integer` column — which is not one row losing its name, it is the whole list
-    500ing on behalf of one bad row. (`app/follow_queries.py`'s `^[0-9]+$` guards have the same
-    hole against the same population; closing it there is a separate change, since the callers
-    that would hit it are batch passes rather than this route.)"""
+    500ing on behalf of one bad row. `app/follow_queries.py`'s guards close the same hole in
+    SQL (`_int_id_guard`, NEU-1440), against the same bound; this is the Python-side half,
+    applied where the label lookup builds its keys."""
     if entity_type == "title":
         try:
             return UUID(entity_id)

@@ -48,3 +48,19 @@ def region_visible() -> ColumnElement[bool]:
         Event.region == PRIMARY_REGION,
         Event.region == any_(Film.origin_country),
     )
+
+
+def feed_visible() -> tuple[ColumnElement[bool], ...]:
+    """The three terms every surface that *lists cards* applies: a film with a URL, a type that
+    is not hidden, and a release-date region this film's readers are in.
+
+    One tuple rather than three terms restated per surface. The flat feed, the follows page's
+    `last_activity_at` and the entity pages' `/events` lists (EF-15, EF-18) all have to agree on
+    what "a card a user can see" means — a page that counted a card the feed hides would date a
+    follow's last activity to something the user could never find.
+
+    The caller joins `catalog.film` and `news.event_summary` itself: the slug term and
+    `region_visible` need `Film` in the query (NEU-446), and the summary join is what makes
+    `EventOut.summary` non-null. Spelling the joins here would mean owning the caller's FROM.
+    """
+    return (Film.slug.is_not(None), visible_events(), region_visible())

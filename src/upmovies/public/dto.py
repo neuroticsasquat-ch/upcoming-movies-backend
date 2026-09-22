@@ -43,6 +43,22 @@ class EventOut(BaseModel):
     sources: list[SourceOut]
 
 
+class EntityEventsResponse(BaseModel):
+    """A page of one entity's own cards (EF-18), newest first.
+
+    The same `EventOut` the feed and the film page carry, so an entity page renders a card with
+    the component they already use rather than a second one that drifts.
+
+    **Keyset-paginated, not offset-paginated**, and so with no `total`: the list grows at the
+    top while it is read — a studio's next attachment lands above whatever the visitor is
+    looking at — and an offset would push unread cards past the boundary. `next_cursor` is null
+    on the last page, which is how a caller knows it has reached the end.
+    """
+
+    items: list[EventOut]
+    next_cursor: str | None
+
+
 class FilmIndexItem(BaseModel):
     ref: str
     title: str

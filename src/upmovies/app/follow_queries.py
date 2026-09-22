@@ -54,11 +54,16 @@ timeline would 500, and the batch passes would fail for every user over one bad 
 the cast means the WHERE (the type filter and the shape guard) has already run when it happens.
 """
 
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    CompoundSelect,
+    DateTime,
     Integer,
     Select,
+    Text,
     any_,
     cast,
     false,
@@ -89,15 +94,30 @@ from upmovies.news.catalog_events import (
     CREDIT_REMOVED_EVENT_TYPE,
     PERSON_ATTACHMENT_EVENT_TYPES,
 )
-from upmovies.news.models import RESOLVED_MENTION_PATHS, Event, EventStory, StoryPerson
+from upmovies.news.models import (
+    RESOLVED_MENTION_PATHS,
+    Event,
+    EventStory,
+    EventSummary,
+    StoryPerson,
+)
 from upmovies.news.subject_key import (
     COLLECTION_SUBJECT_PREFIX,
     COMPANY_SUBJECT_PREFIX,
     sql_normalized_name,
 )
+from upmovies.news.visibility import feed_visible
 
 _INT_ID_PATTERN = r"^[0-9]+$"
 _UUID_PATTERN = r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"
+
+_INT32_MAX = "2147483647"
+"""The largest value the catalog's TMDB keys (`Integer`, i.e. Postgres int4) hold, as the digit
+string `_int_id_guard` compares against — see there for why it is compared as text.
+
+`follow_repo._INT32_MAX` is the same bound as an `int`, for the Python-side half of the check.
+Spelled twice rather than shared because the two are different types for different comparisons,
+and importing the repo here would put a repo on the batch passes' import path."""
 
 _PUBLISHED = "published"
 
@@ -131,6 +151,28 @@ _CREDIT_CHANGE_ADDED = "added"
 `followed_people` from this one, so the import would be a cycle."""
 
 
+def _int_id_guard(entity_id: Any) -> ColumnElement[bool]:
+    """`entity_id` is a decimal integer the catalog's `Integer` keys can actually hold.
+
+    The digit guard on its own is not enough, and `follow_repo._entity_key` names the hole this
+    closes: an id past int32 passes `^[0-9]+$` and `normalise_entity_id`'s positive-integer
+    check, then fails **in the driver** as it is bound against an `Integer` column. That is not
+    one row losing its name, it is the user's whole follows list 500ing on behalf of one bad
+    row — the state a Letterboxd or TMDB import can leave behind (D-15, D-16). It was a batch
+    pass's problem until `follow_last_activity` put these builders on `GET /me/follows`.
+
+    Compared as **text**, by length and then lexically, because the cast is the very thing being
+    guarded and a numeric comparison would have to perform it first. Digit strings of equal
+    length order the same way as the numbers they spell, so the two-part test is exact rather
+    than a conservative digit-count bound — a nine-digit ceiling would be simpler and would
+    silently drop a valid id the day TMDB passes a billion."""
+    return (
+        entity_id.regexp_match(_INT_ID_PATTERN)
+        & (func.length(entity_id) <= len(_INT32_MAX))
+        & ((func.length(entity_id) < len(_INT32_MAX)) | (entity_id <= _INT32_MAX))
+    )
+
+
 def followed_tmdb_ids(
     user_id: UUID, entity_type: str, *, entity_id: str | None = None
 ) -> Select[tuple[int]]:
@@ -140,9 +182,10 @@ def followed_tmdb_ids(
     the want/stop service asking "does anything *else* cover this film" — so they cost one
     branch's work instead of four.
 
-    The digit guard sits beside the `entity_type` filter in the same SELECT, so the projected
-    cast only ever sees a row of this type whose value is a decimal integer, and a row that is
-    neither is skipped rather than failing the statement (see the module docstring).
+    The shape guard (`_int_id_guard`) sits beside the `entity_type` filter in the same SELECT,
+    so the projected cast only ever sees a row of this type whose value is an integer the
+    catalog's keys can hold, and a row that is neither is skipped rather than failing the
+    statement (see the module docstring).
 
     Belt and braces on top of `app.dto.normalise_entity_id`, which is what *should* keep a
     non-numeric id out of the table — but it is a boundary rule, applied by the follow routes'
@@ -151,7 +194,7 @@ def followed_tmdb_ids(
     stmt = select(cast(Follow.entity_id, Integer)).where(
         Follow.user_id == user_id,
         Follow.entity_type == entity_type,
-        Follow.entity_id.regexp_match(_INT_ID_PATTERN),
+        _int_id_guard(Follow.entity_id),
     )
     return stmt if entity_id is None else stmt.where(Follow.entity_id == entity_id)
 
@@ -180,13 +223,13 @@ def _followed_by_anyone(entity_type: str) -> Select[tuple[int]]:
     path asks this of all three types now (EF-4), and three copies of the same SELECT are three
     chances for one of them to lose the digit guard.
 
-    The cast is in the SELECT list and the digit guard in the WHERE, per the module docstring.
+    The cast is in the SELECT list and the shape guard in the WHERE, per the module docstring.
     """
     return (
         select(cast(Follow.entity_id, Integer))
         .where(
             Follow.entity_type == entity_type,
-            Follow.entity_id.regexp_match(_INT_ID_PATTERN),
+            _int_id_guard(Follow.entity_id),
         )
         .distinct()
     )
@@ -338,6 +381,59 @@ def _no_events() -> Select[tuple[UUID]]:
     return select(Event.id).where(false()).correlate(None)
 
 
+def _int_id_source(
+    entity_type: str, *, user_id: UUID | None, entity_id: str | None
+) -> Select[tuple[int]]:
+    """The TMDB ids a branch covers, as integers: this user's follows of `entity_type`, or the
+    single entity a public entity page names (`user_id is None`).
+
+    The one place the two callers of every branch below differ. `/me/follows` asks "what do
+    *my* follows deliver"; `GET /people/{ref}/events` asks "what does *this entity's* stream
+    hold", for a visitor who may have no account at all (EF-18) — and the cards are the same
+    cards, so the rule has to be the same rule. Swapping the id set at the bottom is what makes
+    it one rule rather than two that drift."""
+    if user_id is not None:
+        return followed_tmdb_ids(user_id, entity_type, entity_id=entity_id)
+    # `entity_event_ids` is the only caller that passes no user, it takes an `int`, and it
+    # always names one. Asserted rather than defaulted: a `None` here would silently build a
+    # branch selecting entity 0's cards, which is a page quietly showing the wrong thing.
+    assert entity_id is not None
+    return select(cast(literal(int(entity_id)), Integer))
+
+
+def _text_id_source(entity_type: str, *, user_id: UUID | None, entity_id: str | None) -> Subquery:
+    """`_int_id_source` as the follow graph spells ids — text — for the two branches that build
+    a `subject_key` token by concatenation rather than casting to a catalog key.
+
+    A subquery rather than a `Select` because those branches *join* it: the token they match is
+    `'company:' || entity_id`, which is not a column of anything."""
+    if user_id is None:
+        return select(cast(literal(entity_id), Text).label("entity_id")).subquery("named_entity")
+    stmt = select(Follow.entity_id.label("entity_id")).where(
+        Follow.user_id == user_id,
+        Follow.entity_type == entity_type,
+        _int_id_guard(Follow.entity_id),
+    )
+    if entity_id is not None:
+        stmt = stmt.where(Follow.entity_id == entity_id)
+    return stmt.subquery("followed_organisations")
+
+
+def _pair(entity_type: str, entity_id: Any) -> list[Any]:
+    """The four columns every branch below projects: which entity this card belongs to, the
+    card, and its `created_at`.
+
+    `cast` on both key columns so the `UNION ALL` that stacks the branches sees one type per
+    position — a bind parameter in a union arm is `unknown` to Postgres otherwise, and the two
+    id columns come variously from `catalog` integer keys and `app.follow`'s text."""
+    return [
+        cast(literal(entity_type), Text).label("entity_type"),
+        cast(entity_id, Text).label("entity_id"),
+        Event.id.label("event_id"),
+        Event.created_at.label("created_at"),
+    ]
+
+
 def entity_attachment_event_ids(
     user_id: UUID, *, only: tuple[str, str] | None = None
 ) -> Select[tuple[UUID]]:
@@ -348,17 +444,17 @@ def entity_attachment_event_ids(
     `title_follow_film_ids` rather than folded into it: an attachment card makes *that event*
     timeline-worthy and says nothing about the rest of the film's history.
 
-    Five branches, UNION-ed:
+    Five branches, UNION-ed (`_entity_event_pairs`):
 
-    - `_person_attachment_events` — `casting` / `crew_attached` / `credit_removed` cards whose
+    - `_person_attachment_pairs` — `casting` / `crew_attached` / `credit_removed` cards whose
       `subject_key` names a followed person (D-1437.3);
-    - `_organisation_attachment_events` twice — `company_attached` / `company_removed` and
+    - `_organisation_attachment_pairs` twice — `company_attached` / `company_removed` and
       `collection_attached` / `collection_removed` cards carrying a followed id token
       (D-1437.4);
-    - `first_association_clause` — the story-backed attach and detach cards whose resolved
-      mentions make a followed person's first association with the film (D-1437.5);
-    - `_canceled_for_attached_entities` — the film's `canceled` card, for every follower of an
-      entity currently attached to it (D-1437.6).
+    - `first_association_clause` (two arms) — the story-backed attach and detach cards whose
+      resolved mentions make a followed person's first association with the film (D-1437.5);
+    - `_canceled_pairs` — the film's `canceled` card, for every follower of an entity currently
+      attached to it (D-1437.6).
 
     Each branch reads `news.event` with `status = 'published'` and the event types it owns, and
     nothing else: the feed's own visibility terms (`visible_events()`, `region_visible()`, the
@@ -376,69 +472,105 @@ def entity_attachment_event_ids(
     watchlist it corrected, and it never fitted here anyway — a mute silenced a *film*, while
     these are cards about an entity that happen to name one.
 
-    `only` narrows the graph to one `(entity_type, entity_id)`. Nothing in this ticket passes
-    it; it is the seam NEU-1440's `last_activity_at` needs — "the newest card that reaches this
-    user through *this* follow" — and it costs one `if` per branch.
+    `only` narrows the graph to one `(entity_type, entity_id)` — what `follow_last_activity`
+    needs for a single row, and it costs one `if` per branch.
+    """
+    pairs = _entity_event_pairs(user_id=user_id, only=only)
+    if pairs is None:
+        return _no_events()
+    reached = pairs.subquery("entity_attachment")
+    return select(Event.id).where(Event.id.in_(select(reached.c.event_id))).correlate(None)
+
+
+def entity_event_ids(entity_type: str, entity_id: int) -> Select[tuple[UUID]]:
+    """`SELECT event.id` for one entity's own attach, detach and `canceled` cards, with nobody
+    following anything (EF-18).
+
+    What an entity *page* lists, for a signed-out visitor: the same five branches
+    `entity_attachment_event_ids` unions, with the follow graph swapped out for the one id the
+    URL names (`_int_id_source`, `_text_id_source`). That is the point of routing both through
+    `_entity_event_pairs` — the page's promise is "this is what following delivers", and a page
+    built from its own second spelling of the rule is a promise that goes stale the first time
+    the rule moves.
+
+    `entity_type` is the **follow** graph's word, so a franchise is `franchise` here and
+    `collection` in the catalog and in its `subject_key` token (CONTEXT.md **Franchise**).
+    Visibility stays the caller's, as above.
+    """
+    pairs = _entity_event_pairs(user_id=None, only=(entity_type, str(entity_id)))
+    if pairs is None:
+        return _no_events()
+    reached = pairs.subquery("entity_events")
+    return select(Event.id).where(Event.id.in_(select(reached.c.event_id))).correlate(None)
+
+
+def _entity_event_pairs(
+    *, user_id: UUID | None, only: tuple[str, str] | None
+) -> CompoundSelect[tuple[str, str, UUID, datetime]] | None:
+    """`(entity_type, entity_id, event_id, created_at)` for every card an entity follow
+    delivers — the shape every consumer in this module reduces.
+
+    Rows rather than ids because the follows page asks the attributing question the timeline
+    never does: *which* follow did this card arrive through (EF-15). `entity_attachment_event_ids`
+    throws the key away and keeps the ids; `follow_last_activity` keeps the key and takes a
+    `max` per row; `entity_event_ids` fixes the key and keeps the ids.
+
+    `None` when `only` names a type no branch here owns — `title`, whose follows select films —
+    so the caller can answer with `_no_events()` rather than union nothing.
     """
 
     def wants(entity_type: str) -> bool:
         return only is None or only[0] == entity_type
 
     scoped_id = None if only is None else only[1]
-    branches: list[Select[tuple[UUID]]] = []
+    branches: list[
+        Select[tuple[str, str, UUID, datetime]] | CompoundSelect[tuple[str, str, UUID, datetime]]
+    ] = []
     if wants("person"):
-        branches.append(_person_attachment_events(user_id, entity_id=scoped_id))
-        branches.append(first_association_clause(user_id=user_id, only=only))
+        branches.append(_person_attachment_pairs(user_id=user_id, entity_id=scoped_id))
+        first_association = first_association_clause(user_id=user_id, only=only)
+        if first_association is not None:
+            branches.append(first_association)
     if wants("company"):
-        branches.append(_organisation_attachment_events(user_id, "company", entity_id=scoped_id))
-    if wants("franchise"):
-        branches.append(_organisation_attachment_events(user_id, "franchise", entity_id=scoped_id))
-    canceled = _canceled_for_attached_entities(user_id, only=only)
-    if canceled is not None:
-        branches.append(canceled)
-    if not branches:
-        return _no_events()
-    reached = union_all(*branches).subquery("entity_attachment")
-    return select(Event.id).where(Event.id.in_(select(reached.c.id))).correlate(None)
-
-
-def _names_a_followed_person(user_id: UUID, *, entity_id: str | None = None) -> ColumnElement[bool]:
-    """EXISTS predicate: one of the enclosing `news.event`'s `subject_key` tokens is the
-    normalized name of a person this user follows (D-1437.3).
-
-    `= ANY(event.subject_key)` rather than an overlap against a constructed array, which is the
-    same test one row at a time and reads as the question being asked. A NULL `subject_key` —
-    every card that is not about a person — yields NULL and so never matches.
-
-    Why not `followed_people()`: that builder is system-wide and has no user. The per-user set
-    is `followed_tmdb_ids`, which already carries the digit guard."""
-    return (
-        select(literal(1))
-        .select_from(Person)
-        .where(
-            Person.id.in_(followed_tmdb_ids(user_id, "person", entity_id=entity_id)),
-            sql_normalized_name(Person.name) == any_(Event.subject_key),
+        branches.append(
+            _organisation_attachment_pairs("company", user_id=user_id, entity_id=scoped_id)
         )
-        .correlate(Event)
-        .exists()
-    )
+    if wants("franchise"):
+        branches.append(
+            _organisation_attachment_pairs("franchise", user_id=user_id, entity_id=scoped_id)
+        )
+    branches.extend(_canceled_pairs(user_id=user_id, only=only))
+    if not branches:
+        return None
+    return union_all(*branches)
 
 
-def _person_attachment_events(
-    user_id: UUID, *, entity_id: str | None = None
-) -> Select[tuple[UUID]]:
-    """The person branch: every published credit attach or detach card naming somebody this
-    user follows.
+def _person_attachment_pairs(
+    *, user_id: UUID | None, entity_id: str | None
+) -> Select[tuple[str, str, UUID, datetime]]:
+    """The person branch: every published credit attach or detach card naming one of the people
+    in scope, keyed to the person it names.
 
     `credit_removed` cards name the removed person exactly as the attach cards name the
     arriving one — the sweep's removal path writes `subject_key` from the same
-    `normalize_name` — so the three types are one test rather than two."""
+    `normalize_name` — so the three types are one test rather than two.
+
+    A join on `sql_normalized_name(person.name) = ANY(event.subject_key)` where this used to
+    hold an `EXISTS` of the same test, because the key has to come *out*. It is the same
+    nested loop over the same small id set, and where the `EXISTS` collapsed a card naming two
+    followed people to one row, the join emits the two rows the attribution needs. A NULL
+    `subject_key` — every card that is not about a person — never matches either way.
+
+    Why not `followed_people()`: that builder is system-wide and has no user. The per-user set
+    is `followed_tmdb_ids`, which already carries the shape guard."""
     return (
-        select(Event.id)
+        select(*_pair("person", Person.id))
+        .select_from(Event)
+        .join(Person, sql_normalized_name(Person.name) == any_(Event.subject_key))
         .where(
             Event.status == _PUBLISHED,
             Event.event_type.in_(PERSON_ATTACHMENT_EVENT_TYPES),
-            _names_a_followed_person(user_id, entity_id=entity_id),
+            Person.id.in_(_int_id_source("person", user_id=user_id, entity_id=entity_id)),
         )
         .correlate(None)
     )
@@ -457,43 +589,34 @@ exists rather than an f-string per branch. Both prefixes are read from `news.sub
 where the carding paths write them, never restated."""
 
 
-def _organisation_attachment_events(
-    user_id: UUID, entity_type: str, *, entity_id: str | None = None
-) -> Select[tuple[UUID]]:
+def _organisation_attachment_pairs(
+    entity_type: str, *, user_id: UUID | None, entity_id: str | None
+) -> Select[tuple[str, str, UUID, datetime]]:
     """The studio and franchise branches (D-1437.4): an exact match on the id token a card
     carries, which is what makes these two branches lossless where the person branch is not.
 
-    The digit guard is belt and braces here rather than load-bearing — nothing is cast, so a
-    malformed `entity_id` would build a token that matches nothing rather than abort the
-    statement — and is kept so that every id branch in this module reads the same way."""
+    The shape guard on the follow rows is belt and braces here rather than load-bearing —
+    nothing is cast, so a malformed `entity_id` would build a token that matches nothing rather
+    than abort the statement — and is kept so that every id branch in this module reads the
+    same way."""
     prefix, event_types = _ORGANISATION_BRANCHES[entity_type]
-    follows = select(Follow.entity_id.label("entity_id")).where(
-        Follow.user_id == user_id,
-        Follow.entity_type == entity_type,
-        Follow.entity_id.regexp_match(_INT_ID_PATTERN),
-    )
-    if entity_id is not None:
-        follows = follows.where(Follow.entity_id == entity_id)
-    followed = follows.subquery("followed_organisations")
+    followed = _text_id_source(entity_type, user_id=user_id, entity_id=entity_id)
     return (
-        select(Event.id)
+        select(*_pair(entity_type, followed.c.entity_id))
+        .select_from(Event)
+        .join(followed, literal(prefix).concat(followed.c.entity_id) == any_(Event.subject_key))
         .where(
             Event.status == _PUBLISHED,
             Event.event_type.in_(event_types),
-            select(literal(1))
-            .select_from(followed)
-            .where(literal(prefix).concat(followed.c.entity_id) == any_(Event.subject_key))
-            .correlate(Event)
-            .exists(),
         )
         .correlate(None)
     )
 
 
-def _canceled_for_attached_entities(
-    user_id: UUID, *, only: tuple[str, str] | None = None
-) -> Select[tuple[UUID]] | None:
-    """The `canceled` branch (D-1437.6): a film being called off reaches every follower of an
+def _canceled_pairs(
+    *, user_id: UUID | None, only: tuple[str, str] | None
+) -> list[Select[tuple[str, str, UUID, datetime]]]:
+    """The `canceled` branches (D-1437.6): a film being called off reaches every follower of an
     entity **currently attached** to it — a credit of any kind, a production-company row, the
     film's collection.
 
@@ -503,73 +626,76 @@ def _canceled_for_attached_entities(
     part of their stream. Title followers reach the same card through the film term, and the
     union's de-duplication makes that one row.
 
-    Returns `None` when `only` names a type with no branch here, so the caller can leave the
-    branch out of the union rather than build an `or_()` of nothing."""
+    Three selects where this used to be one with an `or_` of three `EXISTS`, because each
+    attachment table carries a *different* entity key and the key is now projected. A list, so
+    a scope naming a type with no branch here contributes nothing rather than an `or_()` of
+    nothing.
+
+    A person credited twice on one film (a writer-director) yields the same pair twice. Both
+    consumers fold it — `entity_attachment_event_ids` de-duplicates on the primary key,
+    `follow_last_activity` takes a `max` — so there is no `DISTINCT` here to pay for.
+    """
 
     def wants(entity_type: str) -> bool:
         return only is None or only[0] == entity_type
 
     scoped_id = None if only is None else only[1]
-    attached: list[ColumnElement[bool]] = []
+
+    def canceled(key: Any, entity_type: str, joined: Any, on: Any) -> Any:
+        return (
+            select(*_pair(entity_type, key))
+            .select_from(Event)
+            .join(joined, on)
+            .where(Event.status == _PUBLISHED, Event.event_type == CANCELED_EVENT_TYPE)
+            .correlate(None)
+        )
+
+    branches: list[Select[tuple[str, str, UUID, datetime]]] = []
     if wants("person"):
-        attached.append(
-            select(literal(1))
-            .select_from(FilmCredit)
-            .where(
-                FilmCredit.film_id == Event.film_id,
-                FilmCredit.person_id.in_(followed_tmdb_ids(user_id, "person", entity_id=scoped_id)),
+        branches.append(
+            canceled(
+                FilmCredit.person_id,
+                "person",
+                FilmCredit,
+                (FilmCredit.film_id == Event.film_id)
+                & FilmCredit.person_id.in_(
+                    _int_id_source("person", user_id=user_id, entity_id=scoped_id)
+                ),
             )
-            .correlate(Event)
-            .exists()
         )
     if wants("company"):
-        attached.append(
-            select(literal(1))
-            .select_from(FilmProductionCompany)
-            .where(
-                FilmProductionCompany.film_id == Event.film_id,
-                FilmProductionCompany.company_id.in_(
-                    followed_tmdb_ids(user_id, "company", entity_id=scoped_id)
+        branches.append(
+            canceled(
+                FilmProductionCompany.company_id,
+                "company",
+                FilmProductionCompany,
+                (FilmProductionCompany.film_id == Event.film_id)
+                & FilmProductionCompany.company_id.in_(
+                    _int_id_source("company", user_id=user_id, entity_id=scoped_id)
                 ),
             )
-            .correlate(Event)
-            .exists()
         )
     if wants("franchise"):
-        # `correlate(Event)` and not the default: `catalog.film` is in the *enclosing* feed
-        # query's FROM list, so auto-correlation would otherwise strip it from this EXISTS and
-        # silently re-point the collection test at the outer film.
-        attached.append(
-            select(literal(1))
-            .select_from(Film)
-            .where(
-                Film.id == Event.film_id,
-                Film.collection_id.in_(
-                    followed_tmdb_ids(user_id, "franchise", entity_id=scoped_id)
+        branches.append(
+            canceled(
+                Film.collection_id,
+                "franchise",
+                Film,
+                (Film.id == Event.film_id)
+                & Film.collection_id.in_(
+                    _int_id_source("franchise", user_id=user_id, entity_id=scoped_id)
                 ),
             )
-            .correlate(Event)
-            .exists()
         )
-    if not attached:
-        return None
-    return (
-        select(Event.id)
-        .where(
-            Event.status == _PUBLISHED,
-            Event.event_type == CANCELED_EVENT_TYPE,
-            or_(*attached),
-        )
-        .correlate(None)
-    )
+    return branches
 
 
 def first_association_clause(
-    *, user_id: UUID, only: tuple[str, str] | None = None
-) -> Select[tuple[UUID]]:
-    """`SELECT event.id` for the story-backed attach and detach cards whose resolved mentions
-    make a followed entity's **first association** with, or first detachment from, the film
-    (EF-13).
+    *, user_id: UUID | None, only: tuple[str, str] | None = None
+) -> CompoundSelect[tuple[str, str, UUID, datetime]] | None:
+    """The story-backed attach and detach cards whose resolved mentions make an entity's
+    **first association** with, or first detachment from, the film (EF-13), as
+    `_entity_event_pairs` rows — or `None` when `only` names a type this clause does not own.
 
     A story mention is not an attachment — nobody has joined anything until TMDB says so — so a
     person follow cannot simply take every card whose story names them: an interview, a festival
@@ -580,8 +706,8 @@ def first_association_clause(
 
     **One builder, two arms, and M4 extends it in place** (NEU-1446): the `story_entity` arm for
     studios and franchises goes *inside* this function, beside the person arm, because the
-    timeline and the notify pass both reach the rule through here and a second builder beside it
-    is how the two would come to disagree.
+    timeline and the notify pass both reach the rule through here — and so, now, does every
+    entity page (EF-18) — and a second builder beside it is how they would come to disagree.
 
     The attach arm, for a published event `E` on film `F` and a resolved mention `M` of a
     followed person `P` on one of `E`'s stories:
@@ -613,31 +739,54 @@ def first_association_clause(
     published `credit_removed` for `P` on `F` since the last attach card — and it selects
     nothing at M3, because `STORY_DETACH_MENTION_TYPES` is empty. See that constant.
 
-    The two arms need no `DISTINCT` between them: each selects one row per event and they
-    are disjoint by `event_type`, so the `UNION ALL` cannot repeat an id. The caller's own
-    de-duplication covers the branches that *can* overlap.
+    **A card can appear more than once**, keyed to a different person each time, and twice for
+    one person when two of its stories mention them. The arms cannot repeat a row between them
+    — they are disjoint by `event_type` — and neither consumer minds: the pairs *are* the
+    attribution EF-15 wants, and the id readers de-duplicate on the primary key
+    (`first_association_event_ids`, `entity_attachment_event_ids`).
     """
     if only is not None and only[0] != "person":
-        return _no_events()
+        return None
     entity_id = None if only is None else only[1]
-    arms = union_all(
-        _first_association_arm(user_id, entity_id=entity_id),
-        _first_detachment_arm(user_id, entity_id=entity_id),
-    ).subquery("first_association")
-    return select(arms.c.id).correlate(None)
+    return union_all(
+        _first_association_arm(user_id=user_id, entity_id=entity_id),
+        _first_detachment_arm(user_id=user_id, entity_id=entity_id),
+    )
 
 
-def _resolved_mentions_of(
-    user_id: UUID,
+def first_association_event_ids(
+    *, user_id: UUID, only: tuple[str, str] | None = None
+) -> Select[tuple[UUID]]:
+    """`SELECT DISTINCT event.id` over `first_association_clause` — the clause as the readers
+    that only ask *whether* a card qualifies want it.
+
+    `DISTINCT` because the clause keys each row to the person it names, and a caller counting
+    timeline rows wants the card once however many followed people a story mentioned.
+
+    **No production caller today** — `entity_attachment_event_ids` unions the clause's rows and
+    de-duplicates once at the top, so the only readers are the tests that assert EF-13's rule on
+    its own. Kept rather than inlined into them: the projection is this module's business, and a
+    test that spelled `select(distinct(...))` itself would be the second spelling the module
+    exists to prevent. M4 (NEU-1446) is the caller it is waiting for."""
+    pairs = first_association_clause(user_id=user_id, only=only)
+    if pairs is None:
+        return _no_events()
+    arms = pairs.subquery("first_association")
+    return select(arms.c.event_id).distinct().correlate(None)
+
+
+def _mentioning_pairs(
     *,
+    user_id: UUID | None,
     entity_id: str | None,
+    card_types: tuple[str, ...],
     mention_types: tuple[str, ...],
     mention: type[StoryPerson],
     person: type[Person],
     extra: list[ColumnElement[bool]],
-) -> ColumnElement[bool]:
-    """EXISTS predicate: one of the enclosing event's stories carries a resolved mention of a
-    person this user follows, typed as one of `mention_types`, and `extra` holds of it.
+) -> Select[tuple[str, str, UUID, datetime]]:
+    """Published cards of `card_types` carrying a resolved mention, typed as one of
+    `mention_types`, of a person in scope — keyed to that person, with `extra` narrowing.
 
     `RESOLVED_MENTION_PATHS` is the cut (D-25): `accepted` and `tiebreak` match, `unlinked` and
     `not_in_tmdb` never do. A mention nobody was named in carries `person_id` NULL and drops out
@@ -646,21 +795,24 @@ def _resolved_mentions_of(
     candidate id would then match.
 
     `person` is joined in for its name, which the "does an earlier card name them" terms in
-    `extra` compare against a card's `subject_key`."""
+    `extra` compare against a card's `subject_key`, and for the key this projects. The mention,
+    its story and its person are joined rather than held inside an `EXISTS` for the reason
+    `_person_attachment_pairs` gives: the key has to come out."""
     return (
-        select(literal(1))
-        .select_from(EventStory)
+        select(*_pair("person", person.id))
+        .select_from(Event)
+        .join(EventStory, EventStory.event_id == Event.id)
         .join(mention, mention.story_id == EventStory.story_id)
         .join(person, person.id == mention.person_id)
         .where(
-            EventStory.event_id == Event.id,
+            Event.status == _PUBLISHED,
+            Event.event_type.in_(card_types),
             mention.path.in_(RESOLVED_MENTION_PATHS),
-            mention.person_id.in_(followed_tmdb_ids(user_id, "person", entity_id=entity_id)),
+            mention.person_id.in_(_int_id_source("person", user_id=user_id, entity_id=entity_id)),
             mention.features["event_type"].astext.in_(mention_types),
             *extra,
         )
-        .correlate(Event)
-        .exists()
+        .correlate(None)
     )
 
 
@@ -697,7 +849,9 @@ def _card_names_person(
     )
 
 
-def _first_association_arm(user_id: UUID, *, entity_id: str | None) -> Select[tuple[UUID]]:
+def _first_association_arm(
+    *, user_id: UUID | None, entity_id: str | None
+) -> Select[tuple[str, str, UUID, datetime]]:
     """The attach arm of `first_association_clause` — see its docstring for the three terms."""
     mention = aliased(StoryPerson)
     person = aliased(Person)
@@ -717,31 +871,26 @@ def _first_association_arm(user_id: UUID, *, entity_id: str | None) -> Select[tu
         .correlate(Event, mention, person)
         .exists()
     )
-    return (
-        select(Event.id)
-        .where(
-            Event.status == _PUBLISHED,
-            Event.event_type.in_(card_types),
-            _resolved_mentions_of(
-                user_id,
-                entity_id=entity_id,
-                mention_types=mention_types,
-                mention=mention,
-                person=person,
-                extra=[
-                    ~earlier_attach_card,
-                    or_(
-                        ~_holds_a_credit(mention),
-                        _credit_carded_by_this_event(mention),
-                    ),
-                ],
+    return _mentioning_pairs(
+        user_id=user_id,
+        entity_id=entity_id,
+        card_types=card_types,
+        mention_types=mention_types,
+        mention=mention,
+        person=person,
+        extra=[
+            ~earlier_attach_card,
+            or_(
+                ~_holds_a_credit(mention),
+                _credit_carded_by_this_event(mention),
             ),
-        )
-        .correlate(None)
+        ],
     )
 
 
-def _first_detachment_arm(user_id: UUID, *, entity_id: str | None) -> Select[tuple[UUID]]:
+def _first_detachment_arm(
+    *, user_id: UUID | None, entity_id: str | None
+) -> Select[tuple[str, str, UUID, datetime]]:
     """The detach arm of `first_association_clause`, which selects nothing while
     `STORY_DETACH_MENTION_TYPES` is empty — spelled in full because M4 fills that constant, and
     an arm written then is an arm written against a rule nobody is holding in their head.
@@ -794,21 +943,14 @@ def _first_detachment_arm(user_id: UUID, *, entity_id: str | None) -> Select[tup
         .correlate(Event, mention, person)
         .exists()
     )
-    return (
-        select(Event.id)
-        .where(
-            Event.status == _PUBLISHED,
-            Event.event_type == CREDIT_REMOVED_EVENT_TYPE,
-            _resolved_mentions_of(
-                user_id,
-                entity_id=entity_id,
-                mention_types=STORY_DETACH_MENTION_TYPES,
-                mention=mention,
-                person=person,
-                extra=[~detached_since],
-            ),
-        )
-        .correlate(None)
+    return _mentioning_pairs(
+        user_id=user_id,
+        entity_id=entity_id,
+        card_types=(CREDIT_REMOVED_EVENT_TYPE,),
+        mention_types=STORY_DETACH_MENTION_TYPES,
+        mention=mention,
+        person=person,
+        extra=[~detached_since],
     )
 
 
@@ -843,6 +985,95 @@ def _credit_carded_by_this_event(mention: type[StoryPerson]) -> ColumnElement[bo
         .correlate(Event, mention)
         .exists()
     )
+
+
+def follow_last_activity(
+    user_id: UUID, *, only: tuple[str, str] | None = None
+) -> Select[tuple[str, str, datetime]]:
+    """`(entity_type, entity_id, last_activity_at)` — the `created_at` of the newest visible
+    card each of this user's follows delivers (EF-15), for every follow that has delivered one.
+
+    **One statement for the whole page, not one per row.** The follows page sorts by last
+    activity, so the column is needed for every row before the first one can be drawn; an
+    imported library is hundreds of follows, and a query each would be hundreds of round trips
+    for a sort key. A follow that has delivered nothing is simply absent from the result, and
+    the caller reads it as NULL — a `GROUP BY` cannot invent a row for a group with no members,
+    and the alternative (an outer join from `app.follow`) would buy a row of NULLs at the cost
+    of the aggregate's index.
+
+    Two arms, because the two kinds of follow reach cards by different grains — the same split
+    the timeline spells, read at the other end:
+
+    - a **title** follow's activity is any visible beat on its film (`_title_follows`, EF-3),
+      so this arm is a join from the follow row to `news.event` on `film_id`;
+    - a **person, studio or franchise** follow's activity is the cards
+      `entity_attachment_event_ids` would deliver, attributed back to the follow they came
+      through (`_entity_event_pairs`).
+
+    **Visibility is applied here**, unlike in the two builders above, which leave it to the
+    query they are dropped into: this *is* the final query. `feed_visible()` plus the summary
+    join, so the date on the follows page is the date of a card the user can actually open.
+
+    `status = 'published'` on both arms. The entity branches carry it themselves (a superseded
+    attach card is not a beat to deliver, D-2), and the title arm matches them rather than the
+    feed, which still renders a superseded card in place: the two arms disagreeing about what
+    counts as activity is the drift this module exists to prevent, and a superseded card is
+    superseded *by* a later card on the same film, so the newest date is unchanged either way.
+
+    `only` narrows to one `(entity_type, entity_id)`, for the follow routes that answer with a
+    single row — the same seam, and the same reason, as on the builders above.
+    """
+    arms: list[Select[tuple[str, str, datetime]]] = []
+
+    if only is None or only[0] == "title":
+        title_follows = _title_follows(user_id=user_id)
+        title = (
+            select(
+                cast(literal("title"), Text).label("entity_type"),
+                cast(title_follows.c.entity_id, Text).label("entity_id"),
+                Event.created_at.label("created_at"),
+            )
+            .select_from(title_follows)
+            .join(Event, Event.film_id == title_follows.c.key)
+            .join(Film, Film.id == Event.film_id)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .where(Event.status == _PUBLISHED, *feed_visible())
+        )
+        if only is not None:
+            title = title.where(title_follows.c.entity_id == only[1])
+        arms.append(title)
+
+    pairs = _entity_event_pairs(user_id=user_id, only=only)
+    if pairs is not None:
+        reached = pairs.subquery("delivered")
+        arms.append(
+            select(
+                reached.c.entity_type,
+                reached.c.entity_id,
+                Event.created_at.label("created_at"),
+            )
+            .select_from(reached)
+            .join(Event, Event.id == reached.c.event_id)
+            .join(Film, Film.id == Event.film_id)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .where(*feed_visible())
+        )
+
+    if not arms:
+        # `only` named a type the follow graph does not hold. No arm, so no group, so no row —
+        # which the caller already reads as "nothing yet".
+        return select(
+            cast(literal(""), Text).label("entity_type"),
+            cast(literal(""), Text).label("entity_id"),
+            cast(literal(None), DateTime(timezone=True)).label("last_activity_at"),
+        ).where(false())
+
+    delivered = union_all(*arms).subquery("activity")
+    return select(
+        delivered.c.entity_type,
+        delivered.c.entity_id,
+        func.max(delivered.c.created_at).label("last_activity_at"),
+    ).group_by(delivered.c.entity_type, delivered.c.entity_id)
 
 
 def title_followed_by_any_user_clause() -> ColumnElement[bool]:

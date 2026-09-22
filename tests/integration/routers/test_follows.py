@@ -1,5 +1,6 @@
 """`/me/follows` (D-10): the follow graph's CRUD, behind the entitlement gate (D-39)."""
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -734,3 +735,205 @@ async def test_a_title_follow_of_a_film_the_catalog_lost_is_listed_with_nulls(
     assert set(items) == {str(film.id), missing}
     assert (items[missing]["name"], items[missing]["image_path"]) == (None, None)
     assert items[str(film.id)]["name"] == film.title
+
+
+# --- last_activity_at, every type (EF-15) ---------------------------------------------------
+
+OLD = datetime(2026, 9, 1, 12, tzinfo=UTC)
+NEW = datetime(2026, 9, 18, 9, tzinfo=UTC)
+"""Two instants a fixture can card between, far enough apart to read in an assertion."""
+
+
+def at(value: str | None) -> datetime | None:
+    """A response timestamp as a `datetime`. Pydantic renders UTC as `…Z` and `isoformat()`
+    writes `…+00:00`; comparing the parsed instants keeps the assertions about the date rather
+    than about the spelling."""
+    return None if value is None else datetime.fromisoformat(value)
+
+
+async def _row(entitled_client, entity_type: str, entity_id: str) -> dict:
+    """Follow one entity and read back its row from the list route."""
+    written = await entitled_client.post(
+        "/me/follows", json={"entity_type": entity_type, "entity_id": entity_id}
+    )
+    assert written.status_code in (200, 201), written.text
+    rows = (await entitled_client.get("/me/follows")).json()["items"]
+    return next(r for r in rows if (r["entity_type"], r["entity_id"]) == (entity_type, entity_id))
+
+
+async def test_a_title_row_dates_to_the_newest_beat_on_its_film(
+    entitled_client, make_film, add_event
+):
+    """A title follow delivers *every* published beat on its film (EF-3), so its activity is
+    the film's own newest card whatever kind it is — the trailer here, not the casting."""
+    film = await make_film(slug="dune", title="Dune")
+    await add_event(film=film, event_type="casting", created_at=OLD)
+    await add_event(film=film, event_type="trailer", created_at=NEW)
+
+    row = await _row(entitled_client, "title", str(film.id))
+    assert at(row["last_activity_at"]) == NEW
+
+
+async def test_a_person_row_dates_to_its_own_card_and_not_the_films_other_beats(
+    entitled_client, session, make_film, make_person, add_event
+):
+    """The cutover, read off the follows page (EF-3): a person follow reaches the attachment
+    and nothing else about the film. The *newer* trailer is the control — it must not become a
+    followed director's "last activity", because it is not something they would ever be told
+    about."""
+    from upmovies.news.subject_key import normalize_name
+
+    await make_person(id=525, name="Céline Sciamma")
+    film = await make_film(slug="portrait", title="Portrait")
+    await add_event(
+        film=film,
+        event_type="casting",
+        created_at=OLD,
+        subject_key=[normalize_name("Céline Sciamma")],
+    )
+    await add_event(film=film, event_type="trailer", created_at=NEW)
+
+    row = await _row(entitled_client, "person", "525")
+    assert at(row["last_activity_at"]) == OLD
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "entity_id", "event_type", "token"),
+    [
+        pytest.param("company", "711", "company_attached", "company:711", id="studio"),
+        pytest.param("franchise", "10", "collection_attached", "collection:10", id="franchise"),
+    ],
+)
+async def test_an_organisation_row_dates_to_its_own_attachment_card(
+    entitled_client, session, make_film, add_event, entity_type, entity_id, event_type, token
+):
+    """The token-matched branches, from the route. Same control as the person case: the newer
+    beat on the same film is not this follow's activity."""
+    from upmovies.catalog.models import Collection, ProductionCompany
+
+    session.add_all([ProductionCompany(id=711, name="A Studio"), Collection(id=10, name="A Saga")])
+    await session.commit()
+
+    film = await make_film(slug="theirs", title="Theirs")
+    await add_event(film=film, event_type=event_type, created_at=OLD, subject_key=[token])
+    await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    row = await _row(entitled_client, entity_type, entity_id)
+    assert at(row["last_activity_at"]) == OLD
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "entity_id"),
+    [("title", None), ("person", "525"), ("company", "711"), ("franchise", "10")],
+)
+async def test_a_follow_that_has_delivered_nothing_dates_to_null(
+    entitled_client, session, make_film, entity_type, entity_id
+):
+    """**Null is "nothing yet", not "unknown"** (`FollowOut`). A follow taken out this morning
+    on a film the site has never carded is the common case, not an edge one, and the page sorts
+    it to the bottom rather than treating it as missing data."""
+    from upmovies.catalog.models import Collection, Person, ProductionCompany
+
+    session.add_all(
+        [
+            Person(id=525, name="Céline Sciamma"),
+            ProductionCompany(id=711, name="A Studio"),
+            Collection(id=10, name="A Saga"),
+        ]
+    )
+    await session.commit()
+    if entity_id is None:
+        entity_id = str((await make_film(slug="silent", title="Silent")).id)
+
+    row = await _row(entitled_client, entity_type, entity_id)
+    assert row["last_activity_at"] is None
+
+
+async def test_a_card_the_feed_hides_is_not_activity(entitled_client, make_film, add_event):
+    """The date has to be a card the user can actually open, so it reads the same visibility
+    terms the feed does (`feed_visible`). An `other` card is hidden from every surface
+    (`HIDDEN_EVENT_TYPES`) — dating a follow to one would point at nothing."""
+    film = await make_film(slug="quiet", title="Quiet")
+    await add_event(film=film, event_type="casting", created_at=OLD)
+    await add_event(film=film, event_type="other", created_at=NEW)
+
+    row = await _row(entitled_client, "title", str(film.id))
+    assert at(row["last_activity_at"]) == OLD
+
+
+async def test_a_release_date_for_another_market_is_not_activity(
+    entitled_client, make_film, add_event
+):
+    """The third term of `feed_visible`: `region_visible()`. A release-date card for a market
+    this film's readers are not in never reaches the feed, so it cannot be what dated the
+    follow — the page would offer a date pointing at a card the user cannot find."""
+    film = await make_film(slug="local", title="Local", origin_country=["US"])
+    await add_event(film=film, event_type="casting", created_at=OLD)
+    await add_event(film=film, event_type="release_date", region="FR", created_at=NEW)
+
+    row = await _row(entitled_client, "title", str(film.id))
+    assert at(row["last_activity_at"]) == OLD
+
+
+async def test_a_film_with_no_slug_is_not_activity(entitled_client, session, add_event):
+    """The other half of the same rule: a film with no slug has no page, so its cards have no
+    URL to send the reader to. `catalog.film.slug` is nullable and backfilled, so this is a
+    real state rather than a hypothetical one."""
+    film = await add_film(session, tmdb_id=9001, slug=None)
+    await session.commit()
+    await add_event(film=film, event_type="casting", created_at=NEW)
+
+    row = await _row(entitled_client, "title", str(film.id))
+    assert row["last_activity_at"] is None
+
+
+async def test_the_follow_button_answers_with_the_same_activity_the_list_does(
+    entitled_client, make_film, add_event
+):
+    """One row, one truth, the same contract `headline_release` has: the film page reconciles
+    its cache from the write response (NEU-1405), so a POST that answered `null` while the list
+    answered with a real date would sort the row the user just created to the bottom until the
+    next fetch."""
+    film = await make_film(slug="heat", title="Heat")
+    await add_event(film=film, event_type="casting", created_at=NEW)
+
+    written = await entitled_client.post(
+        "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+    )
+    listed = (await entitled_client.get("/me/follows")).json()["items"]
+    assert written.json()["last_activity_at"] == listed[0]["last_activity_at"]
+    assert at(written.json()["last_activity_at"]) == NEW
+
+
+async def test_one_statement_dates_every_row(entitled_client, make_film, add_event, monkeypatch):
+    """**Not N+1** (this ticket). The column is a sort key, so the page needs it for every row
+    before it can draw the first one; a query per follow would be a round trip per row on a page
+    an imported library fills with hundreds.
+
+    Asserted by counting how many times the list route reaches the activity builder, because
+    `_last_activity` executes exactly what it is handed, once: one builder call is one statement
+    for the whole page however many follows it covers."""
+    from upmovies.app.services import follow_service
+
+    films = [await make_film(slug=f"f{i}", title=f"F{i}") for i in range(3)]
+    for film in films:
+        await add_event(film=film, event_type="casting", created_at=OLD)
+        await entitled_client.post(
+            "/me/follows", json={"entity_type": "title", "entity_id": str(film.id)}
+        )
+
+    calls: list[object] = []
+    real = follow_service.follow_last_activity
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(follow_service, "follow_last_activity", spy)
+
+    rows = (await entitled_client.get("/me/follows")).json()["items"]
+
+    assert len(rows) == 3
+    assert all(at(r["last_activity_at"]) == OLD for r in rows)
+    assert len(calls) == 1, calls
+    assert calls[0] == {"only": None}, "the list route asks for every row at once, not row by row"

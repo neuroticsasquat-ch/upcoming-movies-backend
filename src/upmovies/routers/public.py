@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.app.rate_limit import rate_limit
 from upmovies.config import get_settings
 from upmovies.deps import get_session
+from upmovies.pagination import InvalidCursor
 from upmovies.public import service
 from upmovies.public.dto import (
     CalendarResponse,
@@ -11,6 +12,7 @@ from upmovies.public.dto import (
     CollectionSearchResponse,
     CompanyDetailResponse,
     CompanySearchResponse,
+    EntityEventsResponse,
     FeedDayResponse,
     FeedResponse,
     FilmDetailResponse,
@@ -92,6 +94,61 @@ async def popular_people(
     return await service.get_popular_people(session, limit=limit)
 
 
+async def _entity_events(
+    entity_type: str,
+    ref: str,
+    limit: int,
+    cursor: str | None,
+    session: AsyncSession,
+) -> EntityEventsResponse:
+    """The body of the three `/…/{ref}/events` routes, which differ only in the word they pass.
+
+    One handler rather than three copies: the page size, the cursor's 400 and the 404 are the
+    same contract for all three (EF-18), and the entity pages are the surface this project is
+    least finished with. `entity_type` is the follow graph's word — a franchise is `franchise`
+    where its route is `/collections` (CONTEXT.md **Franchise**)."""
+    try:
+        page = await service.get_entity_events(
+            session, entity_type=entity_type, ref=ref, limit=limit, cursor=cursor
+        )
+    except InvalidCursor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_cursor"
+        ) from None
+    if page is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"{entity_type} not found"
+        )
+    return page
+
+
+_EVENTS_LIMIT = Query(default=service.ENTITY_EVENTS_PAGE_SIZE, ge=1, le=100)
+_EVENTS_CURSOR = Query(default=None)
+"""No `max_length`: a token this API did not mint is one mistake however long it is, and a
+length bound would answer some forgeries with a 422 and the rest with `_entity_events`' 400.
+`decode_cursor` refuses anything that is not a base64 `(timestamp, uuid)` in constant work."""
+
+
+# Registered ahead of `/people/{ref}`: `{ref}` is a single path segment, so it cannot swallow a
+# two-segment path — but the order matches the file's convention of putting the more specific
+# route first, and `test_entity_events_still_route` pins it.
+@router.get(
+    "/people/{ref}/events", response_model=EntityEventsResponse, dependencies=[_public_limit]
+)
+async def get_person_events(
+    ref: str,
+    limit: int = _EVENTS_LIMIT,
+    cursor: str | None = _EVENTS_CURSOR,
+    session: AsyncSession = Depends(get_session),
+) -> EntityEventsResponse:
+    """The cards a follow of this person would deliver (EF-18): their attach and detach cards,
+    and the `canceled` card of a film they are attached to. Not the films' other beats — a
+    person follow reaches events, never films (EF-3).
+
+    404 on the same terms as `/people/{ref}`, tombstones included."""
+    return await _entity_events("person", ref, limit, cursor, session)
+
+
 # Registered after the two literal paths above, though it need not be: Starlette matches
 # routes in registration order and `/people/search` and `/people/popular` are literals, which
 # `{ref}` would happily swallow if it came first. Keeping the order is cheaper than relying on
@@ -137,6 +194,34 @@ async def search_collections(
 ) -> CollectionSearchResponse:
     """Search TMDB collections (franchises) by name (folded substring), alphabetical."""
     return await service.get_collection_search(session, q=q, limit=limit, offset=offset)
+
+
+@router.get(
+    "/companies/{ref}/events", response_model=EntityEventsResponse, dependencies=[_public_limit]
+)
+async def get_company_events(
+    ref: str,
+    limit: int = _EVENTS_LIMIT,
+    cursor: str | None = _EVENTS_CURSOR,
+    session: AsyncSession = Depends(get_session),
+) -> EntityEventsResponse:
+    """`/people/{ref}/events` over studios: the studio's own `company_attached` and
+    `company_removed` cards, plus `canceled` on a film it produces."""
+    return await _entity_events("company", ref, limit, cursor, session)
+
+
+@router.get(
+    "/collections/{ref}/events", response_model=EntityEventsResponse, dependencies=[_public_limit]
+)
+async def get_collection_events(
+    ref: str,
+    limit: int = _EVENTS_LIMIT,
+    cursor: str | None = _EVENTS_CURSOR,
+    session: AsyncSession = Depends(get_session),
+) -> EntityEventsResponse:
+    """`/companies/{ref}/events` over franchises. The route says `collections` and the follow
+    says `franchise`; they are the same thing (CONTEXT.md **Franchise**)."""
+    return await _entity_events("franchise", ref, limit, cursor, session)
 
 
 # Registered after `/companies/search` and `/collections/search` for the reason spelled above

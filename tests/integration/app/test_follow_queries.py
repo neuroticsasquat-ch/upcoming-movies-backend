@@ -17,7 +17,10 @@ from sqlalchemy import select
 
 from upmovies.app.follow_queries import (
     entity_attachment_event_ids,
+    entity_event_ids,
     first_association_clause,
+    first_association_event_ids,
+    follow_last_activity,
     title_follow_film_ids,
     title_followed_by_any_user_clause,
 )
@@ -45,6 +48,10 @@ DIRECTOR_NAME = "Céline  Sciamma"
 matches this person by name goes through `sql_normalized_name` rather than past it."""
 COMPANY = 508
 COLLECTION = 726871
+
+OLDER = datetime(2026, 9, 1, 12, tzinfo=UTC)
+NEWER = datetime(2026, 9, 18, 9, tzinfo=UTC)
+"""Two instants `follow_last_activity`'s assertions can read a `max` between."""
 
 
 @pytest.fixture
@@ -536,6 +543,121 @@ async def test_only_narrows_the_event_builder_to_one_follow(
     assert await _ids(session, _events(user.id, only=("title", str(film.id)))) == set()
 
 
+# --- entity_event_ids: the same rule with nobody following anything (EF-18) ------------------
+
+
+async def test_the_public_builder_selects_the_entitys_cards_with_no_follow_at_all(
+    session, user, make_film, attach_card, add_event
+):
+    """NEU-1440's entity pages are public: the visitor may have no account, so the id set the
+    branches read has to come from the URL rather than from `app.follow`. Same cards, same
+    branches — asserted against the per-user builder's answer for a user who follows the same
+    two entities, so the two spellings cannot drift."""
+    film = await make_film(slug="theirs", title="Theirs")
+    person_card = await attach_card(film)
+    company_card = await add_event(
+        film=film, event_type="company_attached", subject_key=[company_subject_token(COMPANY)]
+    )
+    await _follow(session, user, "person", str(DIRECTOR))
+    await _follow(session, user, "company", str(COMPANY))
+
+    assert await _ids(session, entity_event_ids("person", DIRECTOR)) == {person_card.id}
+    assert await _ids(session, entity_event_ids("company", COMPANY)) == {company_card.id}
+    assert await _ids(session, entity_event_ids("person", DIRECTOR)) == await _ids(
+        session, _events(user.id, only=("person", str(DIRECTOR)))
+    )
+
+
+async def test_the_public_builder_owns_no_title_branch(session, make_film, attach_card):
+    """A title follow selects *films*, so there is no "this film's own attachment stream" to
+    ask for — and a `title` narrowing must answer with nothing rather than fall through."""
+    film = await make_film(slug="theirs", title="Theirs")
+    await attach_card(film)
+
+    assert await _ids(session, entity_event_ids("title", 1)) == set()
+
+
+async def test_the_public_builder_finds_an_entity_nobody_follows(
+    session, make_film, attach_card, director
+):
+    """The point of the swap: an entity page lists its cards whether or not anyone has ever
+    followed it. `director` is minted and `attach_card` names them; no `Follow` row exists."""
+    film = await make_film(slug="theirs", title="Theirs")
+    card = await attach_card(film)
+
+    assert (await session.execute(select(Follow))).scalars().all() == []
+    assert await _ids(session, entity_event_ids("person", DIRECTOR)) == {card.id}
+
+
+# --- follow_last_activity (EF-15) ------------------------------------------------------------
+
+
+async def test_last_activity_is_one_row_per_follow_across_both_grains(
+    session, user, make_film, attach_card, add_event
+):
+    """The follows page's third sort, batched. Both grains in one result: the title row dates
+    to its film's newest beat, the person row to its own card — the trailer that is newer than
+    the casting belongs to the film's follower and not to the director's (EF-3)."""
+    followed_film = await make_film(slug="mine", title="Mine")
+    await add_event(film=followed_film, event_type="casting", created_at=OLDER)
+    await add_event(film=followed_film, event_type="trailer", created_at=NEWER)
+    theirs = await make_film(slug="theirs", title="Theirs")
+    await attach_card(theirs, created_at=OLDER)
+    await add_event(film=theirs, event_type="trailer", created_at=NEWER)
+    await _follow(session, user, "title", str(followed_film.id))
+    await _follow(session, user, "person", str(DIRECTOR))
+
+    rows = dict(
+        ((entity_type, entity_id), at)
+        for entity_type, entity_id, at in (
+            await session.execute(follow_last_activity(user.id))
+        ).all()
+    )
+
+    assert rows == {
+        ("title", str(followed_film.id)): NEWER,
+        ("person", str(DIRECTOR)): OLDER,
+    }
+
+
+async def test_a_follow_that_has_delivered_nothing_has_no_row(session, user, make_film):
+    """Absent, not NULL. A `GROUP BY` cannot invent a row for a group with no members, and the
+    caller reads the absence as "nothing yet" — which is what an outer join would have bought
+    at the cost of the aggregate's index."""
+    film = await make_film(slug="silent", title="Silent")
+    await _follow(session, user, "title", str(film.id))
+    await _follow(session, user, "person", str(DIRECTOR))
+
+    assert (await session.execute(follow_last_activity(user.id))).all() == []
+
+
+async def test_last_activity_narrows_to_one_follow(session, user, make_film, add_event):
+    """`only` is what the three single-row follow routes read, so a follow button's answer and
+    the list's answer come from one builder."""
+    film = await make_film(slug="mine", title="Mine")
+    await add_event(film=film, event_type="casting", created_at=OLDER)
+    other = await make_film(slug="other", title="Other")
+    await add_event(film=other, event_type="casting", created_at=NEWER)
+    await _follow(session, user, "title", str(film.id))
+    await _follow(session, user, "title", str(other.id))
+
+    rows = (
+        await session.execute(follow_last_activity(user.id, only=("title", str(film.id))))
+    ).all()
+
+    assert rows == [("title", str(film.id), OLDER)]
+
+
+async def test_last_activity_is_bounded_by_an_int32_entity_id(session, user, make_film):
+    """`_int_id_guard`. An id past int32 passes the digit guard and then fails in the driver as
+    it is bound against `Integer` — which used to be a batch pass's problem and became
+    `GET /me/follows`' the moment this builder joined that route (`follow_repo._entity_key`)."""
+    await make_film(slug="theirs", title="Theirs")
+    await _follow(session, user, "person", "9999999999")
+
+    assert (await session.execute(follow_last_activity(user.id))).all() == []
+
+
 # --- first_association_clause (EF-13, D-1437.5) ----------------------------------------------
 
 
@@ -554,7 +676,8 @@ def story_card(add_event, director):
 
 
 async def _first(session, user):
-    return set((await session.execute(first_association_clause(user_id=user.id))).scalars().all())
+    stmt = first_association_event_ids(user_id=user.id)
+    return set((await session.execute(stmt)).scalars().all())
 
 
 async def test_a_story_formed_casting_card_is_a_first_association(
@@ -583,7 +706,7 @@ async def test_a_second_story_on_the_same_card_is_still_one_event(
     await _mention(session, card, story=second)
     await _follow(session, user, "person", str(DIRECTOR))
 
-    rows = (await session.execute(first_association_clause(user_id=user.id))).scalars().all()
+    rows = (await session.execute(first_association_event_ids(user_id=user.id))).scalars().all()
     assert list(rows) == [card.id]
 
 
@@ -746,9 +869,10 @@ async def test_the_clause_is_not_reached_by_a_non_person_narrowing(session, user
     """`only=("company", …)` has no arm here until M4 extends this builder to `story_entity`,
     and until then it must select nothing rather than fall through to the person arm."""
     assert await _first(session, user) == set()
+    assert first_association_clause(user_id=user.id, only=("company", str(COMPANY))) is None
     assert (
         await _ids(
-            session, first_association_clause(user_id=user.id, only=("company", str(COMPANY)))
+            session, first_association_event_ids(user_id=user.id, only=("company", str(COMPANY)))
         )
         == set()
     )

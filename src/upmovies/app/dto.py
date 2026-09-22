@@ -261,6 +261,13 @@ class FollowOut(BaseModel):
     nothing here deletes user graph rows. An unresolvable follow is listed with nulls rather
     than filtered out.
 
+    `last_activity_at` is the `created_at` of the newest visible card this follow delivers
+    (EF-15) — every beat on the film for a title row, the entity's own attach, detach and
+    `canceled` cards for the other three (EF-3) — and it is the follows page's third sort.
+    **Null means nothing has happened yet**, not "unknown": a follow taken out this morning on
+    a film the site has never carded is a real and common state, and the page reads it as the
+    bottom of that sort rather than as a missing value.
+
     `headline_release` is **title rows only** and null on every other type (EF-14). A followed
     film has one date worth leading with and the follows page shows it; a followed person does
     not have a date of their own, and inventing one — the next release they are credited on,
@@ -277,6 +284,7 @@ class FollowOut(BaseModel):
     headline_release: HeadlineReleaseOut | None
     source: str
     created_at: datetime
+    last_activity_at: datetime | None
 
 
 class FollowListResponse(BaseModel):
