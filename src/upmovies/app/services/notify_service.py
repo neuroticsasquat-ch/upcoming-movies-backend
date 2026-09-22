@@ -5,14 +5,21 @@ chain. It is the only writer of `app.notification` — ingest never calls it, an
 either — because the decision is a fan-out over *every* user, and a route only ever knows about
 the one who made the request.
 
-**Two branches, one graph (M8).** Both read `app.follow_queries`, at its two grains: the alert
-branch takes `watchlist_film_ids` — what this user's follows *cover*, minus their mutes — and
-admits only D-32's whitelist; the digest branch takes the
-D-11 builders `/me/timeline` hands to the feed, which is what keeps "in my digest" and "on my
-timeline" from drifting into two answers. A film in both sets earns both rows: an alert and a
-digest line are different deliveries of the same news, not duplicates of one
+**Two branches, one clause (EF-3, EF-7).** Both read the same two builders `/me/timeline`
+hands to the feed — `title_follow_film_ids` and `entity_attachment_event_ids` — OR-ed exactly
+as the timeline OR-s them, which is what keeps "in my digest" and "on my timeline" from
+drifting into two answers. The digest is that set; the alert branch is that set cut to
+`confidence = 'confirmed'` and to D-32's whitelist. A card in both earns both rows: an alert
+and a digest line are different deliveries of the same news, not duplicates of one
 (`app.models.Notification`). A **muted** film earns neither — the exclusion is inside the
-builders, so it reaches this pass without a rule of its own (D-45).
+builders, so it reaches this pass without a rule of its own (D-45, until NEU-1439).
+
+**The interim push rule** (D-1437.7). Cutting the shared clause to the old whitelist and to
+confirmed cards means an entity follower earns no push at all from this pass — nothing in
+`PUSH_WHITELIST` is an attach type — and that `canceled`, which is confirmed, does not push
+either, because it is not in the whitelist. Both are deliberate and pinned by tests: NEU-1438
+replaces the whitelist and the confidence term with EF-7's per-reach sets and EF-8's provenance
+rule, and it must not have to touch the clause to do it.
 
 **Push is a second channel on the alert branch, not a third branch** (D-36). A user with a
 `push_subscription` row gets the same whitelisted events queued twice, `channel = 'email'` and
@@ -41,19 +48,15 @@ what it offered.
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, Text, and_, cast, exists, func, or_, select
+from sqlalchemy import Select, Text, and_, cast, exists, func, select
 from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.entitlements import entitled_user_clause
-from upmovies.app.follow_queries import (
-    events_naming_followed_people,
-    followed_film_ids,
-    watchlist_film_ids,
-)
+from upmovies.app.follow_queries import follow_scope
 from upmovies.app.models import (
     DEFAULT_ALERT_STORES,
     Follow,
@@ -90,8 +93,13 @@ Decision = tuple[UUID, str, str]
 which every decision in a batch shares."""
 
 PUSH_WHITELIST = tuple(sorted(ALWAYS_ON_ALERT_TYPES | {NOW_AVAILABLE_EVENT_TYPE}))
-"""D-32 in full. Everything outside it is digest material; nothing `unconfirmed` is in it at
-all, because the window admits only `confidence = 'confirmed'` before the type is even read."""
+"""D-32 in full. Everything outside it is digest material, and nothing `unconfirmed` is in it at
+all — `alert_event_ids` applies that floor beside this list, since the shared window stopped
+carrying it (D-1437.7).
+
+It holds no attach or detach type and no `canceled`, so it is also the reason an entity follow
+earns no push from this pass. NEU-1438 replaces it with EF-7's two sets, `TITLE_PUSH_TYPES` and
+`ENTITY_PUSH_TYPES`, applied per *why* the card reached the user."""
 
 ALERT_STORE_BY_MONETIZATION = {"flatrate": "stream", "rent": "rent", "buy": "buy"}
 """The one place `catalog.MONETIZATION_TYPES` and `app.models.ALERT_STORES` meet.
@@ -197,10 +205,15 @@ def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
     **The window.** `created_at` rather than `occurred_at`, because publication is the axis the
     product already groups and paginates on (ADR-0016) — an event carded today about a change
     TMDB recorded last week is news to the reader today, and dating the window by `occurred_at`
-    would mail nobody about it. `confidence = 'confirmed'` is D-32's floor and sits here rather
-    than in the alert branch: a `rumored` event is not digest material either, so nothing
-    `unconfirmed` is ever queued in any kind. `status = 'published'` leaves out a superseded
-    card in favour of the correction that replaced it.
+    would mail nobody about it. `status = 'published'` leaves out a superseded card in favour of
+    the correction that replaced it.
+
+    **No confidence floor** (D-1437.7). It used to sit here, on the grounds that a `rumored`
+    event was not digest material either — but every catalog attach and detach card is
+    `rumored` until its quarantine clears, so with the floor in the shared selector an entity
+    follower's digest would carry nothing their follow delivers. EF-7 is that the digest
+    carries everything the timeline carries; confirmation is what a *push* waits for. The
+    alert branch applies it, and only there.
 
     **The visibility terms are the three the feed applies**, and they are not decoration. A
     notification is a claim, made in the user's inbox, about a card they will then click
@@ -227,7 +240,6 @@ def deliverable_events(since: datetime) -> Select[tuple[UUID]]:
         .where(
             Event.created_at > since,
             Event.status == "published",
-            Event.confidence == "confirmed",
             Film.slug.is_not(None),
             visible_events(),
             region_visible(),
@@ -281,33 +293,28 @@ async def alert_event_ids(
     *,
     recipient: Recipient,
     since: datetime,
-    today: date,
-    max_age_days: int,
 ) -> list[UUID]:
-    """The window's events this user's **watchlist** earns an alert for (D-32, D-42).
+    """The window's events this user earns an **alert** for — the interim push rule (D-1437.7).
 
-    The watchlist is `follow_queries.watchlist_film_ids` and nothing else: the films this
-    user's follows cover, inside the alert window, minus their mutes. Taking
-    the builder rather than restating the rule is what keeps this pass, `/me/watchlist`, the
-    calendar and the slate agreeing about one set.
+    The same clause the digest reads (`follow_scope`), cut to `confidence = 'confirmed'` and to
+    D-32's whitelist. That is deliberately not EF-7 yet: an entity follower earns nothing here,
+    because no attach or detach type is in `PUSH_WHITELIST`, and a cancellation earns nothing
+    either. NEU-1438 is where "which beats may interrupt you" becomes a function of *why* the
+    card reached you; keeping the interim rule as two extra terms on the shared clause is what
+    lets it do that without touching the clause.
 
     The whitelist is applied in SQL; the `now_available` store check is not, because it
     compares two arrays through a vocabulary mapping and reads far better as one named
     predicate than as a `CASE` over `unnest`. The SQL half has already cut the rows to this
-    user's watchlist and this window, so what Python filters is a handful of events, not the
+    user's follows and this window, so what Python filters is a handful of events, not the
     ledger."""
     rows = await session.execute(
         select(Event.id, Event.event_type, Event.subject_key)
         .where(
-            Event.film_id.in_(
-                watchlist_film_ids(
-                    user_id=recipient.user_id,
-                    today=today,
-                    max_age_days=max_age_days,
-                )
-            ),
-            Event.event_type.in_(PUSH_WHITELIST),
             Event.id.in_(deliverable_events(since)),
+            Event.confidence == "confirmed",
+            Event.event_type.in_(PUSH_WHITELIST),
+            follow_scope(recipient.user_id),
         )
         .order_by(Event.created_at, Event.id)
     )
@@ -324,34 +331,22 @@ async def digest_event_ids(
     *,
     user_id: UUID,
     since: datetime,
-    today: date,
-    excluded_statuses: frozenset[str],
 ) -> list[UUID]:
-    """The window's events this user's follows reach — their timeline, restricted to what is
-    new (D-11, D-33).
+    """The window's events this user's follows deliver — their timeline, restricted to what is
+    new (EF-3, EF-7, D-33).
 
-    Both halves of D-11, OR-ed exactly as `public.service.get_timeline` OR-s them: the films
-    the follow graph reaches, and the events that *name* a followed person on a film they hold
-    no credit on. Reusing the builders rather than restating the rule is the point — a digest
-    that quietly covered less than the timeline it summarises would be the drift
-    `app.follow_queries` exists to prevent.
+    `follow_scope` and nothing else: a digest that quietly covered less than the timeline it
+    summarises would be exactly the drift `app.follow_queries` exists to prevent.
 
-    No event type is excluded here. Everything the timeline shows is digest material, including
-    the whitelist beats: a user who follows the director *and* watchlists the film is owed the
-    alert now and the line in their weekly slate, which is what the unique key's `kind` column
-    is for."""
+    No event type and no confidence is excluded here. Everything the timeline shows is digest
+    material, including the whitelist beats and including a `rumored` attachment: a user who
+    follows the director *and* the film is owed the alert now and the line in their weekly
+    slate, which is what the unique key's `kind` column is for."""
     rows = await session.execute(
         select(Event.id)
         .where(
             Event.id.in_(deliverable_events(since)),
-            or_(
-                Event.film_id.in_(
-                    followed_film_ids(
-                        user_id=user_id, today=today, excluded_statuses=excluded_statuses
-                    )
-                ),
-                Event.id.in_(events_naming_followed_people(user_id)),
-            ),
+            follow_scope(user_id),
         )
         .order_by(Event.created_at, Event.id)
     )
@@ -400,9 +395,6 @@ async def decide_for_user(
     *,
     recipient: Recipient,
     since: datetime,
-    today: date,
-    excluded_statuses: frozenset[str],
-    max_age_days: int,
 ) -> list[Decision]:
     """Both branches for one user, written in one statement. Returns the decisions written.
 
@@ -410,20 +402,8 @@ async def decide_for_user(
     the same event, the same `alert` kind, once per channel. Deliberately derived from the one
     list rather than queried twice — "the push whitelist" is D-32's list, and a push branch
     that selected its own events would be free to drift from the mail that accompanies it."""
-    alerts = await alert_event_ids(
-        session,
-        recipient=recipient,
-        since=since,
-        today=today,
-        max_age_days=max_age_days,
-    )
-    digests = await digest_event_ids(
-        session,
-        user_id=recipient.user_id,
-        since=since,
-        today=today,
-        excluded_statuses=excluded_statuses,
-    )
+    alerts = await alert_event_ids(session, recipient=recipient, since=since)
+    digests = await digest_event_ids(session, user_id=recipient.user_id, since=since)
     decisions: list[Decision] = [(event_id, "alert", EMAIL_CHANNEL) for event_id in alerts]
     if recipient.has_push:
         decisions += [(event_id, "alert", PUSH_CHANNEL) for event_id in alerts]
@@ -437,9 +417,6 @@ async def run_notify_pass(
     *,
     session_factory: SessionFactory,
     run_id: UUID,
-    today: date,
-    excluded_statuses: frozenset[str],
-    max_age_days: int,
     failure_threshold: int = 10,
 ) -> NotifyResult:
     """Decide what every user is owed about the events published since the last successful run.
@@ -485,14 +462,7 @@ async def run_notify_pass(
         await heartbeat.tick()
         try:
             async with owned_session(session_factory) as s:
-                written = await decide_for_user(
-                    s,
-                    recipient=recipient,
-                    since=since,
-                    today=today,
-                    excluded_statuses=excluded_statuses,
-                    max_age_days=max_age_days,
-                )
+                written = await decide_for_user(s, recipient=recipient, since=since)
                 if written:
                     # One unit of work is one user, as it is for every other per-item loop in
                     # the pipelines; the row counts are this pass's own counters and reach

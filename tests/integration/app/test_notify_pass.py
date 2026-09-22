@@ -27,6 +27,7 @@ from upmovies.app.services.notify_service import (
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.news.models import Story, StoryPerson
+from upmovies.news.subject_key import normalize_name
 
 WATERMARK = datetime(2026, 9, 17, 3, 0, tzinfo=UTC)
 """When the last successful notify run began. Events created after it are this pass's work."""
@@ -36,12 +37,9 @@ BETWEEN = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 """Where the watermark lands after a first pass — between the two windows below."""
 LATER = datetime(2026, 9, 19, 3, 0, tzinfo=UTC)
 TODAY = date(2026, 9, 18)
-EXCLUDED = frozenset({"Released", "Canceled"})
-"""`TMDB_EXCLUDED_STATUSES`' default. Only the **digest** branch reads it now (D-11's timeline
-builder); the alert window's status term is a constant, `Canceled` alone (D-46)."""
-MAX_AGE_DAYS = 365
-"""The alert window's width — `PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned here the way the
-statuses are, so a film's coverage does not depend on the environment the suite runs in."""
+"""Only a fixture date now. The pass itself takes no `today`, no excluded statuses and no age
+bound since M3: both branches read the timeline's own clause, and neither half of it has a
+window to bound (EF-3, D-1437.7)."""
 GRANTED = datetime(2027, 1, 1, tzinfo=UTC)
 LAPSED = datetime(2026, 1, 1, tzinfo=UTC)
 VERIFIED = datetime(2026, 1, 1, tzinfo=UTC)
@@ -75,17 +73,11 @@ def run_pass(session_factory):
     """Run the pass the way `pipeline_run.run_notify_stage` does — its own run row, its own
     sessions — so the watermark this run leaves behind is the real one."""
 
-    async def _run(*, today: date = TODAY) -> NotifyResult:
+    async def _run() -> NotifyResult:
         async with session_factory() as s:
             run_id = await create_run(s, kind="notify")
             await s.commit()
-        result = await run_notify_pass(
-            session_factory=session_factory,
-            run_id=run_id,
-            today=today,
-            excluded_statuses=EXCLUDED,
-            max_age_days=MAX_AGE_DAYS,
-        )
+        result = await run_notify_pass(session_factory=session_factory, run_id=run_id)
         async with session_factory() as s:
             await finalize_run(s, run_id, status="failed" if result.aborted else "succeeded")
             await s.commit()
@@ -129,6 +121,8 @@ async def _follow_title(session, *, user_id: UUID, film_id: UUID) -> None:
 
 
 async def _follow_person(session, *, user_id: UUID, person_id: int) -> None:
+    """Follow a person — which, since M3, puts that person's *attachment cards* on this user's
+    timeline and digest, and nothing else about the films they are on (EF-3)."""
     session.add(
         Follow(
             user_id=user_id,
@@ -138,6 +132,19 @@ async def _follow_person(session, *, user_id: UUID, person_id: int) -> None:
         )
     )
     await session.commit()
+
+
+async def _attach_card(add_event, film, *, person_name: str, event_type: str = "casting", **kw):
+    """A catalog credit card as the sweep writes one: `rumored` until quarantine clears, with
+    the person's normalized name in `subject_key` and nothing else identifying them."""
+    kw.setdefault("provenance", "catalog")
+    kw.setdefault("confidence", "rumored")
+    return await add_event(
+        film=film,
+        event_type=event_type,
+        subject_key=[normalize_name(person_name)],
+        **kw,
+    )
 
 
 async def _set_alert_stores(session, *, user_id: UUID, alert_stores: list[str]) -> None:
@@ -174,7 +181,47 @@ async def test_a_title_follow_on_a_whitelist_beat_queues_an_alert_and_a_digest(
     assert (digest.kind, digest.event_id) == ("digest", event.id)
 
 
-async def test_a_non_lead_credit_reaches_both_branches(
+async def test_a_followed_persons_attachment_card_is_a_digest_line_and_not_an_alert(
+    session,
+    session_factory,
+    subscriber,
+    make_user,
+    make_film,
+    add_event,
+    make_person,
+    seed_watermark,
+    run_pass,
+):
+    """What an entity follow earns from this pass, in full (EF-3, D-1437.7): the attachment
+    card, in the digest, and nothing interrupting anybody.
+
+    The card is `rumored`, which is what every catalog attachment is until its quarantine
+    clears — and the reason the shared selector lost its confidence floor. With the floor still
+    in place this row would be the only thing the follow delivers and the digest would carry
+    none of it (EF-7). The non-follower is the control: one card, one recipient."""
+    await seed_watermark()
+    user = await subscriber()
+    stranger = await subscriber(email="stranger@example.com")
+    film = await make_film(slug="dune", title="Dune")
+    await make_person(id=488, name="A Director")
+    await _follow_person(session, user_id=user.id, person_id=488)
+    await _follow_title(
+        session,
+        user_id=stranger.id,
+        film_id=(await make_film(slug="something-else", title="Something Else")).id,
+    )
+    card = await _attach_card(
+        add_event, film, person_name="A Director", event_type="crew_attached", created_at=NEW
+    )
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued, result.push_alerts_queued) == (0, 1, 0)
+    (row,) = await _rows(session)
+    assert (row.user_id, row.event_id, row.kind) == (user.id, card.id, "digest")
+
+
+async def test_a_person_follow_no_longer_reaches_the_films_own_beats(
     session,
     session_factory,
     subscriber,
@@ -184,19 +231,14 @@ async def test_a_non_lead_credit_reaches_both_branches(
     seed_watermark,
     run_pass,
 ):
-    """Where the two branches used to come apart, and no longer do (EF-1, EF-2).
+    """The cutover's consequence for this pass (EF-3). Under D-11 a credit put the whole film on
+    the user's timeline, so a release-date change earned them an alert *and* a digest line; now
+    a person follow delivers attachments and the film's own beats belong to its own followers.
 
-    A writing credit is seed grade but was not `lead`, so under D-43's default coverage this
-    film reached the timeline and the digest while the alert branch declined it — on a
-    whitelist beat, with the tier as the only thing between them. A binary follow has no tier,
-    so one row now feeds both branches for every credit the person holds. The pair of tests
-    this replaces (`..._outside_its_coverage_...` and `test_widening_the_coverage_...`) were
-    the two sides of that difference.
-    """
+    Every credit is checked in `test_follow_queries.py`; what is pinned here is that the branch
+    reading the film is the *title* branch and a person follow does not reach it."""
     await seed_watermark()
     user = await subscriber()
-    # Dated ahead of `TODAY`, so the timeline's in-play term (D-11) is satisfied and nothing
-    # but the follow decides what the two branches see.
     film = await make_film(slug="dune", title="Dune", release_date=date(2099, 1, 1))
     await attach_credits(film, crew=[{"id": 488, "name": "A Writer", "job": "Screenplay"}])
     await _follow_person(session, user_id=user.id, person_id=488)
@@ -204,10 +246,20 @@ async def test_a_non_lead_credit_reaches_both_branches(
 
     result = await run_pass()
 
-    assert (result.alerts_queued, result.digests_queued) == (1, 1)
+    assert (result.alerts_queued, result.digests_queued) == (0, 0)
+    assert await _rows(session) == []
 
 
-async def test_an_unbilled_credit_reaches_both_branches_too(
+@pytest.mark.parametrize(
+    ("event_type", "confidence"),
+    [
+        pytest.param("casting", "rumored", id="a casting attachment"),
+        pytest.param("crew_attached", "rumored", id="a crew attachment"),
+        pytest.param("credit_removed", "rumored", id="a detachment"),
+        pytest.param("canceled", "confirmed", id="a cancellation"),
+    ],
+)
+async def test_an_entity_follower_earns_no_alert_from_any_card(
     session,
     session_factory,
     subscriber,
@@ -216,21 +268,35 @@ async def test_an_unbilled_credit_reaches_both_branches_too(
     attach_credits,
     seed_watermark,
     run_pass,
+    event_type,
+    confidence,
 ):
-    """The case no tier ever reached but `any`: a cast entry TMDB left unbilled. EF-2 makes it
-    the same as every other credit, which is the whole of "a person follow reaches any credit"
-    — and it is the row that would silently drop out if a seed-grade term survived anywhere in
-    the alert path."""
+    """The interim push rule, pinned so NEU-1438 flips it deliberately (D-1437.7).
+
+    Nothing an entity follow delivers is in `PUSH_WHITELIST`: the three credit beats are
+    outside it, and `canceled` — which *is* confirmed, so the confidence term does not explain
+    its absence — is outside it too. Every one of these is a digest line and none of them is an
+    alert. EF-7 gives entity follows their own push set; this is the state before it."""
     await seed_watermark()
     user = await subscriber()
-    film = await make_film(slug="dune", title="Dune", release_date=date(2099, 1, 1))
-    await attach_credits(film, cast=[{"id": 488, "name": "A Bit Player", "credit_order": 11}])
+    film = await make_film(slug="dune", title="Dune")
+    # Credited as well as named, so the `canceled` case has an attachment to be found through.
+    # `attach_credits` writes the person row, which is why this test does not also `make_person`.
+    await attach_credits(film, crew=[{"id": 488, "name": "A Director", "job": "Director"}])
     await _follow_person(session, user_id=user.id, person_id=488)
-    await add_event(film=film, event_type="release_date", created_at=NEW)
+    await _attach_card(
+        add_event,
+        film,
+        person_name="A Director",
+        event_type=event_type,
+        confidence=confidence,
+        created_at=NEW,
+    )
 
     result = await run_pass()
 
-    assert (result.alerts_queued, result.digests_queued) == (1, 1)
+    assert (result.alerts_queued, result.push_alerts_queued) == (0, 0)
+    assert [row.kind for row in await _rows(session)] == ["digest"]
 
 
 async def test_a_muted_film_earns_neither_kind(
@@ -299,7 +365,7 @@ async def test_now_available_alerts_only_the_stores_the_user_wants(
     assert alert.user_id == streamer.id
 
 
-async def test_a_director_follow_alerts_on_a_released_films_now_available_beat(
+async def test_a_director_follow_no_longer_alerts_on_a_films_now_available_beat(
     session,
     session_factory,
     subscriber,
@@ -309,22 +375,26 @@ async def test_a_director_follow_alerts_on_a_released_films_now_available_beat(
     seed_watermark,
     run_pass,
 ):
-    """The alert NEU-1417 is about (D-46). The user follows nobody but the director; the film
-    opened two months ago and TMDB has marked it `Released`, which under NEU-1414's window took
-    it off their watchlist on release day — the exact morning the `now_available` beat it was
-    waiting for arrives. The window's status term now ends at `Canceled`, so the alert is owed
-    and sent.
+    """The alert NEU-1417 widened the window for, deliberately retired (EF-3, EF-7).
 
-    The digest line is absent on purpose: timeline coverage is still D-11's in-play cut, so a
-    released film reaches the alert branch and not the digest branch through the same follow.
-    """
+    The user follows nobody but the director; the film opened two months ago and its streaming
+    debut has just been observed. D-46 made that alert reachable by stretching the alert window
+    past release day — ADR-0019 removes the premise instead: a person follow delivers that
+    person's attachments, and where their films end up streaming is the *film's* news, for
+    whoever followed the film. The title follower beside them still gets it, which is the
+    replacement path and what the film page's one button now offers.
+
+    Not an interim state and not NEU-1438's to flip: EF-7's entity push set is the attachment
+    beats and the cancellation, and `now_available` is not in it by design."""
     await seed_watermark()
-    user = await subscriber()
+    indirect = await subscriber(email="director-follower@example.com")
+    direct = await subscriber(email="film-follower@example.com")
     film = await make_film(
         slug="dune", title="Dune", release_date=TODAY - timedelta(days=60), status="Released"
     )
     await attach_credits(film, crew=[{"id": 525, "name": "A Director", "job": "Director"}])
-    await _follow_person(session, user_id=user.id, person_id=525)
+    await _follow_person(session, user_id=indirect.id, person_id=525)
+    await _follow_title(session, user_id=direct.id, film_id=film.id)
     await add_event(
         film=film,
         event_type="now_available",
@@ -336,26 +406,53 @@ async def test_a_director_follow_alerts_on_a_released_films_now_available_beat(
 
     result = await run_pass()
 
-    assert (result.alerts_queued, result.digests_queued) == (1, 0)
-    (alert,) = await _rows(session)
-    assert (alert.user_id, alert.kind) == (user.id, "alert")
+    assert (result.alerts_queued, result.digests_queued) == (1, 1)
+    assert {(row.user_id, row.kind) for row in await _rows(session)} == {
+        (direct.id, "alert"),
+        (direct.id, "digest"),
+    }
 
 
-async def test_a_rumored_event_is_never_queued_in_any_kind(
+async def test_a_rumored_card_is_queued_as_a_digest_and_not_as_an_alert(
     session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
 ):
-    """ "Nothing `unconfirmed` is ever queued as an alert" (D-32) — and it is not digest
-    material either, so the cut lives in the window rather than in one branch."""
+    """The floor that moved (D-1437.7). It used to sit in `deliverable_events`, so a `rumored`
+    card was queued in no kind at all — which, once every catalog attachment arrived `rumored`,
+    would have left an entity follower's digest empty of the only thing their follow delivers.
+
+    EF-7: the digest carries everything the timeline carries, and confirmation is what a *push*
+    waits for. So this card is a digest line and not an alert, on a whitelist beat, through a
+    title follow — every other reason to decline it removed, so what the assertion reads is the
+    confidence term and nothing else."""
     await seed_watermark()
     user = await subscriber()
     film = await make_film(slug="dune", title="Dune")
     await _follow_title(session, user_id=user.id, film_id=film.id)
-    await add_event(film=film, event_type="release_date", confidence="rumored", created_at=NEW)
+    event = await add_event(
+        film=film, event_type="release_date", confidence="rumored", created_at=NEW
+    )
 
     result = await run_pass()
 
-    assert result.events_considered == 0
-    assert await _rows(session) == []
+    assert result.events_considered == 1, "the shared selector no longer cuts on confidence"
+    assert (result.alerts_queued, result.digests_queued) == (0, 1)
+    (row,) = await _rows(session)
+    assert (row.kind, row.event_id) == ("digest", event.id)
+
+
+async def test_a_confirmed_card_on_the_whitelist_still_alerts(
+    session, session_factory, subscriber, make_film, add_event, seed_watermark, run_pass
+):
+    """The other side of the same pair, so the floor is pinned as *moved* rather than dropped."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (1, 1)
 
 
 async def test_a_superseded_event_is_not_queued(
@@ -508,7 +605,7 @@ async def test_a_grant_that_lapses_between_runs_suppresses_the_next_window(
     assert alerts[second_event.id].status == "suppressed"
 
 
-async def test_the_digest_covers_events_that_merely_name_a_followed_person(
+async def test_a_story_that_merely_names_a_followed_person_is_not_in_their_digest(
     session,
     session_factory,
     subscriber,
@@ -518,9 +615,13 @@ async def test_the_digest_covers_events_that_merely_name_a_followed_person(
     seed_watermark,
     run_pass,
 ):
-    """D-11's second half, which `/me/timeline` OR-s in beside the film filter. A digest that
-    covered less than the timeline it summarises would be exactly the drift
-    `app.follow_queries` exists to prevent."""
+    """The negative of what this test used to assert, and the heart of EF-13.
+
+    Under D-11 any event whose story named a resolved followed person was theirs — so a date
+    change reported in an article that mentions the director was a digest line about a film
+    they may have nothing to do with. Now a mention reaches them only as the person's *first
+    association* with the film, and a `release_date` card is not an attach card at all, so
+    `first_association_clause` declines it on its first term."""
     await seed_watermark()
     user = await subscriber()
     person = await make_person(id=525, name="A Director")
@@ -529,9 +630,9 @@ async def test_the_digest_covers_events_that_merely_name_a_followed_person(
         Follow(user_id=user.id, entity_type="person", entity_id=str(person.id), source="manual")
     )
     await session.commit()
-    event = await add_event(
+    await add_event(
         film=film,
-        event_type="casting",
+        event_type="release_date",
         created_at=NEW,
         sources=({"url": "https://deadline.example/story"},),
     )
@@ -544,6 +645,7 @@ async def test_the_digest_covers_events_that_merely_name_a_followed_person(
             person_id=person.id,
             name_as_written="A Director",
             path="accepted",
+            features={"title_mentioned": None, "event_type": "casting"},
             prompt_version="1",
         )
     )
@@ -551,9 +653,98 @@ async def test_the_digest_covers_events_that_merely_name_a_followed_person(
 
     result = await run_pass()
 
-    assert result.digests_queued == 1
+    assert result.digests_queued == 0
+    assert await _rows(session) == []
+
+
+async def test_a_first_association_is_in_the_digest(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    make_person,
+    seed_watermark,
+    run_pass,
+):
+    """The other side: the same mention on a `casting` card, for somebody holding no credit on
+    the film, is the first-association beat — and it is digest material, `rumored` and all."""
+    await seed_watermark()
+    user = await subscriber()
+    person = await make_person(id=525, name="A Director")
+    film = await make_film(slug="uncredited", title="Uncredited")
+    session.add(
+        Follow(user_id=user.id, entity_type="person", entity_id=str(person.id), source="manual")
+    )
+    await session.commit()
+    event = await add_event(
+        film=film,
+        event_type="casting",
+        confidence="rumored",
+        created_at=NEW,
+        sources=({"url": "https://deadline.example/scoop"},),
+    )
+    story_id = (
+        await session.execute(select(Story.id).where(Story.url == "https://deadline.example/scoop"))
+    ).scalar_one()
+    session.add(
+        StoryPerson(
+            story_id=story_id,
+            person_id=person.id,
+            name_as_written="A Director",
+            path="accepted",
+            features={"title_mentioned": None, "event_type": "casting"},
+            prompt_version="1",
+        )
+    )
+    await session.commit()
+
+    result = await run_pass()
+
+    assert (result.digests_queued, result.alerts_queued) == (1, 0)
     (row,) = await _rows(session)
     assert (row.event_id, row.kind) == (event.id, "digest")
+
+
+async def test_both_branches_reach_the_one_first_association_builder(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    seed_watermark,
+    run_pass,
+    monkeypatch,
+):
+    """The contract NEU-1446 inherits: EF-13's predicate is **one** builder, and both branches
+    of this pass reach it through `entity_attachment_event_ids` rather than either of them
+    spelling the rule again. M4 extends the builder to `story_entity`; if a second copy of the
+    predicate had grown here, M4 would widen one branch and quietly leave the other behind.
+
+    Asserted by counting calls rather than by comparing SQL: what matters is that the alert
+    branch and the digest branch each go through it, once, for the user being decided for."""
+    from upmovies.app import follow_queries
+
+    calls: list[dict] = []
+    real = follow_queries.first_association_clause
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(follow_queries, "first_association_clause", spy)
+
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    await _follow_title(session, user_id=user.id, film_id=film.id)
+    await add_event(film=film, event_type="release_date", created_at=NEW)
+
+    result = await run_pass()
+
+    assert (result.alerts_queued, result.digests_queued) == (1, 1)
+    assert len(calls) == 2, "once from the alert branch and once from the digest branch"
+    assert all(call["user_id"] == user.id for call in calls)
 
 
 async def test_a_user_with_no_graph_is_never_considered(

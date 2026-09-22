@@ -23,8 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.app.dto import HeadlineReleaseOut
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import (
-    events_naming_followed_people,
-    followed_film_ids,
+    entity_attachment_event_ids,
+    title_follow_film_ids,
     watchlist_film_ids,
 )
 from upmovies.app.models import User, UserSettings
@@ -1499,20 +1499,21 @@ async def get_feed_grouped(
 async def get_timeline(
     session: AsyncSession, *, user_id: UUID, limit: int, offset: int
 ) -> FeedDayResponse:
-    """The grouped feed restricted to what this user's follows reach (D-11, D-12).
+    """The grouped feed restricted to what this user's follows deliver (EF-3, D-12).
 
-    Two filters, OR-ed by `get_feed_grouped`, because D-11 has two halves: the films the user
-    follows, and the events that *name* a person they follow on a film that person holds no credit
-    on (NEU-1365). The second is event-grained on purpose — such a mention makes its own event
-    timeline-worthy and says nothing about the rest of the film's history. Which is the one way a
-    timeline row is not its feed row: a film-day reached by a mention alone carries that event and
-    not the film's others, so `event_count`, `event_types` and `top_event_type` can read lower here
-    than on `/feed` for the same film and day. The shape and the ordering are the feed's; the
-    contents are what this user follows.
+    Two filters, OR-ed by `get_feed_grouped`, because a follow delivers at two grains
+    (ADR-0019): a **title** follow delivers every beat on its film, and a person, studio or
+    franchise follow delivers the cards in which that entity attaches to or detaches from a
+    film, plus that film's cancellation. The second is event-grained on purpose — an attachment
+    makes its own event timeline-worthy and says nothing about the rest of the film's history.
+    Which is the one way a timeline row is not its feed row: a film-day reached by an attachment
+    alone carries that event and not the film's others, so `event_count`, `event_types` and
+    `top_event_type` can read lower here than on `/feed` for the same film and day. The shape
+    and the ordering are the feed's; the contents are what this user follows.
 
-    **A muted film is absent from both halves** (D-45). The exclusion lives inside the two
-    builders rather than here, so the digest section that summarises this timeline cannot
-    disagree with it about what the user silenced.
+    **A muted film is absent from both halves** (D-45, until NEU-1439). The exclusion lives
+    inside the two builders rather than here, so the digest section that summarises this
+    timeline cannot disagree with it about what the user silenced.
 
     Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
     and the feed are the same product surface — same DTO, same `created_at` day grouping, same
@@ -1525,17 +1526,12 @@ async def get_timeline(
     here, because an empty timeline would read as "nothing happened" rather than "you do not
     have access" (D-41).
     """
-    settings = get_settings()
     return await get_feed_grouped(
         session,
         limit=limit,
         offset=offset,
-        film_filter=followed_film_ids(
-            user_id=user_id,
-            today=datetime.now(UTC).date(),
-            excluded_statuses=settings.tmdb_excluded_statuses,
-        ),
-        event_filter=events_naming_followed_people(user_id),
+        film_filter=title_follow_film_ids(user_id),
+        event_filter=entity_attachment_event_ids(user_id),
     )
 
 

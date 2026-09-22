@@ -91,7 +91,10 @@ and leaves films.
   column `film.companies_observed_at`; new event types `company_attached`,
   `company_removed`, `collection_attached`, `collection_removed`, `canceled`.
 - The notify pass decides per follow type (EF-7) and per provenance for attach and detach
-  cards (EF-8); `deliverable_events()`'s visibility terms are unchanged.
+  cards (EF-8); `deliverable_events()`'s visibility terms are unchanged. Its `confidence =
+  'confirmed'` term is **not** a visibility term and does move: NEU-1437 took it out of the
+  shared selector and into the alert branch, because every catalog attachment is `rumored`
+  until its quarantine clears and EF-7 gives the digest everything the timeline carries.
 - The importers write title follows only, after review (EF-20 to EF-22).
 - The glossary entries **Coverage**, **Watchlist** and **Mute** are retired; **Follow**,
   **Timeline**, **Push whitelist**, **Recorded grade**, **Seed person** and **Tranche** are

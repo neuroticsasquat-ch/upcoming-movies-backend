@@ -70,6 +70,20 @@ CREDIT_EVENT_TYPES = frozenset(CREDIT_ROLE_EVENT_TYPES.values())
 # The shared vocabulary home for the detachment carding phase.
 CREDIT_REMOVED_EVENT_TYPE = "credit_removed"
 
+# Every card a person attaching to or detaching from a film can be (EF-3, NEU-1437). The
+# carding paths need the two halves apart — an attachment is matched on who is already carded,
+# a detachment on which attachment it corrects — but the *delivery* half asks one question of
+# both: "is this card about somebody this user follows". Spelled here rather than in
+# `app.follow_queries` so a fourth credit beat is registered in the vocabulary once.
+#
+# An ordered tuple rather than a frozenset, like `COMPANY_EVENT_TYPES` below and unlike
+# `CREDIT_EVENT_TYPES` above: this one is only ever rendered into an `IN`, and a set's iteration
+# order is not stable between processes, so the same statement would read differently in a log
+# or a plan cache from one run to the next.
+PERSON_ATTACHMENT_EVENT_TYPES: tuple[str, ...] = tuple(
+    sorted(CREDIT_EVENT_TYPES | {CREDIT_REMOVED_EVENT_TYPE})
+)
+
 # The studio half (EF-5, NEU-1433). A production company joining or leaving a film, read out
 # of `catalog.film_company_change` the way the credit types are read out of
 # `film_credit_change`. Registered in `ck_event_type` and in `public.arc._EVENT_STAGE`
