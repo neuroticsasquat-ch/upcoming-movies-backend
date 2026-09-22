@@ -33,11 +33,36 @@ def test_status_into_post_production_is_a_production_wrap():
     assert carded.event_type == "production_wrap"
 
 
+def test_status_into_canceled_is_a_cancellation():
+    """EF-6: the beat entity followers most want, and the one member of the mapping that is
+    not a production milestone."""
+    carded = classify_field_change("status", "Planned", "Canceled")
+
+    assert carded is not None
+    assert carded.event_type == "canceled"
+    assert carded.change == StatusChanged(new_status="Canceled")
+
+
+def test_a_film_cancelled_from_post_production_cards_the_same_way():
+    """Cancellation is terminal whatever it interrupts — the transition it arrives from is not
+    part of the rule."""
+    carded = classify_field_change("status", "Post Production", "Canceled")
+
+    assert carded is not None
+    assert carded.event_type == "canceled"
+
+
+def test_an_uncancellation_cards_nothing():
+    """A `Canceled -> Planned` reversal is TMDB correcting itself, and `Planned` is not a beat
+    in its own right — so the reversal is silent, and the re-cancellation that may follow it
+    finds the original card (`_already_carded`)."""
+    assert classify_field_change("status", "Canceled", "Planned") is None
+
+
 def test_other_status_transitions_do_not_card():
-    # Released and Canceled are real transitions with no event type in scope; an unknown one
-    # is new data from TMDB, and both are dropped rather than guessed at.
+    # Released is a real transition with no event type in scope; an unknown one is new data
+    # from TMDB, and both are dropped rather than guessed at.
     assert classify_field_change("status", "Post Production", "Released") is None
-    assert classify_field_change("status", "Planned", "Canceled") is None
     assert classify_field_change("status", "Planned", "In Limbo") is None
 
 

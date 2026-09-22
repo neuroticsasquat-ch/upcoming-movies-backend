@@ -12,16 +12,34 @@ The *matching* rules deliberately do not live here: "has this change already bee
 each is documented at its own site.
 """
 
-# The TMDB `status` values that are a production milestone, and the event type each becomes.
-# `Released` and `Canceled` are real transitions with no event type in scope; an unrecognised
-# status is new data from upstream. Both are dropped rather than guessed at.
+# The TMDB `status` values that card, and the event type each becomes. `Released` is a real
+# transition with no event type in scope, and an unrecognised status is new data from upstream;
+# both are dropped rather than guessed at.
+#
+# `Canceled` joined them in EF-6 (NEU-1435). It is the beat entity followers most want — a film
+# being called off is the last thing anyone following its director or its studio needs to hear —
+# and it is the one member of this mapping that is not a production milestone: the others say
+# where a film has got to, this one says it has stopped. Everything else about it is the
+# milestones' terms, which is why it lives here rather than in a phase of its own: `confirmed`
+# (ADR-0002 makes TMDB the record for its own scalar fields, so the change *is* the
+# corroboration), no quarantine (a scalar field, not a credit somebody could invent), and at most
+# one per film.
 STATUS_EVENT_TYPES: dict[str, str] = {
     "In Production": "production_start",
     "Post Production": "production_wrap",
+    "Canceled": "canceled",
 }
 
-# A film enters production once, and wraps once. For these the whole matching rule is "does
-# this film already have one" — no window, no timestamp comparison, on either side.
+# The event type a cancellation cards as (EF-6, NEU-1435). Named so the delivery half can reach
+# it without re-deriving it from the status mapping — M3 selects it for every follower of an
+# entity attached to the film, not only for its title followers (EF-3).
+CANCELED_EVENT_TYPE = "canceled"
+
+# A film enters production once, wraps once, and is called off once. For these the whole
+# matching rule is "does this film already have one" — no window, no timestamp comparison, on
+# either side. `canceled` takes the milestones' rule unchanged rather than one of its own: a
+# film uncancelled and re-cancelled is TMDB correcting itself, not a second beat, and the
+# reversal test in the sweep pins that.
 ONCE_PER_FILM_EVENT_TYPES = frozenset(STATUS_EVENT_TYPES.values())
 
 # The event type each *recorded* credit role cards as (spec §5.2, D-49). Director and writer
@@ -97,6 +115,12 @@ COLLECTION_EVENT_TYPES: tuple[str, ...] = (
 # Every event type a catalog change can raise. `release_date` is the odd one out among the
 # field-change types: a film's date may move repeatedly, so it is the only one of those
 # matched on *when* rather than on existence.
+#
+# `canceled` arrives here through `ONCE_PER_FILM_EVENT_TYPES`, and that is right rather than
+# incidental: the LLM cannot emit the type today (`link.cluster._VALID_TYPES` has no member for
+# it), but the day it can, a trade story reporting a cancellation belongs on the card TMDB's own
+# status flip already raised — which is exactly the once-per-film rule the production milestones
+# get. The organisation types are absent for the opposite reason, recorded above them.
 CATALOG_EVENT_TYPES = ONCE_PER_FILM_EVENT_TYPES | {"release_date"} | CREDIT_EVENT_TYPES
 
 # The type the watch-provider poll raises the first time a film is observed under a monetization

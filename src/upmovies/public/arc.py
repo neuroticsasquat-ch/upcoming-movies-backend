@@ -8,6 +8,16 @@ ARC_STAGES: tuple[str, ...] = (
     "dated",
     "trailer",
     "released",
+    # Terminal, and above `released` deliberately (EF-6, NEU-1435). Nothing a film does after
+    # being called off outranks having been called off, so a day that carries the cancellation
+    # and anything else reads as the cancellation.
+    #
+    # **No film is ever *in* this stage.** `_STATUS_BASELINE` has no `Canceled` entry and does
+    # not gain one here: `arc_stage` is an API field the frontend renders from a closed
+    # vocabulary, and widening what `derive_arc_stage` can return is a contract change this
+    # ticket has no mandate for. The stage exists so `_EVENT_STAGE` has a rank to point at —
+    # `event_stage_rank` is the whole of what it is for.
+    "canceled",
 )
 
 _RANK: dict[str, int] = {stage: index for index, stage in enumerate(ARC_STAGES)}
@@ -38,6 +48,10 @@ _EVENT_STAGE: dict[str, str] = {
     # on a day that carries nothing else that is what the group should read as.
     # `collection_removed` is absent on `company_removed`'s reasoning.
     "collection_attached": "announced",
+    # A film being called off is terminal and outranks every other beat it shares a day with
+    # (EF-6, NEU-1435) — if TMDB cancels a film on the day its trailer card landed, the group
+    # is about the cancellation. See `ARC_STAGES` for why no film's `arc_stage` is ever this.
+    "canceled": "canceled",
     "production_start": "shooting",
     "production_wrap": "wrapped",
     "release_date": "dated",

@@ -2,10 +2,13 @@
 which are written by the video poll and read back by the public read models (D-35)."""
 
 from upmovies.news.catalog_events import (
+    CANCELED_EVENT_TYPE,
     CATALOG_EVENT_TYPES,
     COLLECTION_ATTACHED_EVENT_TYPE,
     COLLECTION_EVENT_TYPES,
     COLLECTION_REMOVED_EVENT_TYPE,
+    ONCE_PER_FILM_EVENT_TYPES,
+    STATUS_EVENT_TYPES,
     TRAILER_EVENT_TYPE,
     video_key_of,
     video_subject_key,
@@ -79,3 +82,47 @@ def test_the_collection_types_are_not_catalog_dedup_targets():
     there is no story-borne card for these to dedup against."""
     for event_type in COLLECTION_EVENT_TYPES:
         assert event_type not in CATALOG_EVENT_TYPES
+
+
+# --- the cancellation type's registrations (EF-6, NEU-1435) ---------------------
+
+
+def test_canceled_is_the_status_mapping_a_cancellation_cards_through():
+    """The mapping is the whole trigger: `classify_field_change` reads it and nothing else
+    decides that a cancellation is a beat."""
+    assert STATUS_EVENT_TYPES["Canceled"] == CANCELED_EVENT_TYPE
+
+
+def test_released_is_still_dropped():
+    """EF-6 moved `Canceled` out of the "no event type in scope" pair and deliberately left
+    `Released` in it — the film page's release beats card elsewhere, and a `released` card
+    would be a second announcement of the same day."""
+    assert "Released" not in STATUS_EVENT_TYPES
+
+
+def test_canceled_is_matched_once_per_film():
+    """The production milestones' rule, unchanged: a film is called off once, so any existing
+    card is the one a later flip would duplicate — which is what makes an uncancellation and a
+    re-cancellation free."""
+    assert CANCELED_EVENT_TYPE in ONCE_PER_FILM_EVENT_TYPES
+
+
+def test_canceled_is_registered_everywhere_the_vocabulary_is_enumerated():
+    """EF-6 registers it on EF-5's terms, and every site fails silently when missed: an
+    unregistered type ranks below everything on the arc, is admitted by no CHECK constraint,
+    or reads as "Update" in the digest. `ck_event_type` itself is covered by the migration
+    parity test (`tests/integration/test_migrations.py`)."""
+    from upmovies.app.services.digest_sender import DIGEST_BEAT_LABELS
+    from upmovies.link.cluster import _STALE_EVENT_TYPES
+    from upmovies.news.visibility import HIDDEN_EVENT_TYPES
+
+    assert DIGEST_BEAT_LABELS[CANCELED_EVENT_TYPE] == "Canceled"
+    assert CANCELED_EVENT_TYPE not in HIDDEN_EVENT_TYPES
+    assert CANCELED_EVENT_TYPE in _STALE_EVENT_TYPES
+
+
+def test_canceled_is_a_catalog_dedup_target():
+    """Unlike the organisation types, this one belongs in the set: the day the model can emit
+    it, a trade story reporting a cancellation belongs on the card the status flip raised —
+    the production milestones' rule exactly."""
+    assert CANCELED_EVENT_TYPE in CATALOG_EVENT_TYPES

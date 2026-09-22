@@ -135,6 +135,7 @@ DIGEST_BEAT_LABELS: dict[str, str] = {
     "company_removed": "Studio removed",
     "collection_attached": "Franchise attached",
     "collection_removed": "Franchise removed",
+    "canceled": "Canceled",
     "production_start": "Production started",
     "production_wrap": "Production wrapped",
     "first_look": "First look",

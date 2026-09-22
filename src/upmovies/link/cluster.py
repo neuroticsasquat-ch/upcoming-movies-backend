@@ -62,6 +62,14 @@ _STALE_EVENT_TYPES = {
     # files a *released* film under a collection for the first time, so a franchise attachment
     # is not the early-production beat every other type here is.
     "collection_attached",
+    # Registered with the rest of the vocabulary (EF-6, NEU-1435) and, like
+    # `collection_attached`, a membership to re-examine the day EF-12 lets the model emit it.
+    # `_WRAPPED_STATUSES` holds `Post Production` as well as `Released`, and a film *can* be
+    # called off in post — it is the cancellation everybody remembers. The rule is right for the
+    # release half (a released film cannot be cancelled, and a story saying so is re-circulated
+    # old news) and wrong for the wrapped half, which is inert only because `canceled` is not in
+    # `_VALID_TYPES`: the sweep's catalog-sourced cancellation never passes through here.
+    "canceled",
     "crew_attached",
     "production_start",
     "production_wrap",
