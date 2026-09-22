@@ -11,6 +11,7 @@ from upmovies.ingest.tmdb.credit_history import (
     CREDIT_REMOVED,
     CreditChange,
     RecordedCredit,
+    admission_attachments,
     diff_recorded_credits,
     recorded_credits_from_details,
 )
@@ -201,3 +202,65 @@ def test_first_observation_is_still_a_baseline_for_a_followed_person():
     minor = RecordedCredit(person_id=2, credit_type="cast", job=None)
 
     assert diff_recorded_credits(previous=None, current={minor}) == []
+
+
+# --- admission is an attachment for a followed person (EF-4, D-1436.1) -----------------------
+
+
+def test_admission_writes_an_added_row_for_a_followed_person():
+    """The one exception to the baseline rule. A film entering the catalog with a followed
+    director already on it is the single beat that follow was made for."""
+    assert admission_attachments({DIRECTOR, LEAD}, followed={DIRECTOR.person_id}) == [
+        CreditChange(credit=DIRECTOR, change=CREDIT_ADDED)
+    ]
+
+
+def test_admission_writes_nothing_for_anybody_else():
+    """Everything else on the new film is the baseline it has always been — which is what
+    keeps admitting the catalog from carding tens of thousands of false attachments."""
+    assert admission_attachments({DIRECTOR, LEAD}, followed=set()) == []
+
+
+def test_admission_writes_one_row_per_job():
+    """Identity is (person, credit_type, job), so a followed writer-director arrives as two
+    rows. They card once: `crew_attached` groups per film, type and pass (D-7)."""
+    assert admission_attachments({DIRECTOR, WRITER}, followed={525}) == [
+        CreditChange(credit=DIRECTOR, change=CREDIT_ADDED),
+        CreditChange(credit=WRITER, change=CREDIT_ADDED),
+    ]
+
+
+def test_admission_writes_a_non_seed_credit_of_a_followed_person():
+    """Recorded grade, not seed grade: following someone records every credit they take, and
+    admission is no different (D-49, EF-2)."""
+    gaffer = RecordedCredit(person_id=13, credit_type="crew", job="Gaffer")
+
+    assert admission_attachments({gaffer}, followed={13}) == [
+        CreditChange(credit=gaffer, change=CREDIT_ADDED)
+    ]
+
+
+def test_admission_never_writes_a_removal():
+    """There is no previous side to leave. A first observation can only ever attach."""
+    changes = admission_attachments({DIRECTOR, WRITER, LEAD}, followed={525, 6193})
+
+    assert {c.change for c in changes} == {CREDIT_ADDED}
+
+
+def test_admission_rows_are_ordered_deterministically():
+    """The diff's order, for the same reason: a run's rows land in a stable order rather than
+    a set-iteration one."""
+    changes = admission_attachments({WRITER, LEAD, DIRECTOR}, followed={525, 6193})
+
+    assert changes == [
+        CreditChange(credit=DIRECTOR, change=CREDIT_ADDED),
+        CreditChange(credit=WRITER, change=CREDIT_ADDED),
+        CreditChange(credit=LEAD, change=CREDIT_ADDED),
+    ]
+
+
+def test_the_diff_is_still_a_baseline_however_it_is_called():
+    """The property the exception must not have cost. `diff_recorded_credits` keeps no
+    knowledge of the follow graph at all, so `previous=None` returns nothing whatever it is
+    handed — the exception is the caller's choice, made in one place."""
+    assert diff_recorded_credits(previous=None, current={DIRECTOR, WRITER, LEAD}) == []

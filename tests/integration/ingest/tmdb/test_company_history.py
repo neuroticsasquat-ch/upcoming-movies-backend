@@ -8,6 +8,7 @@ which unconditionally destroys and recreates every company row on every ingest.
 from sqlalchemy import select
 
 from tests.fixtures.tmdb import make_details
+from upmovies.app.models import Follow
 from upmovies.catalog.models import Film, FilmCompanyChange, FilmFieldChange, FilmProductionCompany
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
@@ -163,3 +164,66 @@ async def test_the_marker_writes_no_film_field_change_row(session):
         .all()
     )
     assert "companies_observed_at" not in fields
+
+
+# --- admission is an attachment for a followed studio (EF-4, NEU-1436) -----------------------
+
+
+async def _follow_company(session, user, company_id: int) -> None:
+    session.add(
+        Follow(user_id=user.id, entity_type="company", entity_id=str(company_id), source="manual")
+    )
+    await session.commit()
+
+
+async def test_admitting_a_film_with_a_followed_studio_writes_an_added_row(session, make_user):
+    """EF-4 for companies. The followed studio's next production enters the catalog already
+    carrying it, and the baseline rule would swallow exactly that."""
+    user = await make_user(email="follower@example.com")
+    await _follow_company(session, user, 2)
+
+    await upsert_film(session, _details(9120, [1, 2, 3]))
+    await session.commit()
+
+    changes = await _changes(session, 9120)
+    assert [(c.company_id, c.change) for c in changes] == [(2, "added")]
+    assert changes[0].changed_at is not None
+    assert await _observed_at(session, 9120) is not None
+    assert await _live_companies(session, 9120) == {1, 2, 3}
+
+
+async def test_admitting_the_same_film_with_nobody_following_writes_nothing(session):
+    await upsert_film(session, _details(9121, [1, 2, 3]))
+    await session.commit()
+
+    assert await _changes(session, 9121) == []
+
+
+async def test_a_company_follow_created_after_admission_fabricates_nothing(session, make_user):
+    """The film baselined while nobody followed the studio. The follow is made and the next
+    ingest brings the identical company set: an ordinary diff over the stored rows, so there
+    is nothing to write. A studio that never moved must not be announced as joining."""
+    await upsert_film(session, _details(9122, [1, 2]))
+    await session.commit()
+    assert await _changes(session, 9122) == []
+
+    user = await make_user(email="follower@example.com")
+    await _follow_company(session, user, 2)
+
+    await upsert_film(session, _details(9122, [1, 2]))
+    await session.commit()
+
+    assert await _changes(session, 9122) == []
+
+
+async def test_a_person_follow_at_the_same_id_does_not_admit_a_company(session, make_user):
+    """The `entity_type` filter, proved rather than assumed: a person id is as numeric as a
+    company id, so a builder that lost the filter would read one as the other."""
+    user = await make_user(email="follower@example.com")
+    session.add(Follow(user_id=user.id, entity_type="person", entity_id="2", source="manual"))
+    await session.commit()
+
+    await upsert_film(session, _details(9123, [1, 2]))
+    await session.commit()
+
+    assert await _changes(session, 9123) == []

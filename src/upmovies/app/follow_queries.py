@@ -119,13 +119,34 @@ def muted_film_ids(user_id: UUID) -> Select[tuple[UUID]]:
     return select(WatchlistDismissal.film_id).where(WatchlistDismissal.user_id == user_id)
 
 
+def _followed_by_anyone(entity_type: str) -> Select[tuple[int]]:
+    """`SELECT DISTINCT` the TMDB ids **somebody** follows under one integer-keyed type.
+
+    The system-wide counterpart to `followed_tmdb_ids`, and the shared body of the three
+    builders below. One spelling rather than three, on `_int_follows`' reasoning: the ingest
+    path asks this of all three types now (EF-4), and three copies of the same SELECT are three
+    chances for one of them to lose the digit guard.
+
+    The cast is in the SELECT list and the digit guard in the WHERE, per the module docstring.
+    """
+    return (
+        select(cast(Follow.entity_id, Integer))
+        .where(
+            Follow.entity_type == entity_type,
+            Follow.entity_id.regexp_match(_INT_ID_PATTERN),
+        )
+        .distinct()
+    )
+
+
 def followed_people() -> Select[tuple[int]]:
     """`SELECT DISTINCT person_id` for every person **somebody** follows (EF-2).
 
-    The one builder in this module that asks nothing about a user: the callers are batch
-    passes deciding what the *system* records and enumerates, not what one person sees. The
-    credit history (D-49) records a non-seed credit change when its person is in this set, and
-    the sweep (D-50) enumerates these people beside the seed set.
+    One of the three builders in this module that ask nothing about a user: the callers are
+    batch passes deciding what the *system* records and enumerates, not what one person sees.
+    The credit history (D-49) records a non-seed credit change when its person is in this set,
+    the sweep (D-50) enumerates these people beside the seed set, and the admission exception
+    (EF-4, D-1436.1) writes an `added` row for their credits on a film's first observation.
 
     Every live person follow, with no tier to filter on since EF-1 made the follow binary —
     which is what makes "recorded grade" a set the user can reason about: follow someone, and
@@ -136,17 +157,37 @@ def followed_people() -> Select[tuple[int]]:
     somebody whose grant has lapsed costs one row and is exactly what should already be there
     when they come back; dropping it would need a backfill that cannot be written, because the
     observation is gone.
-
-    The cast is in the SELECT list and the digit guard in the WHERE, per the module docstring.
     """
-    return (
-        select(cast(Follow.entity_id, Integer))
-        .where(
-            Follow.entity_type == "person",
-            Follow.entity_id.regexp_match(_INT_ID_PATTERN),
-        )
-        .distinct()
-    )
+    return _followed_by_anyone("person")
+
+
+def followed_companies() -> Select[tuple[int]]:
+    """`SELECT DISTINCT company_id` for every production company **somebody** follows (EF-4).
+
+    `followed_people` for studios, and read for one reason only: a film admitted with a
+    followed studio already on it records a `film_company_change` rather than a baseline
+    (D-1436.2). There is no recorded grade for companies — every company crossing the set is
+    written down whoever follows it — so nothing else in the ingest path asks.
+
+    No entitlement filter and no user, for the reason `followed_people` gives.
+    """
+    return _followed_by_anyone("company")
+
+
+def followed_franchises() -> Select[tuple[int]]:
+    """`SELECT DISTINCT collection_id` for every franchise **somebody** follows (EF-4).
+
+    `followed_companies` for collections, read at the same point and for the same reason: a
+    film *inserted* into a followed franchise records the `film_field_change` row the
+    `BEFORE UPDATE` trigger could not write (D-1436.4).
+
+    The follow's `entity_type` is `franchise` and the catalog column is `collection_id` — the
+    glossary's two words for one thing, and the reason this builder is named for the product
+    concept and returns the catalog's ids.
+
+    No entitlement filter and no user, for the reason `followed_people` gives.
+    """
+    return _followed_by_anyone("franchise")
 
 
 def _int_follows(

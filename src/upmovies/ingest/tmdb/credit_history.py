@@ -37,6 +37,17 @@ which is the single most valuable event the credit half exists to raise.
 `film_field_change` gets the equivalent protection by accident, being a `BEFORE UPDATE`
 trigger. Accidents do not survive a rewrite, and getting this wrong would emit tens of
 thousands of false "attached to direct" rows the first day the expansion ran.
+
+**The one exception: admission is an attachment for a followed person** (EF-4, ADR-0019
+decision 4, NEU-1436). Somebody follows a director to hear about the director's *next* film,
+and that film enters the catalog with the director already on it — so the rule that protects
+the other tens of thousands of credits swallows the single beat the follow was made for. On a
+first observation, every recorded credit whose person somebody follows *at that moment* is
+written as `added`; everything else on the new film is still a baseline. It lives in
+`admission_attachments` rather than in a `previous is None` branch of the diff, so the
+baseline rule stays one unconditional statement that a reader can check at a glance and every
+test that pins it stays green — the exception is then a choice the caller makes, in one
+place, with the marker in hand.
 """
 
 from collections.abc import Collection
@@ -161,6 +172,33 @@ def diff_recorded_credits(
     return [
         *(CreditChange(credit=c, change=CREDIT_ADDED) for c in _ordered(after - before)),
         *(CreditChange(credit=c, change=CREDIT_REMOVED) for c in _ordered(before - after)),
+    ]
+
+
+def admission_attachments(
+    current: Collection[RecordedCredit], *, followed: Collection[int]
+) -> list[CreditChange]:
+    """The `added` rows a **first** observation writes: every recorded credit whose person
+    somebody follows at that moment (EF-4, D-1436.1). Everything else in `current` is the
+    baseline it has always been.
+
+    The one exception to "first observation is a baseline" (ADR-0014), and deliberately a
+    separate function rather than a branch inside `diff_recorded_credits`: the baseline rule
+    is the safety-critical property of this module, and it stays structurally intact — the
+    diff still returns nothing for `previous is None`, whatever it is handed. What changes is
+    which of the two the caller reaches for.
+
+    `followed` is the same set both sides of an ordinary diff are judged by, read once per
+    `upsert_film`. That is what makes a follow created *after* admission a no-op: on the next
+    ingest `previous` is a set, the person is in `followed` on both sides, and the diff is
+    empty.
+
+    Every credit of a followed person is written, seed-grade or not and one row per job, so a
+    followed writer-director arrives as two `added` rows. Stable order, as the diff's.
+    """
+    return [
+        CreditChange(credit=c, change=CREDIT_ADDED)
+        for c in _ordered({c for c in current if c.person_id in followed})
     ]
 
 

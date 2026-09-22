@@ -50,7 +50,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import FilmFieldChange
+from upmovies.catalog.models import COLLECTION_FIELD, STATUS_FIELD, FilmFieldChange
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
@@ -81,8 +81,6 @@ log = logging.getLogger(__name__)
 # publication, can happen to one film repeatedly rather than once, and a *move* is the one
 # transition that is two beats from one row. This tuple stays the single list of columns in
 # scope so the two phases cannot disagree about it; each passes `fields` for its own half.
-STATUS_FIELD = "status"
-COLLECTION_FIELD = "collection_id"
 TRACKED_FIELDS: tuple[str, ...] = (STATUS_FIELD, COLLECTION_FIELD)
 
 

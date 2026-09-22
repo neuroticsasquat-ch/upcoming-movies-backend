@@ -17,9 +17,9 @@ the two differences are worth naming:
   both sides of its diff has no analogue here.
 - **The previous set is an argument, not a lookup.** `diff_companies` takes it, and
   `load_observed_companies` is a separate call the rebuild makes. That is the seam NEU-1436
-  (EF-4) attaches to: admission-as-attachment has to replace *only* the `previous is None`
-  branch — writing an `added` row for each incoming company a user already follows — and a
-  diff that read the stored side itself would leave nowhere to stand.
+  (EF-4) attached to: `admission_company_attachments` below answers the `previous is None`
+  case — an `added` row for each incoming company somebody already follows — and a diff that
+  read the stored side itself would have left nowhere to stand.
 
 **First observation is a baseline, never a change** (ADR-0014, spec §5.3) is the property this
 module exists to guarantee, and it is expressed structurally: `diff_companies` takes
@@ -27,6 +27,11 @@ module exists to guarantee, and it is expressed structurally: `diff_companies` t
 for it whatever the incoming set contains. `previous=set()` is a different statement — the
 film *was* observed and TMDB listed no companies for it — and a studio arriving then is a
 genuine attachment.
+
+EF-4 is the one exception to it, and it is `admission_company_attachments` rather than a
+change to the diff: on a first observation a company **somebody follows at that moment** is
+written as `added`, because a film entering the catalog already carrying a followed studio is
+exactly the beat that follow was made for.
 
 Which of the two a film is, is read from the durable `film.companies_observed_at` marker and
 **not** from `film_production_company` being empty, for the reason the credit half documents at
@@ -43,6 +48,7 @@ from uuid import UUID
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.follow_queries import followed_companies
 from upmovies.catalog.models import Film, FilmCompanyChange, FilmProductionCompany
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 
@@ -94,8 +100,9 @@ def diff_companies(
     """The company attachments and detachments between two observations of a film.
 
     `previous is None` means this is the film's first observed company set, which is a
-    **baseline, never a change** — the rule this whole module exists to guarantee, and the one
-    branch NEU-1436 replaces to make admission an attachment for followed studios (EF-4).
+    **baseline, never a change** — the rule this whole module exists to guarantee. It stays
+    unconditional: EF-4's admission exception for followed studios is
+    `admission_company_attachments`, which the caller reaches for instead of this.
 
     The diff is over set membership, not over the writes the rebuild performs. The rebuild
     deletes and reinserts unconditionally, so a diff phrased in terms of what it *did* would
@@ -110,6 +117,40 @@ def diff_companies(
         *(CompanyChange(company_id=c, change=COMPANY_ADDED) for c in sorted(after - before)),
         *(CompanyChange(company_id=c, change=COMPANY_REMOVED) for c in sorted(before - after)),
     ]
+
+
+def admission_company_attachments(
+    current: Collection[int], *, followed: Collection[int]
+) -> list[CompanyChange]:
+    """The `added` rows a **first** observation writes: every incoming company somebody
+    follows at that moment (EF-4, D-1436.2). Everything else on the new film is the baseline
+    it has always been.
+
+    `ingest.tmdb.credit_history.admission_attachments` for studios, and a separate function
+    rather than a branch inside `diff_companies` for that module's reason: the baseline rule
+    is what the diff exists to guarantee, so it stays one unconditional statement and the
+    exception is a choice the caller makes with the marker in hand. Named apart from its
+    credit counterpart rather than aliased at the import, because `upsert.py` calls both.
+
+    Sorted by id, as the diff's additions are.
+    """
+    return [
+        CompanyChange(company_id=company_id, change=COMPANY_ADDED)
+        for company_id in sorted(set(current) & set(followed))
+    ]
+
+
+async def load_followed_company_ids(session: AsyncSession) -> set[int]:
+    """The production companies somebody follows — read only to answer EF-4's admission
+    question (D-1436.2).
+
+    Unlike the credit half's `load_followed_person_ids`, this is **not** loaded on every
+    ingest: there is no recorded grade for companies, so an ordinary diff needs no follow
+    graph at all and the set is read in the one branch that uses it. One query per *admission*
+    rather than one per film, and read once inside that branch, so nothing can split the
+    answer mid-upsert.
+    """
+    return set((await session.execute(followed_companies())).scalars().all())
 
 
 async def record_company_changes(

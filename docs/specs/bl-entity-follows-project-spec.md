@@ -333,8 +333,20 @@ delivery changes yet.
   has been cancelled").
 - `subject_key` tokens `company:<tmdb_id>`, `collection:<tmdb_id>`; people tokens unchanged.
 - `followed_people()` replaces `people_followed_at_any()`; the recorded grade reads it.
+  `followed_companies()` and `followed_franchises()` join it — same shape, no user and no
+  entitlement filter — and are read only by EF-4's admission exception (NEU-1436, D-1436.5).
+- `film.companies_observed_at` is **backfilled to `now()` on every existing film** by its own
+  migration (NEU-1433), and `film.credits_observed_at` by NEU-1436's. EF-4 keys "is this a
+  first observation?" on those markers, so a film left unstamped would read as newly admitted
+  on its next refresh and card an attachment for every followed entity on it (D-1436.3,
+  D-1436.6).
+- The one exception to "first observation is a baseline" is EF-4's, and the franchise half of
+  it writes a synthetic `film_field_change` row (`collection_id`, `NULL → id`) from the
+  admission path, because the trigger is `BEFORE UPDATE` (D-1436.4).
 - Deploy: flip `SWEEP_ADMIT_FOLLOWED=true` in Coolify with this milestone's sweep ticket and
-  verify `followed×N` on `/admin/runs`.
+  verify `followed×N` on `/admin/runs`. **At least one sweep must complete before NEU-1436
+  deploys**, so the followed backlog enters as baselines rather than as a day-one flood of
+  cards (D-1436.7).
 
 ### M3 — The cutover
 

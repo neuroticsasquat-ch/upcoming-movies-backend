@@ -7,7 +7,8 @@ pass hands the same SELECT to a batch query from `pipeline_run`, where there is 
 enclosing `catalog.film`, and one exception ends the pass for every user at once.
 """
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -495,3 +496,88 @@ async def test_a_non_seed_credit_reaches_the_other_two_alert_builders(session, u
         ),
     )
     assert film.id in polled
+
+
+# --- followed_companies / followed_franchises (EF-4, D-1436.5) -------------------------------
+
+
+async def test_followed_companies_names_every_company_follow(session, user, make_user):
+    """The set the admission exception reads (D-1436.2). Whole-table, no user and no
+    entitlement filter, on `followed_people`'s reasoning — and the person and franchise rows
+    beside it prove the `entity_type` filter still runs, since their ids are as numeric as a
+    company's."""
+    from upmovies.app.follow_queries import followed_companies
+
+    other = await make_user(email="other@example.com")
+    lapsed = await make_user(
+        email="lapsed@example.com", entitled_until=datetime(2020, 1, 1, tzinfo=UTC)
+    )
+    await _follow(session, user, "company", "420")
+    await _follow(session, other, "company", "421")
+    await _follow(session, lapsed, "company", "422")
+    await _follow(session, user, "person", "423")
+    await _follow(session, user, "franchise", "424")
+
+    assert await _ids(session, followed_companies()) == {420, 421, 422}
+
+
+async def test_followed_companies_is_distinct_across_users(session, user, make_user):
+    """Two users following the same studio is one id: the caller is asking what the *system*
+    records, not who asked for it."""
+    from upmovies.app.follow_queries import followed_companies
+
+    other = await make_user(email="other@example.com")
+    await _follow(session, user, "company", "420")
+    await _follow(session, other, "company", "420")
+
+    assert await _ids(session, followed_companies()) == {420}
+
+
+async def test_followed_companies_skips_a_non_numeric_entity_id(session, user):
+    """The same shape guard every builder in the module carries: a bad row must be skipped
+    rather than abort a statement that runs inside an ingest."""
+    from upmovies.app.follow_queries import followed_companies
+
+    await _follow(session, user, "company", "co-lucasfilm")
+    await _follow(session, user, "company", "420")
+
+    assert await _ids(session, followed_companies()) == {420}
+
+
+async def test_followed_franchises_names_every_franchise_follow(session, user, make_user):
+    """`entity_type` is `franchise` and the ids are TMDB *collection* ids — the glossary's two
+    words for one thing (D-1436.4)."""
+    from upmovies.app.follow_queries import followed_franchises
+
+    other = await make_user(email="other@example.com")
+    lapsed = await make_user(
+        email="lapsed@example.com", entitled_until=datetime(2020, 1, 1, tzinfo=UTC)
+    )
+    await _follow(session, user, "franchise", "726871")
+    await _follow(session, other, "franchise", "8091")
+    await _follow(session, lapsed, "franchise", "10")
+    await _follow(session, user, "company", "726872")
+    await _follow(session, user, "title", str(uuid4()))
+
+    assert await _ids(session, followed_franchises()) == {726871, 8091, 10}
+
+
+async def test_followed_franchises_is_distinct_across_users(session, user, make_user):
+    """Two users following the same franchise is one id: the admission path asks what the
+    *system* records, and a duplicate would write the history row twice."""
+    from upmovies.app.follow_queries import followed_franchises
+
+    other = await make_user(email="other@example.com")
+    await _follow(session, user, "franchise", "726871")
+    await _follow(session, other, "franchise", "726871")
+
+    assert await _ids(session, followed_franchises()) == {726871}
+
+
+async def test_followed_franchises_skips_a_non_numeric_entity_id(session, user):
+    from upmovies.app.follow_queries import followed_franchises
+
+    await _follow(session, user, "franchise", "dune")
+    await _follow(session, user, "franchise", "726871")
+
+    assert await _ids(session, followed_franchises()) == {726871}

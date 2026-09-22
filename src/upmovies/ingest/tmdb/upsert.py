@@ -28,14 +28,18 @@ from upmovies.catalog.models import (
 )
 from upmovies.catalog.slug import assign_slug
 from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
+from upmovies.ingest.tmdb.collection_history import record_collection_admission
 from upmovies.ingest.tmdb.company_history import (
+    admission_company_attachments,
     companies_from_details,
     diff_companies,
+    load_followed_company_ids,
     load_observed_companies,
     mark_companies_observed,
     record_company_changes,
 )
 from upmovies.ingest.tmdb.credit_history import (
+    admission_attachments,
     diff_recorded_credits,
     load_followed_person_ids,
     load_recorded_credits,
@@ -199,7 +203,8 @@ async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     their natural keys; join rows are rebuilt (delete-and-reinsert) so a film dropping a
     genre/company between runs is reflected."""
     collection_id = await _upsert_collection(session, details)
-    film_id = await _upsert_film_row(session, details, collection_id)
+    film_id, film_inserted = await _upsert_film_row(session, details, collection_id)
+    await record_collection_admission(session, film_id, collection_id, film_inserted=film_inserted)
     await _upsert_references(session, details)
     await _rebuild_joins(session, film_id, details)
     await _rebuild_release_dates(session, film_id, details)
@@ -228,8 +233,12 @@ async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -
 
 async def _upsert_film_row(
     session: AsyncSession, details: TMDBMovieDetails, collection_id: int | None
-) -> UUID:
-    slug = await _slug_for_insert(session, details)
+) -> tuple[UUID, bool]:
+    """The film row, and whether this upsert **inserted** it rather than updating one the
+    catalog already held. The second half is EF-4's (D-1436.4): a film inserted into a
+    followed franchise needs the history row the `BEFORE UPDATE` trigger cannot write, and an
+    update into one does not."""
+    slug, film_inserted = await _slug_for_insert(session, details)
     values = {
         "tmdb_id": details.id,
         "slug": slug,
@@ -268,21 +277,32 @@ async def _upsert_film_row(
         .on_conflict_do_update(index_elements=[Film.tmdb_id], set_=update_set)
         .returning(Film.id)
     )
-    return (await session.execute(stmt)).scalar_one()
+    return (await session.execute(stmt)).scalar_one(), film_inserted
 
 
-async def _slug_for_insert(session: AsyncSession, details: TMDBMovieDetails) -> str | None:
-    """An existing film (matched on `tmdb_id`) keeps its stored slug — it is excluded from the
+async def _slug_for_insert(
+    session: AsyncSession, details: TMDBMovieDetails
+) -> tuple[str | None, bool]:
+    """The slug to offer the insert, and whether the catalog holds no film at this `tmdb_id`
+    yet.
+
+    An existing film (matched on `tmdb_id`) keeps its stored slug — it is excluded from the
     `DO UPDATE` set, so the value here is only used when the row is actually inserted. A new film
-    gets a freshly assigned collision-safe slug."""
+    gets a freshly assigned collision-safe slug.
+
+    The second half of the answer is this pre-select's rather than the slug's, because this
+    SELECT is already the one statement that knows: `ON CONFLICT ... RETURNING` cannot say
+    which branch it took without reading `xmax`, and a second SELECT would be a second answer
+    that could disagree with this one.
+    """
     row = (await session.execute(select(Film.slug).where(Film.tmdb_id == details.id))).one_or_none()
-    if row is not None:
-        existing_slug = row[0]
-        if existing_slug is not None:
-            return existing_slug
-    return await assign_slug(
+    film_inserted = row is None
+    if row is not None and row[0] is not None:
+        return row[0], film_inserted
+    slug = await assign_slug(
         session, title=details.title, release_date=details.release_date, tmdb_id=details.id
     )
+    return slug, film_inserted
 
 
 async def _upsert_references(session: AsyncSession, details: TMDBMovieDetails) -> None:
@@ -344,8 +364,8 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
 
     The company diff lives here for the reason the credit diff lives in `_upsert_credits`: both
     sides of it are in hand at this point and nowhere else, because the next statement deletes
-    the stored one. First observation is a baseline, never a change — see
-    `ingest.tmdb.company_history`.
+    the stored one. First observation is a baseline, never a change — except for a studio
+    somebody follows, which is EF-4's admission exception. See `ingest.tmdb.company_history`.
     """
     # Read the stored side before the delete below wipes it. None means the catalog has never
     # observed this film's companies, which `diff_companies` reads as a baseline.
@@ -389,12 +409,17 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
         )
 
     # The marker is set last and only here, so the very first pass writes a baseline and every
-    # later one a diff.
-    await record_company_changes(
-        session,
-        film_id,
-        diff_companies(previous=previous_companies, current=companies_from_details(details)),
-    )
+    # later one a diff — except for the studios somebody already follows, which are EF-4's
+    # one exception to the baseline rule (D-1436.2). The followed set is read only on that
+    # branch: there is no recorded grade for companies, so an ordinary diff never asks.
+    current_companies = companies_from_details(details)
+    if previous_companies is None:
+        changes = admission_company_attachments(
+            current_companies, followed=await load_followed_company_ids(session)
+        )
+    else:
+        changes = diff_companies(previous=previous_companies, current=current_companies)
+    await record_company_changes(session, film_id, changes)
     await mark_companies_observed(session, film_id)
 
 
@@ -488,7 +513,8 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     The rebuild is also where recorded-grade credit *history* is captured: both sides of the
     diff are in hand here and nowhere else, so `catalog.film_credit_change` is written from
     them before the old side is destroyed. First observation is a baseline, never a change —
-    see `ingest.tmdb.credit_history`.
+    except for a person somebody follows, which is EF-4's admission exception. See
+    `ingest.tmdb.credit_history`.
     """
     if not details.credits:
         return
@@ -538,12 +564,18 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
 
     # Step 3 — History: what the rebuild would otherwise have thrown away. The marker is set
     # last and only here, so the very first pass writes a baseline and every later one a diff.
-    await record_credit_changes(
-        session,
-        film_id,
-        diff_recorded_credits(
-            previous=previous_recorded_credits,
-            current=recorded_credits_from_details(details, followed=followed),
-        ),
-    )
+    #
+    # The one exception is EF-4 (D-1436.1): on a first observation the credits of people
+    # somebody *already* follows are written as attachments, because a film entering the
+    # catalog with a followed director on it is precisely what that follow was made for. Both
+    # branches read the one `followed` set above, which is what makes a follow created after
+    # admission a no-op on the next ingest rather than a fabricated `added`.
+    current_recorded_credits = recorded_credits_from_details(details, followed=followed)
+    if previous_recorded_credits is None:
+        changes = admission_attachments(current_recorded_credits, followed=followed)
+    else:
+        changes = diff_recorded_credits(
+            previous=previous_recorded_credits, current=current_recorded_credits
+        )
+    await record_credit_changes(session, film_id, changes)
     await mark_credits_observed(session, film_id)
