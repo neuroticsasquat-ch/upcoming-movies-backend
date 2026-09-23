@@ -816,6 +816,22 @@ that film, in any state, at any age.
 _Avoid_: in play (the working set's term, ending on release day), coverage window (retired
 with coverage), active, upcoming.
 
+**Import**:
+A user's one-off request to bring a library in — a Letterboxd export or a TMDB account's
+watchlist — tracked as a job. It reads the watchlist only, proposes the films inside the
+**alert window** as a review list, and writes one **title** follow per film the user confirms
+(EF-20 to EF-22). It follows no people. An import that is not confirmed follows nothing, and
+the user's next import discards it.
+_Avoid_: sync, link (nothing stays connected; the TMDB session is dropped when the job ends),
+migration.
+
+**Open import**:
+The user's import that is still going — queued, running, or waiting on the user to confirm its
+review list. A user has at most one; starting another discards it. A list waiting to be
+confirmed is still an open import: the work is done, but the user's part is not.
+_Avoid_: active (the code's name for the status set, not the reader's), pending, unfinished,
+in progress (that is one of its states, not the whole).
+
 **My films calendar**:
 The release calendar narrowed to the films the reader follows — what a subscriber sees when
 they ask "what of mine is coming out?". It is the calendar with a where-clause, not a
