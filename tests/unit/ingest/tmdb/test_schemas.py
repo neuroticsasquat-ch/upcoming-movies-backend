@@ -3,8 +3,11 @@ from datetime import date, datetime
 from upmovies.ingest.tmdb.schemas import (
     TMDBCredits,
     TMDBDiscoverResponse,
+    TMDBKnownForTitle,
     TMDBMovieDetails,
     TMDBMovieSummary,
+    TMDBPersonSearchHit,
+    TMDBPersonSearchResponse,
 )
 
 
@@ -404,3 +407,69 @@ def test_movie_details_release_dates_ignores_unknown_extra_keys():
     assert details.release_dates is not None
     assert details.release_dates.results[0].iso_3166_1 == "GB"
     assert details.release_dates.results[0].release_dates[0].type == 5
+
+
+def test_person_search_hit_parses_the_person_fields_and_known_for():
+    hit = TMDBPersonSearchHit.model_validate(
+        {
+            "id": 2037,
+            "name": "Cillian Murphy",
+            "original_name": "Cillian Murphy",
+            "profile_path": "/cillian.jpg",
+            "known_for_department": "Acting",
+            "gender": 2,
+            "popularity": 41.2,
+            "adult": False,  # extra field we don't consume
+            "known_for": [{"id": 872585, "media_type": "movie", "title": "Oppenheimer"}],
+        }
+    )
+    assert hit.id == 2037
+    assert hit.known_for_department == "Acting"
+    assert hit.popularity == 41.2
+    assert [k.id for k in hit.known_for] == [872585]
+
+
+def test_person_search_hit_allows_missing_optional_fields():
+    hit = TMDBPersonSearchHit.model_validate({"id": 1, "name": "Minimal"})
+    assert hit.original_name is None
+    assert hit.known_for_department is None
+    assert hit.popularity is None
+    assert hit.known_for == []
+
+
+def test_known_for_title_reads_a_show_under_its_name():
+    """A TV entry has `name`/`original_name` where a film has `title`/`original_title`.
+
+    Both are modelled because TMDB mixes them in one list: requiring `title` would fail the
+    whole hit on a person best known for television, which is the wrong-Chris-Evans case in
+    reverse — losing the candidate rather than picking the wrong one."""
+    show = TMDBKnownForTitle.model_validate(
+        {
+            "id": 63247,
+            "media_type": "tv",
+            "name": "Peaky Blinders",
+            "original_name": "Peaky Blinders",
+        }
+    )
+    assert show.display_title == "Peaky Blinders"
+    assert show.display_original_title == "Peaky Blinders"
+
+    film = TMDBKnownForTitle.model_validate(
+        {"id": 872585, "media_type": "movie", "title": "Oppenheimer", "original_title": "Opp."}
+    )
+    assert film.display_title == "Oppenheimer"
+    assert film.display_original_title == "Opp."
+
+
+def test_person_search_response_parses_the_envelope():
+    page = TMDBPersonSearchResponse.model_validate(
+        {
+            "page": 1,
+            "total_pages": 2,
+            "total_results": 21,
+            "results": [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}],
+        }
+    )
+    assert page.page == 1
+    assert page.total_pages == 2
+    assert [p.name for p in page.results] == ["One", "Two"]

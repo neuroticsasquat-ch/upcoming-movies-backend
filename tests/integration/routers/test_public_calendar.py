@@ -82,12 +82,19 @@ async def test_calendar_us_only(client, make_film, add_release_date):
         film=film_us_and_gb, iso_3166_1="GB", release_date=_FUTURE, release_type=3
     )
 
+    film_gb_digital = await make_film(slug="film-gb-digital", title="GB Digital")
+    await add_release_date(
+        film=film_gb_digital, iso_3166_1="GB", release_date=_FUTURE, release_type=4
+    )
+
     resp = await client.get("/calendar")
     assert resp.status_code == 200
     body = resp.json()
     refs = [item["film_ref"] for item in body["items"]]
     assert ref(film_gb_only) not in refs
     assert refs.count(ref(film_us_and_gb)) == 1
+    # The home release is US-only, so widening the buckets does not widen the region (D-26).
+    assert ref(film_gb_digital) not in refs
 
 
 # ---------------------------------------------------------------------------
@@ -122,10 +129,11 @@ async def test_calendar_type_mapping(client, make_film, add_release_date):
     assert items_by_ref[ref(film_type2)]["release_type"] == "limited"
     assert items_by_ref[ref(film_type3)]["release_type"] == "wide"
     assert items_by_ref[ref(film_type3)]["release_year"] == 2026  # from Film.release_date default
+    # D-26: the home release is on the calendar too, in its own buckets.
+    assert items_by_ref[ref(film_type4)]["release_type"] == "digital"
+    assert items_by_ref[ref(film_type5)]["release_type"] == "physical"
     assert ref(film_type1) not in items_by_ref  # premiere excluded
-    assert ref(film_type4) not in items_by_ref
-    assert ref(film_type5) not in items_by_ref
-    assert ref(film_type6) not in items_by_ref
+    assert ref(film_type6) not in items_by_ref  # TV excluded
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +181,12 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     film_same_limited = await make_film(slug="zzz-same-limited", title="Same Limited")
     await add_release_date(film=film_same_limited, release_type=2, release_date=same_date)
 
+    film_same_digital = await make_film(slug="zzz-same-digital", title="Same Digital")
+    await add_release_date(film=film_same_digital, release_type=4, release_date=same_date)
+
+    film_same_physical = await make_film(slug="zzz-same-physical", title="Same Physical")
+    await add_release_date(film=film_same_physical, release_type=5, release_date=same_date)
+
     # Same date + type: popularity tiebreak (higher popularity first)
     tie_date = datetime(2093, 8, 20, 0, 0, tzinfo=UTC)
     film_tie_low_pop = await make_film(slug="zzz-tie-low", title="Tie Low Pop", popularity=10.0)
@@ -199,6 +213,8 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     idx_far_wide = refs.index(ref(film_far_wide))
     idx_same_limited = refs.index(ref(film_same_limited))
     idx_same_wide = refs.index(ref(film_same_wide))
+    idx_same_digital = refs.index(ref(film_same_digital))
+    idx_same_physical = refs.index(ref(film_same_physical))
     idx_tie_high = refs.index(ref(film_tie_high_pop))
     idx_tie_low = refs.index(ref(film_tie_low_pop))
     idx_slug_a = refs.index(ref(film_slug_a))
@@ -210,8 +226,12 @@ async def test_calendar_ordering(client, make_film, add_release_date):
     assert idx_tie_high < idx_slug_a
     assert idx_slug_a < idx_far_wide
 
-    # Type ordering within same date: wide < limited (wide releases listed first)
+    # Type ordering within same date: the theatrical arc leads, then the home release —
+    # wide, limited, digital, physical. Raw `release_type DESC` would float physical above
+    # wide, which is why the rank is explicit (D-26).
     assert idx_same_wide < idx_same_limited
+    assert idx_same_limited < idx_same_digital
+    assert idx_same_digital < idx_same_physical
 
     # Popularity tiebreak: higher popularity first
     assert idx_tie_high < idx_tie_low

@@ -1,14 +1,21 @@
 import json
 import logging
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from upmovies.catalog.models import Film, FilmFieldChange
+from upmovies.catalog.models import (
+    Film,
+    FilmCredit,
+    FilmCreditChange,
+    FilmFieldChange,
+    Person,
+)
 from upmovies.link.cluster import (
+    CLUSTER_PROMPT_VERSION,
     ClusterParseError,
     ClusterPlan,
     apply_cluster_decisions,
@@ -16,7 +23,7 @@ from upmovies.link.cluster import (
     cluster_film_events,
 )
 from upmovies.llm import CallLog
-from upmovies.news.models import Event, EventStory, Story
+from upmovies.news.models import Event, EventStory, Story, StoryEntity, StoryPerson
 
 
 class FakeClient:
@@ -2299,3 +2306,610 @@ async def test_attaching_records_the_performers_the_card_now_names(session):
         await session.execute(select(EventStory).where(EventStory.story_id == story.id))
     ).scalar_one()
     assert link.event_id == carded.id
+
+
+async def test_records_story_person_rows_for_clustered_stories(session):
+    """NEU-1360: the extraction tuples land as unresolved `story_person` rows beside the
+    event the story clustered onto — names only, nobody identified yet (INV-5)."""
+    film = Film(tmdb_id=90, title="Mentions")
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/mentions")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["Ana de Armas"],
+                    "stories": [1],
+                }
+            ],
+            "mentions": [
+                {
+                    "n": 1,
+                    "name_as_written": "Ana de Armas",
+                    "role": "Eve",
+                    "department": "Acting",
+                    "title_mentioned": "Blonde",
+                    "event_type": "casting",
+                    "evidence_span": "Ana de Armas will play Eve.",
+                },
+                {
+                    "n": 1,
+                    "name_as_written": "Chad Stahelski",
+                    "role": "director",
+                    "department": "Directing",
+                    "title_mentioned": None,
+                    "event_type": "casting",
+                    "evidence_span": "Chad Stahelski directs.",
+                },
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert result.mentions_recorded == 2
+    rows = (
+        (
+            await session.execute(
+                select(StoryPerson)
+                .where(StoryPerson.story_id == story.id)
+                .order_by(StoryPerson.name_as_written)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [r.name_as_written for r in rows] == ["Ana de Armas", "Chad Stahelski"]
+    ana = rows[0]
+    assert (ana.role, ana.department) == ("Eve", "Acting")
+    assert ana.evidence_span == "Ana de Armas will play Eve."
+    assert ana.features == {"title_mentioned": "Blonde", "event_type": "casting"}
+    assert ana.prompt_version == CLUSTER_PROMPT_VERSION
+    # Unresolved is the resting state until M4's resolver lands (NEU-1362 onward).
+    assert (ana.person_id, ana.confidence, ana.path, ana.resolved_at) == (None, None, None, None)
+    assert ana.candidates is None
+
+
+async def test_records_story_entity_rows_for_clustered_stories(session):
+    """EF-12: the organisation tuples land as unresolved `story_entity` rows beside the
+    person ones — names only, nothing identified yet (INV-5)."""
+    film = Film(tmdb_id=190, title="Organisations")
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/organisations")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "company_attached",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ],
+            "mentions": [],
+            "organisations": [
+                {
+                    "n": 1,
+                    "name_as_written": "Blumhouse",
+                    "kind": "company",
+                    "title_mentioned": "M3GAN",
+                    "event_type": "company_attached",
+                    "evidence_span": "Blumhouse is boarding the thriller.",
+                },
+                {
+                    "n": 1,
+                    "name_as_written": "The Conjuring",
+                    "kind": "collection",
+                    "title_mentioned": None,
+                    "event_type": "collection_attached",
+                    "evidence_span": "It joins The Conjuring universe.",
+                },
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert result.organisations_recorded == 2
+    # The beat the model classified is now a card of its own rather than `announced`/`other`.
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().one()
+    assert event.event_type == "company_attached"
+    rows = (
+        (
+            await session.execute(
+                select(StoryEntity)
+                .where(StoryEntity.story_id == story.id)
+                .order_by(StoryEntity.name_as_written)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [(r.name_as_written, r.kind) for r in rows] == [
+        ("Blumhouse", "company"),
+        ("The Conjuring", "collection"),
+    ]
+    blumhouse = rows[0]
+    assert blumhouse.evidence_span == "Blumhouse is boarding the thriller."
+    # NEU-1446 reads the beat out of `features`, exactly as it does for a person.
+    assert blumhouse.features == {"title_mentioned": "M3GAN", "event_type": "company_attached"}
+    assert blumhouse.prompt_version == CLUSTER_PROMPT_VERSION
+    assert (blumhouse.entity_id, blumhouse.confidence, blumhouse.path) == (None, None, None)
+    assert (blumhouse.resolved_at, blumhouse.candidates) == (None, None)
+
+
+async def test_does_not_record_organisations_for_rejected_stories(session):
+    """A rejected story has no film behind it, and resolution is film-scoped end to end."""
+    film = Film(tmdb_id=191, title="Rejected Organisations")
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/off-topic-org")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}],
+            "organisations": [
+                {"n": 1, "name_as_written": "Blumhouse", "kind": "company", "evidence_span": "q"}
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.stories_rejected, result.organisations_recorded) == (1, 0)
+    rows = (
+        (await session.execute(select(StoryEntity).where(StoryEntity.story_id == story.id)))
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+
+async def test_a_reply_with_no_organisations_block_clusters_unchanged(session):
+    """Backwards compatibility: a reply in the pre-EF-12 shape still clusters, and simply
+    records no organisations."""
+    film = Film(tmdb_id=192, title="No Organisations")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/no-organisations")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["Ana de Armas"],
+                    "stories": [1],
+                }
+            ],
+            "mentions": [{"n": 1, "name_as_written": "Ana de Armas", "evidence_span": "q"}],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.mentions_recorded, result.organisations_recorded) == (1, 0)
+
+
+async def test_a_studio_boarding_a_released_film_is_stale_stage(session):
+    """`company_attached` joined `_STALE_EVENT_TYPES` ahead of the vocabulary (EF-5) and the
+    rule now applies to a beat the model really emits."""
+    film = Film(tmdb_id=193, title="Already Out", status="Released")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/stale-company")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "company_attached",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ],
+            "organisations": [
+                {"n": 1, "name_as_written": "Blumhouse", "kind": "company", "evidence_span": "q"}
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.events_created, result.stories_rejected) == (0, 1)
+    assert result.organisations_recorded == 0
+
+
+async def test_does_not_record_mentions_for_rejected_stories(session):
+    """A rejected story has no film behind it, and resolution is film-scoped end to end —
+    recording its mentions would only grow a queue nobody could ever work."""
+    film = Film(tmdb_id=91, title="Rejected Mentions")
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/off-topic")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}],
+            "mentions": [{"n": 1, "name_as_written": "Wrong Film Person", "event_type": "casting"}],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert result.stories_rejected == 1
+    assert result.mentions_recorded == 0
+    rows = (
+        (await session.execute(select(StoryPerson).where(StoryPerson.story_id == story.id)))
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+
+async def test_a_reply_with_no_mentions_block_clusters_unchanged(session):
+    """Backwards compatibility: a reply in the pre-NEU-1360 shape still clusters, and simply
+    records no mentions."""
+    film = Film(tmdb_id=92, title="No Mentions")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/no-mentions")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "trailer",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ]
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.events_created, result.stories_clustered, result.mentions_recorded) == (1, 1, 0)
+
+
+# ── Tier-A short-circuit, cluster side (NEU-1371, ADR-0017 D-5) ────────────
+
+
+async def _pending_credit(
+    session,
+    film,
+    person_id,
+    name,
+    *,
+    job: str | None = "Director",
+    changed_at: datetime | None = None,
+):
+    """A seed-grade attachment TMDB recorded but the sweep has not carded yet — quarantined,
+    which is the state the short-circuit exists to resolve. Written with its live
+    `film_credit` row, because a change with no live credit is a *reverted* one."""
+    session.add(Person(id=person_id, name=name))
+    await session.flush()
+    credit_type = "crew" if job else "cast"
+    session.add(
+        FilmCreditChange(
+            film_id=film.id,
+            person_id=person_id,
+            credit_type=credit_type,
+            job=job,
+            change="added",
+            changed_at=changed_at or (datetime.now(UTC) - timedelta(days=2)),
+        )
+    )
+    session.add(
+        FilmCredit(
+            credit_id=f"c-{film.tmdb_id}-{person_id}",
+            film_id=film.id,
+            person_id=person_id,
+            credit_type=credit_type,
+            job=job,
+            credit_order=None if job else 0,
+        )
+    )
+    await session.flush()
+
+
+async def _carded_by(session, film, person_id):
+    return (
+        await session.execute(
+            select(FilmCreditChange.carded_by_event_id).where(
+                FilmCreditChange.film_id == film.id, FilmCreditChange.person_id == person_id
+            ),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+
+
+def _casting_reply(cast, *, stories=(1,)):
+    return {
+        "events": [
+            {
+                "existing": None,
+                "type": "casting",
+                "confidence": "confirmed",
+                "cast": list(cast),
+                "stories": list(stories),
+            }
+        ]
+    }
+
+
+async def test_a_new_casting_card_publishes_the_quarantined_credit_it_names(session):
+    """INV-4's forward half: credit day 0, trade story day 1. The card publishes now and the
+    change is stamped with it, so the sweep's later pass has nothing left to card."""
+    film = Film(tmdb_id=1, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _pending_credit(session, film, 100, "Zendaya", job=None)
+    await _linked_story(session, film, "https://e/1")
+    await session.commit()
+
+    result = await cluster_film_events(
+        session,
+        client=FakeClient(_casting_reply(["Zendaya"])),
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    (event,) = (
+        (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    )
+    assert event.provenance == "story"
+    assert await _carded_by(session, film, 100) == event.id
+
+
+async def test_a_casting_story_publishes_a_directing_credit(session):
+    """The type-scoping trap from the other end: the LLM classifies a director story as
+    `casting`, and the change it confirms carries the `director` role. Matching on who rather
+    than on type is what stops a `crew_attached` card being raised for it later."""
+    film = Film(tmdb_id=2, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _pending_credit(session, film, 101, "Denis Villeneuve")
+    await _linked_story(session, film, "https://e/2")
+    await session.commit()
+
+    await cluster_film_events(
+        session,
+        client=FakeClient(_casting_reply(["Denis Villeneuve"])),
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    (event,) = (
+        (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().all()
+    )
+    assert event.event_type == "casting"
+    assert await _carded_by(session, film, 101) == event.id
+
+
+async def test_a_casting_card_leaves_a_pending_credit_it_does_not_name(session):
+    """A film gains cast repeatedly. One story is confirmation of the people it names and of
+    nobody else on the same film."""
+    film = Film(tmdb_id=3, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _pending_credit(session, film, 102, "Zendaya", job=None)
+    await _pending_credit(session, film, 103, "Rebecca Ferguson", job=None)
+    await _linked_story(session, film, "https://e/3")
+    await session.commit()
+
+    await cluster_film_events(
+        session,
+        client=FakeClient(_casting_reply(["Zendaya"])),
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert await _carded_by(session, film, 102) is not None
+    assert await _carded_by(session, film, 103) is None
+
+
+async def test_a_reverted_credit_is_not_published_by_a_story_naming_it(session):
+    """The presence check. TMDB has already dropped the credit, so quarantine will make sure
+    it never publishes — stamping it would record a publication that never happened. The
+    story card itself is unaffected: a trade's word does not depend on TMDB's."""
+    film = Film(tmdb_id=4, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _pending_credit(session, film, 104, "Zendaya", job=None)
+    await session.execute(delete(FilmCredit).where(FilmCredit.film_id == film.id))
+    await _linked_story(session, film, "https://e/4")
+    await session.commit()
+
+    result = await cluster_film_events(
+        session,
+        client=FakeClient(_casting_reply(["Zendaya"])),
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert result.events_created == 1
+    assert await _carded_by(session, film, 104) is None
+
+
+async def test_a_credit_older_than_the_window_is_not_published_by_a_later_story(session):
+    """Beyond the window the story is a retrospective, not a confirmation — and the change is
+    one the sweep has its own reasons for still holding."""
+    film = Film(tmdb_id=5, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _pending_credit(
+        session, film, 105, "Zendaya", job=None, changed_at=datetime.now(UTC) - timedelta(days=40)
+    )
+    await _linked_story(session, film, "https://e/5")
+    await session.commit()
+
+    await cluster_film_events(
+        session,
+        client=FakeClient(_casting_reply(["Zendaya"])),
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert await _carded_by(session, film, 105) is None
+
+
+async def test_a_story_joining_a_catalog_card_publishes_the_film_s_other_pending_credits(
+    session,
+):
+    """Promotion (ADR-0014) and the short-circuit compose: the story attaches to the catalog
+    card TMDB's own credit raised, and that card — now news-backed — is what publishes the
+    attachment still pending for the second performer it names."""
+    film = Film(tmdb_id=6, title="Runner")
+    session.add(film)
+    await session.flush()
+    carded = Event(
+        film_id=film.id,
+        event_type="casting",
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=datetime.now(UTC) - timedelta(days=1),
+        subject_key=["zendaya"],
+    )
+    session.add(carded)
+    await session.flush()
+    await _pending_credit(session, film, 106, "Rebecca Ferguson", job=None)
+    await _linked_story(session, film, "https://e/6")
+    await session.commit()
+
+    result = await cluster_film_events(
+        session,
+        client=FakeClient(_casting_reply(["Zendaya", "Rebecca Ferguson"])),
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    # No second card: the story joined the one the catalog already published.
+    assert result.events_created == 0
+    assert await _carded_by(session, film, 106) == carded.id
+
+
+async def test_zero_disables_the_forward_short_circuit(session):
+    """The rollback switch, and what a caller with no `Settings` would get if the default
+    were ever read as off."""
+    film = Film(tmdb_id=7, title="Runner")
+    session.add(film)
+    await session.flush()
+    await _pending_credit(session, film, 107, "Zendaya", job=None)
+    story = await _linked_story(session, film, "https://e/7")
+    await session.commit()
+
+    built = await build_cluster_request(
+        session, film_id=film.id, attach_limit=45, run_date=date(2026, 1, 1)
+    )
+    assert built is not None
+    _prompt, plan = built
+    n = plan.unclustered_story_ids.index(story.id) + 1
+    await apply_cluster_decisions(
+        session,
+        plan=plan,
+        raw=json.dumps(_casting_reply(["Zendaya"], stories=(n,))),
+        story_confirm_days=0,
+    )
+    await session.commit()
+
+    assert await _carded_by(session, film, 107) is None

@@ -2,6 +2,7 @@
 spine (keyed by `tmdb_id`) plus its normalized genre/company/country/language/collection
 relations. Pure DB I/O — the caller owns the transaction (commit/rollback)."""
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -26,12 +27,25 @@ from upmovies.catalog.models import (
     SpokenLanguage,
 )
 from upmovies.catalog.slug import assign_slug
+from upmovies.ingest.tmdb.client import TMDBClient, TMDBNotFound
+from upmovies.ingest.tmdb.collection_history import record_collection_admission
+from upmovies.ingest.tmdb.company_history import (
+    admission_company_attachments,
+    companies_from_details,
+    diff_companies,
+    load_followed_company_ids,
+    load_observed_companies,
+    mark_companies_observed,
+    record_company_changes,
+)
 from upmovies.ingest.tmdb.credit_history import (
-    diff_seed_credits,
-    load_seed_credits,
+    admission_attachments,
+    diff_recorded_credits,
+    load_followed_person_ids,
+    load_recorded_credits,
     mark_credits_observed,
     record_credit_changes,
-    seed_credits_from_details,
+    recorded_credits_from_details,
 )
 from upmovies.ingest.tmdb.release_date_history import (
     diff_release_dates,
@@ -40,7 +54,14 @@ from upmovies.ingest.tmdb.release_date_history import (
     mark_release_dates_observed,
     record_release_date_changes,
 )
-from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import (
+    TMDBCastMember,
+    TMDBCollectionSearchHit,
+    TMDBCompanySearchHit,
+    TMDBCrewMember,
+    TMDBMovieDetails,
+    TMDBPersonSearchHit,
+)
 
 
 async def mark_film_missing(session: AsyncSession, tmdb_id: int) -> None:
@@ -71,13 +92,171 @@ async def mark_person_missing(session: AsyncSession, person_id: int) -> None:
     )
 
 
+async def ensure_person_details(
+    session: AsyncSession, client: TMDBClient, person_id: int
+) -> Person | None:
+    """Make sure this person's `/person/{id}` fields are on their `catalog.person` row, fetching
+    them once if they are not. Returns the row, or None when we hold none. Caller commits.
+
+    **Lazy, and once.** The sanity holds (D-8, NEU-1370) need `birthday` and `deathday`, which
+    neither credits endpoint returns; backfilling them for every seed person would be tens of
+    thousands of requests for dates that decide nothing about almost all of them. So this is
+    called only for the people a credit event is about to name — one request per newly carded
+    person, never per seed person — and `details_observed_at` is what makes it once rather than
+    once per pass.
+
+    Never refreshed after the first fetch, deliberately: a birthday does not change, and a death
+    recorded upstream after we read the person is missed until someone clears the stamp by hand.
+    That is the cheap side of the trade — the alternative is a cadence over the whole person
+    table to catch an event that is rare and only ever *adds* a hold.
+
+    A 404 tombstones the person the way every other id-addressed fetch here does, and returns
+    None: TMDB has no such person, so there are no dates to decide anything on, and the caller
+    treats that as "no reason to hold" rather than as a failure. It **also stamps**
+    `details_observed_at`, because the question was asked and answered — without it a deleted
+    person id sitting in the rolling window would be re-requested on every pass for the whole
+    of `SWEEP_EVENT_LOOKBACK_DAYS`, which is the once-per-person guarantee gone. `tmdb_missing_at`
+    cannot stand in for it: the person upsert clears that on revival, and the two columns answer
+    different questions ("is this id live" against "have we asked for the dates").
+    """
+    person = await session.get(Person, person_id)
+    if person is None or person.details_observed_at is not None:
+        return person
+    try:
+        details = await client.person_details(person_id)
+    except TMDBNotFound:
+        await mark_person_missing(session, person_id)
+        person.details_observed_at = datetime.now(UTC)
+        await session.flush()
+        return None
+    person.birthday = details.birthday
+    person.deathday = details.deathday
+    # Refreshed rather than left alone: the response carries them, and writing the dates beside
+    # a `popularity` we have just been handed a fresher value for would be a choice to hold a
+    # stale one. `name` and the rest stay with the credits path, which sees them far more often.
+    person.popularity = details.popularity
+    person.profile_path = details.profile_path
+    person.details_observed_at = datetime.now(UTC)
+    await session.flush()
+    return person
+
+
+async def upsert_people(
+    session: AsyncSession,
+    members: Iterable[TMDBCastMember | TMDBCrewMember | TMDBPersonSearchHit],
+) -> None:
+    """Upsert `catalog.person` rows for these cast/crew entries or person search hits.
+    Caller commits.
+
+    Split out of `_upsert_credits` for the Letterboxd import (D-15), which needs exactly this
+    and nothing else around it: a film the user rated four stars contributes its director and
+    top-2 billing as people to follow, and is then discarded — no `catalog.film` row, no
+    credits, because the catalog is the *upcoming*-film spine and a rated back-catalogue film
+    has nothing left to announce (`NEU-1356-letterboxd-import.md` §3). Sharing the write rather
+    than restating it is what keeps the two paths agreeing on the conflict set, and in
+    particular on clearing `tmdb_missing_at`.
+
+    A `/search/person` hit is accepted alongside them because person resolution (D-21) needs
+    exactly the same write for the candidate it accepts: the hit carries the same seven person
+    fields, and a person named in a trade story is as good a proof that the id is live as one
+    named in a film's credits. Sharing this rather than writing `catalog.person` a third way
+    is what keeps every path agreeing on the conflict set — most of all on clearing
+    `tmdb_missing_at`, which a separate resolver write would be free to forget.
+
+    Deduped by TMDB id, first entry winning, so one person billed and also credited as a
+    writer is one row — and so the statement cannot raise the "ON CONFLICT DO UPDATE command
+    cannot affect row a second time" that a duplicate id inside one `VALUES` produces."""
+    people_by_id: dict[int, dict] = {}
+    for m in members:
+        if m.id not in people_by_id:
+            people_by_id[m.id] = {
+                "id": m.id,
+                "name": m.name,
+                "original_name": m.original_name,
+                "profile_path": m.profile_path,
+                "known_for_department": m.known_for_department,
+                "gender": m.gender,
+                "popularity": m.popularity,
+            }
+    if not people_by_id:
+        return
+    stmt = insert(Person).values(list(people_by_id.values()))
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[Person.id],
+        set_={
+            "name": stmt.excluded.name,
+            "original_name": stmt.excluded.original_name,
+            "profile_path": stmt.excluded.profile_path,
+            "known_for_department": stmt.excluded.known_for_department,
+            "gender": stmt.excluded.gender,
+            "popularity": stmt.excluded.popularity,
+            # TMDB returning this person at all — in a film's credits, or as a search hit —
+            # is proof the id is live again, which is the whole revival path for a
+            # tombstoned seed person (NEU-1124).
+            "tmdb_missing_at": None,
+        },
+    )
+    await session.execute(stmt)
+
+
+async def upsert_organisation(
+    session: AsyncSession, hit: TMDBCompanySearchHit | TMDBCollectionSearchHit
+) -> None:
+    """Upsert the one `catalog.production_company` or `catalog.collection` row an accepted
+    organisation resolution names (EF-12). Caller commits.
+
+    Here rather than in the resolver for `upsert_people`'s reason: `catalog` reference rows
+    are written in one place, so every path agrees on the conflict set. The two statements
+    are the ones `_upsert_references` and `_upsert_collection` already run per field, with one
+    row instead of a film's worth.
+
+    Only ever called for the candidate a decision *accepted*, never for the whole shortlist.
+    Both tables are read by the public studio and franchise pages and by header search
+    (NEU-1428, NEU-1430), so writing the namesakes this pass rejected would put organisations
+    no film in the catalog touches in front of users — `candidates.py`'s rule for
+    `catalog.person`, which these two tables inherit.
+    """
+    if isinstance(hit, TMDBCollectionSearchHit):
+        stmt = insert(Collection).values(
+            id=hit.id,
+            name=hit.name,
+            poster_path=hit.poster_path,
+            backdrop_path=hit.backdrop_path,
+        )
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[Collection.id],
+                set_={
+                    "name": stmt.excluded.name,
+                    "poster_path": stmt.excluded.poster_path,
+                    "backdrop_path": stmt.excluded.backdrop_path,
+                },
+            )
+        )
+        return
+    company = insert(ProductionCompany).values(
+        id=hit.id, name=hit.name, logo_path=hit.logo_path, origin_country=hit.origin_country
+    )
+    await session.execute(
+        company.on_conflict_do_update(
+            index_elements=[ProductionCompany.id],
+            set_={
+                "name": company.excluded.name,
+                "logo_path": company.excluded.logo_path,
+                "origin_country": company.excluded.origin_country,
+            },
+        )
+    )
+
+
 async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     """Insert/update a film and its relations (matched on `tmdb_id`). The surrogate `id`
     and `created_at` are preserved; `updated_at` is bumped. Reference rows are upserted by
     their natural keys; join rows are rebuilt (delete-and-reinsert) so a film dropping a
     genre/company between runs is reflected."""
     collection_id = await _upsert_collection(session, details)
-    film_id = await _upsert_film_row(session, details, collection_id)
+    film_id, film_inserted = await _upsert_film_row(session, details, collection_id)
+    await record_collection_admission(session, film_id, collection_id, film_inserted=film_inserted)
     await _upsert_references(session, details)
     await _rebuild_joins(session, film_id, details)
     await _rebuild_release_dates(session, film_id, details)
@@ -106,8 +285,12 @@ async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -
 
 async def _upsert_film_row(
     session: AsyncSession, details: TMDBMovieDetails, collection_id: int | None
-) -> UUID:
-    slug = await _slug_for_insert(session, details)
+) -> tuple[UUID, bool]:
+    """The film row, and whether this upsert **inserted** it rather than updating one the
+    catalog already held. The second half is EF-4's (D-1436.4): a film inserted into a
+    followed franchise needs the history row the `BEFORE UPDATE` trigger cannot write, and an
+    update into one does not."""
+    slug, film_inserted = await _slug_for_insert(session, details)
     values = {
         "tmdb_id": details.id,
         "slug": slug,
@@ -146,21 +329,32 @@ async def _upsert_film_row(
         .on_conflict_do_update(index_elements=[Film.tmdb_id], set_=update_set)
         .returning(Film.id)
     )
-    return (await session.execute(stmt)).scalar_one()
+    return (await session.execute(stmt)).scalar_one(), film_inserted
 
 
-async def _slug_for_insert(session: AsyncSession, details: TMDBMovieDetails) -> str | None:
-    """An existing film (matched on `tmdb_id`) keeps its stored slug — it is excluded from the
+async def _slug_for_insert(
+    session: AsyncSession, details: TMDBMovieDetails
+) -> tuple[str | None, bool]:
+    """The slug to offer the insert, and whether the catalog holds no film at this `tmdb_id`
+    yet.
+
+    An existing film (matched on `tmdb_id`) keeps its stored slug — it is excluded from the
     `DO UPDATE` set, so the value here is only used when the row is actually inserted. A new film
-    gets a freshly assigned collision-safe slug."""
+    gets a freshly assigned collision-safe slug.
+
+    The second half of the answer is this pre-select's rather than the slug's, because this
+    SELECT is already the one statement that knows: `ON CONFLICT ... RETURNING` cannot say
+    which branch it took without reading `xmax`, and a second SELECT would be a second answer
+    that could disagree with this one.
+    """
     row = (await session.execute(select(Film.slug).where(Film.tmdb_id == details.id))).one_or_none()
-    if row is not None:
-        existing_slug = row[0]
-        if existing_slug is not None:
-            return existing_slug
-    return await assign_slug(
+    film_inserted = row is None
+    if row is not None and row[0] is not None:
+        return row[0], film_inserted
+    slug = await assign_slug(
         session, title=details.title, release_date=details.release_date, tmdb_id=details.id
     )
+    return slug, film_inserted
 
 
 async def _upsert_references(session: AsyncSession, details: TMDBMovieDetails) -> None:
@@ -217,6 +411,18 @@ async def _upsert_references(session: AsyncSession, details: TMDBMovieDetails) -
 
 
 async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovieDetails) -> None:
+    """Rebuild the four join tables, and capture the studio *history* the company rebuild would
+    otherwise throw away (EF-5).
+
+    The company diff lives here for the reason the credit diff lives in `_upsert_credits`: both
+    sides of it are in hand at this point and nowhere else, because the next statement deletes
+    the stored one. First observation is a baseline, never a change — except for a studio
+    somebody follows, which is EF-4's admission exception. See `ingest.tmdb.company_history`.
+    """
+    # Read the stored side before the delete below wipes it. None means the catalog has never
+    # observed this film's companies, which `diff_companies` reads as a baseline.
+    previous_companies = await load_observed_companies(session, film_id)
+
     await session.execute(delete(FilmGenre).where(FilmGenre.film_id == film_id))
     await session.execute(
         delete(FilmProductionCompany).where(FilmProductionCompany.film_id == film_id)
@@ -254,6 +460,20 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
             )
         )
 
+    # The marker is set last and only here, so the very first pass writes a baseline and every
+    # later one a diff — except for the studios somebody already follows, which are EF-4's
+    # one exception to the baseline rule (D-1436.2). The followed set is read only on that
+    # branch: there is no recorded grade for companies, so an ordinary diff never asks.
+    current_companies = companies_from_details(details)
+    if previous_companies is None:
+        changes = admission_company_attachments(
+            current_companies, followed=await load_followed_company_ids(session)
+        )
+    else:
+        changes = diff_companies(previous=previous_companies, current=current_companies)
+    await record_company_changes(session, film_id, changes)
+    await mark_companies_observed(session, film_id)
+
 
 async def _rebuild_release_dates(
     session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
@@ -286,6 +506,10 @@ async def _rebuild_release_dates(
     if not details.release_dates or not details.release_dates.results:
         return
 
+    # Every type TMDB returns, filtered by nothing but a missing date. Narrowing this to the
+    # displayable cut would look like a saving and would cost the no-backfill property
+    # `catalog.release_grade` documents: a type admitted by a later widening has to already be
+    # stored, or its first ingest reads it as a date newly *set* and cards the whole catalog.
     rows = [
         {
             "film_id": film_id,
@@ -338,59 +562,25 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     Film credits are rebuilt (delete-and-reinsert) each run so that a person dropped
     from the cast/crew between runs is correctly removed.
 
-    The rebuild is also where seed-grade credit *history* is captured: both sides of the
+    The rebuild is also where recorded-grade credit *history* is captured: both sides of the
     diff are in hand here and nowhere else, so `catalog.film_credit_change` is written from
     them before the old side is destroyed. First observation is a baseline, never a change —
-    see `ingest.tmdb.credit_history`.
+    except for a person somebody follows, which is EF-4's admission exception. See
+    `ingest.tmdb.credit_history`.
     """
     if not details.credits:
         return
 
+    # Recorded grade's second half (D-49), read once and handed to *both* sides of the diff
+    # below: judging them by two different answers is what would fabricate an attachment for
+    # a credit that never moved. One query per film, on the same session as the rest.
+    followed = await load_followed_person_ids(session)
+
     # Read the stored side before the delete below wipes it.
-    previous_seed_credits = await load_seed_credits(session, film_id)
+    previous_recorded_credits = await load_recorded_credits(session, film_id, followed=followed)
 
     # Step 1 — People: union of cast + crew, deduped by TMDB person id.
-    people_by_id: dict[int, dict] = {}
-    for m in details.credits.cast:
-        if m.id not in people_by_id:
-            people_by_id[m.id] = {
-                "id": m.id,
-                "name": m.name,
-                "original_name": m.original_name,
-                "profile_path": m.profile_path,
-                "known_for_department": m.known_for_department,
-                "gender": m.gender,
-                "popularity": m.popularity,
-            }
-    for m in details.credits.crew:
-        if m.id not in people_by_id:
-            people_by_id[m.id] = {
-                "id": m.id,
-                "name": m.name,
-                "original_name": m.original_name,
-                "profile_path": m.profile_path,
-                "known_for_department": m.known_for_department,
-                "gender": m.gender,
-                "popularity": m.popularity,
-            }
-
-    if people_by_id:
-        stmt = insert(Person).values(list(people_by_id.values()))
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[Person.id],
-            set_={
-                "name": stmt.excluded.name,
-                "original_name": stmt.excluded.original_name,
-                "profile_path": stmt.excluded.profile_path,
-                "known_for_department": stmt.excluded.known_for_department,
-                "gender": stmt.excluded.gender,
-                "popularity": stmt.excluded.popularity,
-                # TMDB naming this person in a film's credits is proof the id is live again,
-                # which is the whole revival path for a tombstoned seed person (NEU-1124).
-                "tmdb_missing_at": None,
-            },
-        )
-        await session.execute(stmt)
+    await upsert_people(session, [*details.credits.cast, *details.credits.crew])
 
     # Step 2 — Credits rebuild: delete stale rows then reinsert current set.
     await session.execute(delete(FilmCredit).where(FilmCredit.film_id == film_id))
@@ -426,11 +616,18 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
 
     # Step 3 — History: what the rebuild would otherwise have thrown away. The marker is set
     # last and only here, so the very first pass writes a baseline and every later one a diff.
-    await record_credit_changes(
-        session,
-        film_id,
-        diff_seed_credits(
-            previous=previous_seed_credits, current=seed_credits_from_details(details)
-        ),
-    )
+    #
+    # The one exception is EF-4 (D-1436.1): on a first observation the credits of people
+    # somebody *already* follows are written as attachments, because a film entering the
+    # catalog with a followed director on it is precisely what that follow was made for. Both
+    # branches read the one `followed` set above, which is what makes a follow created after
+    # admission a no-op on the next ingest rather than a fabricated `added`.
+    current_recorded_credits = recorded_credits_from_details(details, followed=followed)
+    if previous_recorded_credits is None:
+        changes = admission_attachments(current_recorded_credits, followed=followed)
+    else:
+        changes = diff_recorded_credits(
+            previous=previous_recorded_credits, current=current_recorded_credits
+        )
+    await record_credit_changes(session, film_id, changes)
     await mark_credits_observed(session, film_id)

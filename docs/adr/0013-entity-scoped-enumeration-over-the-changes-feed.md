@@ -61,3 +61,14 @@ above; their projects are reached through their directors and stars anyway.
   Bounded by dormancy (ADR-0015), which removes dead films' credits from the seed query.
 - Sweep runtime is linear in the seed count, so the seed set's size is an operational number to
   watch, not a static one.
+
+## Amendment (2026-09-20, NEU-1416 planning; D-50)
+
+The enumeration set is the seed people **plus every live person some user follows at coverage
+`any`**. Their non-seed undated credits reach candidates under a fourth tranche,
+`SWEEP_ADMIT_FOLLOWED`, behind the same status filter and corroboration bar. This does not widen
+seed grade — the NEU-1090 measurement against a top-3 cut stands, and producers stay out — it
+adds a second admission rule beside it: a follow is a user saying this person is worth a
+request, which is the relevance prior this ADR chose people for in the first place. The set is
+small (people followed that widely, one request each) and bounded by the follow graph rather than
+by dormancy.

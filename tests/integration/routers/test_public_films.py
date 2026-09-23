@@ -75,10 +75,12 @@ async def test_detail_returns_chronological_summarized_events_with_sources(
     # casting's day (Mar) comes before trailer's day (Jan).
     all_events = _flatten_events(body)
     assert [e["event_type"] for e in all_events] == ["casting", "trailer"]
-    # Each event must expose created_at and must NOT expose occurred_at.
+    # Each event exposes both timestamps. `created_at` is still the publication axis
+    # (ADR-0016); `occurred_at` rides along purely as card disclosure — the residual ADR-0016
+    # left open and NEU-1346 closed. Neither field reorders anything.
     for event in all_events:
         assert "created_at" in event, "event must expose created_at"
-        assert "occurred_at" not in event, "event must not expose occurred_at"
+        assert "occurred_at" in event, "event must expose occurred_at"
     casting = _events_for_type(body, "casting")[0]
     assert casting["created_at"] == casting_created_at.isoformat().replace("+00:00", "Z")
     assert casting["confidence"] == "confirmed"
@@ -246,11 +248,11 @@ async def test_detail_excludes_other_events(client, make_film, add_event):
 # ── release_dates projection tests ───────────────────────────────────────────
 
 
-async def test_detail_exposes_theatrical_release_dates(
+async def test_detail_exposes_displayable_release_dates(
     client, make_film, add_event, add_release_date
 ):
-    """Only theatrical-arc dates (limited + wide) surface, labeled like the calendar;
-    premiere (1) and digital (4) are dropped."""
+    """The theatrical arc (limited + wide) and the US home release (digital + physical)
+    surface, labeled like the calendar; premiere (1) and TV (6) are dropped (D-26)."""
     film = await make_film(slug="rd-us-2026", title="US Dates Film")
     await add_event(film=film, summary="Event.")
     await add_release_date(
@@ -276,16 +278,29 @@ async def test_detail_exposes_theatrical_release_dates(
     await add_release_date(
         film=film,
         iso_3166_1="US",
-        release_type=4,  # digital — excluded
+        release_type=6,  # TV — excluded
+        release_date=datetime(2026, 6, 2, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=4,  # digital
         release_date=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="US",
+        release_type=5,  # physical
+        release_date=datetime(2026, 9, 15, tzinfo=UTC),
     )
 
     r = await client.get("/films/rd-us-2026")
     assert r.status_code == 200
     body = r.json()
     rds = body["release_dates"]
-    assert len(rds) == 2
-    # ordered by release_date asc: limited (June 10) before wide (July 17)
+    assert len(rds) == 4
+    # ordered by release_type asc, which for one market reads as the release arc itself:
+    # limited (June 10), wide (July 17), digital (Aug 1), physical (Sept 15)
     assert rds[0]["date"].startswith("2026-06-10")
     assert rds[0]["release_type"] == 2
     assert rds[0]["type_label"] == "Limited"
@@ -294,6 +309,43 @@ async def test_detail_exposes_theatrical_release_dates(
     assert rds[1]["release_type"] == 3
     assert rds[1]["type_label"] == "Wide"
     assert rds[1]["certification"] == "PG-13"
+    assert rds[2]["date"].startswith("2026-08-01")
+    assert rds[2]["release_type"] == 4
+    assert rds[2]["type_label"] == "Digital"
+    assert rds[3]["date"].startswith("2026-09-15")
+    assert rds[3]["release_type"] == 5
+    assert rds[3]["type_label"] == "Physical"
+
+
+async def test_detail_drops_an_origin_country_home_release_date(
+    client, make_film, add_event, add_release_date, session
+):
+    """The home release is US-only (D-26): a GB digital date on a GB film is not "when can I
+    watch this at home?", while the GB *theatrical* date beside it is the film's own market."""
+    film = await make_film(slug="rd-gb-home-2026", title="Home Abroad")
+    film.origin_country = ["GB"]
+    session.add(film)
+    await session.commit()
+    await session.refresh(film)
+
+    await add_event(film=film, summary="Event.")
+    await add_release_date(
+        film=film,
+        iso_3166_1="GB",
+        release_type=3,
+        release_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    await add_release_date(
+        film=film,
+        iso_3166_1="GB",
+        release_type=4,  # GB digital — excluded
+        release_date=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    r = await client.get("/films/rd-gb-home-2026")
+    assert r.status_code == 200
+    rds = r.json()["release_dates"]
+    assert [(rd["country"], rd["release_type"]) for rd in rds] == [("GB", 3)]
 
 
 async def test_detail_excludes_non_home_region_dates(
@@ -480,6 +532,7 @@ async def test_detail_exposes_film_metadata_all_fields(
     # companies: name-ascending — Alpha before Zeta
     assert body["production_companies"] == ["Alpha Films", "Zeta Studios"]
     assert body["collection"] == {
+        "id": 1,
         "name": "The Franchise Collection",
         "poster_path": "/collection.jpg",
     }
@@ -537,12 +590,12 @@ async def test_detail_metadata_is_scoped_per_film(
     body_a = (await client.get("/films/meta-scope-a-2026")).json()
     assert body_a["genres"] == ["Action", "Adventure"]
     assert body_a["production_companies"] == ["Alpha Films", "Zeta Studios"]
-    assert body_a["collection"] == {"name": "Collection A", "poster_path": None}
+    assert body_a["collection"] == {"id": 1, "name": "Collection A", "poster_path": None}
 
     body_b = (await client.get("/films/meta-scope-b-2026")).json()
     assert body_b["genres"] == ["Horror"]
     assert body_b["production_companies"] == ["Beta Films"]
-    assert body_b["collection"] == {"name": "Collection B", "poster_path": None}
+    assert body_b["collection"] == {"id": 2, "name": "Collection B", "poster_path": None}
 
 
 # ── alternative_titles exposure tests ────────────────────────────────────────
@@ -972,16 +1025,38 @@ async def test_film_detail_cast_top_billed(client, make_film, add_event, attach_
     body = r.json()
     cast = body["cast"]
     assert len(cast) == 3
-    # ordered by credit_order asc: Alice (1), Bob (2), Charlie (3)
+    # ordered by credit_order asc: Alice (1), Bob (2), Charlie (3). Each person_id travels with
+    # its own row through that re-ordering (D-10), so a follow button cannot key on a neighbour.
+    assert cast[0]["person_id"] == 1002
     assert cast[0]["name"] == "Alice Actor"
     assert cast[0]["character"] == "Alice"
     assert cast[0]["profile_path"] == "/alice.jpg"
+    assert cast[1]["person_id"] == 1003
     assert cast[1]["name"] == "Bob Actor"
     assert cast[1]["character"] == "Bob"
     assert cast[1]["profile_path"] is None
+    assert cast[2]["person_id"] == 1001
     assert cast[2]["name"] == "Charlie Actor"
     assert cast[2]["character"] == "Charlie"
     assert cast[2]["profile_path"] == "/charlie.jpg"
+
+
+async def test_film_detail_sends_the_whole_cast(client, make_film, add_event, attach_credits):
+    """D-1416.7: the 12-cast cap is gone, so every name on the page can link to its person
+    page. The frontend's own `FOLLOWABLE_CAST_COUNT` still decides where the follow buttons
+    go, so nothing moves."""
+    film = await make_film(slug="full-cast-2026", title="Full Cast")
+    await add_event(film=film, event_type="casting", summary="Casting.")
+    await attach_credits(
+        film,
+        cast=[
+            {"id": 2000 + n, "name": f"Actor {n}", "character": f"Role {n}", "credit_order": n}
+            for n in range(20)
+        ],
+    )
+
+    body = (await client.get("/films/full-cast-2026")).json()
+    assert [c["person_id"] for c in body["cast"]] == [2000 + n for n in range(20)]
 
 
 async def test_film_detail_crew_grouped_orderable(client, make_film, add_event, attach_credits):
@@ -1005,7 +1080,12 @@ async def test_film_detail_crew_grouped_orderable(client, make_film, add_event, 
     crew = body["crew"]
     # Department priority: Directing → Writing → Production → Editing
     assert [c["job"] for c in crew] == ["Director", "Screenplay", "Producer", "Editor"]
-    assert crew[0] == {"name": "Director Person", "job": "Director", "department": "Directing"}
+    assert crew[0] == {
+        "person_id": 3003,
+        "name": "Director Person",
+        "job": "Director",
+        "department": "Directing",
+    }
 
 
 async def test_film_detail_crew_orders_within_job_by_credit_order(
@@ -1493,3 +1573,285 @@ async def test_detail_does_not_ship_directors_and_keeps_crew(
     body = (await client.get("/films/no-directors-field-2026")).json()
     assert "directors" not in body
     assert [c["name"] for c in body["crew"]] == ["The Director"]
+
+
+# NEU-1346 — the film page is where supersession and first-seen dates surface (D-2, D-9).
+async def test_detail_event_carries_status_superseded_by_and_occurred_at(
+    client, make_film, add_event
+):
+    film = await make_film(slug="superseded-2026", title="A Superseded Credit")
+    removal = await add_event(
+        film=film,
+        event_type="credit_removed",
+        summary="No longer directing.",
+        occurred_at=datetime(2026, 5, 2, tzinfo=UTC),
+    )
+    await add_event(
+        film=film,
+        event_type="crew_attached",
+        summary="Directing.",
+        occurred_at=datetime(2026, 5, 1, tzinfo=UTC),
+        status="superseded",
+        superseded_by=removal.id,
+    )
+
+    r = await client.get("/films/superseded-2026")
+    assert r.status_code == 200
+    events = {e["event_type"]: e for e in _flatten_events(r.json())}
+
+    attachment = events["crew_attached"]
+    assert attachment["status"] == "superseded"
+    assert attachment["superseded_by"] == str(removal.id)
+    assert attachment["occurred_at"] == "2026-05-01T00:00:00Z"
+
+    assert events["credit_removed"]["status"] == "published"
+    assert events["credit_removed"]["superseded_by"] is None
+
+
+# ── entity ids for follow buttons (NEU-1395) ─────────────────────────────────
+
+
+async def test_detail_carries_entity_ids_for_follows(
+    client, make_film, add_event, make_collection, attach_companies, attach_credits
+):
+    """Every follow affordance on the film page keys on an id (D-10): the film's own UUID for
+    the `title` follow button, TMDB person ids for cast and crew, the TMDB
+    collection id for `franchise`, and TMDB company ids for `company`. Each must match the row
+    it was sourced from."""
+    col = await make_collection(id=77, name="The Franchise Collection")
+    film = await make_film(slug="entity-ids-2026", title="Entity Ids Film", collection_id=col.id)
+    await add_event(film=film, summary="Event.")
+    await attach_companies(film, [(10, "Zeta Studios"), (5, "Alpha Films")])
+    await attach_credits(
+        film,
+        cast=[{"id": 1001, "name": "Alice Actor", "character": "Alice", "credit_order": 1}],
+        crew=[
+            {"id": 3001, "name": "Director Person", "job": "Director", "department": "Directing"}
+        ],
+    )
+
+    r = await client.get("/films/entity-ids-2026")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["id"] == str(film.id)
+    assert body["cast"][0]["person_id"] == 1001
+    assert body["crew"][0]["person_id"] == 3001
+    assert body["collection"]["id"] == 77
+    # name-ascending, same order as `production_companies`
+    assert body["companies"] == [
+        {"id": 5, "name": "Alpha Films"},
+        {"id": 10, "name": "Zeta Studios"},
+    ]
+
+
+async def test_detail_keeps_production_companies_names_beside_companies(
+    client, make_film, add_event, attach_companies
+):
+    """`companies` is a new field beside `production_companies`, not a widening of it — the
+    frontend and backend deploy independently in either order only while the old field keeps
+    its name and its `list[str]` type."""
+    film = await make_film(slug="companies-compat-2026")
+    await add_event(film=film, summary="Event.")
+    await attach_companies(film, [(10, "Zeta Studios"), (5, "Alpha Films")])
+
+    body = (await client.get("/films/companies-compat-2026")).json()
+
+    assert body["production_companies"] == ["Alpha Films", "Zeta Studios"]
+    assert [c["name"] for c in body["companies"]] == body["production_companies"]
+
+
+async def test_detail_sparse_film_has_id_and_empty_companies(client, make_film, add_event):
+    film = await make_film(slug="entity-ids-sparse-2026")
+    await add_event(film=film, summary="Event.")
+
+    body = (await client.get("/films/entity-ids-sparse-2026")).json()
+
+    assert body["id"] == str(film.id)
+    assert body["companies"] == []
+    assert body["collection"] is None
+
+
+# --- where to watch (D-29, NEU-1376) --------------------------------------------
+
+
+async def test_detail_exposes_where_to_watch_by_monetization_type(
+    client, make_film, add_event, add_availability
+):
+    """The box is the current snapshot, bucketed the way a reader decides: what a subscription
+    already covers, what costs a rental, what costs a purchase."""
+    film = await make_film(slug="wtw-2026", title="Watchable")
+    await add_event(film=film, summary="Event.")
+    await add_availability(
+        film=film,
+        offers=[
+            (8, "Netflix", "flatrate"),
+            (2, "Apple TV", "rent"),
+            (10, "Prime Video", "rent"),
+            (2, "Apple TV", "buy"),
+        ],
+        link="https://www.themoviedb.org/movie/99/watch",
+    )
+
+    r = await client.get("/films/wtw-2026")
+    assert r.status_code == 200
+    box = r.json()["where_to_watch"]
+
+    assert box["region"] == "US"
+    assert box["link"] == "https://www.themoviedb.org/movie/99/watch"
+    assert box["flatrate"] == [{"id": 8, "name": "Netflix", "logo_path": "/provider8.jpg"}]
+    assert [p["name"] for p in box["rent"]] == ["Apple TV", "Prime Video"]
+    assert [p["name"] for p in box["buy"]] == ["Apple TV"]
+
+
+async def test_detail_where_to_watch_carries_justwatch_attribution(
+    client, make_film, add_event, add_availability
+):
+    """TMDB's terms for this endpoint require crediting JustWatch wherever the data renders, so
+    the field is part of the payload rather than something a client has to remember to add."""
+    film = await make_film(slug="wtw-attr-2026", title="Attributed")
+    await add_event(film=film, summary="Event.")
+    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")])
+
+    r = await client.get("/films/wtw-attr-2026")
+
+    assert r.json()["where_to_watch"]["attribution"] == "JustWatch"
+
+
+async def test_detail_where_to_watch_is_null_when_nobody_carries_the_film(
+    client, make_film, add_event
+):
+    """Not an empty box: a film nobody carries has nothing to say about where to watch it, and
+    the page should render no section at all rather than three empty lists."""
+    film = await make_film(slug="wtw-none-2026", title="Uncarried")
+    await add_event(film=film, summary="Event.")
+
+    r = await client.get("/films/wtw-none-2026")
+
+    assert r.json()["where_to_watch"] is None
+
+
+async def test_detail_where_to_watch_keeps_an_empty_bucket_for_a_type_nobody_offers(
+    client, make_film, add_event, add_availability
+):
+    """A film on a subscription service but not for sale still has a box; the untouched buckets
+    are present and empty, so a client can render "streaming" without guarding three keys."""
+    film = await make_film(slug="wtw-flatrate-2026", title="Stream Only")
+    await add_event(film=film, summary="Event.")
+    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")])
+
+    box = (await client.get("/films/wtw-flatrate-2026")).json()["where_to_watch"]
+
+    assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
+    assert box["rent"] == []
+    assert box["buy"] == []
+
+
+async def test_detail_where_to_watch_keeps_the_order_the_poll_observed(
+    client, make_film, add_event, add_availability
+):
+    """TMDB hands the services back in JustWatch's own ranking and the rebuild writes them in
+    that order, so the box must not re-sort them alphabetically — the head of the list is the
+    answer most readers want."""
+    film = await make_film(slug="wtw-order-2026", title="Ranked")
+    await add_event(film=film, summary="Event.")
+    await add_availability(
+        film=film,
+        offers=[
+            (8, "Netflix", "flatrate"),
+            (15, "Hulu", "flatrate"),
+            (1, "AMC+", "flatrate"),
+        ],
+    )
+
+    box = (await client.get("/films/wtw-order-2026")).json()["where_to_watch"]
+
+    assert [p["name"] for p in box["flatrate"]] == ["Netflix", "Hulu", "AMC+"]
+
+
+async def test_detail_where_to_watch_reads_only_the_us_region(
+    client, make_film, add_event, add_availability
+):
+    """Availability is US-only in v1 (D-27). A row for another region is data the box has no
+    place for, and must not leak into it once a later region is polled."""
+    film = await make_film(slug="wtw-region-2026", title="Two Regions")
+    await add_event(film=film, summary="Event.")
+    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")])
+    await add_availability(
+        film=film, offers=[(15, "Hulu", "flatrate")], region="GB", link="https://gb/watch"
+    )
+
+    box = (await client.get("/films/wtw-region-2026")).json()["where_to_watch"]
+
+    assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
+    assert box["region"] == "US"
+
+
+async def test_detail_where_to_watch_link_is_null_when_the_poll_stored_none(
+    client, make_film, add_event, add_availability
+):
+    """TMDB answers some regions with offers and no `link`. The box still renders; only the
+    link-back is missing."""
+    film = await make_film(slug="wtw-nolink-2026", title="No Link")
+    await add_event(film=film, summary="Event.")
+    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")], link=None)
+
+    box = (await client.get("/films/wtw-nolink-2026")).json()["where_to_watch"]
+
+    assert box["link"] is None
+    assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
+
+
+# --- the trailer card's video key (D-35) ---------------------------------------
+
+
+async def test_film_detail_carries_the_trailer_video_key(client, make_film, add_event):
+    """The key the poll recorded rides on the card so the page can embed a player
+    (NEU-1386), rather than the client having to go back to TMDB for it."""
+    film = await make_film(slug="odyssey-key", title="The Odyssey")
+    await add_event(
+        film=film,
+        event_type="trailer",
+        provenance="catalog",
+        subject_key=["youtube:abc123"],
+        summary="A new trailer is out.",
+    )
+
+    body = (await client.get(f"/films/{ref(film)}")).json()
+
+    (event,) = _events_for_type(body, "trailer")
+    assert event["video_key"] == "abc123"
+
+
+async def test_film_detail_leaves_video_key_null_on_a_story_born_trailer(
+    client, make_film, add_event
+):
+    """The outlets reported a trailer; we hold no video, so there is nothing to embed and the
+    card falls back to its sources."""
+    film = await make_film(slug="odyssey-no-key", title="The Odyssey")
+    await add_event(film=film, event_type="trailer", summary="Outlets ran the trailer.")
+
+    body = (await client.get(f"/films/{ref(film)}")).json()
+
+    (event,) = _events_for_type(body, "trailer")
+    assert event["video_key"] is None
+
+
+async def test_film_detail_does_not_read_another_cards_subject_key_as_a_video(
+    client, make_film, add_event
+):
+    """`subject_key` is one column shared by every event type — a `now_available` card's
+    `US:rent` tokens and a casting card's names must never surface as a video id."""
+    film = await make_film(slug="odyssey-other-subjects", title="The Odyssey")
+    await add_event(
+        film=film,
+        event_type="now_available",
+        provenance="catalog",
+        subject_key=["US:rent"],
+        summary="Available to rent on Apple TV.",
+    )
+    await add_event(film=film, event_type="casting", subject_key=["Gal Gadot"])
+
+    body = (await client.get(f"/films/{ref(film)}")).json()
+
+    assert {e["video_key"] for e in _flatten_events(body)} == {None}

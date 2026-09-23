@@ -17,6 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from upmovies.catalog.person_dates import DECEASED, IMPLAUSIBLE_AGE
 from upmovies.db import Base
 
 
@@ -28,7 +29,8 @@ class IngestRun(Base):
     __tablename__ = "ingest_run"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('tmdb', 'feeds', 'link', 'synthesize', 'sweep')",
+            "kind IN ('tmdb', 'feeds', 'link', 'synthesize', 'sweep', 'providers', 'notify', "
+            "'digest')",
             name="ck_ingest_run_kind",
         ),
         CheckConstraint(
@@ -73,14 +75,16 @@ class IngestRun(Base):
 
 
 class RunLLMUsage(Base):
-    """Per-stage LLM token usage + estimated dollar cost for one ingest run. A `link`-kind
-    run writes a `link` row and a `cluster` row; a `synthesize`-kind run writes a `summarize`
-    row. One row per (run, stage) — `record_llm_usage` UPSERTs on the unique constraint."""
+    """Per-stage LLM token usage + estimated dollar cost for one ingest run. A `link`-kind run
+    writes a `link` and a `cluster` row, plus a `source_judge` or `resolve` row on a run whose
+    band of unknown domains or ambiguous mentions was not empty; a `synthesize`-kind run writes
+    a `summarize` row. One row per (run, stage) — `record_llm_usage` UPSERTs on the unique
+    constraint."""
 
     __tablename__ = "run_llm_usage"
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('link', 'cluster', 'summarize', 'source_judge')",
+            "stage IN ('link', 'cluster', 'summarize', 'source_judge', 'resolve')",
             name="ck_run_llm_usage_stage",
         ),
         UniqueConstraint("run_id", "stage", name="uq_run_llm_usage_run_stage"),
@@ -124,7 +128,7 @@ class LLMCall(Base):
     __tablename__ = "llm_call"
     __table_args__ = (
         CheckConstraint(
-            "stage IN ('link', 'cluster', 'summarize', 'source_judge')",
+            "stage IN ('link', 'cluster', 'summarize', 'source_judge', 'resolve')",
             name="ck_llm_call_stage",
         ),
         CheckConstraint("attempts >= 1", name="ck_llm_call_attempts"),
@@ -329,3 +333,104 @@ class RunRetrievalHealth(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     run: Mapped["IngestRun"] = relationship("IngestRun", back_populates="retrieval_health_row")
+
+
+HOLD_BURST = "burst"
+# The two date reasons are `catalog.person_dates`' own names rather than a second spelling of
+# them: that module decides both conditions, for this hold and for person resolution's scoring
+# feature (D-21), and a reason this table spelled differently from the rule that produces it
+# would be a hold whose `reason` column disagreed with why it was held.
+HOLD_DECEASED = DECEASED
+HOLD_IMPLAUSIBLE_AGE = IMPLAUSIBLE_AGE
+HOLD_REASONS = (HOLD_BURST, HOLD_DECEASED, HOLD_IMPLAUSIBLE_AGE)
+"""Why a credit attachment is being withheld from carding (D-8, NEU-1370).
+
+Closed, and check-constrained below, for the reason the LLM stage list is: the release rules
+differ per reason — `burst` is a statement about *other* rows and can stop being true, while
+the two date checks are statements about the person and cannot — so a reason nothing knows how
+to release would be a permanent hold nobody notices."""
+
+RELEASE_CLEARED = "cleared"
+RELEASE_EXPIRED = "expired"
+RELEASE_MANUAL = "manual"
+RELEASE_REASONS = (RELEASE_CLEARED, RELEASE_EXPIRED, RELEASE_MANUAL)
+"""How an open hold ended. `cleared` — the condition stopped holding, and the credit cards on
+the next pass. `expired` — the change aged out of `SWEEP_EVENT_LOOKBACK_DAYS` and will never
+be read again, so nothing cards. `manual` — an admin overrode it (§4), and it cards next pass
+subject to the ordinary quarantine rules."""
+
+
+class CreditHold(Base):
+    """One credit attachment a sanity check withheld from carding, and how it ended (D-8).
+
+    The log quarantine (NEU-1368) deliberately does not have. That gate needs no state — both
+    its conditions are properties of *now*, re-derived from the rolling window on every pass —
+    but these checks do, for two reasons it does not share. A burst is a judgement about a set
+    of rows rather than about one, so "why was this not carded" is unanswerable from the row
+    itself; and a `deceased` hold is exactly the kind a human has to be able to override, which
+    needs something to point at.
+
+    **Holds, never discards.** A hold that turns out to be real — a prolific documentary
+    producer, a posthumous release — must still publish, so every row here has a release path:
+    the condition lifting (`cleared`), a human (`manual`), or the change ageing out of the
+    window (`expired`, which publishes nothing because there is nothing left to read).
+
+    A row is **open** while `released_at IS NULL`, and `load_attachment_backlog` reads past
+    open rows. Re-included once released `cleared` or `manual`; an `expired` row is never
+    re-included, because its change is older than the lookback the backlog reads.
+    """
+
+    __tablename__ = "credit_hold"
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('burst', 'deceased', 'implausible_age')",
+            name="ck_credit_hold_reason",
+        ),
+        CheckConstraint(
+            "release_reason IN ('cleared', 'expired', 'manual')",
+            name="ck_credit_hold_release_reason",
+        ),
+        # Openness is `released_at IS NULL`, and the reason is what a released row is read
+        # back by; letting the two disagree would make either one unusable as the filter.
+        CheckConstraint(
+            "(released_at IS NULL) = (release_reason IS NULL)",
+            name="ck_credit_hold_released",
+        ),
+        # The grain: one row per attachment observation, so re-holding the same change on the
+        # next pass updates rather than accumulates. `changed_at` is part of it because a
+        # person re-attaching to the same film later is a different beat owed its own hold.
+        UniqueConstraint(
+            "film_id",
+            "person_id",
+            "credit_type",
+            "changed_at",
+            name="uq_credit_hold_change",
+        ),
+        {"schema": "ingest"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), nullable=False
+    )
+    person_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.person.id", ondelete="CASCADE"), nullable=False
+    )
+    credit_type: Mapped[str] = mapped_column(Text, nullable=False)
+    """The seed-grade *role* the held credit carries — `director`, `writer` or `cast` — as
+    `catalog.seed_grade.credit_role` derives it, not TMDB's `cast`/`crew` split.
+
+    The role rather than the split because that is the grain the rest of the phase holds an
+    attachment at: an actor-director attaching in both capacities on one day is two beats, and
+    a hold on one of them must not read as a hold on the other."""
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """The observation being held — `film_credit_change.changed_at`, copied so this row can be
+    aged against the lookback window without joining back to the history."""
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    held_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    release_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

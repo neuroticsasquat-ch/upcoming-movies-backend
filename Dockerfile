@@ -31,7 +31,9 @@ COPY scripts/ scripts/
 COPY alembic.ini alembic.ini
 COPY migrations/ migrations/
 EXPOSE 8000
-CMD ["uvicorn", "upmovies.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# `--proxy-headers --forwarded-allow-ips=*` here for parity with prod below, where they are
+# what makes `request.client.host` the caller rather than the proxy (NEU-1344).
+CMD ["uvicorn", "upmovies.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--proxy-headers", "--forwarded-allow-ips", "*"]
 
 
 FROM base AS prod
@@ -52,4 +54,10 @@ ENV OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 # Run migrations on startup, then exec uvicorn (wrapped by opentelemetry-instrument
 # to auto-instrument FastAPI/SQLAlchemy/asyncpg/httpx) so signals reach the server.
-CMD ["sh", "-c", "alembic upgrade head && exec opentelemetry-instrument uvicorn upmovies.main:app --host 0.0.0.0 --port 8000"]
+#
+# `--proxy-headers --forwarded-allow-ips='*'` (NEU-1344): without them every request
+# arrives as Traefik's address, which makes the per-IP rate limiter one global bucket and
+# has been recording the proxy in `app.login_attempt.ip`. Trusting every hop is safe here
+# because this port is reachable only over the Docker network — Traefik is the sole route
+# in, so there is no path by which a client sets its own `X-Forwarded-For`.
+CMD ["sh", "-c", "alembic upgrade head && exec opentelemetry-instrument uvicorn upmovies.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]

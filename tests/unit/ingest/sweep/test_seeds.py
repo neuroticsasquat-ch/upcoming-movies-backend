@@ -104,3 +104,50 @@ def test_tally_groups_by_film():
     tallies = tally_attachments(attachments)
     assert sorted(tallies) == [100, 101]
     assert all(t.seed_attachment_count == 1 for t in tallies.values())
+
+
+# --- the followed half (D-50) ---------------------------------------------------------------
+
+
+def test_a_followed_person_reaches_their_non_seed_credits_too():
+    """Their seed-grade credits keep their own roles; only the rest are `followed`, so the
+    tranches judge the two kinds of candidate separately."""
+    credits = _credits(
+        7,
+        cast=[make_credit_entry(100, order=0), make_credit_entry(101, order=11)],
+        crew=[
+            make_credit_entry(102, department="Directing", job="Director"),
+            make_credit_entry(103, department="Camera", job="Cinematographer"),
+        ],
+    )
+
+    assert {(a.tmdb_id, a.role) for a in seed_attachments(7, credits, followed=True)} == {
+        (100, "cast"),
+        (101, "followed"),
+        (102, "director"),
+        (103, "followed"),
+    }
+
+
+def test_a_person_nobody_follows_that_widely_reaches_seed_grade_only():
+    """The default, and the whole of the pre-M9 behaviour: `followed=False` is what the probe
+    passes, so it keeps measuring seed grade alone."""
+    credits = _credits(
+        7,
+        cast=[make_credit_entry(101, order=11)],
+        crew=[make_credit_entry(103, department="Camera", job="Cinematographer")],
+    )
+
+    assert seed_attachments(7, credits) == []
+
+
+def test_a_followed_person_still_reaches_no_dated_film():
+    """`followed` widens which *credits* count, never which films: a dated entry belongs to
+    discover, not to the sweep, at every role."""
+    credits = _credits(
+        7,
+        cast=[make_credit_entry(100, order=11, release_date="2027-05-01")],
+        crew=[make_credit_entry(101, department="Crew", job="Gaffer", release_date="2027-05-01")],
+    )
+
+    assert seed_attachments(7, credits, followed=True) == []

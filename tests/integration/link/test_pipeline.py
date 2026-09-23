@@ -442,7 +442,7 @@ async def test_cluster_request_mapping(session):
     calls = _cluster_calls(client)
     assert len(calls) == 1  # one cluster call per film
     assert calls[0]["model"] == "claude-sonnet-4-6"
-    assert calls[0]["prompt"].max_tokens == 4096
+    assert calls[0]["prompt"].max_tokens == 8192
     assert "distinct EVENTS" in calls[0]["prompt"].stable_prefix
 
 

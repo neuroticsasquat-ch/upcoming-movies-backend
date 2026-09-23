@@ -1,0 +1,36 @@
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+{% if slate %}
+YOUR SLATE — the next {{ slate_window_days }} days of films you follow
+
+{% for day in slate %}
+{{ day.heading }}
+{% for item in day.entries %}
+  {{ item.title }} — {{ item.release_label }}
+  {{ item.film_url }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+{% if days %}
+NEW ON YOUR TIMELINE
+
+{% for day in days %}
+{{ day.heading }}
+{% for film in day.films %}
+  {{ film.title }}
+{% for event in film.events %}
+  {{ event.beat }}: {{ event.summary }}
+{% endfor %}
+  {{ film.film_url }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+You are getting this {{ cadence }} digest because you follow people, companies, franchises and
+films on {{ product_name }}, and because films you follow have dates coming up. Change
+how often it arrives — or stop it — here:
+
+{{ settings_url }}
+
+— {{ product_name }}

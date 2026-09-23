@@ -1,0 +1,5 @@
+{% if items | length == 1 %}
+{{ items[0].title }} — {{ items[0].beat | lower }}
+{% elif items %}
+{{ items | length }} updates from your follows
+{% endif %}

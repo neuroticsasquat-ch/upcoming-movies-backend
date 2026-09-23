@@ -46,6 +46,32 @@ protection by accident — it is a `BEFORE UPDATE` trigger, so inserts write no 
 accidents do not survive a rewrite. Without the rule, admitting 3,000 films would emit tens of
 thousands of false "attached to direct" events on day one.
 
+> **Amendment — 2026-09-22 (NEU-1436).** The baseline rule has **one exception**: an entity
+> **somebody follows at the moment of the observation** (EF-4, ADR-0019 decision 4). Under the
+> entity-follow model the rule swallowed the most valuable attachment there is — somebody
+> follows a director to hear about the director's *next* film, and that film enters the
+> catalog with the director already on it, so the beat the follow was made for was the one
+> beat that never carded. On a film's first observation, every credit, production-company row
+> and collection held by a followed entity is now written as `added`; everything else on the
+> new film stays a baseline. The rows are ordinary history and card as ordinary `casting` /
+> `crew_attached` / `company_attached` / `collection_attached` events, through the same
+> quarantine, burst grouping and sanity holds, with `occurred_at` at the observation.
+>
+> Two properties make it safe. The exception is **keyed on the follow set read at the
+> observation**, the same set both sides of an ordinary diff are judged by, so a follow created
+> *after* admission finds the credit present on both sides of the next diff and fabricates
+> nothing. And it is a **separate function** (`admission_attachments` and its company
+> counterpart) rather than a branch inside the diff, so the baseline rule itself stays one
+> unconditional statement.
+>
+> The **collection case writes a synthetic `film_field_change` row** (`collection_id`,
+> `NULL → id`) from the admission path, because the accident this decision relies on cuts the
+> other way there: `film_field_change_trg` is `BEFORE UPDATE`, so a film *inserted* into a
+> followed collection writes no history for NEU-1434's reader to find. The row is
+> indistinguishable from a trigger-written one on purpose — one carding rule, not two — and
+> the coupling is the documented cost: if the trigger is ever rewritten to fire on insert, that
+> row becomes a duplicate and goes with it. See `docs/specs/NEU-1436-admission-is-an-attachment.md`.
+
 **Presentation.** `EventOut.summary` is a required `str` and every read path joins `EventSummary`,
 so an event without a summary row is invisible everywhere. A catalog-sourced event therefore
 writes a real `EventSummary` row with a **deterministic** body, produced by the event-creating
@@ -107,6 +133,22 @@ this needs no special path.
 > **forward-only**: already-carded removals (including the reported Maya Boyd 4-card chain) are
 > grandfathered, not destructively cleaned. See the spec at
 > `docs/specs/NEU-1205-dampen-credit-oscillation.md`.
+>
+> **Note — 2026-09-18 (NEU-1368).** This gate is now one half of a symmetric pair, and the
+> other half is specified in **ADR-0017** (the claim ledger), not here. D-3 there generalises
+> the dwell hold to *attachments*: an `added` row cards only once
+> `changed_at + SWEEP_CREDIT_QUARANTINE_HOURS <= now` **and** the credit is still in
+> `catalog.film_credit` under the same seed-grade role — so a TMDB edit that was reverted
+> inside the window publishes nothing at all, rather than publishing and then being corrected
+> by a `credit_removed` card. Read the two together: this gate asks whether the person came
+> *back* within the window and reads raw `film_credit_change`, while the attachment gate asks
+> whether they are *still here* and reads live state. **Consequence for this amendment's
+> transient-invariant argument:** it narrows. The window in which the latest carded event
+> disagrees with TMDB now opens only for a departure that has already been carded as an
+> attachment, because a flap's *attachment* half no longer cards either. The two settings are
+> independent and both default on (3 days, 72 hours); the attachment one additionally refuses
+> the boot when it is not under `SWEEP_EVENT_LOOKBACK_DAYS`, which this one, backstopped by
+> `scripts/backfill_credit_removals.py`, still only documents.
 
 > **Amendment — 2026-08-29 (NEU-1206).** The release-date half is refined: a subject
 > `(iso_3166_1, release_type)` can carry **multiple** `catalog.film_release_date` rows (TMDB has
@@ -186,6 +228,23 @@ this needs no special path.
 > a stale `dto.py` comment that still described the labels as rendering *beneath* the title. The
 > behaviour change is frontend-only, in `FeedDayCard`. See the spec at
 > `docs/specs/NEU-1212-feed-beat-labels-on-unconfirmed-updates.md`.
+>
+> **Amendment — 2026-09-20 (NEU-1406).** The "unconfirmed updates" heading is renamed to
+> **"Not yet reported"** on both the grouped feed and the film page. NEU-1208 chose
+> "unconfirmed" so the heading would signal uncertainty, and called it the sole veracity signal;
+> NEU-1348 then put D-9's confidence badge (`confirmed` / `unconfirmed`) on every card, and the
+> two collided — 46% of the catalog section carried a `confirmed` badge under a heading that said
+> "unconfirmed", led by release dates and production milestones. The axes are independent: the
+> heading keys on `news_backed` and answers "has a trade outlet covered this?", so it is a
+> **provenance** signal; the card's confidence badge is the **veracity** signal. The heading
+> gives the word up; the badge keeps it. A one-line explainer, once per page, names the split.
+>
+> What did **not** change: NEU-1208's structure (titles-only catalog rows, collapsed by default
+> on the feed, both sections always rendered with "None today" for an empty one, no per-card
+> "via TMDB" attribution) and NEU-1212's beat badges stand. NEU-1205's transient-invariant
+> argument still holds, for the feed's collapsed "Not yet reported" section. No backend code,
+> DTO schema, or migration change — the behaviour change is frontend-only. See the spec at
+> `docs/specs/NEU-1406-not-yet-reported-heading.md` in upcoming-movies-frontend.
 
 ## Considered alternatives
 

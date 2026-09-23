@@ -28,6 +28,14 @@ services:
       SOURCE_JUDGE_MODEL: "${SOURCE_JUDGE_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
       SUMMARY_PROVIDER: "${SUMMARY_PROVIDER:-deepinfra}"
       SUMMARY_MODEL: "${SUMMARY_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+      # `resolve` is the second stage on the Pro tier, for the same asymmetry as `cluster`:
+      # it is only asked about mentions the deterministic scorer could not separate — two
+      # people TMDB knows by one name (D-22) — and getting that wrong is an alert about
+      # somebody who was never in the story. It answers ≤10% of mentions, so the tier costs
+      # little; routed here explicitly rather than left on the code default so the whole
+      # deployment stays on one provider and one credential.
+      RESOLVE_PROVIDER: "${RESOLVE_PROVIDER:-deepinfra}"
+      RESOLVE_MODEL: "${RESOLVE_MODEL:-deepseek-ai/DeepSeek-V4-Pro}"
       # Both providers in scope are reasoning models, and reasoning tokens count against the
       # reply ceiling while staying invisible in the returned text. The batch size of 20 was
       # derived from a worst-case *Haiku* reply (config.py), so it is the number most likely to
@@ -43,6 +51,11 @@ services:
       # https://backlotter.com in the deploy environment (unset = empty string overrides the
       # code default; the fallback below prevents silent misconfiguration).
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://backlotter.com}"
+      # TMDB's image CDN, without a size segment — the base the *mail* builds absolute poster
+      # URLs from (NEU-1380), and it must agree with the frontend's VITE_TMDB_IMAGE_BASE. Here
+      # for the Coolify reason the mail block below gives: a variable absent from the file at
+      # first deploy is one somebody has to add by hand later.
+      TMDB_IMAGE_BASE: "${TMDB_IMAGE_BASE:-https://image.tmdb.org/t/p}"
       COOKIE_DOMAIN: "${COOKIE_DOMAIN}"
       COOKIE_SAMESITE: "lax"
       ENVIRONMENT: "production"
@@ -56,6 +69,16 @@ services:
       HEALTHCHECK_DAILY_URL: "${HEALTHCHECK_DAILY_URL:-}"
       HEALTHCHECK_HOURLY_URL: "${HEALTHCHECK_HOURLY_URL:-}"
       HEALTHCHECK_SWEEP_URL: "${HEALTHCHECK_SWEEP_URL:-}"
+      # The D-27 watch-provider poll runs on a fourth slot and gets a fourth check, for the
+      # reason the sweep gets its own: it is not a stage in any other chain, so a poll that
+      # stopped running would be invisible in every deadman that does exist (NEU-1374).
+      HEALTHCHECK_PROVIDERS_URL: "${HEALTHCHECK_PROVIDERS_URL:-}"
+      HEALTHCHECK_NOTIFY_URL: "${HEALTHCHECK_NOTIFY_URL:-}"
+      # The M7 digest sender runs `digest daily` and `digest weekly` on two slots, one per
+      # cadence, and each gets its own check: a healthchecks.io check has one schedule, so a
+      # daily check cannot also expect the weekly ping (D-33, NEU-1381).
+      HEALTHCHECK_DIGEST_DAILY_URL: "${HEALTHCHECK_DIGEST_DAILY_URL:-}"
+      HEALTHCHECK_DIGEST_WEEKLY_URL: "${HEALTHCHECK_DIGEST_WEEKLY_URL:-}"
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
@@ -90,6 +113,14 @@ services:
       # for the same reason as T and K — the M4 tuning ticket sets it from the discovery
       # probe, and that should be a Coolify env change rather than a redeploy. The fallback
       # repeats the code default deliberately: unset would pass an empty string and fail to boot.
+      # The age window, in days, over which a film's US theatrical governing date puts it in the
+      # watch-provider poll's scoped set (D-27). Here for the same reason as T and K: the poll's
+      # request budget and how quickly a home release is noticed are both read off these, and
+      # turning them should be a Coolify env change rather than a redeploy. The fallbacks repeat
+      # the code defaults deliberately — unset would pass an empty string and fail to boot — and
+      # are pinned to them by test (`tests/unit/test_config.py`).
+      PROVIDER_POLL_MIN_AGE_DAYS: "${PROVIDER_POLL_MIN_AGE_DAYS:-14}"
+      PROVIDER_POLL_MAX_AGE_DAYS: "${PROVIDER_POLL_MAX_AGE_DAYS:-365}"
       SWEEP_DORMANCY_DAYS: "${SWEEP_DORMANCY_DAYS:-365}"
       # How often the sweep still re-fetches a dormant film. Dormancy is not a one-way door —
       # the change that revives a project can only be seen by reading it, so this is the
@@ -99,8 +130,123 @@ services:
       # Forward-dwell gate for credit detachment carding (NEU-1205). 0 disables the gate and
       # reverts to plain NEU-1200. The fallback repeats the code default deliberately: unset
       # would pass an empty string and fail to boot. Must be < SWEEP_EVENT_LOOKBACK_DAYS so a
-      # held removal is still in the rolling window when it becomes eligible.
+      # held removal is still in the rolling window when it becomes eligible — with 48h to
+      # spare, since the dwell is only observed at a sweep pass and rounds up to the next one
+      # (NEU-1401). Unguarded at boot, unlike the quarantine: the backfill can re-read removals.
       SWEEP_CREDIT_DWELL_DAYS: "${SWEEP_CREDIT_DWELL_DAYS:-3}"
+      # The rolling window both carding phases re-read their backlog from (ADR-0014). Seeded
+      # here as of NEU-1368, which is what made it operationally load-bearing: the quarantine
+      # below is refused at boot unless it fits inside this with 48h to spare for the sweep pass
+      # that observes it, so raising the hold means raising this first — and a variable absent
+      # from the file at first deploy is one somebody has to add to Coolify by hand, per the
+      # gotcha above.
+      SWEEP_EVENT_LOOKBACK_DAYS: "${SWEEP_EVENT_LOOKBACK_DAYS:-7}"
+      # Attachment quarantine (ADR-0017, D-3, NEU-1368). The other direction of the gate
+      # above: an added credit cards only once it has survived this window and is still in
+      # `catalog.film_credit`, so a TMDB edit that was never true publishes nothing rather
+      # than publishing and needing a correction. 0 disables and reverts to immediate carding.
+      # The fallback repeats the code default deliberately: unset would pass an empty string
+      # and fail to boot. Must fit inside SWEEP_EVENT_LOOKBACK_DAYS *with room for the sweep
+      # pass that observes it* — the hold rounds up to the next pass, so the ceiling is the
+      # window in hours minus 48 (7 days = 168 → 120h), not 167h. Unlike the dwell gate that
+      # constraint is *enforced*: a value above the ceiling refuses the boot, because nothing
+      # re-reads an attachment that ages out of the window unheld (NEU-1401). Raising the hold
+      # means raising SWEEP_EVENT_LOOKBACK_DAYS first, in the same edit. The M5 spike
+      # (NEU-1372) has since read the knee off `film_credit_change`; retuning from its findings
+      # is a Coolify change rather than a redeploy.
+      SWEEP_CREDIT_QUARANTINE_HOURS: "${SWEEP_CREDIT_QUARANTINE_HOURS:-72}"
+      # Tier-A short-circuit (ADR-0017, D-5, NEU-1371): how far either direction will look to
+      # pair a trade story with a credit attachment, so a story that breaks a casting while
+      # the credit is quarantined publishes it instead of the sweep carding it again days
+      # later. Keep comfortably above SWEEP_CREDIT_QUARANTINE_HOURS; `0` disables it.
+      SWEEP_STORY_CONFIRM_DAYS: "${SWEEP_STORY_CONFIRM_DAYS:-14}"
+      # Sanity holds (ADR-0017, D-8, NEU-1370). Where quarantine asks whether an edit
+      # survived a window, these ask whether it is possible at all, and they judge the
+      # *person*: how many films one person may be attached to in a day before the whole run
+      # is held as a burst; how long after a recorded death a credit is still ordinary; and
+      # the age below which a seed-grade credit is implausible on its face. All three are
+      # re-tunable from the Coolify UI, and all three refuse a 0 — unlike the two gates above
+      # none has a coherent "off", so turning a check off is a code change. The fallbacks
+      # repeat the code defaults deliberately: unset would pass an empty string and fail to
+      # boot. 20 / 2 / 3 are placeholders set from the shape of the attacks rather than from
+      # measurement; retune once M5 has holds in prod.
+      SWEEP_SANITY_MAX_FILMS_PER_DAY: "${SWEEP_SANITY_MAX_FILMS_PER_DAY:-20}"
+      SWEEP_SANITY_POSTHUMOUS_YEARS: "${SWEEP_SANITY_POSTHUMOUS_YEARS:-2}"
+      SWEEP_SANITY_MIN_AGE_YEARS: "${SWEEP_SANITY_MIN_AGE_YEARS:-3}"
+      # Transactional mail (D-30, NEU-1338). Seeded at the code default `noop`, which records
+      # and logs every send and transmits nothing, so this lands without a Resend account and
+      # without changing what production does. Turning mail on is a Coolify change —
+      # MAIL_PROVIDER=resend plus the two below — and boot-time validation then refuses a
+      # missing key or an undeliverable MAIL_FROM rather than failing the signup that needed
+      # the mail. The lines are here *now* precisely because of the Coolify gotcha above: a
+      # `${NAME:-default}` is read once and stored as a UI entry, so a variable that does not
+      # exist in the file when the app is first deployed is one somebody has to add by hand.
+      MAIL_PROVIDER: "${MAIL_PROVIDER:-noop}"
+      MAIL_FROM: "${MAIL_FROM:-}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      # Web Push (D-36, NEU-1387). All three seeded **empty**, like TURNSTILE_SECRET below and
+      # unlike the tuned constants above: without them `/me/push` answers `push_unavailable`
+      # and nobody can subscribe, which is the right state for a deployment that has not
+      # generated a keypair yet. Generate one *once* per deployment, in the container:
+      # `vapid --gen` writes `private_key.pem` / `public_key.pem`, and `vapid
+      # --applicationServerKey` prints the base64url public key the browser subscribes with —
+      # that string is VAPID_PUBLIC_KEY, and VAPID_PRIVATE_KEY is the matching base64url
+      # private key (`pywebpush` also accepts a path to the PEM, which a container that
+      # redeploys from an image does not have). Changing either afterwards invalidates every
+      # subscription taken out under the old pair, so this is not a value to rotate casually.
+      # VAPID_SUBJECT is a `mailto:` or `https:` URL a push service can use to reach whoever
+      # runs this deployment. Once a browser has registered, the `notify` slot refuses to
+      # start without all three (`pipeline_run.assert_push_sendable`) — the lines are here now
+      # for the Coolify gotcha above.
+      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY:-}"
+      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY:-}"
+      VAPID_SUBJECT: "${VAPID_SUBJECT:-}"
+      # Email verification (NEU-1339). Both repeat the code default rather than being left
+      # out, for the Coolify reason above: a variable absent from the file at first deploy is
+      # one somebody has to add by hand later, and these are the two a non-production
+      # environment most wants to change — PRODUCT_NAME so its mail does not claim to be the
+      # live product, and the TTL, which is also the number the mail copy quotes.
+      PRODUCT_NAME: "${PRODUCT_NAME:-Backlotter}"
+      VERIFY_TOKEN_TTL_HOURS: "${VERIFY_TOKEN_TTL_HOURS:-24}"
+      # Password reset (NEU-1340), here for the same reason and deliberately the shorter
+      # window: this link sets the password and drops every session.
+      RESET_TOKEN_TTL_HOURS: "${RESET_TOKEN_TTL_HOURS:-1}"
+      # Email change (NEU-1341), the same short window and for the same reason: spending this
+      # link moves the address the account signs in and recovers with.
+      EMAIL_CHANGE_TOKEN_TTL_HOURS: "${EMAIL_CHANGE_TOKEN_TTL_HOURS:-1}"
+      # Open signup (D-18, NEU-1343). Cloudflare Turnstile's secret key, and the switch that
+      # puts the invite requirement back. The secret is seeded **empty** on purpose, unlike
+      # every other line here: an unset value refuses signups rather than taking unverified
+      # ones, so the window between this landing and the real key going into the Coolify UI
+      # (spec §7) costs signups instead of quietly admitting scripts. The line is present for
+      # the Coolify gotcha above — a variable absent from the file at first deploy is one
+      # somebody has to add by hand.
+      TURNSTILE_SECRET: "${TURNSTILE_SECRET:-}"
+      SIGNUP_OPEN: "${SIGNUP_OPEN:-true}"
+      # Per-IP rate limiting (D-19, NEU-1344). Every bucket is listed even though the code
+      # carries the same defaults, for the Coolify gotcha above: a variable absent at first
+      # deploy is one somebody has to add by hand later, and two of these are the knobs an
+      # incident is answered with. The strings are `"<capacity>/<refill_per_minute>"`; a
+      # malformed one fails the container at boot rather than the route at its first caller.
+      RATE_LIMIT_ENABLED: "${RATE_LIMIT_ENABLED:-true}"
+      # **Ships false, and this is the rollout order** (spec §5): deploy this, then set
+      # SSR_ORIGIN_SECRET here and as a Wrangler secret and deploy the frontend sibling
+      # (NEU-1389), and only then flip this to true in the Coolify UI and restart. Flipped
+      # before the Worker signs its requests, it throttles the entire server-rendered site
+      # through a handful of Cloudflare egress IPs.
+      RATE_LIMIT_PUBLIC_ENABLED: "${RATE_LIMIT_PUBLIC_ENABLED:-false}"
+      RATE_LIMIT_SIGNUP: "${RATE_LIMIT_SIGNUP:-5/0.083}"
+      RATE_LIMIT_LOGIN: "${RATE_LIMIT_LOGIN:-20/1.33}"
+      RATE_LIMIT_AUTH_REQUEST: "${RATE_LIMIT_AUTH_REQUEST:-5/0.083}"
+      RATE_LIMIT_IMPORT: "${RATE_LIMIT_IMPORT:-6/0.1}"
+      RATE_LIMIT_PUBLIC: "${RATE_LIMIT_PUBLIC:-240/120}"
+      RATE_LIMIT_ICS: "${RATE_LIMIT_ICS:-30/30}"
+      # The secret the SSR Worker signs its API calls with, so it can name the visitor it is
+      # rendering for instead of being metered as one caller. Seeded **empty**, like
+      # TURNSTILE_SECRET above: unset means the signature header is ignored, never that a
+      # signed request is refused, so this deploying ahead of the Worker costs nothing. Must
+      # match the Wrangler secret of the same name exactly.
+      SSR_ORIGIN_SECRET: "${SSR_ORIGIN_SECRET:-}"
       # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
       # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"

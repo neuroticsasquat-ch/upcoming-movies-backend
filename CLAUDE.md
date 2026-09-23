@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Linear
+
+`linear_initiative: backlotter`
+`linear_team: Neuroticsasquatch`
+`linear_repos: upcoming-movies-frontend`
+
 ## Companion docs — read before working
 
 - **`AGENTS.md`** — operating rules, production/deploy flow, gotchas. Authoritative on process.
@@ -29,6 +35,7 @@ up edits; changes to `pyproject.toml` require `task build`.
 | Lint / format / typecheck | `task lint` / `task format` / `task typecheck` |
 | Coverage (HTML in `./htmlcov`) | `task coverage` |
 | Migrate / new migration | `task migrate` / `task makemigration -- "message"` |
+| Release notes for a tag (host) | `task release-notes -- v0.4.1` |
 | Create local DBs | `task db:init` |
 | Refresh local content from prod | `task db:refresh` |
 
@@ -43,19 +50,29 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
 
 - **`upmovies.main:app`** — the HTTP service. `create_app()` mounts routers; `lifespan` calls
   `validate_stage_configuration(settings)` (a stage routed at an unpriced/uncredentialed
-  `(provider, model)` kills the container at boot, not mid-publish) and cancels runs orphaned by a crash.
-- **`python -m upmovies.pipeline_run {daily|hourly|sweep}`** — the Coolify scheduled tasks, a
-  *separate process* that re-runs the same startup validation. `daily` = tmdb → feeds(per-film) →
+  `(provider, model)` kills the container at boot, not mid-publish),
+  `validate_mail_configuration(settings)` and `validate_rate_limit_configuration(settings)`,
+  cancels runs orphaned by a crash, and opens the one process-wide `MailGateway` that
+  `deps.get_mailer` hands to routes.
+- **`python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify|digest {daily|weekly}}`**
+  — the Coolify scheduled tasks, a *separate process* that re-runs the stage and mail validation
+  (not the rate-limit one — it serves no HTTP). `daily` = tmdb → feeds(per-film) →
   link → synthesize, sequential and fail-fast; `hourly` = light feeds pass; `sweep` runs on its own
-  slot ~2h ahead of daily and is deliberately **not** in the daily chain (ADR-0013). Each pings a
-  healthchecks.io deadman (`/start`, base, `/fail`).
+  slot ~2h ahead of daily and is deliberately **not** in the daily chain (ADR-0013); `providers`
+  is the D-27 watch-provider poll, on a fourth slot for the same reasons; `notify` is M7's
+  decision pass (D-31) *and* the alert send that follows it in the same run, scheduled after the
+  daily chain because it reads what that chain published; `digest {daily|weekly}` mails each
+  user on that cadence the digest rows `notify` queued, weekly with the "your slate" section
+  (D-33), on one slot per cadence after `notify`. Each pings a healthchecks.io deadman
+  (`/start`, base, `/fail`).
 
 ### Layout (`src/upmovies/`)
 
 `app/` auth & accounts (models/repos/services) · `catalog/` Film/TMDB spine · `news/` stories, feeds,
 events · `ingest/` run tracking + TMDB ingest + `sweep/` · `link/` story→film linking, `retrieval/`,
 clustering, source gate · `synthesize/` event summarization · `llm/` gateway + provider adapters +
-pricing · `public/` read models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
+pricing · `mail/` transactional mail: gateway + Resend adapter + Jinja templates · `public/` read
+models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
 
 ### Cross-cutting patterns
 
@@ -65,12 +82,20 @@ pricing · `public/` read models for feed/film/calendar/sitemap · `routers/` Fa
   scripts. **Register new model modules there.**
 - **Postgres schemas:** `app`, `catalog`, `news`, `ingest`. Tests build them with `create_all`; prod
   uses Alembic. Add the model column first (tests pick it up immediately), then generate and review
-  the migration.
+  the migration. The suite proves the two agree: `tests/integration/test_migrations.py` builds a
+  scratch DB with `alembic upgrade head`, diffs its columns/constraints/indexes against the
+  `create_all` schema (by name and definition, so a hand-named constraint in a migration needs the
+  same `name=` in the model), and round-trips the head revision.
 - **Pipelines** take `(session_factory, run_id, …)`, commit per item, and always finalize their run —
   `failed` on crash — because `routers/ingest_admin.py` reuses the same runners.
-- **LLM gateway** resolves a provider per *stage* (link, cluster, summarize, source_judge), never per
-  model, and **never falls back** — answering one stage from another provider would misattribute cost
-  and latency.
+- **LLM gateway** resolves a provider per *stage* (link, cluster, summarize, source_judge, resolve),
+  never per model, and **never falls back** — answering one stage from another provider would
+  misattribute cost and latency. The set is closed: `ingest.llm_call` and `ingest.run_llm_usage`
+  check-constrain `stage` to the same list, so a new stage needs a migration too.
+- **Rate limiting** is one dependency, `Depends(rate_limit("<bucket>"))` (`app/rate_limit.py`):
+  per-IP token buckets, in-process, keyed on `request.client.host` — which is the real caller only
+  because both CMDs pass `--proxy-headers`. A request signed with `SSR_ORIGIN_SECRET` names its
+  visitor instead. `RATE_LIMIT_ENABLED=false` bypasses everything, which is how the suite runs.
 - **Admin auth is two things:** `require_admin` (bearer `ADMIN_TOKEN`, machine-facing) vs
   `require_current_admin` (session cookie + `is_admin`, human-facing UI). `require_csrf` guards
   cookie-authed mutations.
@@ -90,7 +115,15 @@ pricing · `public/` read models for feed/film/calendar/sitemap · `routers/` Fa
 
 - Type hints use `X | None` / `X | Y` — no `Optional`/`Union`, no `from __future__ import annotations`.
 - Ruff: line length 100, rules `E,F,W,I,B,UP`. Use `import x as x` re-exports in `__init__.py`.
-- Commits and PR titles: Conventional Commits with a trailing Linear ID — `feat: add X (NEU-123)`.
+- Commits and PR titles: Conventional Commits with a **scope** and a trailing Linear ID —
+  `feat(auth): add X (NEU-123)`. The scope is the component (`auth`, `mail`, `retrieval`, `feed`,
+  …), not the Linear project, and it is load-bearing rather than decorative: `cliff.toml` groups
+  `RELEASE_NOTES.md` by scope, so a scopeless commit lands under a catch-all "General" heading.
   Branch per ticket using Linear's generated name.
+- Release notes: tag the release, then `task release-notes -- v0.4.1`. git-cliff renders only
+  user-facing types (`feat`/`fix`/`perf`/`revert`) and **prepends** the new section —
+  `RELEASE_NOTES.md` accumulates per-release chunks and is never rebuilt wholesale. This is the
+  one task that runs on the host rather than in the container, because git-cliff reads git
+  history and tags; don't call `git-cliff` directly.
 - The frontend is a sibling repo at `../frontend`; read its `AGENTS.md` before
   touching it.

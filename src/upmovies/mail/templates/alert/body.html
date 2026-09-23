@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#f6f6f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1a1a1a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:8px;">
+      <tr>
+        <td style="padding:32px;">
+          <p style="margin:0 0 16px;font-size:16px;">
+            Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+          </p>
+          <p style="margin:0 0 24px;font-size:16px;line-height:1.5;">
+            {% if items | length == 1 %}
+            Something moved on a film you are watching.
+            {% else %}
+            {{ items | length }} films you follow moved.
+            {% endif %}
+          </p>
+          {% for item in items %}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+            <tr>
+              {% if item.poster_url %}
+              <td width="92" valign="top" style="padding:0 16px 0 0;">
+                <a href="{{ item.film_url }}"><img src="{{ item.poster_url }}" width="92" alt="" style="display:block;width:92px;height:auto;border:0;border-radius:4px;"></a>
+              </td>
+              {% endif %}
+              <td valign="top">
+                <p style="margin:0 0 4px;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#777777;">{{ item.beat }}</p>
+                <p style="margin:0 0 8px;font-size:17px;font-weight:600;line-height:1.3;">
+                  <a href="{{ item.film_url }}" style="color:#1a1a1a;text-decoration:none;">{{ item.title }}</a>
+                </p>
+                <p style="margin:0 0 8px;font-size:15px;line-height:1.5;">{{ item.summary }}</p>
+                <p style="margin:0;font-size:14px;">
+                  <a href="{{ item.film_url }}" style="color:#1a56db;">See the film page</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+          {% endfor %}
+          <p style="margin:0;font-size:14px;line-height:1.5;color:#555555;">
+            You are getting this because you follow these films on {{ product_name }}.
+            <a href="{{ settings_url }}" style="color:#1a56db;">Choose which films and which
+            updates you hear about</a> — or stop them altogether.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

@@ -813,7 +813,7 @@ async def test_feed_grouped_within_day_tiebreak_created_at_then_id(client, make_
 
 
 async def test_feed_grouped_film_row_order_unchanged(client, make_film, add_event):
-    """(film, day) rows still order by day.desc(), title.asc(), slug.asc()."""
+    """(film, day) rows of equal significance still order by day.desc(), title.asc()."""
     z = await make_film(slug="zzz-last", title="Zzz Film")
     a = await make_film(slug="aaa-first", title="Aaa Film")
     day = datetime(2026, 6, 1, tzinfo=UTC)
@@ -822,6 +822,64 @@ async def test_feed_grouped_film_row_order_unchanged(client, make_film, add_even
 
     items = (await client.get("/feed/grouped")).json()["items"]
     assert [i["film_ref"] for i in items] == [ref(a), ref(z)]
+
+
+# NEU-1369 — intra-day ordering by significance (D-7). The day axis is untouched; within a
+# day the bigger beat leads, and title only breaks ties between equal beats.
+
+
+async def test_feed_grouped_within_day_orders_by_significance_then_title(
+    client, make_film, add_event
+):
+    """A trailer outranks a casting beat outranks an announcement, whatever the titles say —
+    the same `_EVENT_STAGE` ranking the film arc and `top_event_type` already use."""
+    announced = await make_film(slug="aaa-announced", title="Aaa Announced")
+    cast = await make_film(slug="mmm-cast", title="Mmm Cast")
+    trailer = await make_film(slug="zzz-trailer", title="Zzz Trailer")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(film=announced, event_type="announced", summary="a", created_at=day)
+    await add_event(film=cast, event_type="casting", summary="c", created_at=day)
+    await add_event(film=trailer, event_type="trailer", summary="t", created_at=day)
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(trailer), ref(cast), ref(announced)]
+    assert [i["top_event_type"] for i in items] == ["trailer", "casting", "announced"]
+
+
+async def test_feed_grouped_equal_significance_still_orders_by_title(client, make_film, add_event):
+    """Significance ranks first, but it is not a tiebreak of its own: two casting beats on
+    one day fall back to the title order the rows arrived in."""
+    z = await make_film(slug="zzz-film", title="Zzz Film")
+    a = await make_film(slug="aaa-film", title="Aaa Film")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    await add_event(film=z, event_type="casting", summary="z", created_at=day)
+    await add_event(film=a, event_type="casting", summary="a", created_at=day)
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(a), ref(z)]
+
+
+async def test_feed_grouped_significance_never_reorders_the_day_axis(client, make_film, add_event):
+    """The day axis is the publication log and D-7 does not touch it: yesterday's trailer
+    still sits under yesterday's heading, below today's announcement."""
+    today_small = await make_film(slug="today-announced", title="Today Announced")
+    yesterday_big = await make_film(slug="yesterday-trailer", title="Yesterday Trailer")
+    await add_event(
+        film=today_small,
+        event_type="announced",
+        summary="a",
+        created_at=datetime(2026, 6, 2, tzinfo=UTC),
+    )
+    await add_event(
+        film=yesterday_big,
+        event_type="trailer",
+        summary="t",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+    items = (await client.get("/feed/grouped")).json()["items"]
+    assert [i["day"] for i in items] == ["2026-06-02", "2026-06-01"]
+    assert [i["film_ref"] for i in items] == [ref(today_small), ref(yesterday_big)]
 
 
 # ---------------------------------------------------------------------------
@@ -938,3 +996,86 @@ async def test_grouped_parenthetical_lookups_are_batched_per_page(
     assert len(body["items"]) == 3
     assert counts["country"] == 1
     assert counts["credit"] == 1  # the director lookup, batched over the page's film ids
+
+
+# NEU-1346 — the grouped feed ships the same claim-ledger fields as the film page, so a
+# superseded card renders marked and in place rather than disappearing (D-2).
+async def test_grouped_events_carry_status_superseded_by_and_occurred_at(
+    client, make_film, add_event
+):
+    film = await make_film(slug="superseded-2026")
+    day = datetime(2026, 6, 1, tzinfo=UTC)
+    removal = await add_event(
+        film=film,
+        event_type="credit_removed",
+        summary="No longer directing.",
+        created_at=day,
+        occurred_at=datetime(2026, 5, 2, tzinfo=UTC),
+        sources=({"url": "https://variety.com/removal"},),
+    )
+    await add_event(
+        film=film,
+        event_type="crew_attached",
+        summary="Directing.",
+        created_at=day,
+        occurred_at=datetime(2026, 5, 1, tzinfo=UTC),
+        status="superseded",
+        superseded_by=removal.id,
+        sources=({"url": "https://variety.com/attachment"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+    events = {e["event_type"]: e for e in item["events"]}
+
+    attachment = events["crew_attached"]
+    assert attachment["status"] == "superseded"
+    assert attachment["superseded_by"] == str(removal.id)
+    assert attachment["occurred_at"] == "2026-05-01T00:00:00Z"
+
+    assert events["credit_removed"]["status"] == "published"
+    assert events["credit_removed"]["superseded_by"] is None
+
+
+async def test_a_news_backed_trailer_row_carries_the_video_key(client, make_film, add_event):
+    """The grouped feed builds its events through a second `EventOut` call site, so the key
+    has to be read there too (D-35).
+
+    Through a *news-backed* row because that is the only kind that ships event bodies at all:
+    a TMDB row is section titles only (NEU-1208), so the poll's own card reaches a reader with
+    a `video_key` on the film page rather than here. The row is news-backed as soon as a trade
+    story clusters onto the card the poll raised, which leaves it `provenance='catalog'` — the
+    event was still *born* from the video — and that is the shape pinned here.
+    """
+    film = await make_film(slug="trailer-row-2026", title="A Film")
+    await add_event(
+        film=film,
+        event_type="trailer",
+        provenance="catalog",
+        subject_key=["youtube:abc123"],
+        summary="A new trailer is out.",
+        created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/trailer"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+
+    assert item["news_backed"] is True
+    assert [e["video_key"] for e in item["events"]] == ["abc123"]
+
+
+async def test_a_news_backed_card_that_is_not_a_trailer_has_no_video_key(
+    client, make_film, add_event
+):
+    film = await make_film(slug="casting-row-2026", title="A Film")
+    await add_event(
+        film=film,
+        event_type="casting",
+        subject_key=["Gal Gadot"],
+        summary="Casting announced.",
+        created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),
+        sources=({"url": "https://deadline.com/casting"},),
+    )
+
+    item = (await client.get("/feed/grouped")).json()["items"][0]
+
+    assert [e["video_key"] for e in item["events"]] == [None]

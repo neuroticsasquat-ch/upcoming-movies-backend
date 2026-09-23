@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -133,3 +134,77 @@ async def test_event_accepts_crew_attached(session):
         )
     )
     await session.commit()
+
+
+# NEU-1346 — the event table is the claim ledger (ADR-0017): a card a later correction
+# supersedes is marked, never deleted (D-1, D-2).
+async def test_event_status_defaults_to_published(session):
+    film, _ = await _film_and_story(session)
+    event = Event(
+        film_id=film.id, event_type="casting", confidence="confirmed", occurred_at=datetime.now(UTC)
+    )
+    session.add(event)
+    await session.commit()
+    await session.refresh(event)
+    assert event.status == "published"
+    assert event.superseded_by is None
+
+
+async def test_event_rejects_bad_status(session):
+    film, _ = await _film_and_story(session)
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="casting",
+            confidence="confirmed",
+            occurred_at=datetime.now(UTC),
+            status="withdrawn",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+async def test_superseded_by_points_at_the_correcting_event(session):
+    film, _ = await _film_and_story(session)
+    attachment = Event(
+        film_id=film.id,
+        event_type="crew_attached",
+        confidence="confirmed",
+        occurred_at=datetime.now(UTC),
+    )
+    session.add(attachment)
+    await session.flush()
+    removal = Event(
+        film_id=film.id,
+        event_type="credit_removed",
+        confidence="confirmed",
+        occurred_at=datetime.now(UTC),
+    )
+    session.add(removal)
+    await session.flush()
+
+    attachment.status = "superseded"
+    attachment.superseded_by = removal.id
+    await session.commit()
+
+    session.expunge_all()
+    stored = await session.get(Event, attachment.id)
+    assert stored is not None
+    assert stored.status == "superseded"
+    assert stored.superseded_by == removal.id
+
+
+async def test_superseded_by_rejects_an_unknown_event(session):
+    film, _ = await _film_and_story(session)
+    session.add(
+        Event(
+            film_id=film.id,
+            event_type="casting",
+            confidence="confirmed",
+            occurred_at=datetime.now(UTC),
+            superseded_by=uuid4(),
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()

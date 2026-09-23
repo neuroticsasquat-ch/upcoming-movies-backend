@@ -1,13 +1,14 @@
 import unicodedata
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    CTE,
     ColumnElement,
     Date,
-    any_,
+    Select,
     case,
     cast,
     distinct,
@@ -16,33 +17,63 @@ from sqlalchemy import (
     nulls_last,
     or_,
     select,
+    tuple_,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.dto import headline_release_out
+from upmovies.app.entitlements import entitled_user_clause
+from upmovies.app.follow_queries import (
+    entity_attachment_event_ids,
+    entity_event_ids,
+    title_follow_film_ids,
+)
+from upmovies.app.models import User, UserSettings
+from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
+    MONETIZATION_TYPES,
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmAvailabilityCurrent,
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
     FilmProductionCountry,
     FilmReleaseDate,
+    FilmReleaseDateChange,
     Genre,
     Person,
     ProductionCompany,
     ProductionCountry,
+    WatchProvider,
 )
-from upmovies.catalog.ref import film_ref, parse_film_ref
+from upmovies.catalog.queries import alert_window_clause, in_play_clause
+from upmovies.catalog.ref import (
+    collection_ref,
+    company_ref,
+    film_ref,
+    parse_collection_ref,
+    parse_company_ref,
+    parse_film_ref,
+    parse_person_ref,
+    person_ref,
+)
 from upmovies.catalog.release_grade import (
     PRIMARY_REGION,
     RELEASE_TYPE_BUCKETS,
     displayable_regions,
+    is_displayable_release,
 )
+from upmovies.catalog.seed_grade import DIRECTOR_JOB, is_seed_grade
+from upmovies.config import get_settings
+from upmovies.news.catalog_events import video_key_of
 from upmovies.news.models import Event, EventStory, EventSummary, Story
-from upmovies.news.visibility import visible_events
+from upmovies.news.visibility import feed_visible, region_visible, visible_events
+from upmovies.pagination import decode_cursor, encode_cursor
 from upmovies.public.arc import (
     derive_arc_stage,
+    event_stage_rank,
     most_significant_event_type,
     ordered_event_types,
 )
@@ -51,9 +82,17 @@ from upmovies.public.dto import (
     CalendarItem,
     CalendarResponse,
     CastMemberOut,
+    CollectionDetailResponse,
     CollectionOut,
+    CollectionSearchItem,
+    CollectionSearchResponse,
+    CompanyDetailResponse,
+    CompanyOut,
+    CompanySearchItem,
+    CompanySearchResponse,
     CrewMemberOut,
     DayGroup,
+    EntityEventsResponse,
     EventOut,
     FeedDayItem,
     FeedDayResponse,
@@ -62,15 +101,46 @@ from upmovies.public.dto import (
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
+    FilmRowOut,
+    PersonCreditOut,
+    PersonDetailResponse,
+    PersonFilmOut,
+    PersonSearchItem,
+    PersonSearchResponse,
+    PopularPeopleResponse,
+    ProviderOut,
     ReleaseDateOut,
     SourceOut,
+    WhereToWatchOut,
 )
+from upmovies.public.ical import CalendarFeedEvent
 from upmovies.public.release import release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 MIN_QUERY_LEN = 2
 
 CALENDAR_REGION = "US"  # single governing region for v1
+
+ICAL_PAST_WINDOW_DAYS = 365
+"""How far back `get_ical_feed` publishes. Not a setting: it is a property of what a calendar is
+for, not an operational knob, and a deploy that shortened it would silently delete events from
+every subscriber's calendar."""
+
+# Significance order for two calendar rows sharing a date: the theatrical arc first (a wide
+# opening is the bigger beat than a limited one), then the home release in the order it
+# happens. Ordering only — which types are *on* the calendar is `RELEASE_TYPE_BUCKETS`.
+_CALENDAR_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical")
+
+# A bucket nobody ranked sorts last rather than raising at import: a new displayable type is a
+# cosmetic ordering question, not a reason for the container to refuse to boot.
+_CALENDAR_TYPE_RANK: dict[int, int] = {
+    release_type: (
+        _CALENDAR_BUCKET_ORDER.index(bucket)
+        if bucket in _CALENDAR_BUCKET_ORDER
+        else len(_CALENDAR_BUCKET_ORDER)
+    )
+    for release_type, bucket in RELEASE_TYPE_BUCKETS.items()
+}
 
 _CREW_DEPARTMENT_ORDER = (
     "Directing",
@@ -109,18 +179,6 @@ def _natural_title_col() -> ColumnElement[str]:
     before 'The Batman' as 'Batman' vs 'Batman' — the second word decides."""
     title = func.lower(Film.title)
     return func.regexp_replace(title, r"^(a|an|the)\s+", "", "i")
-
-
-def _region_visible() -> ColumnElement[bool]:
-    """SQL predicate: a release_date event reaches the public surface only when its region is
-    global (NULL) or in the film's primary set — US plus the film's origin countries. Other
-    event types are never region-filtered. Requires Film to be present in the query (NEU-446)."""
-    return or_(
-        Event.event_type != "release_date",
-        Event.region.is_(None),
-        Event.region == PRIMARY_REGION,
-        Event.region == any_(Film.origin_country),
-    )
 
 
 def _has_story() -> ColumnElement[bool]:
@@ -259,18 +317,9 @@ def _title_match(nq: str) -> ColumnElement[bool]:
 async def get_film_search(
     session: AsyncSession, *, q: str, limit: int, offset: int
 ) -> FilmIndexResponse:
-    term = q.strip()
-    # Gate on alphanumeric count, not raw length: require at least MIN_QUERY_LEN
-    # alphanumeric characters. One check short-circuits blank/whitespace, single-
-    # character, and all-punctuation queries (e.g. "", "a", "%", "_", "--") to an
-    # empty page instead of running an unbounded %term% scan. This also gates the
-    # wildcard-literal path: "%"/"_" have zero alphanumerics, so they return empty
-    # here -- _escape_like / the wildcard-literal tests only exercise escaping for
-    # queries that clear this gate (e.g. "50%", which has two alphanumerics).
-    alphanumeric_len = sum(1 for c in term if c.isalnum())
-    if alphanumeric_len < MIN_QUERY_LEN:
+    nq = _searchable_query(q)
+    if nq is None:
         return FilmIndexResponse(items=[], total=0, limit=limit, offset=offset)
-    nq = _normalize_query(term)
     # Search spans the whole catalog: any slugged film whose title matches, regardless of
     # whether it has news events yet or is upcoming. This is deliberately broader than the
     # /films index and /feed, which gate on a visible, summarized event. The slug guard stays
@@ -298,6 +347,646 @@ async def get_film_search(
     )
     items = _film_index_items(list(films))
     return FilmIndexResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+def _searchable_query(q: str) -> str | None:
+    """The folded query, or None when it is too short to search on.
+
+    Gates on alphanumeric count, not raw length: at least MIN_QUERY_LEN alphanumeric
+    characters. One check short-circuits blank, single-character and all-punctuation
+    queries ("", "a", "%", "--") to an empty page instead of an unbounded %term% scan. It
+    also closes the wildcard path: "%" and "_" carry no alphanumerics, and what survives the
+    fold is alphanumeric only, so no LIKE metacharacter ever reaches the database.
+    """
+    term = q.strip()
+    if sum(1 for c in term if c.isalnum()) < MIN_QUERY_LEN:
+        return None
+    return _normalize_query(term)
+
+
+def _name_match(nq: str, *cols: Any) -> ColumnElement[bool]:
+    """Fold each column the way `_normalize_query` folded the query and substring-match."""
+    pattern = f"%{nq}%"
+    return or_(*(_normalized_col(col).like(pattern) for col in cols))
+
+
+# A person TMDB has since deleted (`tmdb_missing_at` set) is not a follow target: nothing
+# will ever be ingested against them again, so a follow would be a dead row from day one.
+_LIVE_PERSON = Person.tmdb_missing_at.is_(None)
+
+
+def _person_search_items(people: list[Person]) -> list[PersonSearchItem]:
+    return [
+        PersonSearchItem(
+            id=p.id,
+            name=p.name,
+            known_for_department=p.known_for_department,
+            profile_path=p.profile_path,
+        )
+        for p in people
+    ]
+
+
+async def get_person_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> PersonSearchResponse:
+    """Search `catalog.person` by name / original_name (folded substring), most popular first.
+
+    Popularity is TMDB's score, refreshed on every film ingest that credits the person; a
+    NULL score sorts last so a stub row never outranks a scored one on a tie.
+    """
+    nq = _searchable_query(q)
+    if nq is None:
+        return PersonSearchResponse(items=[], total=0, limit=limit, offset=offset)
+    where = (_LIVE_PERSON, _name_match(nq, Person.name, Person.original_name))
+    total = await session.scalar(select(func.count()).select_from(Person).where(*where))
+    people = (
+        (
+            await session.execute(
+                select(Person)
+                .where(*where)
+                .order_by(nulls_last(Person.popularity.desc()), Person.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return PersonSearchResponse(
+        items=_person_search_items(list(people)), total=total or 0, limit=limit, offset=offset
+    )
+
+
+async def get_popular_people(session: AsyncSession, *, limit: int) -> PopularPeopleResponse:
+    """The onboarding grid (D-17): the most popular people who have a profile photo.
+
+    A faceless tile is useless on a wall of faces, and a person with no popularity score has
+    no claim to being "popular", so both are required rather than sorted to the end.
+    """
+    people = (
+        (
+            await session.execute(
+                select(Person)
+                .where(
+                    _LIVE_PERSON,
+                    Person.profile_path.is_not(None),
+                    Person.popularity.is_not(None),
+                )
+                .order_by(Person.popularity.desc(), Person.id.asc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return PopularPeopleResponse(items=_person_search_items(list(people)), limit=limit)
+
+
+def _film_row_out(film: Film, headline: HeadlineRelease | None) -> FilmRowOut:
+    """One film cited on an entity page (person, studio or franchise). One function because it
+    is one row — a studio page and a person page disagreeing about a film's date would be the
+    exact bug `FilmRowOut` exists to prevent."""
+    return FilmRowOut(
+        ref=film_ref(film.tmdb_id, film.title),
+        id=film.id,
+        tmdb_id=film.tmdb_id,
+        slug=film.slug,
+        title=film.title,
+        poster_path=film.poster_path,
+        headline_release=headline_release_out(headline),
+    )
+
+
+def _film_row_order_key(row: FilmRowOut, *, sign: int) -> tuple[bool, float, str]:
+    """The order every entity page's two lists run in.
+
+    Sorted in Python rather than in SQL: the headline release is two statements of its own
+    (`catalog.headline_release`), so the dates are only in hand once the films are. Undated
+    films sort last in both lists — the `is None` term leads the key — because a film with no
+    displayable date is the least certain thing on the page whichever direction the dates run.
+    `sign` flips the date alone (`-1` for `recent`, newest first), so the title tiebreak stays
+    alphabetical in both.
+    """
+    return (
+        row.headline_release is None,
+        sign * (row.headline_release.date.toordinal() if row.headline_release else 0),
+        row.title,
+    )
+
+
+def _person_film_out(
+    film: Film, credits: list[PersonCreditOut], headline: HeadlineRelease | None
+) -> PersonFilmOut:
+    """One row of a person page. Every credit on it is one a follow delivers (EF-2), so the row
+    has nothing left to qualify itself with."""
+    return PersonFilmOut(film=_film_row_out(film, headline), credits=credits)
+
+
+_UNBILLED = 1_000_000
+"""Where a credit with no billing position sorts: after every billed one.
+
+A sentinel rather than `None` because the sort key is a tuple and `None` does not compare
+against an `int`. Crew rows and the long tail of a cast list both arrive without an `order`."""
+
+
+async def get_person_detail(session: AsyncSession, ref: str) -> PersonDetailResponse | None:
+    """A person's page (D-1416.6), or None for an unknown or tombstoned person.
+
+    **Two lists, and between them exactly what a follow can reach.** `upcoming` is the in-play
+    set (`in_play_clause`, the D-11 timeline's bound) and `recent` is the alert window
+    (`alert_window_clause`, D-46) less the in-play set, so every film is in one or the other
+    and never both. Nothing older is returned at all: the page's job is to show what following
+    this person would deliver, and a filmography stretching back thirty years answers a
+    different question — one `/films/search` already answers.
+
+    **Tombstoned people 404 rather than rendering empty.** `tmdb_missing_at` means TMDB has
+    deleted the person; they are not a follow target anywhere else (`_LIVE_PERSON`, used by
+    search and the onboarding grid), so a page offering a follow button for one would offer a
+    row that is dead from the moment it is written.
+
+    **Every credit is listed, and every one of them is reached by a follow** (EF-2). The tier
+    badge D-48 hung on each row is gone with the tier itself: the page's answer to "what would
+    following them deliver?" is now the list, unqualified.
+    """
+    person_id = parse_person_ref(ref)
+    if person_id is None:
+        return None
+    person = (
+        await session.execute(select(Person).where(Person.id == person_id, _LIVE_PERSON))
+    ).scalar_one_or_none()
+    if person is None:
+        return None
+
+    settings = get_settings()
+    today = datetime.now(UTC).date()
+    in_play = in_play_clause(today=today, excluded_statuses=settings.tmdb_excluded_statuses)
+    window = alert_window_clause(today=today, max_age_days=settings.provider_poll_max_age_days)
+    rows = (
+        await session.execute(
+            select(
+                Film,
+                FilmCredit.credit_type,
+                FilmCredit.job,
+                FilmCredit.character,
+                FilmCredit.credit_order,
+                in_play.label("in_play"),
+            )
+            .join(FilmCredit, FilmCredit.film_id == Film.id)
+            .where(FilmCredit.person_id == person.id, or_(in_play, window))
+        )
+    ).all()
+
+    films: dict[UUID, Film] = {}
+    credits: dict[UUID, list[PersonCreditOut]] = {}
+    upcoming_ids: set[UUID] = set()
+    for row in rows:
+        film = row[0]
+        films[film.id] = film
+        credits.setdefault(film.id, []).append(
+            PersonCreditOut(
+                credit_type=row.credit_type,
+                job=row.job,
+                character=row.character,
+                credit_order=row.credit_order,
+            )
+        )
+        if row.in_play:
+            upcoming_ids.add(film.id)
+    headlines = await headline_releases(session, list(films), today=today)
+
+    def rows_for(film_ids: set[UUID], *, descending: bool) -> list[PersonFilmOut]:
+        items = [
+            _person_film_out(films[fid], _ordered_credits(credits[fid]), headlines.get(fid))
+            for fid in film_ids
+        ]
+        sign = -1 if descending else 1
+        return sorted(items, key=lambda i: _film_row_order_key(i.film, sign=sign))
+
+    return PersonDetailResponse(
+        ref=person_ref(person.id, person.name),
+        id=person.id,
+        name=person.name,
+        profile_path=person.profile_path,
+        known_for_department=person.known_for_department,
+        birthday=person.birthday,
+        deathday=person.deathday,
+        upcoming=rows_for(upcoming_ids, descending=False),
+        recent=rows_for(set(films) - upcoming_ids, descending=True),
+    )
+
+
+def _ordered_credits(credits: list[PersonCreditOut]) -> list[PersonCreditOut]:
+    """A film's credits, director first, then the rest of seed grade, then everything else —
+    and within each, billing before job. So "Director · Writer" reads in that order and two
+    renderings of the same row cannot differ.
+
+    **A deliberate rule, not the tier rank rewritten.** The old key sorted on `credit_tier`,
+    and it did not say this: `lead` folded the director in with the top-3 billed, so a
+    director who was also 2nd-billed rendered "<character> · Director" while one who was
+    4th-billed rendered "Director · <character>". That was an accident of a cut built to
+    decide what alerts, and EF-1 deleted the cut. Ranking the director outright is what the
+    page was always trying to say — it is the credit a film is attributed to — so the
+    inconsistency goes with the tier rather than being preserved.
+
+    This is presentation only. It borrows `seed_grade`'s primitives because they already name
+    "the roles a film is known by"; it decides nothing about what a follow delivers, which
+    since EF-2 is every credit here whatever its rank.
+    """
+    return sorted(
+        credits,
+        key=lambda c: (
+            _credit_rank(c),
+            c.credit_order if c.credit_order is not None else _UNBILLED,
+            c.job or "",
+        ),
+    )
+
+
+def _credit_rank(credit: PersonCreditOut) -> int:
+    """`0` for a director credit, `1` for any other seed-grade role, `2` for the rest."""
+    if credit.credit_type == "crew" and credit.job == DIRECTOR_JOB:
+        return 0
+    return 1 if is_seed_grade(credit.credit_type, credit.job, credit.credit_order) else 2
+
+
+async def _entity_film_lists(
+    session: AsyncSession, films_of_entity: Select[tuple[Film]]
+) -> tuple[list[FilmRowOut], list[FilmRowOut]]:
+    """The `(upcoming, recent)` pair every entity page returns, given a statement selecting that
+    entity's films.
+
+    **Two lists, and between them exactly what a follow can reach.** `upcoming` is the in-play
+    set (`in_play_clause`, the D-11 timeline's bound) and `recent` is the alert window
+    (`alert_window_clause`, D-46) less the in-play set, so every film is in one or the other and
+    never both. Nothing older is returned at all: the page's job is to show what following this
+    entity would deliver, and a back catalogue stretching back thirty years answers a different
+    question — one `/films/search` already answers.
+
+    The caller passes only the membership half of the query (which company, which collection),
+    because that is the only thing the studio and franchise pages disagree about. The window
+    split, the headline dates and the ordering are this project's rule, spelled once.
+    """
+    settings = get_settings()
+    today = datetime.now(UTC).date()
+    in_play = in_play_clause(today=today, excluded_statuses=settings.tmdb_excluded_statuses)
+    window = alert_window_clause(today=today, max_age_days=settings.provider_poll_max_age_days)
+    rows = (
+        await session.execute(
+            films_of_entity.add_columns(in_play.label("in_play")).where(or_(in_play, window))
+        )
+    ).all()
+
+    films: dict[UUID, Film] = {row[0].id: row[0] for row in rows}
+    upcoming_ids = {row[0].id for row in rows if row.in_play}
+    headlines = await headline_releases(session, list(films), today=today)
+
+    def rows_for(film_ids: set[UUID], *, descending: bool) -> list[FilmRowOut]:
+        items = [_film_row_out(films[fid], headlines.get(fid)) for fid in film_ids]
+        sign = -1 if descending else 1
+        return sorted(items, key=lambda row: _film_row_order_key(row, sign=sign))
+
+    return rows_for(upcoming_ids, descending=False), rows_for(
+        set(films) - upcoming_ids, descending=True
+    )
+
+
+async def get_company_detail(session: AsyncSession, ref: str) -> CompanyDetailResponse | None:
+    """A studio's page (EF-17), or None for an id the catalog does not hold.
+
+    The person page's shape without its credits: a studio's relationship to a film is a single
+    membership row (`catalog.film_production_company`), so there is no job to name and no grade
+    to badge — the film either counts as the studio's or it does not.
+    """
+    company_id = parse_company_ref(ref)
+    if company_id is None:
+        return None
+    company = (
+        await session.execute(select(ProductionCompany).where(ProductionCompany.id == company_id))
+    ).scalar_one_or_none()
+    if company is None:
+        return None
+
+    upcoming, recent = await _entity_film_lists(
+        session,
+        select(Film)
+        .join(FilmProductionCompany, FilmProductionCompany.film_id == Film.id)
+        .where(FilmProductionCompany.company_id == company.id),
+    )
+    return CompanyDetailResponse(
+        ref=company_ref(company.id, company.name),
+        id=company.id,
+        name=company.name,
+        logo_path=company.logo_path,
+        upcoming=upcoming,
+        recent=recent,
+    )
+
+
+async def get_collection_detail(session: AsyncSession, ref: str) -> CollectionDetailResponse | None:
+    """A franchise's page (EF-17), or None for an id the catalog does not hold.
+
+    `get_company_detail` over `catalog.collection`. Membership is a column on the film itself
+    (`film.collection_id` — TMDB gives a film at most one collection) rather than a join table,
+    which is the only difference between the two.
+    """
+    collection_id = parse_collection_ref(ref)
+    if collection_id is None:
+        return None
+    collection = (
+        await session.execute(select(Collection).where(Collection.id == collection_id))
+    ).scalar_one_or_none()
+    if collection is None:
+        return None
+
+    upcoming, recent = await _entity_film_lists(
+        session, select(Film).where(Film.collection_id == collection.id)
+    )
+    return CollectionDetailResponse(
+        ref=collection_ref(collection.id, collection.name),
+        id=collection.id,
+        name=collection.name,
+        poster_path=collection.poster_path,
+        upcoming=upcoming,
+        recent=recent,
+    )
+
+
+ENTITY_EVENTS_PAGE_SIZE = 20
+"""The entity pages' card list is a page of 20 (EF-18, §6 M3).
+
+A default rather than a fixed count: the ceiling below is the abuse bound every list route in
+this router carries, and the page the product specifies is what a client that says nothing
+gets."""
+
+_ENTITY_EVENT_LOOKUPS: dict[str, tuple[Any, Any, Any]] = {
+    "person": (Person, parse_person_ref, _LIVE_PERSON),
+    "company": (ProductionCompany, parse_company_ref, None),
+    "franchise": (Collection, parse_collection_ref, None),
+}
+"""How each entity page resolves the `ref` in its URL: the catalog row to prove exists, the
+parser for `<id>-<slug>`, and the extra term the detail route applies.
+
+Keyed by the **follow** graph's word, which is what `follow_queries` takes — a franchise is
+`franchise` here and `catalog.Collection` beside it (CONTEXT.md **Franchise**). The existence
+rules are the detail routes', deliberately: a `ref` that 404s on `/people/{ref}` and 200s on
+`/people/{ref}/events` would be a page whose two halves disagree about whether it exists, and
+the tombstone term is the case that actually arises (`_LIVE_PERSON` — TMDB has deleted them,
+so they are not a follow target anywhere)."""
+
+
+async def get_entity_events(
+    session: AsyncSession,
+    *,
+    entity_type: str,
+    ref: str,
+    limit: int,
+    cursor: str | None,
+) -> EntityEventsResponse | None:
+    """One page of an entity's own attach, detach and `canceled` cards (EF-18), or `None` for a
+    `ref` the catalog does not hold.
+
+    **What a follow of this entity would deliver**, which is why the selection is
+    `follow_queries.entity_event_ids` and not a query of this module's own: the page sits
+    beside the follow button and its promise is "this is what you would get". A second
+    spelling here would be a promise that goes stale the first time EF-3's rule moves — and it
+    has moved twice already this project.
+
+    Public, like the rest of this router: the page renders for an anonymous visitor and the
+    follow button is the thing that asks for an account.
+
+    Newest first by `created_at`, which is the feed's axis (ADR-0016) and not the film page's
+    `occurred_at`: this list answers "what has happened with them lately", so it orders by when
+    we carded a beat rather than by when the beat is dated. Ties break on `id` so the keyset
+    cannot drop or repeat a card, and one row beyond the page is fetched to learn whether there
+    is a next one without counting a list that is still growing.
+    """
+    model, parse_ref, extra = _ENTITY_EVENT_LOOKUPS[entity_type]
+    entity_id = parse_ref(ref)
+    if entity_id is None:
+        return None
+    terms = [model.id == entity_id] + ([] if extra is None else [extra])
+    if not await session.scalar(select(exists().where(*terms))):
+        return None
+
+    filters: list[ColumnElement[bool]] = [
+        Event.id.in_(entity_event_ids(entity_type, entity_id)),
+        *feed_visible(),
+    ]
+    if cursor is not None:
+        created_at, event_id = decode_cursor(cursor)
+        filters.append(tuple_(Event.created_at, Event.id) < (created_at, event_id))
+
+    rows = (
+        await session.execute(
+            select(Event, EventSummary.summary, EventSummary.edited_at)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .join(Film, Film.id == Event.film_id)
+            .where(*filters)
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(limit + 1)
+        )
+    ).all()
+
+    page = rows[:limit]
+    sources = await _sources_by_event(session, [event.id for event, _summary, _edited in page])
+    next_cursor = None
+    if len(rows) > limit and page:
+        last = page[-1][0]
+        next_cursor = encode_cursor(last.created_at, last.id)
+    return EntityEventsResponse(
+        items=[
+            _event_out(event, summary, edited_at, sources.get(event.id, []))
+            for event, summary, edited_at in page
+        ],
+        next_cursor=next_cursor,
+    )
+
+
+async def get_company_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> CompanySearchResponse:
+    """Search `catalog.production_company` by name (folded substring), alphabetical.
+
+    Companies carry no popularity, so the order is the name itself: a stable, guessable
+    order for a list the user scans by eye. It sorts on the same fold the match uses, so
+    "Mission: Impossible" and "Mission Impossible" sit together whatever the DB collation
+    makes of the punctuation.
+    """
+    nq = _searchable_query(q)
+    if nq is None:
+        return CompanySearchResponse(items=[], total=0, limit=limit, offset=offset)
+    where = _name_match(nq, ProductionCompany.name)
+    total = await session.scalar(select(func.count()).select_from(ProductionCompany).where(where))
+    companies = (
+        (
+            await session.execute(
+                select(ProductionCompany)
+                .where(where)
+                .order_by(_normalized_col(ProductionCompany.name).asc(), ProductionCompany.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = [
+        CompanySearchItem(
+            id=c.id, name=c.name, logo_path=c.logo_path, origin_country=c.origin_country
+        )
+        for c in companies
+    ]
+    return CompanySearchResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_collection_search(
+    session: AsyncSession, *, q: str, limit: int, offset: int
+) -> CollectionSearchResponse:
+    """Search `catalog.collection` (TMDB franchises) by name (folded substring), alphabetical."""
+    nq = _searchable_query(q)
+    if nq is None:
+        return CollectionSearchResponse(items=[], total=0, limit=limit, offset=offset)
+    where = _name_match(nq, Collection.name)
+    total = await session.scalar(select(func.count()).select_from(Collection).where(where))
+    collections = (
+        (
+            await session.execute(
+                select(Collection)
+                .where(where)
+                .order_by(_normalized_col(Collection.name).asc(), Collection.id.asc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = [
+        CollectionSearchItem(id=c.id, name=c.name, poster_path=c.poster_path) for c in collections
+    ]
+    return CollectionSearchResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def _where_to_watch(
+    session: AsyncSession, film_id: UUID, *, region: str = PRIMARY_REGION
+) -> WhereToWatchOut | None:
+    """This film's current where-to-watch box, or `None` if nobody carries it (D-29).
+
+    Reads `film_availability_current` — the snapshot the provider poll rebuilds wholesale every
+    run — rather than the `availability_first_seen` ledger beside it. The two answer different
+    questions: the ledger says a film *was* on a service and never forgets, which is what
+    `now_available` cards off; the box says where a reader can watch it *now*, so a film that
+    has left every service must empty it rather than keep the last poll's answer.
+
+    **Ordered by primary key, which here means the order TMDB listed the services.** The
+    rebuild deletes and re-inserts a region in one statement in the order the poll observed —
+    JustWatch's own ranking, which is what puts the service most readers have at the head of the
+    list. Sorting by name instead would throw that ranking away for an alphabetical one nobody
+    asked for. The key is a surrogate, but the delete-and-rebuild is what makes it carry
+    meaning: the rows of a region are always written together, in one order, by one writer.
+    """
+    rows = (
+        await session.execute(
+            select(
+                FilmAvailabilityCurrent.monetization_type,
+                FilmAvailabilityCurrent.link,
+                WatchProvider.id,
+                WatchProvider.name,
+                WatchProvider.logo_path,
+            )
+            .join(WatchProvider, WatchProvider.id == FilmAvailabilityCurrent.provider_id)
+            .where(
+                FilmAvailabilityCurrent.film_id == film_id,
+                FilmAvailabilityCurrent.region == region,
+            )
+            .order_by(FilmAvailabilityCurrent.id.asc())
+        )
+    ).all()
+    if not rows:
+        return None
+    buckets: dict[str, list[ProviderOut]] = {kind: [] for kind in MONETIZATION_TYPES}
+    for row in rows:
+        # A type outside `MONETIZATION_TYPES` raises `KeyError` rather than being dropped: the
+        # table check-constrains the column to this same tuple, so one reaching here is a schema
+        # that moved without this read model, which should be loud. A type *added* to the tuple
+        # is the quieter half — it lands in `buckets` and then needs a field on
+        # `WhereToWatchOut` and a line below, or the box silently omits it.
+        buckets[row.monetization_type].append(
+            ProviderOut(id=row.id, name=row.name, logo_path=row.logo_path)
+        )
+    # The poll writes one `region.link` onto every row of a region (see
+    # `FilmAvailabilityCurrent`), so the rows never disagree: this reads the first of a set of
+    # equals, and is `None` only when TMDB gave the region no link at all.
+    link = next((row.link for row in rows if row.link is not None), None)
+    # Named rather than splatted from `buckets`: the keys are the model's fields, and a `**`
+    # would type-check against `attribution` too and hide a renamed bucket until runtime.
+    return WhereToWatchOut(
+        region=region,
+        flatrate=buckets["flatrate"],
+        rent=buckets["rent"],
+        buy=buckets["buy"],
+        link=link,
+    )
+
+
+async def _sources_by_event(
+    session: AsyncSession, event_ids: list[UUID]
+) -> dict[UUID, list[Story]]:
+    """`{event_id: [story]}` for a page of cards, oldest story first.
+
+    One statement for the page rather than one per card, and one spelling for the three
+    surfaces that render `SourceOut` lists — the flat feed, the film page and the entity pages'
+    `/events` (EF-18). The order is the `sources` order the card shows: published first, then
+    by id so an outlet with no date still lands somewhere stable.
+    """
+    if not event_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(EventStory.event_id, Story)
+            .join(Story, Story.id == EventStory.story_id)
+            .where(EventStory.event_id.in_(event_ids))
+            .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
+        )
+    ).all()
+    by_event: dict[UUID, list[Story]] = {}
+    for event_id, story in rows:
+        by_event.setdefault(event_id, []).append(story)
+    return by_event
+
+
+def _event_out(
+    event: Any, summary: str | None, edited_at: datetime | None, sources: list[Story]
+) -> EventOut:
+    """One card as the API renders it, wherever it is rendered.
+
+    `summary` is typed nullable because the column is, and is never null here: every caller
+    joins `news.event_summary` inner, which is what makes the join part of "the feed's
+    visibility terms" rather than a convenience.
+    """
+    return EventOut(
+        event_id=event.id,
+        event_type=event.event_type,
+        confidence=event.confidence,
+        created_at=event.created_at,
+        occurred_at=event.occurred_at,
+        summary=summary,  # type: ignore  — guaranteed non-null by the EventSummary join
+        summary_edited=edited_at is not None,
+        provenance=event.provenance,
+        status=event.status,
+        superseded_by=event.superseded_by,
+        video_key=video_key_of(event.event_type, event.subject_key),
+        sources=[
+            SourceOut(
+                url=source_url(story),
+                source=outlet_label(story),
+                title=story.title,
+                published_at=story.published_at,
+            )
+            for story in cap_sources(sources)
+        ],
+    )
 
 
 async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse | None:
@@ -328,44 +1017,14 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             )
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Event.film_id == film.id, visible_events(), _region_visible())
+            .where(Event.film_id == film.id, visible_events(), region_visible())
             .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _edited_at, _has_story in summarized]
-    sources_by_event: dict[UUID, list[Story]] = {}
-    if event_ids:
-        source_rows = (
-            await session.execute(
-                select(EventStory.event_id, Story)
-                .join(Story, Story.id == EventStory.story_id)
-                .where(EventStory.event_id.in_(event_ids))
-                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
-            )
-        ).all()
-        for event_id, story in source_rows:
-            sources_by_event.setdefault(event_id, []).append(story)
-
-    def _to_event_out(event: Any, summary: str | None, edited_at: datetime | None) -> EventOut:
-        return EventOut(
-            event_id=event.id,
-            event_type=event.event_type,
-            confidence=event.confidence,
-            created_at=event.created_at,
-            summary=summary,  # type: ignore  — guaranteed non-null by visible_events() filter
-            summary_edited=edited_at is not None,
-            provenance=event.provenance,
-            sources=[
-                SourceOut(
-                    url=source_url(story),
-                    source=outlet_label(story),
-                    title=story.title,
-                    published_at=story.published_at,
-                )
-                for story in cap_sources(sources_by_event.get(event.id, []))
-            ],
-        )
+    sources_by_event = await _sources_by_event(
+        session, [event.id for event, _summary, _edited_at, _has_story in summarized]
+    )
 
     # Group events by UTC day key, split by has_story (NEU-1201).
     day_groups: list[DayGroup] = []
@@ -373,7 +1032,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     for event, summary, edited_at, has_story in summarized:
         utc = event.occurred_at.astimezone(UTC)
         day_key = date(utc.year, utc.month, utc.day)
-        eout = _to_event_out(event, summary, edited_at)
+        eout = _event_out(event, summary, edited_at, sources_by_event.get(event.id, []))
         news_list, tmdb_list = day_events.setdefault(day_key, ([], []))
         (news_list if has_story else tmdb_list).append(eout)
     for day_key in sorted(day_events, reverse=True):
@@ -387,7 +1046,7 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             )
         )
 
-    # The one definition, shared with the event writer and with `_region_visible` above
+    # The one definition, shared with the event writer and with `news.visibility.region_visible`
     # (`catalog.release_grade`). This used to take `origin_country[0]` while the visibility
     # predicate took all of them, so a co-production could surface an event about a date the
     # page declined to list — the drift NEU-1121 closes.
@@ -416,7 +1075,10 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         .all()
     )
 
-    # Surface only the theatrical arc (wide + limited); premiere/digital/physical/TV are dropped.
+    # Surface the theatrical arc (wide + limited) in any of those regions, plus the US home
+    # release (digital + physical); premiere and TV are dropped, and so is a home-release date
+    # in an origin country — `is_displayable_release` owns that asymmetry, which is why the
+    # membership test is the predicate rather than the label alone (D-26).
     release_dates = [
         ReleaseDateOut(
             country=row.iso_3166_1,
@@ -426,7 +1088,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             certification=row.certification,
         )
         for row in release_date_rows
-        if (label := release_label_for_tmdb_type(row.release_type)) is not None
+        if is_displayable_release(
+            iso_3166_1=row.iso_3166_1,
+            release_type=row.release_type,
+            origin_country=film.origin_country,
+        )
+        and (label := release_label_for_tmdb_type(row.release_type)) is not None
     ]
 
     # If no displayable release dates remain after filtering but the film has a primary
@@ -455,20 +1122,16 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         .all()
     )
 
-    companies = list(
-        (
-            await session.execute(
-                select(ProductionCompany.name)
-                .join(
-                    FilmProductionCompany, FilmProductionCompany.company_id == ProductionCompany.id
-                )
-                .where(FilmProductionCompany.film_id == film.id)
-                .order_by(ProductionCompany.name.asc(), ProductionCompany.id.asc())
-            )
+    company_rows = (
+        await session.execute(
+            select(ProductionCompany.id, ProductionCompany.name)
+            .join(FilmProductionCompany, FilmProductionCompany.company_id == ProductionCompany.id)
+            .where(FilmProductionCompany.film_id == film.id)
+            .order_by(ProductionCompany.name.asc(), ProductionCompany.id.asc())
         )
-        .scalars()
-        .all()
-    )
+    ).all()
+    companies = [r.name for r in company_rows]
+    companies_out = [CompanyOut(id=r.id, name=r.name) for r in company_rows]
 
     countries = (await _production_countries_for_films(session, {film.id})).get(film.id, [])
 
@@ -478,7 +1141,9 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
             await session.execute(select(Collection).where(Collection.id == film.collection_id))
         ).scalar_one_or_none()
         if col_row is not None:
-            collection = CollectionOut(name=col_row.name, poster_path=col_row.poster_path)
+            collection = CollectionOut(
+                id=col_row.id, name=col_row.name, poster_path=col_row.poster_path
+            )
 
     _excluded_titles = {t.lower() for t in [film.title, film.original_title] if t}
     _alt_title_rows = list(
@@ -504,21 +1169,23 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
 
     cast_rows = (
         await session.execute(
-            select(Person.name, FilmCredit.character, Person.profile_path)
+            select(Person.id, Person.name, FilmCredit.character, Person.profile_path)
             .join(FilmCredit, FilmCredit.person_id == Person.id)
             .where(FilmCredit.film_id == film.id, FilmCredit.credit_type == "cast")
             .order_by(nulls_last(FilmCredit.credit_order.asc()), Person.name.asc())
-            .limit(12)
         )
     ).all()
     cast_out = [
-        CastMemberOut(name=r.name, character=r.character, profile_path=r.profile_path)
+        CastMemberOut(
+            person_id=r.id, name=r.name, character=r.character, profile_path=r.profile_path
+        )
         for r in cast_rows
     ]
 
     crew_rows = (
         await session.execute(
             select(
+                Person.id,
                 Person.name,
                 FilmCredit.job,
                 FilmCredit.department,
@@ -529,12 +1196,13 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         )
     ).all()
     crew_out = [
-        CrewMemberOut(name=r.name, job=r.job, department=r.department)
+        CrewMemberOut(person_id=r.id, name=r.name, job=r.job, department=r.department)
         for r in sorted(crew_rows, key=_crew_sort_key)
     ]
 
     return FilmDetailResponse(
         ref=film_ref(film.tmdb_id, film.title),
+        id=film.id,
         title=film.title,
         tmdb_id=film.tmdb_id,
         imdb_id=film.imdb_id,
@@ -554,10 +1222,12 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         genres=genres,
         production_countries=countries,
         production_companies=companies,
+        companies=companies_out,
         collection=collection,
         alternative_titles=alternative_titles,
         cast=cast_out,
         crew=crew_out,
+        where_to_watch=await _where_to_watch(session, film.id),
     )
 
 
@@ -567,13 +1237,87 @@ class SitemapFilm:
     lastmod: datetime
 
 
+@dataclass
+class SitemapEntity:
+    """One entity page in the sitemap. `path` is the frontend's route segment for that type —
+    `person`, `studio` or `franchise` (EF-19's on-screen vocabulary, which the URLs follow even
+    though the code says `company` and `collection`)."""
+
+    path: str
+    ref: str
+
+
+async def get_sitemap_entities(session: AsyncSession) -> list[SitemapEntity]:
+    """Every person, studio and franchise page worth crawling (EF-17).
+
+    **An entity is listed when it has at least one film in reach** — in play, or inside the
+    alert window — which is exactly the set its page renders. The alternative, listing every
+    row in three catalog tables, would submit hundreds of thousands of pages whose whole content
+    is "No upcoming films", and a crawler is entitled to read a sitemap as a claim that the URLs
+    on it are worth fetching.
+
+    **No `lastmod`, unlike the film rows.** A film page's freshness is the news on it and
+    `event.created_at` states it exactly; an entity page changes when any of its films moves,
+    which is not a timestamp this schema holds. `lastmod` is optional in the protocol and an
+    invented one is worse than none — a wrong date teaches the crawler to ignore the field.
+    """
+    settings = get_settings()
+    today = datetime.now(UTC).date()
+    in_reach = or_(
+        in_play_clause(today=today, excluded_statuses=settings.tmdb_excluded_statuses),
+        alert_window_clause(today=today, max_age_days=settings.provider_poll_max_age_days),
+    )
+
+    people = (
+        await session.execute(
+            select(Person.id, Person.name)
+            .join(FilmCredit, FilmCredit.person_id == Person.id)
+            .join(Film, Film.id == FilmCredit.film_id)
+            .where(_LIVE_PERSON, in_reach)
+            .group_by(Person.id, Person.name)
+            .order_by(Person.id.asc())
+        )
+    ).all()
+    companies = (
+        await session.execute(
+            select(ProductionCompany.id, ProductionCompany.name)
+            .join(
+                FilmProductionCompany,
+                FilmProductionCompany.company_id == ProductionCompany.id,
+            )
+            .join(Film, Film.id == FilmProductionCompany.film_id)
+            .where(in_reach)
+            .group_by(ProductionCompany.id, ProductionCompany.name)
+            .order_by(ProductionCompany.id.asc())
+        )
+    ).all()
+    collections = (
+        await session.execute(
+            select(Collection.id, Collection.name)
+            .join(Film, Film.collection_id == Collection.id)
+            .where(in_reach)
+            .group_by(Collection.id, Collection.name)
+            .order_by(Collection.id.asc())
+        )
+    ).all()
+
+    return [
+        *(SitemapEntity(path="person", ref=person_ref(id_, name)) for id_, name in people),
+        *(SitemapEntity(path="studio", ref=company_ref(id_, name)) for id_, name in companies),
+        *(
+            SitemapEntity(path="franchise", ref=collection_ref(id_, name))
+            for id_, name in collections
+        ),
+    ]
+
+
 async def get_sitemap_films(session: AsyncSession) -> list[SitemapFilm]:
     rows = (
         await session.execute(
             select(Film.tmdb_id, Film.title, func.max(Event.created_at))
             .join(Event, Event.film_id == Film.id)
             .join(EventSummary, EventSummary.event_id == Event.id)
-            .where(visible_events(), _region_visible())
+            .where(visible_events(), region_visible())
             .group_by(Film.id, Film.tmdb_id, Film.title)
             .order_by(Film.slug.asc())
         )
@@ -590,33 +1334,23 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(Film.slug.is_not(None), visible_events(), _region_visible())
+        .where(*feed_visible())
     )
     rows = (
         await session.execute(
             select(Event, EventSummary.summary, Film.tmdb_id, Film.title)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(Film.slug.is_not(None), visible_events(), _region_visible())
+            .where(*feed_visible())
             .order_by(Event.created_at.desc(), Event.id.asc())
             .limit(limit)
             .offset(offset)
         )
     ).all()
 
-    event_ids = [event.id for event, _summary, _tmdb_id, _title in rows]
-    sources_by_event: dict[UUID, list[Story]] = {}
-    if event_ids:
-        source_rows = (
-            await session.execute(
-                select(EventStory.event_id, Story)
-                .join(Story, Story.id == EventStory.story_id)
-                .where(EventStory.event_id.in_(event_ids))
-                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
-            )
-        ).all()
-        for event_id, story in source_rows:
-            sources_by_event.setdefault(event_id, []).append(story)
+    sources_by_event = await _sources_by_event(
+        session, [event.id for event, _summary, _tmdb_id, _title in rows]
+    )
 
     items: list[FeedItem] = []
     for event, summary, tmdb_id, title in rows:
@@ -644,7 +1378,47 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
     return FeedResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) -> FeedDayResponse:
+def _feed_scope(
+    film_filter: Select[tuple[UUID]] | None, event_filter: Select[tuple[UUID]] | None
+) -> tuple[ColumnElement[bool], ...]:
+    """`get_feed_grouped`'s narrowing as a WHERE-clause tuple: empty for the unfiltered feed,
+    and the **OR** of the two filters when both are given (NEU-1365).
+
+    OR and not AND: the two answer the same question of different grains — the timeline wants
+    every event on a film the user follows *plus* every event naming a person they follow on a
+    film they do not (D-11) — so intersecting them would return only the mentions that landed on
+    an already-followed film, which is the one case neither filter was added for.
+
+    Phrased on `Event.film_id` rather than `Film.id` so one clause serves every query that has to
+    agree: the day queries join `Film`, the event fetch does not, and a film that reached the page
+    on one named event would otherwise ship its whole day.
+    """
+    terms: list[ColumnElement[bool]] = []
+    if film_filter is not None:
+        terms.append(Event.film_id.in_(film_filter))
+    if event_filter is not None:
+        terms.append(Event.id.in_(event_filter))
+    return (or_(*terms),) if terms else ()
+
+
+async def get_feed_grouped(
+    session: AsyncSession,
+    *,
+    limit: int,
+    offset: int,
+    film_filter: Select[tuple[UUID]] | None = None,
+    event_filter: Select[tuple[UUID]] | None = None,
+) -> FeedDayResponse:
+    """The grouped feed — and, given either filter, any narrowing of it (NEU-1351, NEU-1365).
+
+    `film_filter` is a `SELECT film.id` and `event_filter` a `SELECT event.id`, both composed by
+    the caller; the timeline passes the films its user follows and the events naming the people
+    they follow (`app.follow_queries`). Together they narrow the *event* scope — see `_feed_scope`
+    for why that is an OR — and that one scope applies identically to the day count, the day
+    window, the film-day rows and the events fetched for them. Which is what makes a filtered page
+    the same DTO with fewer rows in it, day pagination and all, rather than a second query to keep
+    in step with this one.
+    """
     # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
     # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
     # number of distinct days, so the client knows when no more days remain.
@@ -653,14 +1427,15 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
     # (ADR-0016). A backfill or a new catalog tranche therefore lands as one tall day — that is
     # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
     day = cast(func.timezone("UTC", Event.created_at), Date)
-    visible = (Film.slug.is_not(None), visible_events(), _region_visible())
+    visible = feed_visible()
+    scoped = _feed_scope(film_filter, event_filter)
 
     distinct_days = (
         select(day.label("day"))
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(*visible)
+        .where(*visible, *scoped)
         .group_by(day)
     )
     total_days = await session.scalar(select(func.count()).select_from(distinct_days.subquery()))
@@ -684,7 +1459,7 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             .select_from(Event)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(*visible, day.in_(select(window.c.day)))
+            .where(*visible, *scoped, day.in_(select(window.c.day)))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
             .order_by(day.desc(), _natural_title_col().asc(), Film.slug.asc())
         )
@@ -702,7 +1477,11 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 Event.event_type,
                 Event.confidence,
                 Event.provenance,
+                Event.status,
+                Event.superseded_by,
                 Event.created_at,
+                Event.occurred_at,
+                Event.subject_key,
                 cast(func.timezone("UTC", Event.created_at), Date).label("event_day"),
                 EventSummary.summary,
                 EventSummary.edited_at,
@@ -713,6 +1492,10 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 Event.film_id.in_({r.film_id for r in rows}),
                 cast(func.timezone("UTC", Event.created_at), Date).in_({r.day for r in rows}),
                 visible_events(),
+                # The same scope as the rows above, not just their (film, day) keys: a film that
+                # reached the page on one event naming a followed person ships that event, not
+                # every event it happened to have that day (NEU-1365).
+                *scoped,
             )
             .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
@@ -745,9 +1528,13 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
                 event_type=e.event_type,
                 confidence=e.confidence,
                 created_at=e.created_at,
+                occurred_at=e.occurred_at,
                 summary=e.summary,
                 summary_edited=e.edited_at is not None,
                 provenance=e.provenance,
+                status=e.status,
+                superseded_by=e.superseded_by,
+                video_key=video_key_of(e.event_type, e.subject_key),
                 sources=[
                     SourceOut(
                         url=source_url(story),
@@ -794,7 +1581,55 @@ async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) ->
             items.append(_make_item(row, news_events, True))
         if catalog_events:
             items.append(_make_item(row, catalog_events, False, ship_events=False))
+
+    # Within a day, the bigger beat leads (D-7): a casting burst outranks a status change,
+    # and a trailer outranks both. Sorted here rather than in SQL because the ranking is
+    # `_EVENT_STAGE`'s, and a CASE expression restating it is a second copy to keep in step.
+    # A *stable* sort over rows SQL already returned in title order, so significance ranks
+    # first and title still breaks its ties — the day axis is untouched, it is only re-keyed
+    # here because every row of every windowed day is already in hand.
+    items.sort(key=lambda item: (item.day, event_stage_rank(item.top_event_type)), reverse=True)
     return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
+
+
+async def get_timeline(
+    session: AsyncSession, *, user_id: UUID, limit: int, offset: int
+) -> FeedDayResponse:
+    """The grouped feed restricted to what this user's follows deliver (EF-3, D-12).
+
+    Two filters, OR-ed by `get_feed_grouped`, because a follow delivers at two grains
+    (ADR-0019): a **title** follow delivers every beat on its film, and a person, studio or
+    franchise follow delivers the cards in which that entity attaches to or detaches from a
+    film, plus that film's cancellation. The second is event-grained on purpose — an attachment
+    makes its own event timeline-worthy and says nothing about the rest of the film's history.
+    Which is the one way a timeline row is not its feed row: a film-day reached by an attachment
+    alone carries that event and not the film's others, so `event_count`, `event_types` and
+    `top_event_type` can read lower here than on `/feed` for the same film and day. The shape
+    and the ordering are the feed's; the contents are what this user follows.
+
+    **Nothing subtracts from either half** (EF-14). A mute used to, from inside the two
+    builders; it went with the watchlist it corrected, and the only way off this timeline now
+    is to unfollow — which takes the film out of the builder itself, so the digest section that
+    summarises this timeline still cannot disagree with it about what the user asked for.
+
+    Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
+    and the feed are the same product surface — same DTO, same `created_at` day grouping, same
+    day pagination (ADR-0016) — and the client swaps one for the other on `/` as soon as `me`
+    resolves. Two queries would be two things to keep in step.
+
+    Takes a `user_id` rather than a `User` so nothing request-scoped reaches the filter, which
+    the notify pass (NEU-1379) runs from `pipeline_run`. Entitlement is the route's gate (D-39),
+    not this function's: an unentitled user gets 403 from `require_entitled()` and never arrives
+    here, because an empty timeline would read as "nothing happened" rather than "you do not
+    have access" (D-41).
+    """
+    return await get_feed_grouped(
+        session,
+        limit=limit,
+        offset=offset,
+        film_filter=title_follow_film_ids(user_id),
+        event_filter=entity_attachment_event_ids(user_id),
+    )
 
 
 async def _directors_for_films(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
@@ -920,39 +1755,67 @@ async def _calendar_genres(session: AsyncSession, film_ids: set[UUID]) -> dict[U
     return genres_by_film
 
 
-async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
-    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    surfaced_types = tuple(RELEASE_TYPE_BUCKETS)  # (2, 3) — derived, never drifts
+def _calendar_type_rank(release_type: ColumnElement[int]) -> ColumnElement[int]:
+    """`_CALENDAR_TYPE_RANK` as a SQL expression to sort by, ascending."""
+    return case(_CALENDAR_TYPE_RANK, value=release_type, else_=len(_CALENDAR_BUCKET_ORDER))
 
-    # Governing release date per (film, category): collapse to the earliest date for the
-    # subject before applying the upcoming filter (NEU-1206).
-    governing = (
-        select(
-            FilmReleaseDate.film_id.label("film_id"),
-            FilmReleaseDate.release_type.label("release_type"),
-            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
-                "governing_date"
-            ),
+
+def _calendar_governing_cte(*, name: str, title_follow_user_id: UUID | None = None) -> CTE:
+    """The governing release date per (film, category): the earliest date in the subject,
+    collapsed *before* any window filter (NEU-1206).
+
+    The types are `RELEASE_TYPE_BUCKETS`' keys — (2, 3, 4, 5), derived, never drifts — and the
+    region filter is already US-only, which is exactly the cut the home-release types (4, 5) are
+    displayable in, so widening the bucket map widens both calendars without a second region
+    rule (D-26).
+
+    `title_follow_user_id` narrows the set to the films that user follows **by title** (EF-14)
+    — the whole of "my films" now that nothing indirect reaches a film. It belongs here rather
+    than in a later predicate for the reason `get_ical_feed` puts it here: the collapse is per
+    subject, so a user filter applied after it would be collapsing over rows the caller cannot
+    see.
+    """
+    governing = select(
+        FilmReleaseDate.film_id.label("film_id"),
+        FilmReleaseDate.release_type.label("release_type"),
+        func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
+            "governing_date"
+        ),
+    )
+    if title_follow_user_id is not None:
+        governing = governing.where(
+            FilmReleaseDate.film_id.in_(title_follow_film_ids(title_follow_user_id))
         )
-        .where(
+    return (
+        governing.where(
             FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
-            FilmReleaseDate.release_type.in_(surfaced_types),
+            FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
         )
         .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
-        .cte("governing")
+        .cte(name)
     )
 
+
+async def _calendar_page(
+    session: AsyncSession,
+    *,
+    governing: CTE,
+    visible: tuple[ColumnElement[bool], ...],
+    limit: int,
+    offset: int,
+) -> CalendarResponse:
+    """One page of a calendar, from a governing CTE and the predicates that decide which of its
+    rows the caller may see.
+
+    The public calendar and the caller's own (`get_my_films_calendar`) differ in exactly those
+    two inputs — which films, and which cuts. Paging by date, within-date ordering and the
+    decoration are spelled once, here, because the frontend renders both through one component
+    and one set of grouping helpers: a page whose shape or ordering drifted would be a second
+    component in disguise (D-1411.3).
+    """
     # Pagination is by DATE: limit/offset count distinct release dates (soonest first), not
     # film rows — so the UI shows "N dates at a time" with a deterministic "view more".
     # `total` is the number of distinct upcoming dates.
-    visible = (
-        governing.c.governing_date >= today,
-        Film.slug.is_not(None),
-        func.coalesce(Film.adult, False).is_(False),
-        or_(Film.runtime.is_(None), Film.runtime == 0, Film.runtime >= 75),
-        Film.popularity > 1.5,
-    )
-
     distinct_dates = (
         select(governing.c.governing_date.label("d"))
         .select_from(governing)
@@ -983,10 +1846,13 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
             .select_from(governing)
             .join(Film, Film.id == governing.c.film_id)
             .where(*visible, governing.c.governing_date.in_(select(window.c.d)))
-            # Within a date, wide (3) before limited (2) → release_type DESC.
+            # Within a date, the theatrical arc leads and the home release follows:
+            # wide, limited, digital, physical (`_CALENDAR_TYPE_RANK`). This used to be
+            # `release_type DESC`, which said the same thing while only 2 and 3 existed but
+            # would float physical (5) above wide (3) now that it does not.
             .order_by(
                 governing.c.governing_date.asc(),
-                governing.c.release_type.desc(),
+                _calendar_type_rank(governing.c.release_type),
                 nulls_last(Film.popularity.desc()),
                 Film.slug.asc(),
             )
@@ -1013,3 +1879,195 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
         for row in rows
     ]
     return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)
+
+
+async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
+    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
+    governing = _calendar_governing_cte(name="governing")
+    # The noise cuts that keep a public listing clean. They are the public route's alone: the
+    # my-films calendar next door deliberately carries none of them (D-1411.2).
+    visible = (
+        governing.c.governing_date >= today,
+        Film.slug.is_not(None),
+        func.coalesce(Film.adult, False).is_(False),
+        or_(Film.runtime.is_(None), Film.runtime == 0, Film.runtime >= 75),
+        Film.popularity > 1.5,
+    )
+    return await _calendar_page(
+        session, governing=governing, visible=visible, limit=limit, offset=offset
+    )
+
+
+async def get_my_films_calendar(
+    session: AsyncSession, *, user_id: UUID, limit: int, offset: int
+) -> CalendarResponse:
+    """`GET /me/calendar`: the **my films calendar** (D-34, D-39) — the release calendar
+    narrowed to the films this user follows.
+
+    Same response shape, same date-paging, same buckets, same governing-date rule and the same
+    upcoming-only window as `get_calendar` — the frontend renders both tabs through one
+    component, so the only thing allowed to differ is which films.
+
+    That set is the `.ics` feed's, not the public listing's, and for the feed's reasons:
+
+    - **Title follows, and only title follows** (EF-14): the films the user asked for by name,
+      in any state and at any age. Following a director puts **nothing** here — an entity
+      follow delivers that entity's attachment cards, not a place on a date list (EF-3), and a
+      director's back catalogue arriving on the user's calendar is precisely what the cutover
+      removed. There is no set that subtracts either: the way a film leaves this page is
+      unfollowing it, which takes it off the `.ics` feed in the same breath.
+    - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
+      user followed by name is not noise to them, and applying the cuts here would make this
+      page disagree with the same user's subscribed calendar — the bug this endpoint exists to
+      prevent (D-1411.2). Only the slug rule survives, for the reason every surface applies it:
+      a row links to the film's page and there is no page to link.
+
+    The window is `get_calendar`'s `>= today`, *not* the feed's reach into the past (D-1411.1).
+    That reach exists for a client reason — a subscribed calendar drops every event a feed stops
+    publishing — and a JSON page re-rendered on every visit has no such client; paging
+    soonest-first over a past window would open page one on releases a year gone.
+    """
+    today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
+    governing = _calendar_governing_cte(name="my_films_governing", title_follow_user_id=user_id)
+    visible = (governing.c.governing_date >= today, Film.slug.is_not(None))
+    return await _calendar_page(
+        session, governing=governing, visible=visible, limit=limit, offset=offset
+    )
+
+
+async def get_ical_feed(
+    session: AsyncSession, *, token: str
+) -> tuple[CalendarFeedEvent, ...] | None:
+    """The subscriber's calendar feed events, or None when there is no feed to serve (D-34).
+
+    `None` covers three cases on purpose — no such token, a token that has been rotated away,
+    and a token whose owner is not entitled — because the route answers all three with 404 and
+    the caller is unauthenticated. Telling them apart is the whole risk D-39 names: a 403 for
+    the third case would confirm to a stranger holding a guessed URL that the token is real.
+    Folding the entitlement rule into the lookup, rather than checking it after, is what makes
+    that indistinguishability structural instead of a `raise` somebody can reorder.
+
+    `entitled_user_clause()` rather than `is_entitled()` over a loaded row: the gate is being
+    applied to the *token's owner*, who is not the request's user — there is no request user at
+    all here — so the request-time dependency cannot reach this, and the SQL predicate is the
+    one spelling of the rule that does not need a `User` in hand (D-39).
+
+    What the feed holds, and why it is not the public calendar's query with a user filter bolted
+    on:
+
+    - **Title follows, and only title follows** (EF-14): the films this user asked for by
+      name, in any state and at any age — the same set `/me/calendar` draws, because the two
+      are one surface in two formats and a feed that disagreed with the page would be the bug
+      D-1411.2 exists to prevent. A followed director contributes nothing: an entity follow
+      delivers cards, not dates (EF-3). Unfollowing a film is what takes it off this feed and
+      off `/me/calendar` together.
+    - **No popularity, runtime or adult cut.** Those keep noise off a public listing. A film the
+      user followed by name is not noise to them — the same reasoning
+      `digest_sender.load_slate` records for the slate.
+    - **No upcoming-only filter**, unlike `get_calendar` — but a bounded reach backwards. A
+      subscribed feed is the client's whole view of this calendar: a client re-fetching it drops
+      every event the feed stopped publishing, so filtering to future dates would quietly erase
+      each release from the user's calendar the day after it happened. Everything future is
+      therefore published in full, and the past is cut at `ICAL_PAST_WINDOW_DAYS`. The cut is
+      what keeps the document bounded by something other than the follow graph: an imported
+      library runs to thousands of films (D-15, D-16), each with up to four buckets, and this
+      is a document re-fetched on the client's schedule rather than a paginated read. A release
+      a year gone is not a date anyone scrolls back to; a release last month is exactly the one
+      the previous paragraph exists to protect.
+    - **A film with no slug is skipped**, for the reason the decision pass skips one: the event's
+      DESCRIPTION is a link to the film's page, and there is no page to link.
+    """
+    user_id = await session.scalar(
+        select(UserSettings.user_id)
+        .join(User, User.id == UserSettings.user_id)
+        .where(UserSettings.ical_token == token, entitled_user_clause())
+    )
+    if user_id is None:
+        return None
+
+    # Python-side, not SQL `CURRENT_DATE` — `get_calendar` next door takes the same care, and
+    # for the same reason: the cutoff must be the same instant for every row of one response.
+    today = datetime.now(tz=UTC).date()
+    earliest = today - timedelta(days=ICAL_PAST_WINDOW_DAYS)
+
+    # The governing date per (film, bucket): the earliest row in the subject, collapsed exactly
+    # as `get_calendar` collapses it (NEU-1206), over the same displayable types in the same
+    # single region — the one the home-release buckets are displayable in at all (D-26).
+    governing = (
+        select(
+            FilmReleaseDate.film_id.label("film_id"),
+            FilmReleaseDate.release_type.label("release_type"),
+            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
+                "governing_date"
+            ),
+        )
+        .where(
+            FilmReleaseDate.film_id.in_(title_follow_film_ids(user_id)),
+            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
+            FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
+        )
+        .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
+        .cte("ical_governing")
+    )
+
+    # DTSTAMP's source. `catalog.film_release_date` is delete-and-rebuilt on every ingest and
+    # carries no timestamp of its own, so "when did this date last move?" is answered by the
+    # table that exists to remember exactly that (`FilmReleaseDateChange`, NEU-1121) — per
+    # subject, which is the grain the UID is keyed on.
+    #
+    # Correlated per row rather than a grouped subquery joined in: the change table is
+    # append-only and unbounded, so grouping it whole would make every calendar fetch pay for
+    # the history of the entire catalog to read a handful of followed films out of it. This
+    # way each row is one index seek on `ix_catalog_film_release_date_change_lookup`, and the
+    # work is bounded by how many films the user follows.
+    last_moved = (
+        select(func.max(FilmReleaseDateChange.changed_at))
+        .where(
+            FilmReleaseDateChange.film_id == governing.c.film_id,
+            FilmReleaseDateChange.release_type == governing.c.release_type,
+            FilmReleaseDateChange.iso_3166_1 == PRIMARY_REGION,
+        )
+        .correlate(governing)
+        .scalar_subquery()
+    )
+
+    rows = (
+        await session.execute(
+            select(
+                governing.c.film_id,
+                governing.c.release_type,
+                governing.c.governing_date,
+                Film.tmdb_id,
+                Film.title,
+                # A date that has never been recorded as moving falls back to when the slate was
+                # first observed, and then to the film's own row — both fixed points. Never
+                # `now()`: a DTSTAMP computed per request would tell the client every event
+                # changed on every poll, which is the one thing a stable UID is for.
+                func.coalesce(
+                    last_moved,
+                    Film.release_dates_observed_at,
+                    Film.created_at,
+                ).label("updated_at"),
+            )
+            .select_from(governing)
+            .join(Film, Film.id == governing.c.film_id)
+            .where(Film.slug.is_not(None), governing.c.governing_date >= earliest)
+            .order_by(
+                governing.c.governing_date.asc(),
+                _calendar_type_rank(governing.c.release_type),
+                Film.title.asc(),
+            )
+        )
+    ).all()
+
+    return tuple(
+        CalendarFeedEvent(
+            film_id=str(row.film_id),
+            bucket=RELEASE_TYPE_BUCKETS[row.release_type],
+            title=row.title,
+            release_date=row.governing_date,
+            film_ref=film_ref(row.tmdb_id, row.title),
+            updated_at=row.updated_at,
+        )
+        for row in rows
+    )
