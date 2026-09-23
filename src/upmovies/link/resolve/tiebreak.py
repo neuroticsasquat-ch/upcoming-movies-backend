@@ -46,6 +46,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from upmovies.link.resolve.candidates import Candidate
+from upmovies.link.resolve.org_candidates import COLLECTION, OrgCandidate
+from upmovies.link.resolve.org_scoring import OrgMention
 from upmovies.link.resolve.scoring import Mention
 from upmovies.llm.types import CallLog, Completer, Prompt
 
@@ -96,6 +98,66 @@ Return ONLY a JSON object — no prose, no markdown:
 
 "reason" is read by a human reviewing the decision, so cite the evidence that separated the \
 options — not a restatement of the name."""
+
+
+_ORG_INSTRUCTIONS = """You are identifying ONE organisation named in a film-trade news \
+story — a studio, production company or financier, or a film franchise or series.
+
+A deterministic pass has already reduced the possible answers to the numbered options you \
+are given, and could not separate them: they are organisations TMDB knows by (or close to) \
+the name the story wrote. Your only job is to say which ONE of them the story means, or that \
+none of them is that organisation.
+
+The options are a CLOSED SET and they are numbered per request. Answer with an "n" that \
+appears in the options list, or null. A number that names no option identifies nobody and \
+will be discarded — never invent one, and never answer with an index the list does not offer.
+
+Being offered an option is not evidence about it. The options share a name with the mention, \
+which is why they are here and is not a reason to pick any of them. Weigh, in this order, \
+whether an option is already ON this film (a production company credited on it, or the \
+collection it is filed under), and whether the sort of work the option is known for fits the \
+story's subject. A shared name is never enough on its own.
+
+Studio names nest and repeat, and that is the hard case this exists for: a parent company, \
+its genre label and its television arm are DIFFERENT organisations that a story may name \
+with the same two words. Pick the one whose scope the story actually describes, and prefer \
+null when the story does not say which arm it means.
+
+Prefer null to a guess. A mention nothing is named for is recoverable and is reviewed by a \
+human; a confidently wrong studio becomes an alert about a company that was never in the \
+story. If two options remain genuinely indistinguishable on the evidence in front of you, \
+that is null, not a coin flip.
+
+The input is a JSON object: {"film": {...}, "story": {...}, "mention": {...}, \
+"options": [...]}. "film" is the film the story has already been linked to. "story" is the \
+headline and dek as published. "mention" is the name exactly as the story wrote it, with its \
+"kind" ("company" for a studio, "collection" for a franchise), whatever other title and beat \
+the extraction pass reported, and the quote it was named in. Each option carries its "n", the \
+organisation's name as TMDB spells it, and whether it is currently on this film.
+
+Return ONLY a JSON object — no prose, no markdown:
+{"option": <an "n" from the options list, or null>, "reason": "<one short clause>"}
+
+"reason" is read by a human reviewing the decision, so cite the evidence that separated the \
+options — not a restatement of the name."""
+
+
+@dataclass(frozen=True)
+class OrgTiebreakQuestion:
+    """What one organisation mention's closed-set question is asked about.
+
+    `TiebreakQuestion`'s fields with an `OrgMention` in place of a `Mention`. A separate type
+    rather than a widened one, for `_ORG_INSTRUCTIONS`' reason: the two questions are asked of
+    different vocabularies, and a single question object carrying either mention shape would
+    make it possible to build a person payload against the organisation prompt.
+    """
+
+    film_title: str
+    film_year: int | None
+    story_title: str
+    story_text: str
+    mention: OrgMention
+    evidence_span: str | None = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +277,61 @@ def _option(n: int, candidate: Candidate) -> dict:
     return option
 
 
+def build_org_tiebreak_request(
+    question: OrgTiebreakQuestion, options: Sequence[OrgCandidate]
+) -> Prompt:
+    """`build_tiebreak_request` for the two organisation kinds — one prompt for both of them
+    (EF-12), because a studio and a franchise are separated by the same evidence: whether the
+    option is on this film, and what it is otherwise known for.
+
+    The mention's own `kind` rides in the payload rather than selecting a third instruction
+    block, so the stable prefix stays one constant per *stage* and a franchise question and a
+    studio question share whatever cache the block earns.
+    """
+    if not options:
+        # As on the person side: a mention with no candidates never routes to the band, so an
+        # empty shortlist here is a wiring bug rather than a question worth a call.
+        raise ValueError("a tiebreak needs at least one option to choose between")
+    payload = {
+        "film": {"title": question.film_title, "year": question.film_year},
+        "story": {"title": question.story_title, "summary": question.story_text},
+        "mention": {
+            "name_as_written": question.mention.name_as_written,
+            "kind": question.mention.kind,
+            "title_mentioned": question.mention.title_mentioned,
+            "event_type": question.mention.event_type,
+            "evidence_span": question.evidence_span,
+        },
+        "options": [_org_option(n, option) for n, option in enumerate(options, start=1)],
+    }
+    return Prompt(
+        stable_prefix=_ORG_INSTRUCTIONS,
+        user=json.dumps(payload, ensure_ascii=False),
+        max_tokens=_MAX_TOKENS,
+        prefill_required=False,
+    )
+
+
+def _org_option(n: int, candidate: OrgCandidate) -> dict:
+    """One numbered organisation option. Only keys with something in them are emitted, for
+    `_option`'s reason — a row padded with nulls reads as evidence of absence.
+
+    The catalog reach is **not** emitted. It is the popularity prior, which D-21 allows to
+    order a shortlist and nothing else; showing it would invite the model to ratify exactly
+    the ordering the band exists because the arithmetic could not justify.
+    """
+    option: dict = {
+        "n": n,
+        "name": candidate.name,
+        "kind": "franchise" if candidate.kind == COLLECTION else "studio or production company",
+    }
+    if candidate.original_name and candidate.original_name != candidate.name:
+        option["original_name"] = candidate.original_name
+    if candidate.attached:
+        option["already_on_this_film"] = True
+    return option
+
+
 def _credit(credit_type: str, job: str | None, department: str | None) -> dict:
     """A credit rendered the way the model is asked to read it: the job where TMDB has one,
     and the credit type where it does not. `cast` with no job is a performer, which is the
@@ -282,6 +399,33 @@ def _extract_json_object(text: str) -> str:
     if start == -1 or end == -1 or end < start:
         return text
     return text[start : end + 1]
+
+
+async def ask_org_tiebreak(
+    *,
+    client: Completer,
+    model: str,
+    question: OrgTiebreakQuestion,
+    options: Sequence[OrgCandidate],
+    calls: CallLog,
+) -> TiebreakReply:
+    """One closed-set call for one organisation mention, recorded into `calls` with its parse
+    outcome. `ask_tiebreak`'s contract in full, and the same `TiebreakReply`: the answer shape
+    is a number and a clause whatever was being identified, so the parser and the four
+    outcomes are shared rather than copied."""
+    result = await client.complete_call(
+        model=model, prompt=build_org_tiebreak_request(question, options), calls=calls
+    )
+    reply = parse_tiebreak_reply(result.text, option_count=len(options))
+    calls.set_parse_ok(reply.usable)
+    if not reply.usable:
+        log.warning(
+            "resolve: unusable organisation tiebreak answer for %r (out_of_list=%s, raw: %r)",
+            question.mention.name_as_written,
+            reply.out_of_list,
+            result.text[:200],
+        )
+    return reply
 
 
 async def ask_tiebreak(

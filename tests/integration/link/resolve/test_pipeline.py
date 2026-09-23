@@ -217,7 +217,7 @@ async def test_an_accept_writes_the_person_the_confidence_and_the_cache(session_
     # something to point at and the headshot came with it.
     person = await session.get(Person, 500)
     assert person is not None and person.profile_path == "/profile500.jpg"
-    cached = await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id))
+    cached = await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id, "person"))
     assert cached is not None and cached.person_id == 500
 
 
@@ -347,7 +347,10 @@ async def test_a_tie_between_namesakes_queues_a_tiebreak_and_names_nobody(sessio
     assert (mention.person_id, mention.path) == (None, "tiebreak")
     # Nothing was accepted, so nothing was cached: the band is for the resolve stage to
     # decide, and caching an undecided mention would cache the indecision.
-    assert await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id)) is None
+    assert (
+        await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id, "person"))
+        is None
+    )
     # Popularity ordered the shortlist the resolve stage will read, and decided nothing else.
     assert [c["person_id"] for c in _logged_candidates(mention)] == [700, 701]
 
@@ -394,7 +397,10 @@ async def test_a_tiebreak_accept_is_never_cached(session_factory, session):
 
     await _resolve_with_tiebreak(session_factory, session)
 
-    assert await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id)) is None
+    assert (
+        await session.get(ResolutionCache, ("deadline.com", "Chris Evans", film.id, "person"))
+        is None
+    )
 
 
 @respx.mock

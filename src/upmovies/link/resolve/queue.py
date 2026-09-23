@@ -1,41 +1,78 @@
 """Reading back what the resolver decided — the query behind D-25's `/admin/resolution`.
 
 Read-only by design. The page it feeds exists so a human can see *why* a mention went where
-it went; it corrects nothing, because a correction surface would have to write `person_id`
-back onto a row the next run re-derives from scratch. Unlinked stays unlinked until the
-scorer's inputs change.
+it went; it corrects nothing, because a correction surface would have to write an id back onto
+a row the next run re-derives from scratch. Unlinked stays unlinked until the scorer's inputs
+change.
 
-The rows this returns are the ones `pipeline.py::_write_decision` wrote: `path` set,
-`features` carrying both the extraction-time context and the resolver's own working notes
-under `resolution`, and `candidates` holding the whole ranked shortlist rather than only the
-winner. A near-miss the scorer rejected is the most useful thing on the page.
+The rows this returns are the ones the two resolvers wrote — `path` set, `features` carrying
+both the extraction-time context and the resolver's own working notes under `resolution`, and
+`candidates` holding the whole ranked shortlist rather than only the winner. A near-miss the
+scorer rejected is the most useful thing on the page.
+
+**One page, three kinds** (EF-12). People live in `news.story_person` and organisations in
+`news.story_entity`; a caller picks one `kind` per request and the row that comes back is
+flattened to the fields both tables share plus the two that are the person table's alone. The
+two are *not* unioned into a single page: the tables have different columns and different
+keyset orders, and paging across both would have to interleave two cursors to save a filter
+the admin page has anyway.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+from uuid import UUID
 
 from sqlalchemy import ColumnElement, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
 from upmovies.link.resolve.scoring import Path
-from upmovies.news.models import Story, StoryPerson
+from upmovies.news.models import (
+    ORGANISATION_KINDS,
+    PERSON_KIND,
+    Story,
+    StoryEntity,
+    StoryPerson,
+)
 from upmovies.pagination import InvalidCursor as InvalidCursor
 from upmovies.pagination import decode_cursor as decode_cursor
 from upmovies.pagination import encode_cursor as encode_cursor
+
+DECISION_KINDS = (PERSON_KIND, *ORGANISATION_KINDS)
+"""The three `kind` values this page lists, person first — which is also the default, so a
+caller written against the person-only endpoint keeps the page it had (EF-12)."""
 
 
 @dataclass(frozen=True)
 class DecisionRow:
     """One decided mention with the story it was found in and the film that story is about.
 
-    Assembled here rather than left as three ORM rows so the router does no joining of its
-    own: `story` is always present (a mention cannot exist without one), `film` is not — a
-    story whose link was later removed keeps its mentions and loses its `film_id`.
+    Flattened off the ORM row rather than handed over as one, so the router does no joining
+    and no type-switching of its own: `story_person` and `story_entity` are different tables,
+    and a caller that had to ask which one it held would be re-deciding per row what the
+    `kind` filter already decided per page.
+
+    `story` is always present (a mention cannot exist without one), `film` is not — a story
+    whose link was later removed keeps its mentions and loses its `film_id`. `role` and
+    `department` are always None for an organisation: they are person facts, and
+    `story_entity` has no column for them.
     """
 
-    mention: StoryPerson
+    id: UUID
+    kind: str
     story: Story
     film: Film | None
+    name_as_written: str
+    role: str | None
+    department: str | None
+    evidence_span: str | None
+    path: str
+    entity_id: int | None
+    confidence: float | None
+    features: dict[str, Any]
+    candidates: list[Any]
+    resolved_at: datetime
 
 
 @dataclass(frozen=True)
@@ -51,20 +88,26 @@ class DecisionPage:
     next_cursor: str | None
 
 
-def _decided() -> list[ColumnElement[bool]]:
-    """What makes a `story_person` row a decision rather than a mention awaiting one.
+def _decided(model: type[StoryPerson] | type[StoryEntity]) -> list[ColumnElement[bool]]:
+    """What makes a mention row a decision rather than a mention awaiting one.
 
-    `resolved_at` is checked alongside `path` although `_write_decision` always writes the
-    two together: no constraint pairs them, and the keyset below orders on `resolved_at`, so
-    a NULL slipping through would not merely omit a row — it would silently truncate a page.
+    `resolved_at` is checked alongside `path` although both resolvers always write the two
+    together: no constraint pairs them, and the keyset below orders on `resolved_at`, so a
+    NULL slipping through would not merely omit a row — it would silently truncate a page.
     """
-    return [StoryPerson.path.is_not(None), StoryPerson.resolved_at.is_not(None)]
+    return [model.path.is_not(None), model.resolved_at.is_not(None)]
 
 
 async def list_decisions(
-    db: AsyncSession, *, path: Path | None = None, limit: int, cursor: str | None = None
+    db: AsyncSession,
+    *,
+    kind: str = PERSON_KIND,
+    path: Path | None = None,
+    limit: int,
+    cursor: str | None = None,
 ) -> DecisionPage:
-    """One page of resolver decisions, newest first, optionally narrowed to a single `path`.
+    """One page of resolver decisions of one `kind`, newest first, optionally narrowed to a
+    single `path`.
 
     Keyset-paginated on `(resolved_at, id)` rather than offset-paginated like the other admin
     lists, because every daily run writes into this queue while it is being read: with an
@@ -81,28 +124,63 @@ async def list_decisions(
     have no features, no candidates and no decision to inspect, which is the whole of what
     this page renders.
     """
-    filters = _decided()
+    if kind not in DECISION_KINDS:
+        raise ValueError(f"unknown decision kind {kind!r}")
+    model: type[StoryPerson] | type[StoryEntity] = (
+        StoryPerson if kind == PERSON_KIND else StoryEntity
+    )
+    filters = _decided(model)
+    if kind in ORGANISATION_KINDS:
+        filters.append(StoryEntity.kind == kind)
     if path is not None:
-        filters.append(StoryPerson.path == path.value)
+        filters.append(model.path == path.value)
     if cursor is not None:
         resolved_at, mention_id = decode_cursor(cursor)
-        filters.append(tuple_(StoryPerson.resolved_at, StoryPerson.id) < (resolved_at, mention_id))
+        filters.append(tuple_(model.resolved_at, model.id) < (resolved_at, mention_id))
 
     # One row beyond the page, to learn whether a next page exists without counting the queue.
     result = await db.execute(
-        select(StoryPerson, Story, Film)
-        .join(Story, Story.id == StoryPerson.story_id)
+        select(model, Story, Film)
+        .join(Story, Story.id == model.story_id)
         .outerjoin(Film, Film.id == Story.film_id)
         .where(*filters)
-        .order_by(StoryPerson.resolved_at.desc(), StoryPerson.id.desc())
+        .order_by(model.resolved_at.desc(), model.id.desc())
         .limit(limit + 1)
     )
-    found = [DecisionRow(mention=m, story=s, film=f) for m, s, f in result.all()]
+    found = [_row(kind, mention, story, film) for mention, story, film in result.all()]
 
     rows = found[:limit]
     next_cursor = None
     if len(found) > limit and rows:
-        last = rows[-1].mention
-        assert last.resolved_at is not None  # `_decided()` filtered the NULLs out
+        last = rows[-1]
         next_cursor = encode_cursor(last.resolved_at, last.id)
     return DecisionPage(rows=rows, next_cursor=next_cursor)
+
+
+def _row(
+    kind: str, mention: StoryPerson | StoryEntity, story: Story, film: Film | None
+) -> DecisionRow:
+    """One ORM row flattened. `path` and `resolved_at` are narrowed here rather than asserted
+    at the call site: `_decided` filtered the NULLs out of both, so the page's own filter is
+    what makes the narrowing sound."""
+    assert mention.path is not None and mention.resolved_at is not None  # `_decided()` filters
+    if isinstance(mention, StoryPerson):
+        role, department, entity_id = mention.role, mention.department, mention.person_id
+    else:
+        role, department, entity_id = None, None, mention.entity_id
+    return DecisionRow(
+        id=mention.id,
+        kind=kind,
+        story=story,
+        film=film,
+        name_as_written=mention.name_as_written,
+        role=role,
+        department=department,
+        evidence_span=mention.evidence_span,
+        path=mention.path,
+        entity_id=entity_id,
+        confidence=mention.confidence,
+        features=mention.features or {},
+        candidates=list(mention.candidates or []),
+        resolved_at=mention.resolved_at,
+    )

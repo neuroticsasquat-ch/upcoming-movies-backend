@@ -23,7 +23,14 @@ from upmovies.news.catalog_events import (
     ONCE_PER_FILM_EVENT_TYPES,
 )
 from upmovies.news.credit_confirm import stamp_story_confirmed_changes
-from upmovies.news.models import Event, EventStory, Story, StoryPerson
+from upmovies.news.models import (
+    ORGANISATION_KINDS,
+    Event,
+    EventStory,
+    Story,
+    StoryEntity,
+    StoryPerson,
+)
 from upmovies.news.source_quality import (
     best_tier,
     domain_for_story,
@@ -43,6 +50,16 @@ class ClusterParseError(Exception):
 _VALID_TYPES = {
     "announced",
     "casting",
+    # The four organisation beats (EF-12, NEU-1445). A story about a studio boarding or
+    # leaving a film, or a film being filed under a franchise, formed an `announced` or an
+    # `other` card before these existed — and `other` is hidden on every surface, so the beat
+    # an organisation follower most wants was the one they could not be told about. They are
+    # the same four types the catalog path already cards (`news.catalog_events`), which is
+    # what lets EF-13's first-association predicate ask one question of both provenances.
+    "collection_attached",
+    "collection_removed",
+    "company_attached",
+    "company_removed",
     "production_start",
     "production_wrap",
     "release_date",
@@ -53,14 +70,16 @@ _VALID_TYPES = {
 _STALE_EVENT_TYPES = {
     "announced",
     "casting",
-    # Early-production beats the LLM cannot emit *yet*, registered with the rest of the
-    # vocabulary so the rule is in place the day it can (EF-5, EF-12). `crew_attached` has
-    # been here on the same terms since the credit half shipped.
+    # A studio boarding a film that has already wrapped or released is re-circulated old news
+    # exactly as a casting is, so the rule that was registered ahead of the vocabulary (EF-5)
+    # now applies to a type the model really emits (EF-12, NEU-1445). `crew_attached` has been
+    # here on the same terms since the credit half shipped.
     "company_attached",
-    # Registered with the rest of the vocabulary (EF-5), and the one member of this set whose
-    # membership should be re-examined the day EF-12 lets the model emit it: TMDB routinely
-    # files a *released* film under a collection for the first time, so a franchise attachment
-    # is not the early-production beat every other type here is.
+    # Kept, having been re-examined now that EF-12 lets the model emit it. TMDB does routinely
+    # file a *released* film under a collection for the first time — but that is the catalog
+    # path's beat, raised from `film_field_change` by `ingest.sweep.collection_events`, which
+    # never passes through here. What this drops is a *trade story* claiming a released film is
+    # joining a franchise, which is the re-circulated old news every other member is.
     "collection_attached",
     # Registered with the rest of the vocabulary (EF-6, NEU-1435) and, like
     # `collection_attached`, a membership to re-examine the day EF-12 lets the model emit it.
@@ -154,7 +173,8 @@ Split only when a story genuinely reports two co-equal beats.
 
 New events carry:
 - "type": one of announced, casting, production_start, production_wrap, release_date, \
-trailer, first_look, other, off_topic
+trailer, first_look, company_attached, company_removed, collection_attached, \
+collection_removed, other, off_topic
 - "confidence": "confirmed" if reported as fact, "rumored" if speculation/unconfirmed.
 - "region": for a "release_date" event ONLY, the ISO 3166-1 alpha-2 code (e.g. "IN" for \
 India, "US" for the United States) of the country the date applies to; null when the date is \
@@ -218,15 +238,60 @@ When "existing" is a number, attach its "stories" to that event ("type"/"confide
 be null). Otherwise it is a new event and "type"/"confidence" are required. "existing" \
 refers to an EXISTING event's number; "stories" lists NEW story numbers "n". Every new \
 story's "n" must appear in exactly one group. "mentions" is independent of the grouping: a \
-story with no person named contributes none, a story naming four people contributes four."""
+story with no person named contributes none, a story naming four people contributes four.
 
-# The version of `_INSTRUCTIONS` above, stamped onto every `story_person` row the extraction
-# pass writes. Bumped to 2 by NEU-1360, which added the "mentions" contract — rows written
-# before it have no mention tuples behind them at all, and a re-extraction has to be able to
-# tell those apart from rows this prompt produced. A module constant rather than a setting
+The four ORGANISATION types in the "type" list above are for beats about a studio or a \
+franchise rather than about a person:
+
+- "company_attached": a production company, studio or financier is reported as boarding, \
+joining, backing, financing or picking up THIS film.
+- "company_removed": a company is reported as exiting, dropping, passing on or being \
+replaced on THIS film.
+- "collection_attached": THIS film is reported as joining, launching or becoming part of a \
+franchise, series or cinematic universe.
+- "collection_removed": THIS film is reported as being taken out of, or no longer part of, \
+a franchise or series.
+A studio merely distributing, releasing or dating a film it already made is none of these — \
+the dominant-beat rule stands, and a release-date story stays "release_date".
+
+Separately again, list in "organisations" — a THIRD top-level key, beside "events" and \
+"mentions" — every STUDIO, production company, financier, FRANCHISE or film series the new \
+stories name, one entry per organisation per story. Like "mentions" this is extraction, not \
+judgement: report what the story names whether or not its beat became an event.
+
+- "n": the story number the organisation is read from.
+- "name_as_written": the organisation's name copied EXACTLY as that story writes it. Do not \
+correct spelling, expand or add abbreviations, drop or add accents, or convert it to any \
+other form of the name. Never emit an id, a database key, or a number of any kind in place \
+of a name — you do not know them and must not guess.
+- "kind": "company" for a studio, production company, financier or distributor; \
+"collection" for a franchise, series or cinematic universe. Nothing else is an organisation \
+for this purpose — a broadcaster, an awards body, a festival, a trade union or a news outlet \
+is not one, and neither is a fictional organisation inside the film.
+- "title_mentioned": another film or series title the story names in connection with THIS \
+organisation — another of its productions. null if it names none. This is never the film the \
+payload is about.
+- "event_type": which beat of this story the organisation is named in connection with, from \
+the same vocabulary as an event's "type". null if the mention is incidental to every beat.
+- "evidence_span": a SHORT verbatim quote from the story — the sentence or clause that names \
+the organisation. Quote it, do not paraphrase.
+
+So the JSON object returned has three top-level keys, the third being:
+"organisations": [{"n": <story number n>, "name_as_written": <name>, \
+"kind": "company" | "collection", "title_mentioned": <other title or null>, \
+"event_type": <type or null>, "evidence_span": <short quote>}]
+Return [] for it when the new stories name no studio or franchise at all."""
+
+# The version of `_INSTRUCTIONS` above, stamped onto every `story_person` and `story_entity`
+# row the extraction pass writes. Bumped to 2 by NEU-1360, which added the "mentions"
+# contract — rows written before it have no mention tuples behind them at all, and a
+# re-extraction has to be able to tell those apart from rows this prompt produced. Bumped to 3
+# by NEU-1445, which added the "organisations" contract on the same terms: a `story_person`
+# row stamped 2 sits beside stories whose studios were never extracted, and that is a fact
+# about the prompt rather than about the article. A module constant rather than a setting
 # (unlike `SUMMARY_PROMPT_VERSION`, which exists so an operator can force a re-render):
 # the version describes the text directly above it, so the two cannot drift apart.
-CLUSTER_PROMPT_VERSION = "2"
+CLUSTER_PROMPT_VERSION = "3"
 
 
 @dataclass
@@ -235,6 +300,7 @@ class ClusterResult:
     stories_clustered: int
     stories_rejected: int = 0
     mentions_recorded: int = 0
+    organisations_recorded: int = 0
 
 
 @dataclass
@@ -267,6 +333,23 @@ class ClusterMention:
     name_as_written: str
     role: str | None = None
     department: str | None = None
+    title_mentioned: str | None = None
+    event_type: str | None = None
+    evidence_span: str | None = None
+
+
+@dataclass
+class ClusterOrganisation:
+    """One studio or franchise one story names, exactly as the model reported it (EF-12).
+
+    `ClusterMention`'s shape without `role` and `department`, which are person facts, plus the
+    `kind` that says which catalog table the name will eventually be resolved against. Names
+    only — the model never emits ids (INV-5).
+    """
+
+    story_index: int
+    name_as_written: str
+    kind: str
     title_mentioned: str | None = None
     event_type: str | None = None
     evidence_span: str | None = None
@@ -345,6 +428,61 @@ def parse_cluster_mentions(raw: str, *, n_stories: int) -> list[ClusterMention]:
             )
         )
     return mentions
+
+
+def parse_cluster_organisations(raw: str, *, n_stories: int) -> list[ClusterOrganisation]:
+    """Pure parse of the organisation half of the cluster response (EF-12).
+
+    `parse_cluster_mentions`' rules throughout, for the same reasons: [] rather than None on
+    an unparseable reply, because a story naming no studio is the ordinary case; the story
+    index validated against the batch; free text stripped and bounded.
+
+    De-duplicates within a story on `(kind, normalized name)` rather than on the name alone.
+    A name can legitimately be both kinds in one article — "Jurassic World" is a franchise and
+    "Universal" is a studio, but a story about "Blumhouse" launching the "Blumhouse" imprint
+    names one string under two kinds — and collapsing those would silently drop a resolvable
+    mention. Across stories they stay separate: each story is its own piece of evidence.
+
+    An entry whose `kind` is not one of `ORGANISATION_KINDS` is dropped rather than guessed at.
+    `kind` is what decides which TMDB endpoint the name is searched against, so a word the
+    model invented is not a mention with a missing field — it is a mention nothing could ever
+    resolve.
+    """
+    try:
+        data = json.loads(_extract_json_object(raw))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    organisations: list[ClusterOrganisation] = []
+    seen: set[tuple[int, str, str]] = set()
+    for item in data.get("organisations") or []:
+        if not isinstance(item, dict):
+            continue
+        n = item.get("n")
+        if not isinstance(n, int) or not (1 <= n <= n_stories):
+            continue
+        name = _mention_text(item.get("name_as_written"))
+        if name is None:
+            continue
+        kind = _mention_text(item.get("kind"))
+        if kind not in ORGANISATION_KINDS:
+            continue
+        key = (n, kind, normalize_name(name))
+        if key in seen:
+            continue
+        seen.add(key)
+        organisations.append(
+            ClusterOrganisation(
+                story_index=n,
+                name_as_written=name,
+                kind=kind,
+                title_mentioned=_mention_text(item.get("title_mentioned")),
+                event_type=_mention_event_type(item.get("event_type")),
+                evidence_span=_mention_text(item.get("evidence_span"), limit=_EVIDENCE_SPAN_MAX),
+            )
+        )
+    return organisations
 
 
 def parse_cluster_groups(raw: str, *, n_stories: int) -> list[ClusterGroup] | None:
@@ -944,7 +1082,20 @@ async def apply_cluster_decisions(
         story_ids=story_ids,
         clustered_sids=clustered_sids,
     )
-    return ClusterResult(events_created, stories_clustered, stories_rejected, mentions_recorded)
+    organisations_recorded = _record_organisations(
+        session,
+        film_id=plan.film_id,
+        raw=raw,
+        story_ids=story_ids,
+        clustered_sids=clustered_sids,
+    )
+    return ClusterResult(
+        events_created,
+        stories_clustered,
+        stories_rejected,
+        mentions_recorded,
+        organisations_recorded,
+    )
 
 
 def _record_mentions(
@@ -997,6 +1148,54 @@ def _record_mentions(
         # otherwise looks exactly like a run of stories with nobody named in them.
         log.info(
             "cluster mentions: film=%s recorded=%d dropped_unclustered=%d",
+            film_id,
+            recorded,
+            dropped,
+        )
+    return recorded
+
+
+def _record_organisations(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    raw: str,
+    story_ids: list[UUID],
+    clustered_sids: set[UUID],
+) -> int:
+    """Persist the reply's organisation tuples as unresolved `story_entity` rows (EF-12).
+
+    `_record_mentions` in full, for the other two kinds: only stories that actually clustered,
+    every row unresolved, and `features` carrying the two extraction fields that have no column
+    of their own. `features->>'event_type'` is the one EF-13's first-association predicate
+    reads (NEU-1446), so it is written here in the same shape the person side writes it and is
+    never regenerated — the story is clustered by the time this returns.
+    """
+    organisations = parse_cluster_organisations(raw, n_stories=len(story_ids))
+    recorded = 0
+    dropped = 0
+    for organisation in organisations:
+        sid = story_ids[organisation.story_index - 1]
+        if sid not in clustered_sids:
+            dropped += 1
+            continue
+        session.add(
+            StoryEntity(
+                story_id=sid,
+                kind=organisation.kind,
+                name_as_written=organisation.name_as_written,
+                evidence_span=organisation.evidence_span,
+                features={
+                    "title_mentioned": organisation.title_mentioned,
+                    "event_type": organisation.event_type,
+                },
+                prompt_version=CLUSTER_PROMPT_VERSION,
+            )
+        )
+        recorded += 1
+    if organisations:
+        log.info(
+            "cluster organisations: film=%s recorded=%d dropped_unclustered=%d",
             film_id,
             recorded,
             dropped,

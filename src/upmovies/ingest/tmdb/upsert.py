@@ -56,6 +56,8 @@ from upmovies.ingest.tmdb.release_date_history import (
 )
 from upmovies.ingest.tmdb.schemas import (
     TMDBCastMember,
+    TMDBCollectionSearchHit,
+    TMDBCompanySearchHit,
     TMDBCrewMember,
     TMDBMovieDetails,
     TMDBPersonSearchHit,
@@ -195,6 +197,56 @@ async def upsert_people(
         },
     )
     await session.execute(stmt)
+
+
+async def upsert_organisation(
+    session: AsyncSession, hit: TMDBCompanySearchHit | TMDBCollectionSearchHit
+) -> None:
+    """Upsert the one `catalog.production_company` or `catalog.collection` row an accepted
+    organisation resolution names (EF-12). Caller commits.
+
+    Here rather than in the resolver for `upsert_people`'s reason: `catalog` reference rows
+    are written in one place, so every path agrees on the conflict set. The two statements
+    are the ones `_upsert_references` and `_upsert_collection` already run per field, with one
+    row instead of a film's worth.
+
+    Only ever called for the candidate a decision *accepted*, never for the whole shortlist.
+    Both tables are read by the public studio and franchise pages and by header search
+    (NEU-1428, NEU-1430), so writing the namesakes this pass rejected would put organisations
+    no film in the catalog touches in front of users — `candidates.py`'s rule for
+    `catalog.person`, which these two tables inherit.
+    """
+    if isinstance(hit, TMDBCollectionSearchHit):
+        stmt = insert(Collection).values(
+            id=hit.id,
+            name=hit.name,
+            poster_path=hit.poster_path,
+            backdrop_path=hit.backdrop_path,
+        )
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[Collection.id],
+                set_={
+                    "name": stmt.excluded.name,
+                    "poster_path": stmt.excluded.poster_path,
+                    "backdrop_path": stmt.excluded.backdrop_path,
+                },
+            )
+        )
+        return
+    company = insert(ProductionCompany).values(
+        id=hit.id, name=hit.name, logo_path=hit.logo_path, origin_country=hit.origin_country
+    )
+    await session.execute(
+        company.on_conflict_do_update(
+            index_elements=[ProductionCompany.id],
+            set_={
+                "name": company.excluded.name,
+                "logo_path": company.excluded.logo_path,
+                "origin_country": company.excluded.origin_country,
+            },
+        )
+    )
 
 
 async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:

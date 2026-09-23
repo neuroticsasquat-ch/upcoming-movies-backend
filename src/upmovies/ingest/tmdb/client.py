@@ -12,6 +12,10 @@ from upmovies.config import Settings
 from upmovies.ingest.tmdb.schemas import (
     TMDBAccount,
     TMDBAccountMoviesResponse,
+    TMDBCollectionSearchHit,
+    TMDBCollectionSearchResponse,
+    TMDBCompanySearchHit,
+    TMDBCompanySearchResponse,
     TMDBDiscoverResponse,
     TMDBMovieDetails,
     TMDBMovieSummary,
@@ -265,6 +269,25 @@ class TMDBClient:
         url = f"{self._base_url}/search/person"
         resp = await self._request("GET", url, params={"query": query, "page": 1})
         return TMDBPersonSearchResponse.model_validate(resp.json()).results
+
+    async def search_company(self, query: str) -> list[TMDBCompanySearchHit]:
+        """Search `/search/company` by name — the organisation half of the candidate union
+        (EF-12), for a studio a trade story names.
+
+        First page only, and for `search_person`'s reason: the organisation resolver caps its
+        union at ten and fills it film-anchored-first, so a company on page two of TMDB's own
+        ranking cannot survive the cap and the second page would cost a request per mention to
+        widen a shortlist that is then truncated."""
+        url = f"{self._base_url}/search/company"
+        resp = await self._request("GET", url, params={"query": query, "page": 1})
+        return TMDBCompanySearchResponse.model_validate(resp.json()).results
+
+    async def search_collection(self, query: str) -> list[TMDBCollectionSearchHit]:
+        """Search `/search/collection` by name — the franchise half of the organisation
+        candidate union (EF-12). First page only, on `search_company`'s terms."""
+        url = f"{self._base_url}/search/collection"
+        resp = await self._request("GET", url, params={"query": query, "page": 1})
+        return TMDBCollectionSearchResponse.model_validate(resp.json()).results
 
     async def movie_details(self, tmdb_id: int) -> TMDBMovieDetails:
         """Fetch full details for a single movie from `/movie/{id}`. Attaches the verbatim

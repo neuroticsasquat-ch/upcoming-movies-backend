@@ -351,6 +351,66 @@ class TMDBPersonSearchResponse(BaseModel):
     total_results: int
 
 
+# `/search/company` and `/search/collection` — the organisation half of the candidate union
+# (EF-12, NEU-1445). Neither endpoint reports a popularity signal, which is why the
+# organisation scorer's tiebreak prior is counted out of the catalog instead
+# (`link.resolve.org_candidates.load_catalog_reach`).
+
+
+class TMDBCompanySearchHit(BaseModel):
+    """A production company as `/search/company` returns them (EF-12).
+
+    The same four fields `catalog.production_company` stores, which is what lets an accepted
+    hit be written straight through rather than through a second mapping that would have to be
+    kept agreeing with `ingest.tmdb.upsert._upsert_references`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    logo_path: str | None = None
+    origin_country: str | None = None
+
+
+class TMDBCompanySearchResponse(BaseModel):
+    """The paged envelope returned by `/search/company`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    page: int
+    results: list[TMDBCompanySearchHit] = Field(default_factory=list)
+    total_pages: int
+    total_results: int
+
+
+class TMDBCollectionSearchHit(BaseModel):
+    """A collection as `/search/collection` returns them (EF-12).
+
+    `original_name` is carried although `catalog.collection` has no column for it: a franchise
+    is routinely written under its original-language name by a trade quoting a foreign
+    production's press release, and the name gate reads both spellings exactly as it does for a
+    person's `original_name`. It is scoring input, not something to store."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    name: str
+    original_name: str | None = None
+    poster_path: str | None = None
+    backdrop_path: str | None = None
+
+
+class TMDBCollectionSearchResponse(BaseModel):
+    """The paged envelope returned by `/search/collection`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    page: int
+    results: list[TMDBCollectionSearchHit] = Field(default_factory=list)
+    total_pages: int
+    total_results: int
+
+
 class TMDBPersonDetails(BaseModel):
     """A person as `/person/{id}` returns them — the only TMDB endpoint that carries birth and
     death dates (NEU-1370).

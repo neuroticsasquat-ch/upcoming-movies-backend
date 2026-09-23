@@ -91,9 +91,14 @@ PERSON_ATTACHMENT_EVENT_TYPES: tuple[str, ...] = tuple(
 # detachment is a correction to an arc, not a stage of one), and deliberately **not** in
 # `HIDDEN_EVENT_TYPES` — a studio attaching is a beat the timeline shows.
 #
-# Absent from `CATALOG_EVENT_TYPES` below, like `now_available` and unlike the credit types:
-# that set is `link.cluster._catalog_dedup_target`'s, for beats the LLM reaches under another
-# name, and the cluster vocabulary has no organisation types at all until EF-12 gives it one.
+# Absent from `CATALOG_EVENT_TYPES` below, like `now_available` and unlike the credit types —
+# and it stays absent now that EF-12 has given the cluster vocabulary these very types
+# (NEU-1445). That set is `link.cluster._catalog_dedup_target`'s, and the credit arm of that
+# rule matches a story card to a catalog card on `Event.subject_key`, i.e. on *who*. An
+# organisation has no such token on a story card and cannot have one: resolution runs after
+# clustering, so the company id is not known when `subject_key` is written (NEU-1446's
+# constraint 4). The two provenances are reconciled by the sweep's backward stamp instead
+# (EF-13, D-1446.6), not here.
 COMPANY_ATTACHED_EVENT_TYPE = "company_attached"
 COMPANY_REMOVED_EVENT_TYPE = "company_removed"
 
@@ -114,9 +119,8 @@ COMPANY_EVENT_TYPES: tuple[str, ...] = (
 # `HIDDEN_EVENT_TYPES` — a film joining a franchise is the whole of what a franchise follow
 # delivers (EF-3).
 #
-# Absent from `CATALOG_EVENT_TYPES` below for the reason the company types are: that set is
-# `link.cluster._catalog_dedup_target`'s, and the cluster vocabulary has no organisation types
-# at all until EF-12 gives it one.
+# Absent from `CATALOG_EVENT_TYPES` below for the reason the company types are, recorded in
+# full above them: a story card carries no `collection:<id>` token to match a catalog card on.
 COLLECTION_ATTACHED_EVENT_TYPE = "collection_attached"
 COLLECTION_REMOVED_EVENT_TYPE = "collection_removed"
 
@@ -134,7 +138,8 @@ COLLECTION_EVENT_TYPES: tuple[str, ...] = (
 # incidental: the LLM cannot emit the type today (`link.cluster._VALID_TYPES` has no member for
 # it), but the day it can, a trade story reporting a cancellation belongs on the card TMDB's own
 # status flip already raised — which is exactly the once-per-film rule the production milestones
-# get. The organisation types are absent for the opposite reason, recorded above them.
+# get. The organisation types are absent for a different reason, recorded above them: the model
+# emits them as of EF-12, and they still have nothing to match a catalog card on.
 CATALOG_EVENT_TYPES = ONCE_PER_FILM_EVENT_TYPES | {"release_date"} | CREDIT_EVENT_TYPES
 
 # The type the watch-provider poll raises the first time a film is observed under a monetization
