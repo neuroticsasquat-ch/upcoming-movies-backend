@@ -60,6 +60,38 @@ async def list_follows(
     user: User = Depends(entitled),
     db: AsyncSession = Depends(get_session),
 ) -> FollowListResponse:
+    """Every follow the user has, in one unpaginated response (EF-15). **Unpaginated by
+    decision, not oversight — NEU-1451.** Read this before adding a pass or paging it.
+
+    The follows page is one flat list with type chips, three sorts and a client-side name
+    filter, and every follow button in the app (`useIsFollowing`, `useFollow`) answers "do I
+    follow X?" by scanning this whole cached list. Paging the route therefore costs a keys view
+    and a rewrite of the buttons' optimistic update, cross-repo — not just a `limit`.
+
+    The cost is four linear passes over the list — the follow rows, the entity labels,
+    `catalog.headline_release` for the title rows, and `last_activity_at` over `news.event`
+    — plus the DTO build and JSON. Measured 2026-09-23 after NEU-1440, all title follows, two
+    published cards per film, warm, median of 3:
+
+        follows   service   DTO+JSON   payload   gzipped
+          1,000    113 ms       9 ms   0.32 MB         —
+          5,000    348 ms      62 ms   1.58 MB   0.19 MB
+         10,000    694 ms     110 ms   3.17 MB         —
+
+    `last_activity_at` is the largest pass and the one that grows with the event table rather
+    than the follow count (326 ms of 803 at 10,000 follows with ten cards per film).
+
+    10,000 is not reachable: EF-21 lets an import follow only in-window films (`confirm` writes
+    `selectable_film_ids` alone), the whole catalog holds about 9,500 of those, and nothing
+    bulk-writes entity follows. A heavy importer lands in the hundreds to low thousands. So:
+    `GZipMiddleware` (`main.py`) carries the payload, and past
+    `follow_service.FOLLOWS_WARN_THRESHOLD` (2,000) the service logs a WARNING per request.
+
+    **Reopen the paging design** — server-side `limit`/cursor with `types`, `q` and `sort`,
+    plus a keys view for the buttons, via `upmovies/pagination.py` — if a writer can create
+    follows outside the alert window, that warning fires in production, or a fifth pass is
+    proposed. Re-take the numbers with `scripts/bench_follows.py`; the full reasoning is
+    `docs/specs/NEU-1451-follows-list-ceiling.md`."""
     rows = await follow_service.list_follows(db, user=user)
     return FollowListResponse(
         items=[_to_out(r.follow, r.label, r.headline, r.last_activity) for r in rows],

@@ -1,5 +1,6 @@
 """`/me/follows` (D-10): the follow graph's CRUD, behind the entitlement gate (D-39)."""
 
+import logging
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -937,3 +938,55 @@ async def test_one_statement_dates_every_row(entitled_client, make_film, add_eve
     assert all(at(r["last_activity_at"]) == OLD for r in rows)
     assert len(calls) == 1, calls
     assert calls[0] == {"only": None}, "the list route asks for every row at once, not row by row"
+
+
+# --- the measured ceiling (NEU-1451) -------------------------------------------------------
+
+
+async def _follow_people(session, user_id, count: int) -> None:
+    from upmovies.app.models import Follow
+    from upmovies.catalog.models import Person
+
+    for i in range(count):
+        session.add(Person(id=1000 + i, name=f"Person {i}"))
+        session.add(
+            Follow(user_id=user_id, entity_type="person", entity_id=str(1000 + i), source="manual")
+        )
+    await session.commit()
+
+
+async def test_the_list_warns_once_past_the_follow_ceiling(
+    entitled_client, session, caplog, monkeypatch
+):
+    """The route stays unpaginated by decision, so an account past the measured ceiling has to
+    say so — otherwise the trigger that reopens the paging design is nobody's to notice. The
+    constant is lowered rather than 2,001 rows inserted."""
+    from upmovies.app.services import follow_service
+
+    monkeypatch.setattr(follow_service, "FOLLOWS_WARN_THRESHOLD", 3)
+    await _follow_people(session, entitled_client.user.id, 4)
+
+    with caplog.at_level(logging.WARNING, logger=follow_service.__name__):
+        r = await entitled_client.get("/me/follows")
+
+    assert r.status_code == 200
+    warnings = [rec for rec in caplog.records if rec.name == follow_service.__name__]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert str(entitled_client.user.id) in warnings[0].getMessage()
+    assert "has 4 follows" in warnings[0].getMessage()
+
+
+async def test_the_list_is_silent_at_the_follow_ceiling(
+    entitled_client, session, caplog, monkeypatch
+):
+    from upmovies.app.services import follow_service
+
+    monkeypatch.setattr(follow_service, "FOLLOWS_WARN_THRESHOLD", 3)
+    await _follow_people(session, entitled_client.user.id, 3)
+
+    with caplog.at_level(logging.WARNING, logger=follow_service.__name__):
+        r = await entitled_client.get("/me/follows")
+
+    assert r.status_code == 200
+    assert [rec for rec in caplog.records if rec.name == follow_service.__name__] == []

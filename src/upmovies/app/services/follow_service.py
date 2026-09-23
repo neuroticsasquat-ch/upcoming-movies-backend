@@ -8,6 +8,7 @@ The rules live in a service rather than the router because the imports (D-15, D-
 follows too, with their own `source`, and should be calling `follow` rather than restating the
 existence check."""
 
+import logging
 from datetime import UTC, datetime
 from typing import NamedTuple
 from uuid import UUID
@@ -20,6 +21,13 @@ from upmovies.app.models import Follow, User
 from upmovies.app.repos import follow_repo
 from upmovies.app.repos.follow_repo import EntityLabel
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
+
+log = logging.getLogger(__name__)
+
+FOLLOWS_WARN_THRESHOLD = 2_000
+"""Follow count past which `list_follows` logs a warning: the ceiling `GET /me/follows` is
+measured for, and the signal that reopens its paging design (NEU-1451, `routers/follows.py`).
+A constant rather than a setting — it is documentation with a side effect, not a knob."""
 
 
 class FollowRow(NamedTuple):
@@ -83,8 +91,19 @@ async def list_follows(db: AsyncSession, *, user: User) -> list[FollowRow]:
 
     `today` is resolved here, Python-side and once for the whole response, the way every
     request-time entry point in this codebase does it: two rows of one list deciding on
-    different sides of midnight whether a date is still upcoming is the bug that buys."""
+    different sides of midnight whether a date is still upcoming is the bug that buys.
+
+    Unbounded by decision: the cost and the ceiling are in `routers/follows.py::list_follows`,
+    and past `FOLLOWS_WARN_THRESHOLD` rows this logs once per call so the ceiling is a signal."""
     follows = await follow_repo.list_for_user(db, user.id)
+    if len(follows) > FOLLOWS_WARN_THRESHOLD:
+        log.warning(
+            "user_id=%s has %d follows, past the %d-row ceiling GET /me/follows is measured "
+            "for (NEU-1451)",
+            user.id,
+            len(follows),
+            FOLLOWS_WARN_THRESHOLD,
+        )
     labels = await follow_repo.entity_labels(db, [(f.entity_type, f.entity_id) for f in follows])
     film_ids = [_film_id(f) for f in follows]
     headlines = await headline_releases(
