@@ -228,6 +228,23 @@ this needs no special path.
 > a stale `dto.py` comment that still described the labels as rendering *beneath* the title. The
 > behaviour change is frontend-only, in `FeedDayCard`. See the spec at
 > `docs/specs/NEU-1212-feed-beat-labels-on-unconfirmed-updates.md`.
+>
+> **Amendment — 2026-09-20 (NEU-1406).** The "unconfirmed updates" heading is renamed to
+> **"Not yet reported"** on both the grouped feed and the film page. NEU-1208 chose
+> "unconfirmed" so the heading would signal uncertainty, and called it the sole veracity signal;
+> NEU-1348 then put D-9's confidence badge (`confirmed` / `unconfirmed`) on every card, and the
+> two collided — 46% of the catalog section carried a `confirmed` badge under a heading that said
+> "unconfirmed", led by release dates and production milestones. The axes are independent: the
+> heading keys on `news_backed` and answers "has a trade outlet covered this?", so it is a
+> **provenance** signal; the card's confidence badge is the **veracity** signal. The heading
+> gives the word up; the badge keeps it. A one-line explainer, once per page, names the split.
+>
+> What did **not** change: NEU-1208's structure (titles-only catalog rows, collapsed by default
+> on the feed, both sections always rendered with "None today" for an empty one, no per-card
+> "via TMDB" attribution) and NEU-1212's beat badges stand. NEU-1205's transient-invariant
+> argument still holds, for the feed's collapsed "Not yet reported" section. No backend code,
+> DTO schema, or migration change — the behaviour change is frontend-only. See the spec at
+> `docs/specs/NEU-1406-not-yet-reported-heading.md` in upcoming-movies-frontend.
 
 ## Considered alternatives
 
