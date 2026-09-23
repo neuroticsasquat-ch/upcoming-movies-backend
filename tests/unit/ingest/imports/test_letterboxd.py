@@ -1,4 +1,8 @@
-"""Reading a Letterboxd export (D-15). Pure parsing — no DB, no network."""
+"""Reading a Letterboxd export (D-15). Pure parsing — no DB, no network.
+
+Since EF-20 the only member this reads is `watchlist.csv`. The ratings tests here are no
+longer about promotion cuts; they are about a `ratings.csv` being *refused* rather than read
+as a watchlist, which is what it would otherwise be — the headers differ by one column."""
 
 import pytest
 
@@ -10,20 +14,35 @@ from upmovies.ingest.imports.letterboxd import (
 )
 
 
-def test_reads_both_files_out_of_an_export_zip():
+def test_reads_the_watchlist_out_of_an_export_zip():
     data = export_zip(
         {
             "watchlist.csv": watchlist_csv([("Dune", 2021), ("Arrival", 2016)]),
+            # Everything else in a real export, `ratings.csv` now among it. Out of scope, and
+            # not an error — a zip that carries more than the watchlist is still an export.
             "ratings.csv": ratings_csv([("Heat", 1995, 4.5)]),
-            # Everything else in a real export. Out of scope, and not an error.
             "diary.csv": b"Date,Name,Year,Letterboxd URI,Rating,Rewatch\n",
             "profile.csv": b"Date Joined,Username\n",
         }
     )
     export = parse_upload(data)
     assert [(r.name, r.year) for r in export.watchlist] == [("Dune", 2021), ("Arrival", 2016)]
-    assert [(r.name, r.year, r.rating) for r in export.ratings] == [("Heat", 1995, 4.5)]
-    assert export.row_count == 3
+    assert export.row_count == 2
+
+
+def test_the_ratings_in_a_zip_contribute_nothing():
+    """EF-20: `ratings.csv` beside a watchlist is read past, not read.
+
+    The zip is the common case — it is what Letterboxd's "Export your data" hands you — so the
+    ratings must be inert here rather than refused, or every real export would be a 422."""
+    with_ratings = export_zip(
+        {
+            "watchlist.csv": watchlist_csv([("Dune", 2021)]),
+            "ratings.csv": ratings_csv([(f"Rated {i}", 1990 + i, 5.0) for i in range(50)]),
+        }
+    )
+    without = export_zip({"watchlist.csv": watchlist_csv([("Dune", 2021)])})
+    assert parse_upload(with_ratings) == parse_upload(without)
 
 
 def test_reads_a_zip_whose_members_sit_in_a_folder():
@@ -33,12 +52,21 @@ def test_reads_a_zip_whose_members_sit_in_a_folder():
     assert [r.name for r in parse_upload(data).watchlist] == ["Dune"]
 
 
-def test_a_bare_csv_is_identified_by_its_header_not_its_name():
-    # The `Rating` column is the only difference, and the file arrives with whatever name the
-    # user's browser gave it.
-    assert parse_upload(watchlist_csv([("Dune", 2021)])).ratings == ()
-    assert parse_upload(ratings_csv([("Dune", 2021, 3.0)])).watchlist == ()
-    assert len(parse_upload(ratings_csv([("Dune", 2021, 3.0)])).ratings) == 1
+def test_a_bare_ratings_csv_is_refused_rather_than_read_as_a_watchlist():
+    """The one thing that makes `RATING_COLUMN` still worth knowing about (EF-20).
+
+    `ratings.csv` carries the same `Name` and `Year` columns a watchlist does, so a parser that
+    simply stopped looking at the `Rating` column would import somebody's entire viewing
+    history as films they mean to see — and every one of them outside the alert window."""
+    with pytest.raises(InvalidImportFile) as excinfo:
+        parse_upload(ratings_csv([("Heat", 1995, 4.5)]))
+    assert "already watched" in str(excinfo.value)
+
+
+def test_a_bare_watchlist_csv_is_identified_by_its_header_not_its_name():
+    # The file arrives with whatever name the user's browser gave it, routinely
+    # `watchlist (1).csv`.
+    assert [r.name for r in parse_upload(watchlist_csv([("Dune", 2021)])).watchlist] == ["Dune"]
 
 
 def test_a_utf8_bom_does_not_hide_the_header():
@@ -54,22 +82,6 @@ def test_a_blank_year_is_kept_as_none_rather_than_dropped():
     assert [(r.name, r.year) for r in export.watchlist] == [("Untitled Project", None)]
 
 
-@pytest.mark.parametrize("rating", ["", "not-a-number"])
-def test_an_unreadable_rating_sorts_with_the_low_ones(rating):
-    # Watched but unrated. Not promoted, and deliberately not an error.
-    (row,) = parse_upload(ratings_csv([("Heat", 1995, rating)])).ratings
-    assert row.rating is None
-    assert row.is_promoted is False
-
-
-@pytest.mark.parametrize(
-    ("rating", "promoted"), [(3.5, False), (4.0, True), (4.5, True), (5.0, True)]
-)
-def test_the_promotion_cut_is_four_stars_inclusive(rating, promoted):
-    (row,) = parse_upload(ratings_csv([("Heat", 1995, rating)])).ratings
-    assert row.is_promoted is promoted
-
-
 def test_a_row_with_no_name_is_dropped():
     # A trailing blank line, or an export truncated mid-write. One unreadable line must not
     # cost the user the other thousand.
@@ -77,10 +89,10 @@ def test_a_row_with_no_name_is_dropped():
     assert [r.name for r in parse_upload(data).watchlist] == ["Dune"]
 
 
-def test_row_count_includes_the_ratings_the_import_will_skip():
-    # It is the denominator of the progress bar the UI polls, so a job whose `rows_total`
-    # excluded them would appear to stall and then leap to done.
-    export = parse_upload(ratings_csv([("Heat", 1995, 1.0), ("Dune", 2021, 5.0)]))
+def test_row_count_is_the_watchlist_alone():
+    # It is the denominator of the progress bar the UI polls, and there is nothing else for
+    # the runner to step through any more.
+    export = parse_upload(watchlist_csv([("Heat", 1995), ("Dune", 2021)]))
     assert export.row_count == 2
 
 
@@ -95,10 +107,19 @@ def test_an_empty_file_is_refused():
         parse_upload(b"")
 
 
-def test_a_zip_with_neither_file_is_refused():
+def test_a_zip_with_no_watchlist_is_refused():
     with pytest.raises(InvalidImportFile) as excinfo:
         parse_upload(export_zip({"diary.csv": b"Date,Name\n"}))
     assert "watchlist.csv" in str(excinfo.value)
+
+
+def test_a_zip_holding_only_ratings_is_refused():
+    # A user who exported and then kept only the file they thought mattered. The message has
+    # to say why, because the file is not corrupt — it is simply not imported any more.
+    with pytest.raises(InvalidImportFile) as excinfo:
+        parse_upload(export_zip({"ratings.csv": ratings_csv([("Heat", 1995, 4.5)])}))
+    assert "watchlist.csv" in str(excinfo.value)
+    assert "Ratings" in str(excinfo.value)
 
 
 def test_a_file_past_the_row_cap_is_refused():

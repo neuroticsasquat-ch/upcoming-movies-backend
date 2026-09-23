@@ -1,15 +1,23 @@
-"""Reading a Letterboxd export: the zip, or one of the two CSVs out of it, into rows.
+"""Reading a Letterboxd export: the zip, or the watchlist CSV out of it, into rows.
 
 Pure — no DB, no network, no clock — so the whole of "is this a usable file?" is decided
 before a job row exists and answered to the uploader as a 422 they can act on, rather than
 surfacing minutes later as a failed job they have to poll to discover (spec §1).
 
-Only `watchlist.csv` and `ratings.csv` are read. The export also carries diary entries,
-reviews, lists, likes and comments; the spec puts all of them out of scope, and a member of
-the zip we do not name is not an error — a Letterboxd export that grew a file is not a broken
-one.
+**Only `watchlist.csv` is read** (EF-20). The ratings path is deleted: a follow is binary now
+(EF-1), so a four-star rating in 2019 would buy a follow that pushes on every credit change of
+somebody the user once enjoyed, which is not what rating a film says. The export also carries
+diary entries, reviews, lists, likes and comments; those were always out of scope, and a member
+of the zip we do not name is not an error — a Letterboxd export that grew a file is not a
+broken one.
 
-Neither CSV carries a TMDB id — the `Letterboxd URI` column is a link to *their* page, and
+`ratings.csv` is the one unnamed member this still has to *recognise*, because it is not inert:
+its header is a superset of the watchlist's, so an uploader who sends it on its own would
+otherwise have their entire rated history read as a watchlist. It is refused with a reason
+instead, which is the same bargain the rest of this module makes — the user learns what to
+upload while they are still looking at the file.
+
+`watchlist.csv` carries no TMDB id — the `Letterboxd URI` column is a link to *their* page, and
 following it would mean scraping — so every row here is a title and a year that
 `ingest.tmdb.resolution` has to place. That is why the rows come out of this module untouched:
 whatever normalization matching needs belongs to the matcher, next to the hits it compares
@@ -23,11 +31,12 @@ from dataclasses import dataclass
 from upmovies.app.errors import DomainError
 
 WATCHLIST_MEMBER = "watchlist.csv"
-RATINGS_MEMBER = "ratings.csv"
 
 NAME_COLUMN = "Name"
 YEAR_COLUMN = "Year"
 RATING_COLUMN = "Rating"
+"""Not a column this reads — the column that tells a bare `ratings.csv` apart from a bare
+`watchlist.csv`, which is otherwise only knowable from a filename the user's browser chose."""
 
 MAX_ROWS_PER_FILE = 5_000
 """Spec §4. At the client's 40 req / 10 s this is ~20 minutes of work for one file, which the
@@ -39,10 +48,6 @@ MAX_MEMBER_BYTES = 32 * 1024 * 1024
 which bounds nothing about what is *inside* a zip: 5 MB of well-compressed CSV is gigabytes
 expanded. Checked against the member's declared size before it is read, so a bomb is refused
 rather than decompressed and then refused."""
-
-PROMOTED_RATING = 4.0
-"""The rating at or above which a film contributes its people (spec §3). Letterboxd rates in
-halves from 0.5 to 5, so this is "four stars or better"."""
 
 
 class InvalidImportFile(DomainError):
@@ -61,35 +66,20 @@ class WatchlistRow:
 
 
 @dataclass(frozen=True)
-class RatingRow:
-    """One `ratings.csv` row. `rating` is None when the column was blank or unreadable, which
-    sorts with the low ratings: neither is promoted, and neither costs a request."""
-
-    name: str
-    year: int | None
-    rating: float | None
-
-    @property
-    def is_promoted(self) -> bool:
-        return self.rating is not None and self.rating >= PROMOTED_RATING
-
-
-@dataclass(frozen=True)
 class LetterboxdExport:
-    """What one upload turned out to contain. Either list may be empty — a user who uploads
-    `watchlist.csv` alone has no ratings — but not both, which `parse_upload` refuses."""
+    """What one upload turned out to contain: the rows of `watchlist.csv`, and nothing else.
+
+    A file with no watchlist in it at all is refused by `parse_upload`. A watchlist that is
+    merely *empty* is not — somebody whose watchlist has nothing on it has uploaded a valid
+    export, and the job that reads it succeeds having done nothing, which is the truth."""
 
     watchlist: tuple[WatchlistRow, ...] = ()
-    ratings: tuple[RatingRow, ...] = ()
 
     @property
     def row_count(self) -> int:
-        """Every row the runner will step through, promoted or not.
-
-        Counts the ratings this import will skip without a request as well, because this is
-        the denominator of the progress bar the UI polls (NEU-1358): a job whose `rows_total`
-        excluded them would appear to stall at the watchlist and then leap to done."""
-        return len(self.watchlist) + len(self.ratings)
+        """Every row the runner will step through — the denominator of the progress bar the UI
+        polls (NEU-1358)."""
+        return len(self.watchlist)
 
 
 def parse_upload(data: bytes) -> LetterboxdExport:
@@ -97,8 +87,8 @@ def parse_upload(data: bytes) -> LetterboxdExport:
 
     A zip is read by member name, a bare CSV by its header row — the asymmetry is the spec's
     (§1) and it is the right way round. Inside the export the names are Letterboxd's own and
-    are the only thing distinguishing `ratings.csv` from `diary.csv`, whose headers are
-    supersets of it; a file uploaded on its own has whatever name the user's browser gave it,
+    are the only thing distinguishing `watchlist.csv` from `diary.csv`, whose header is a
+    superset of it; a file uploaded on its own has whatever name the user's browser gave it,
     which is routinely `watchlist (1).csv`."""
     if zipfile.is_zipfile(io.BytesIO(data)):
         return _parse_zip(data)
@@ -106,25 +96,23 @@ def parse_upload(data: bytes) -> LetterboxdExport:
 
 
 def _parse_zip(data: bytes) -> LetterboxdExport:
+    watchlist: bytes | None = None
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        members = {}
         for info in archive.infolist():
             # Matched on the basename: an export is sometimes re-zipped with its contents in a
             # folder, and the member is then `letterboxd-user-2026-09-15/watchlist.csv`.
             name = info.filename.rsplit("/", 1)[-1].lower()
-            if name in (WATCHLIST_MEMBER, RATINGS_MEMBER) and name not in members:
+            if name == WATCHLIST_MEMBER and watchlist is None:
                 if info.file_size > MAX_MEMBER_BYTES:
                     raise InvalidImportFile(f"{name} in the zip is too large to read")
-                members[name] = archive.read(info)
+                watchlist = archive.read(info)
 
-    if not members:
+    if watchlist is None:
         raise InvalidImportFile(
-            "the zip contains neither watchlist.csv nor ratings.csv — upload a Letterboxd "
-            "export, or one of those two files on its own"
+            "the zip contains no watchlist.csv — upload a Letterboxd export, or watchlist.csv "
+            "on its own. Ratings are no longer imported."
         )
-    watchlist = _read_watchlist(members[WATCHLIST_MEMBER]) if WATCHLIST_MEMBER in members else ()
-    ratings = _read_ratings(members[RATINGS_MEMBER]) if RATINGS_MEMBER in members else ()
-    return LetterboxdExport(watchlist=watchlist, ratings=ratings)
+    return LetterboxdExport(watchlist=_read_watchlist(watchlist))
 
 
 def _parse_single_csv(data: bytes) -> LetterboxdExport:
@@ -138,7 +126,13 @@ def _parse_single_csv(data: bytes) -> LetterboxdExport:
             f"{NAME_COLUMN!r} and {YEAR_COLUMN!r} columns"
         )
     if RATING_COLUMN in columns:
-        return LetterboxdExport(ratings=_read_ratings(data))
+        # `ratings.csv` and `diary.csv` both land here, and both would otherwise read cleanly
+        # as a watchlist — same `Name` and `Year` columns — and import somebody's whole
+        # viewing history as films they mean to see.
+        raise InvalidImportFile(
+            "that file is a list of films you have already watched — ratings are no longer "
+            "imported. Upload watchlist.csv, or the export zip Letterboxd sent you."
+        )
     return LetterboxdExport(watchlist=_read_watchlist(data))
 
 
@@ -155,15 +149,6 @@ def _read_watchlist(data: bytes) -> tuple[WatchlistRow, ...]:
     rows = [
         WatchlistRow(name=name, year=_year(raw))
         for raw in _rows(data, WATCHLIST_MEMBER)
-        if (name := _name(raw)) is not None
-    ]
-    return tuple(rows)
-
-
-def _read_ratings(data: bytes) -> tuple[RatingRow, ...]:
-    rows = [
-        RatingRow(name=name, year=_year(raw), rating=_rating(raw))
-        for raw in _rows(data, RATINGS_MEMBER)
         if (name := _name(raw)) is not None
     ]
     return tuple(rows)
@@ -197,12 +182,5 @@ def _year(row: dict[str, str | None]) -> int | None:
     rather than having it silently vanish between the file and the report."""
     try:
         return int((row.get(YEAR_COLUMN) or "").strip())
-    except ValueError:
-        return None
-
-
-def _rating(row: dict[str, str | None]) -> float | None:
-    try:
-        return float((row.get(RATING_COLUMN) or "").strip())
     except ValueError:
         return None

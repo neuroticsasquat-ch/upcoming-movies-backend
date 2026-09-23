@@ -66,8 +66,9 @@ _UPLOAD_BODY: dict[str, Any] = {
                             "type": "string",
                             "format": "binary",
                             "description": (
-                                "A Letterboxd export zip, or watchlist.csv / ratings.csv on "
-                                f"its own. At most {MAX_UPLOAD_BYTES} bytes."
+                                "A Letterboxd export zip, or watchlist.csv on its own. "
+                                "Ratings are not imported (EF-20). At most "
+                                f"{MAX_UPLOAD_BYTES} bytes."
                             ),
                         }
                     },
@@ -95,9 +96,9 @@ async def start_letterboxd_import(
 
     Rejects before it enqueues, so the uploader learns what is wrong with their file while they
     are still looking at it: 413 for an upload past the cap, 422 for anything `parse_upload`
-    cannot read, and 409 while one of this user's imports is still going — one at a time,
-    because two would race each other for the same rate-limited TMDB budget and for the same
-    follow rows."""
+    cannot read — which since EF-20 includes a `ratings.csv` sent on its own — and 409 while one
+    of this user's imports is still going, one at a time, because two would race each other for
+    the same rate-limited TMDB budget and for the same follow rows."""
     export = await _parsed_upload(request)
 
     if await import_job_repo.active_for_user(db, user.id) is not None:
