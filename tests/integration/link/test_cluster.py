@@ -23,7 +23,7 @@ from upmovies.link.cluster import (
     cluster_film_events,
 )
 from upmovies.llm import CallLog
-from upmovies.news.models import Event, EventStory, Story, StoryPerson
+from upmovies.news.models import Event, EventStory, Story, StoryEntity, StoryPerson
 
 
 class FakeClient:
@@ -2382,6 +2382,197 @@ async def test_records_story_person_rows_for_clustered_stories(session):
     # Unresolved is the resting state until M4's resolver lands (NEU-1362 onward).
     assert (ana.person_id, ana.confidence, ana.path, ana.resolved_at) == (None, None, None, None)
     assert ana.candidates is None
+
+
+async def test_records_story_entity_rows_for_clustered_stories(session):
+    """EF-12: the organisation tuples land as unresolved `story_entity` rows beside the
+    person ones — names only, nothing identified yet (INV-5)."""
+    film = Film(tmdb_id=190, title="Organisations")
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/organisations")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "company_attached",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ],
+            "mentions": [],
+            "organisations": [
+                {
+                    "n": 1,
+                    "name_as_written": "Blumhouse",
+                    "kind": "company",
+                    "title_mentioned": "M3GAN",
+                    "event_type": "company_attached",
+                    "evidence_span": "Blumhouse is boarding the thriller.",
+                },
+                {
+                    "n": 1,
+                    "name_as_written": "The Conjuring",
+                    "kind": "collection",
+                    "title_mentioned": None,
+                    "event_type": "collection_attached",
+                    "evidence_span": "It joins The Conjuring universe.",
+                },
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert result.organisations_recorded == 2
+    # The beat the model classified is now a card of its own rather than `announced`/`other`.
+    event = (await session.execute(select(Event).where(Event.film_id == film.id))).scalars().one()
+    assert event.event_type == "company_attached"
+    rows = (
+        (
+            await session.execute(
+                select(StoryEntity)
+                .where(StoryEntity.story_id == story.id)
+                .order_by(StoryEntity.name_as_written)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [(r.name_as_written, r.kind) for r in rows] == [
+        ("Blumhouse", "company"),
+        ("The Conjuring", "collection"),
+    ]
+    blumhouse = rows[0]
+    assert blumhouse.evidence_span == "Blumhouse is boarding the thriller."
+    # NEU-1446 reads the beat out of `features`, exactly as it does for a person.
+    assert blumhouse.features == {"title_mentioned": "M3GAN", "event_type": "company_attached"}
+    assert blumhouse.prompt_version == CLUSTER_PROMPT_VERSION
+    assert (blumhouse.entity_id, blumhouse.confidence, blumhouse.path) == (None, None, None)
+    assert (blumhouse.resolved_at, blumhouse.candidates) == (None, None)
+
+
+async def test_does_not_record_organisations_for_rejected_stories(session):
+    """A rejected story has no film behind it, and resolution is film-scoped end to end."""
+    film = Film(tmdb_id=191, title="Rejected Organisations")
+    session.add(film)
+    await session.flush()
+    story = await _linked_story(session, film, "https://e/off-topic-org")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [{"existing": None, "type": "off_topic", "confidence": None, "stories": [1]}],
+            "organisations": [
+                {"n": 1, "name_as_written": "Blumhouse", "kind": "company", "evidence_span": "q"}
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.stories_rejected, result.organisations_recorded) == (1, 0)
+    rows = (
+        (await session.execute(select(StoryEntity).where(StoryEntity.story_id == story.id)))
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+
+async def test_a_reply_with_no_organisations_block_clusters_unchanged(session):
+    """Backwards compatibility: a reply in the pre-EF-12 shape still clusters, and simply
+    records no organisations."""
+    film = Film(tmdb_id=192, title="No Organisations")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/no-organisations")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "casting",
+                    "confidence": "confirmed",
+                    "cast": ["Ana de Armas"],
+                    "stories": [1],
+                }
+            ],
+            "mentions": [{"n": 1, "name_as_written": "Ana de Armas", "evidence_span": "q"}],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.mentions_recorded, result.organisations_recorded) == (1, 0)
+
+
+async def test_a_studio_boarding_a_released_film_is_stale_stage(session):
+    """`company_attached` joined `_STALE_EVENT_TYPES` ahead of the vocabulary (EF-5) and the
+    rule now applies to a beat the model really emits."""
+    film = Film(tmdb_id=193, title="Already Out", status="Released")
+    session.add(film)
+    await session.flush()
+    await _linked_story(session, film, "https://e/stale-company")
+    await session.commit()
+
+    client = FakeClient(
+        {
+            "events": [
+                {
+                    "existing": None,
+                    "type": "company_attached",
+                    "confidence": "confirmed",
+                    "stories": [1],
+                }
+            ],
+            "organisations": [
+                {"n": 1, "name_as_written": "Blumhouse", "kind": "company", "evidence_span": "q"}
+            ],
+        }
+    )
+    result = await cluster_film_events(
+        session,
+        client=client,
+        model="m",
+        film_id=film.id,
+        attach_limit=45,
+        run_date=date(2026, 1, 1),
+        calls=CallLog(),
+    )
+    await session.commit()
+
+    assert (result.events_created, result.stories_rejected) == (0, 1)
+    assert result.organisations_recorded == 0
 
 
 async def test_does_not_record_mentions_for_rejected_stories(session):

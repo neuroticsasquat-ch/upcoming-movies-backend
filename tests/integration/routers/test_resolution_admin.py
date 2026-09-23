@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fixtures.catalog import add_film
 from upmovies.catalog.models import Person
-from upmovies.link.resolve.queue import encode_cursor
-from upmovies.news.models import Story, StoryPerson
+from upmovies.link.resolve.queue import DECISION_KINDS, encode_cursor
+from upmovies.news.models import Story, StoryEntity, StoryPerson
+from upmovies.routers.resolution_admin import DecisionKind
 
 NOW = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
 # As Pydantic renders it: UTC serializes with a `Z`, not a `+00:00` offset.
@@ -21,6 +22,20 @@ CANDIDATE = {
     "score": 0.62,
     "features": {"name_match": "exact", "already_credited": False, "popularity_prior": 0.1},
 }
+
+# One candidate exactly as `org_scoring.org_candidate_log` writes it (EF-12).
+ORG_CANDIDATE = {
+    "entity_id": 3172,
+    "kind": "company",
+    "name": "Blumhouse Productions",
+    "score": 0.7,
+    "features": {"name_match": "exact", "attached": True, "catalog_reach": 12},
+}
+
+# The same two as the DTO renders them: the stored shapes carry only the id column their own
+# resolver writes, and the page fills the other in as null.
+CANDIDATE_OUT = {**CANDIDATE, "entity_id": None, "kind": None}
+ORG_CANDIDATE_OUT = {**ORG_CANDIDATE, "person_id": None}
 
 
 async def _story(session: AsyncSession, film=None, **overrides) -> Story:
@@ -57,6 +72,32 @@ async def _decision(session: AsyncSession, story: Story, **overrides) -> StoryPe
     }
     fields.update(overrides)
     row = StoryPerson(**fields)
+    session.add(row)
+    await session.flush()
+    await session.commit()
+    return row
+
+
+async def _org_decision(session: AsyncSession, story: Story, **overrides) -> StoryEntity:
+    """An organisation mention the resolver has already decided (EF-12)."""
+    fields: dict = {
+        "story_id": story.id,
+        "kind": "company",
+        "name_as_written": "Blumhouse",
+        "evidence_span": "Blumhouse is boarding the thriller",
+        "path": "unlinked",
+        "confidence": 0.5,
+        "features": {
+            "title_mentioned": None,
+            "event_type": "company_attached",
+            "resolution": {},
+        },
+        "candidates": [ORG_CANDIDATE],
+        "prompt_version": "3",
+        "resolved_at": NOW,
+    }
+    fields.update(overrides)
+    row = StoryEntity(**fields)
     session.add(row)
     await session.flush()
     await session.commit()
@@ -105,10 +146,12 @@ async def test_returns_the_fields_the_review_page_renders(
             "department": "Acting",
             "evidence_span": "Chris Evans is set to star",
             "path": "unlinked",
+            "kind": "person",
+            "entity_id": None,
             "person_id": None,
             "confidence": 0.4,
             "features": {"title_mentioned": None, "event_type": "casting", "resolution": {}},
-            "candidates": [CANDIDATE],
+            "candidates": [CANDIDATE_OUT],
             "resolved_at": NOW_JSON,
         }
     ]
@@ -145,7 +188,14 @@ async def test_renders_a_malformed_candidate_rather_than_failing(
     r = await admin_authed_client.get("/admin/resolution")
     assert r.status_code == 200
     assert r.json()["items"][0]["candidates"] == [
-        {"person_id": 7, "name": None, "score": None, "features": {}}
+        {
+            "person_id": 7,
+            "entity_id": None,
+            "kind": None,
+            "name": None,
+            "score": None,
+            "features": {},
+        }
     ]
 
 
@@ -320,6 +370,126 @@ async def test_decided_row_with_no_candidates_renders_empty(
     r = await admin_authed_client.get("/admin/resolution")
     assert r.status_code == 200
     assert r.json()["items"][0]["candidates"] == []
+
+
+# --- the three kinds (EF-12) ----------------------------------------------------------------
+
+
+async def test_defaults_to_the_person_queue(admin_authed_client, session: AsyncSession):
+    """The page as it stands asks for no kind and keeps the queue it had, until NEU-1447."""
+    film = await add_film(session, tmdb_id=570)
+    story = await _story(session, film, slug="person-default")
+    await _decision(session, story)
+    await _org_decision(session, await _story(session, film, slug="org-default"))
+
+    body = (await admin_authed_client.get("/admin/resolution")).json()
+    assert [i["kind"] for i in body["items"]] == ["person"]
+
+
+async def test_lists_the_company_queue(admin_authed_client, session: AsyncSession):
+    film = await add_film(session, tmdb_id=571, title="Fight Club")
+    story = await _story(session, film, slug="company")
+    row = await _org_decision(session, story, path="accepted", entity_id=3172)
+
+    body = (await admin_authed_client.get("/admin/resolution?kind=company")).json()
+    assert body["items"] == [
+        {
+            "id": str(row.id),
+            "kind": "company",
+            "story": {
+                "id": str(story.id),
+                "title": "A trade story",
+                "url": story.url,
+                "outlet": "Deadline",
+            },
+            "film": {"id": str(film.id), "tmdb_id": 571, "title": "Fight Club"},
+            "name_as_written": "Blumhouse",
+            # Person facts, and `news.story_entity` has no column for them.
+            "role": None,
+            "department": None,
+            "evidence_span": "Blumhouse is boarding the thriller",
+            "path": "accepted",
+            "entity_id": 3172,
+            # The compatibility duplicate is person-only, so an organisation row leaves it null.
+            "person_id": None,
+            "confidence": 0.5,
+            "features": {
+                "title_mentioned": None,
+                "event_type": "company_attached",
+                "resolution": {},
+            },
+            "candidates": [ORG_CANDIDATE_OUT],
+            "resolved_at": NOW_JSON,
+        }
+    ]
+
+
+async def test_the_two_organisation_kinds_are_separate_queues(
+    admin_authed_client, session: AsyncSession
+):
+    film = await add_film(session, tmdb_id=572)
+    await _org_decision(session, await _story(session, film, slug="c"), name_as_written="Blumhouse")
+    await _org_decision(
+        session,
+        await _story(session, film, slug="f"),
+        kind="collection",
+        name_as_written="The Conjuring",
+    )
+
+    companies = (await admin_authed_client.get("/admin/resolution?kind=company")).json()
+    franchises = (await admin_authed_client.get("/admin/resolution?kind=collection")).json()
+    assert [i["name_as_written"] for i in companies["items"]] == ["Blumhouse"]
+    assert [i["name_as_written"] for i in franchises["items"]] == ["The Conjuring"]
+
+
+async def test_the_path_filter_applies_within_a_kind(admin_authed_client, session: AsyncSession):
+    film = await add_film(session, tmdb_id=573)
+    for i, path in enumerate(("unlinked", "accepted")):
+        story = await _story(session, film, slug=f"org-{i}")
+        await _org_decision(session, story, path=path, name_as_written=path)
+
+    body = (await admin_authed_client.get("/admin/resolution?kind=company&path=accepted")).json()
+    assert [i["name_as_written"] for i in body["items"]] == ["accepted"]
+
+
+async def test_an_organisation_page_pages_through_its_own_cursor(
+    admin_authed_client, session: AsyncSession
+):
+    film = await add_film(session, tmdb_id=574)
+    for i in range(3):
+        story = await _story(session, film, slug=f"paged-org-{i}")
+        await _org_decision(
+            session, story, name_as_written=f"Studio {i}", resolved_at=NOW + timedelta(minutes=i)
+        )
+
+    first = (await admin_authed_client.get("/admin/resolution?kind=company&limit=2")).json()
+    second = (
+        await admin_authed_client.get(
+            f"/admin/resolution?kind=company&limit=2&cursor={first['next_cursor']}"
+        )
+    ).json()
+    names = [i["name_as_written"] for i in first["items"] + second["items"]]
+    assert names == ["Studio 2", "Studio 1", "Studio 0"]
+    assert second["next_cursor"] is None
+
+
+async def test_rejects_a_kind_outside_the_vocabulary(admin_authed_client):
+    r = await admin_authed_client.get("/admin/resolution?kind=studio")
+    assert r.status_code == 422
+
+
+def test_the_query_enum_spells_the_whole_vocabulary():
+    """The enum is written out so FastAPI can document its members; this is what keeps the
+    duplication honest."""
+    assert tuple(k.value for k in DecisionKind) == DECISION_KINDS
+
+
+async def test_an_undecided_organisation_is_omitted(admin_authed_client, session: AsyncSession):
+    story = await _story(session, await add_film(session, tmdb_id=575), slug="undecided-org")
+    await _org_decision(session, story, path=None, confidence=None, resolved_at=None)
+
+    body = (await admin_authed_client.get("/admin/resolution?kind=company")).json()
+    assert body["items"] == []
 
 
 async def test_a_path_without_a_resolved_at_is_not_a_decision(

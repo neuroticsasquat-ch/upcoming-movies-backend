@@ -309,20 +309,125 @@ class StoryPerson(Base):
 RESOLVED_MENTION_PATHS = ("accepted", "tiebreak")
 
 
+PERSON_KIND = "person"
+"""The `kind` a person mention is keyed under in `news.resolution_cache` and filtered by on
+`/admin/resolution`. People have no `kind` column of their own — they have their own table —
+so this is the one place the word is spelled (EF-12)."""
+
+ORGANISATION_KINDS = ("company", "collection")
+"""The two `news.story_entity.kind` values (EF-12) — catalog spelling, not follow spelling.
+
+`collection` is what TMDB and `catalog.collection` call a franchise, and it stays that way on
+this side of the line: these rows record what the extraction pass read out of an article
+against the catalog it is resolved into. The mapping to a follow's `entity_type` (`franchise`)
+belongs to the query builder that joins the two (EF-13, NEU-1446), not to the extraction
+vocabulary.
+
+`person` is deliberately absent: people are `story_person`, which keeps its own table and its
+person-specific `role` / `department` columns.
+"""
+
+
+class StoryEntity(Base):
+    """One organisation — a studio or a franchise — the cluster stage's extraction pass found
+    named in a story (EF-12). `story_person`'s shape, for the two kinds that are not people.
+
+    A separate table rather than a `kind` column on `story_person`, because that table's
+    `role`, `department` and FK-backed `person_id` are person facts a company row would carry
+    as three permanent NULLs and a lie about what `entity_id` references.
+
+    Written at clustering from the model's own tuples, which carry names only and never ids
+    (INV-5). Every row arrives unresolved — `entity_id`, `confidence`, `path` and `resolved_at`
+    NULL — and is picked up by `link.resolve.org_pipeline` on a later pass. `entity_id` NULL
+    with `path='not_in_tmdb'` stays valid afterwards (INV-8), and INV-6 caps `confidence` at
+    the story's own link confidence.
+
+    `features` carries the extraction-time context that has no column of its own —
+    `title_mentioned` and `event_type` — and the resolver **merges** its own working notes into
+    it under a `resolution` key rather than replacing it, for the reason spelled out in full on
+    `StoryPerson`. `features->>'event_type'` is where NEU-1446's first-association predicate
+    reads the beat this organisation was named in connection with, exactly as it does for a
+    person.
+
+    **`entity_id` carries no foreign key**, unlike `story_person.person_id`: it points at
+    `catalog.production_company` or `catalog.collection` depending on `kind`, and one column
+    cannot reference two tables. Neither of those is ever deleted by ingest — both are upserted
+    reference data — so the `ON DELETE SET NULL` the person side needs has nothing to guard
+    against here.
+    """
+
+    __tablename__ = "story_entity"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('company', 'collection')",
+            name="ck_story_entity_kind",
+        ),
+        CheckConstraint(
+            "path IS NULL OR path IN ('accepted', 'tiebreak', 'unlinked', 'not_in_tmdb')",
+            name="ck_story_entity_path",
+        ),
+        Index("ix_story_entity_story_id", "story_id"),
+        Index("ix_story_entity_kind_entity_id", "kind", "entity_id"),
+        {"schema": "news"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    story_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("news.story.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    name_as_written: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_span: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    candidates: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class ResolutionCache(Base):
-    """A name-to-person decision, remembered per (source domain, name as written, film) so the
-    same trade naming the same person on the same film is not re-resolved every run (D-24).
+    """A name-to-entity decision, remembered per (source domain, name as written, film, kind)
+    so the same trade naming the same person or studio on the same film is not re-resolved
+    every run (D-24, EF-12).
 
-    The triple is the primary key, which is the unique key the cache needs: the same name means
-    different people on different films, and one outlet's house style for a name ("Chris Evans"
-    vs "Christopher Evans") is not another's. `person_id` NULL is a cached *negative* — nobody
-    in TMDB matches — and is as much an answer as a hit is (INV-8).
+    The quadruple is the primary key, which is the unique key the cache needs: the same name
+    means different people on different films, one outlet's house style for a name ("Chris
+    Evans" vs "Christopher Evans") is not another's, and a name can be both a person and a
+    studio ("Blumhouse" is not, but "A24" and "Amblin" name people too). A cached row with no
+    id is a cached *negative* — nobody in TMDB matches — and is as much an answer as a hit is
+    (INV-8).
 
-    Nothing writes this yet: M4's resolver (NEU-1362 onward) fills it. The table lands with the
-    extraction schema so the two migrate together."""
+    **Two id columns, because only one kind has a table to reference.** `person_id` keeps its
+    FK into `catalog.person` with `ON DELETE SET NULL`, which is load-bearing: TMDB tombstones
+    people, and a cached id surviving that deletion would be handed to `story_person.person_id`
+    — which *does* carry the FK — and fail the write. `entity_id` is the plain column the two
+    organisation kinds use; it points at `catalog.production_company` or `catalog.collection`
+    by `kind`, one column cannot reference two tables, and neither of those is ever deleted by
+    ingest. Exactly one of the two is ever set, and `ck_resolution_cache_id_matches_kind` is
+    what makes that true rather than merely intended."""
 
     __tablename__ = "resolution_cache"
-    __table_args__ = ({"schema": "news"},)
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('person', 'company', 'collection')",
+            name="ck_resolution_cache_kind",
+        ),
+        # The two id columns are exclusive by `kind`, structurally rather than by convention:
+        # the docstring above says which column a row's kind means, and without this a person
+        # row could carry an `entity_id` nothing would ever read back.
+        CheckConstraint(
+            "CASE WHEN kind = 'person' THEN entity_id IS NULL ELSE person_id IS NULL END",
+            name="ck_resolution_cache_id_matches_kind",
+        ),
+        {"schema": "news"},
+    )
 
     source_domain: Mapped[str] = mapped_column(Text, primary_key=True)
     name_as_written: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -331,11 +436,15 @@ class ResolutionCache(Base):
         ForeignKey("catalog.film.id", ondelete="CASCADE"),
         primary_key=True,
     )
+    # Last in the key and server-defaulted to `person`, so every row written before EF-12
+    # keeps the meaning it was written with and the person pass reads its own cache unchanged.
+    kind: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("'person'"))
     person_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("catalog.person.id", ondelete="SET NULL", name="fk_resolution_cache_person"),
         nullable=True,
     )
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     resolved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

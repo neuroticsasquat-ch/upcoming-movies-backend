@@ -62,7 +62,7 @@ this pass rejected would make them followable. They are re-read on a later run i
 """
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import Any
@@ -98,7 +98,7 @@ from upmovies.link.resolve.scoring import (
 )
 from upmovies.link.resolve.tiebreak import TiebreakQuestion, TiebreakReply, ask_tiebreak
 from upmovies.llm.types import CallLog, Completer, StageGateway, Usage
-from upmovies.news.models import ResolutionCache, Story, StoryPerson
+from upmovies.news.models import PERSON_KIND, ResolutionCache, Story, StoryPerson
 from upmovies.news.source_quality import domain_for_story
 
 log = logging.getLogger(__name__)
@@ -175,14 +175,18 @@ class ResolutionResult:
             case Path.NOT_IN_TMDB:
                 self.not_in_tmdb += 1
 
-    def detail(self) -> str | None:
+    def detail(self, unit: str = "mentions") -> str | None:
         """This pass's clause of the link run's detail line, or None when it had nothing to
         do — an empty backlog says nothing worth a clause of its own, and a "resolved 0"
-        printed on every quiet day is one the eye stops seeing."""
+        printed on every quiet day is one the eye stops seeing.
+
+        `unit` names what was resolved, because the organisation arm (EF-12) is a second pass
+        with the same counters on a different backlog and two "resolved N mentions" clauses on
+        one line would be unreadable."""
         if not self.resolved and not self.failed:
             return None
         line = (
-            f"resolved {self.resolved} mentions "
+            f"resolved {self.resolved} {unit} "
             f"({self.accepted} accepted, {self.tiebreak} tiebreak, "
             f"{self.unlinked} unlinked, {self.not_in_tmdb} not in tmdb; "
             f"{self.cache_hits} cached, {self.failed} failed)"
@@ -228,7 +232,6 @@ async def run_resolution(
     credential to have been configured for a provider it never reaches.
     """
     limits = thresholds or Thresholds()
-    result = ResolutionResult()
     # One pass's worth of person dates, keyed by TMDB id. A run's mentions repeat names —
     # several stories about one casting is the shape a per-film feed produces — and the
     # candidates a name yields repeat with them, so this is what keeps a candidate the catalog
@@ -236,28 +239,80 @@ async def run_resolution(
     dates: dict[int, PersonDates] = {}
     async with session_factory() as s:
         pending = await _pending_mention_ids(s, limit=limit)
+
+    async def resolve_one(
+        session: AsyncSession, mention_id: UUID, result: ResolutionResult, calls: CallLog
+    ) -> Path | None:
+        return await _resolve_one(
+            session,
+            client,
+            mention_id=mention_id,
+            thresholds=limits,
+            result=result,
+            now=now,
+            window_days=window_days,
+            cap=cap,
+            gateway=gateway,
+            resolve_model=resolve_model,
+            calls=calls,
+            dates=dates,
+        )
+
+    return await run_mention_pass(
+        session_factory=session_factory,
+        run_id=run_id,
+        pending=pending,
+        resolve_one=resolve_one,
+        gateway=gateway,
+        resolve_model=resolve_model,
+        unit="mentions",
+    )
+
+
+ResolveOne = Callable[[AsyncSession, UUID, ResolutionResult, CallLog], Awaitable[Path | None]]
+"""What one mention's whole decision looks like to `run_mention_pass`: a session, the row to
+decide, the counters to tick and the call log to record into."""
+
+
+async def run_mention_pass(
+    *,
+    session_factory: SessionFactory,
+    run_id: UUID,
+    pending: Sequence[UUID],
+    resolve_one: ResolveOne,
+    gateway: StageGateway | None,
+    resolve_model: str,
+    unit: str,
+    carried_usage: Usage | None = None,
+) -> ResolutionResult:
+    """Work one backlog of mentions, one session and one isolated failure per row.
+
+    The loop both resolution arms share (EF-12): the person arm over `story_person` and the
+    organisation arm over `story_entity` differ in what one decision *is* — a different table,
+    a different catalogue, a different scorer — and in nothing about how a pass is run. Failure
+    isolation, the progress heartbeat, the per-call `ingest.llm_call` rows and the one
+    aggregate usage row are that second thing, and are spelled once here so the two arms cannot
+    drift into reporting a run differently.
+
+    `unit` names what is being resolved, for the log line and the run's detail clause.
+
+    `carried_usage` is what an *earlier* pass in the same run already spent on this stage, and
+    it exists because `record_llm_usage` overwrites the (run, stage) row rather than adding to
+    it. The two arms share one `resolve` stage, so the second one to ask a tiebreak has to
+    write the total or it would silently erase the first one's cost from `/admin/runs`. A pass
+    that asks no tiebreak writes nothing and leaves whatever row is there standing, which is
+    the right answer in the other three combinations.
+    """
+    result = ResolutionResult()
     for mention_id in pending:
-        # Owned by the loop rather than by `_resolve_one`, so a call that crashed the mention
+        # Owned by the loop rather than by the decision, so a call that crashed the mention
         # still becomes an `ingest.llm_call` row: the `finally` below writes whatever was
         # recorded through its own session, which the failed mention's rollback cannot take
         # with it (NEU-975, the same arrangement `source_stage` uses).
         calls = CallLog()
         try:
             async with session_factory() as s:
-                path = await _resolve_one(
-                    s,
-                    client,
-                    mention_id=mention_id,
-                    thresholds=limits,
-                    result=result,
-                    now=now,
-                    window_days=window_days,
-                    cap=cap,
-                    gateway=gateway,
-                    resolve_model=resolve_model,
-                    calls=calls,
-                    dates=dates,
-                )
+                path = await resolve_one(s, mention_id, result, calls)
                 # The link run's counters are already a whole-run total across units — the
                 # link stage counts stories, the cluster stage films (`link/pipeline.py`) —
                 # so a third unit changes nothing about how they are read, and the guard
@@ -270,7 +325,7 @@ async def run_resolution(
             if path is not None:
                 result.record(path)
         except Exception:
-            log.exception("resolution failed for mention %s", mention_id)
+            log.exception("resolution failed for %s %s", unit, mention_id)
             async with session_factory() as s:
                 await record_progress(s, run_id, failed_delta=1)
                 await s.commit()
@@ -292,6 +347,8 @@ async def run_resolution(
         # One aggregate row per (run, stage), written once the band is worked rather than per
         # mention: `record_llm_usage` UPSERTs, so a per-mention write would be correct and
         # would also be one round trip per ambiguous name for a number only the total means.
+        # Both arms write it, and both UPSERT into the same (run, stage) row, which is what
+        # makes one run's `resolve` cost one number however many backlogs paid into it.
         async with session_factory() as s:
             await record_llm_usage(
                 s,
@@ -299,11 +356,11 @@ async def run_resolution(
                 stage="resolve",
                 provider=gateway.provider_for("resolve"),
                 model=resolve_model,
-                usage=result.usage,
+                usage=(result.usage if carried_usage is None else carried_usage + result.usage),
             )
             await s.commit()
     if result.resolved or result.failed:
-        log.info("resolution: %s", result.detail())
+        log.info("resolution: %s", result.detail(unit))
     return result
 
 
@@ -696,10 +753,14 @@ async def _cached_decision(
     answer as a hit. This pass writes none — it caches accepts only — but D-24 blesses the
     shape and the resolve stage may, so reading one back as `not_in_tmdb` costs a line and
     keeps a future write from arriving as a crash.
+
+    `kind` joined the cache's key in EF-12, and this arm pins it to `person`: the same name on
+    the same film is a different question asked of `catalog.person` and of
+    `catalog.production_company`, and the organisation arm's answer must not be read back here.
     """
     if domain is None:
         return None
-    cached = await session.get(ResolutionCache, (domain, name_as_written, film_id))
+    cached = await session.get(ResolutionCache, (domain, name_as_written, film_id, PERSON_KIND))
     if cached is None:
         return None
     return Decision(
@@ -736,13 +797,14 @@ async def _cache_decision(
         source_domain=domain,
         name_as_written=name_as_written,
         film_id=film_id,
+        kind=PERSON_KIND,
         person_id=decision.person_id,
         confidence=decision.confidence,
         resolved_at=resolved_at,
     )
     await session.execute(
         stmt.on_conflict_do_update(
-            index_elements=["source_domain", "name_as_written", "film_id"],
+            index_elements=["source_domain", "name_as_written", "film_id", "kind"],
             set_={
                 "person_id": stmt.excluded.person_id,
                 "confidence": stmt.excluded.confidence,
