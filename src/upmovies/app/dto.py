@@ -301,6 +301,16 @@ def normalise_alert_stores(stores: list[str]) -> list[str]:
 # except `user_id`, which the caller is.
 
 
+SKIP_REASONS = ("outside_window",)
+"""The `kind` values in `app.import_job.unmatched` that mean "matched, and deliberately not
+followed" rather than "could not be placed".
+
+One stored column, two fields on the way out (see `ImportJobOut`). The column keeps every row
+the job reported, in the order it read them, because that is what the runner writes and what
+EF-22 (NEU-1449) will lift wholesale onto `app.import_candidate`; the split happens in the read
+model, where the two lists mean opposite things to the person reading them."""
+
+
 class ImportUnmatchedOut(BaseModel):
     """A title the import could not place, and why.
 
@@ -309,11 +319,41 @@ class ImportUnmatchedOut(BaseModel):
     Letterboxd row is unmatched because no `/search/movie` rule would place the title it names
     (`watchlist`, `rating`), while a TMDB row is unmatched only when TMDB has since deleted the
     entry its own list still points at (`tmdb_missing`) — there is no resolution step in that
-    import to fail, because the ids are authoritative (D-16)."""
+    import to fail, because the ids are authoritative (D-16).
+
+    `rating` is **historical**: the ratings path is deleted (EF-20) and nothing writes it any
+    more, but `app.import_job.unmatched` is a JSONB column and jobs that ran before M5 still
+    hold rows carrying it. Polling one of those must not 500 on its own report.
+
+    A film the alert window closed on is **not** here — it was matched, and is in the catalog.
+    It goes to `ImportJobOut.skipped`."""
 
     name: str
     year: int | None = None
     kind: Literal["watchlist", "rating", "tmdb_missing"]
+
+
+class ImportSkippedOut(BaseModel):
+    """A film the import matched, upserted, and then deliberately did not follow (EF-21).
+
+    Not a failure, which is the whole reason it is its own list rather than a fourth `kind` on
+    `unmatched`. The frontend renders `unmatched` as "titles we could not match", and tells the
+    user to go and follow them by hand — which for these rows would be false twice over, and
+    would invite exactly the follows EF-21 exists to prevent. A new field is additive: the
+    onboarding screen ignores it until NEU-1450 renders it, and what it already shows stays
+    true in the meantime.
+
+    `title` and `reason` rather than `name` and `kind`, matching the shape the ticket names and
+    the `skip_reason` column EF-22 gives each candidate next."""
+
+    title: str
+    year: int | None = None
+    reason: Literal["outside_window"]
+
+
+def _is_skip(row: object) -> bool:
+    """Whether one stored report row is a deliberate skip rather than a failure to place."""
+    return isinstance(row, dict) and row.get("kind") in SKIP_REASONS
 
 
 class TMDBCallbackIn(BaseModel):
@@ -341,9 +381,38 @@ class ImportJobOut(BaseModel):
     status: str
     rows_total: int
     rows_done: int
+    # Two counts of the same thing for the whole of M5, and deliberately: `watchlist_created`
+    # is the number the onboarding screen renders as "N watchlist films", and `follows_created`
+    # counts title follows now that the people path that used to own it is gone (EF-20). EF-22
+    # (NEU-1449) parts them again — `follows_created` becomes the count of the rows the user
+    # confirmed, which is not every candidate the job proposed.
     watchlist_created: int
     follows_created: int
+    # Both read `app.import_job.unmatched` and split it by `kind`: one column, because the
+    # runner writes one ordered report and EF-22 lifts it whole onto `app.import_candidate`;
+    # two fields, because "we could not find this" and "we found it and it has nothing left to
+    # deliver" are opposite things to tell somebody.
     unmatched: list[ImportUnmatchedOut]
+    skipped: list[ImportSkippedOut] = Field(default_factory=list, validation_alias="unmatched")
+
+    @field_validator("unmatched", mode="before")
+    @classmethod
+    def _failures_only(cls, rows: object) -> object:
+        if not isinstance(rows, list):
+            return rows
+        return [r for r in rows if not _is_skip(r)]
+
+    @field_validator("skipped", mode="before")
+    @classmethod
+    def _skips_only(cls, rows: object) -> object:
+        if not isinstance(rows, list):
+            return rows
+        return [
+            {"title": r.get("name"), "year": r.get("year"), "reason": r.get("kind")}
+            for r in rows
+            if _is_skip(r)
+        ]
+
     # The TMDB account a `tmdb` job read, for "Imported from @user"; NULL on a Letterboxd job
     # and the only thing kept about that account (D-16).
     tmdb_username: str | None = None

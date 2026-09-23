@@ -17,6 +17,7 @@ from upmovies.routers.imports import MAX_UPLOAD_BYTES
 
 WATCHLIST = watchlist_csv([("Dune", 2021), ("Arrival", 2016)])
 RATINGS = ratings_csv([("Heat", 1995, 5.0)])
+# A real export carries both. Only the watchlist is read (EF-20), so `rows_total` counts two.
 EXPORT = export_zip({"watchlist.csv": WATCHLIST, "ratings.csv": RATINGS})
 
 
@@ -72,7 +73,7 @@ async def test_a_valid_export_is_accepted_and_queued(entitled_client, session, s
     assert r.json() == {"job_id": str(job.id)}
     assert job.status == "queued"
     assert job.source == "letterboxd"
-    assert job.rows_total == 3  # two watchlist rows plus the one rating
+    assert job.rows_total == 2  # the two watchlist rows; the rating is not a row any more
     assert job.user_id == entitled_client.user.id
     spawned.assert_awaited_once()
 
@@ -82,6 +83,19 @@ async def test_a_bare_csv_is_accepted_on_its_own(entitled_client, session, spawn
     assert r.status_code == 202
     (job,) = await _jobs(session)
     assert job.rows_total == 2
+
+
+async def test_a_bare_ratings_csv_is_422_rather_than_imported_as_a_watchlist(
+    entitled_client, session, spawned
+):
+    """EF-20 at the route. `ratings.csv` has the same `Name` and `Year` columns a watchlist
+    does, so this is the difference between a 422 and importing somebody's entire viewing
+    history as films they mean to see."""
+    r = await entitled_client.post("/me/import/letterboxd", files=_upload(RATINGS, "r.csv"))
+    assert r.status_code == 422
+    assert "already watched" in r.json()["detail"]
+    assert await _jobs(session) == []
+    spawned.assert_not_called()
 
 
 async def test_a_file_with_the_wrong_header_is_422_with_a_reason(entitled_client, session, spawned):
@@ -151,22 +165,54 @@ async def test_polling_returns_the_job_row(entitled_client, session, spawned):
     body = r.json()
     assert body["id"] == job_id
     assert body["status"] == "queued"
-    assert body["rows_total"] == 3
+    assert body["rows_total"] == 2
     assert (body["rows_done"], body["watchlist_created"], body["follows_created"]) == (0, 0, 0)
     assert body["unmatched"] == []
+    assert body["skipped"] == []
     assert body["error"] is None
     assert body["finished_at"] is None
 
 
-async def test_the_unmatched_report_is_rendered_for_the_poller(entitled_client, session, spawned):
+@pytest.mark.parametrize("kind", ["watchlist", "tmdb_missing", "rating"])
+async def test_the_unmatched_report_is_rendered_for_the_poller(
+    entitled_client, session, spawned, kind
+):
+    """Every failure kind survives the round trip, `rating` included: nothing writes it any
+    more (EF-20), but `app.import_job.unmatched` is JSONB and jobs that ran before M5 still
+    hold rows carrying it — polling one of those must not 500 on its own report."""
     await entitled_client.post("/me/import/letterboxd", files=_upload(EXPORT))
     (job,) = await _jobs(session)
-    job.unmatched = [{"name": "A Film", "year": 1999, "kind": "watchlist"}]
+    job.unmatched = [{"name": "A Film", "year": 1999, "kind": kind}]
     job.status = "succeeded"
     await session.commit()
 
     body = (await entitled_client.get(f"/me/import/{job.id}")).json()
+    assert body["unmatched"] == [{"name": "A Film", "year": 1999, "kind": kind}]
+    assert body["skipped"] == []
+
+
+async def test_a_skipped_film_is_reported_apart_from_the_unmatched_ones(
+    entitled_client, session, spawned
+):
+    """EF-21's rows leave the stored column as `skipped`, not as a fourth `unmatched` kind.
+
+    The onboarding screen renders `unmatched` as "titles we could not match — go and follow
+    them yourself", which for a film that *was* matched would be false twice over and would
+    invite exactly the follows EF-21 exists to prevent. `skipped` is additive, so what the
+    screen already shows stays true until NEU-1450 renders the new list."""
+    await entitled_client.post("/me/import/letterboxd", files=_upload(EXPORT))
+    (job,) = await _jobs(session)
+    job.unmatched = [
+        {"name": "Long Gone", "year": 2019, "kind": "outside_window"},
+        {"name": "A Film", "year": 1999, "kind": "watchlist"},
+    ]
+    job.status = "succeeded"
+    await session.commit()
+
+    body = (await entitled_client.get(f"/me/import/{job.id}")).json()
+
     assert body["unmatched"] == [{"name": "A Film", "year": 1999, "kind": "watchlist"}]
+    assert body["skipped"] == [{"title": "Long Gone", "year": 2019, "reason": "outside_window"}]
 
 
 async def test_polling_someone_elses_job_is_404(entitled_client, session, make_user, spawned):

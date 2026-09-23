@@ -299,9 +299,12 @@ class ImportJob(Base):
         Integer, nullable=False, server_default=text("0")
     )
     follows_created: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    # `[{"name": str, "year": int | None, "kind": "watchlist" | "rating"}]`, in the order the
-    # rows were read. A list rather than a table of its own: it is written once by the runner,
-    # read whole by the one route that renders it, and never queried across users.
+    # `[{"name": str, "year": int | None, "kind": ...}]`, in the order the rows were read —
+    # `ingest.imports.apply.UnmatchedKind` is the authority on the kinds. A list rather than a
+    # table of its own: it is written once by the runner, read whole by the one route that
+    # renders it, and never queried across users. The column keeps both halves of the report;
+    # `app.dto.ImportJobOut` is what splits it into `unmatched` and `skipped` on the way out.
+    # Rows written before M5 can carry `kind="rating"`, which nothing writes any more (EF-20).
     unmatched: Mapped[list[dict]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )

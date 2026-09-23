@@ -1,9 +1,10 @@
-"""The TMDB account import runner (D-16): what a watchlist and a favorites list turn into, what
-a second run does not, and that the session is always deleted.
+"""The TMDB account import runner (D-16): what an account watchlist turns into, what a second
+run does not, and that the session is always deleted.
 
-The acceptance criteria of `NEU-1357-tmdb-account-import.md` in order, driven through
-`import_tmdb_account` against a respx-mocked TMDB. The ids are grouped so a film's role is
-readable from its number: 10xx is watchlisted, 20xx is favorited, 1xx directs, 2xx acts."""
+The acceptance criteria of `NEU-1357-tmdb-account-import.md` as EF-20 and EF-21 leave them,
+driven through `import_tmdb_account` against a respx-mocked TMDB. The favorites half is gone —
+the list is not read at all — and a watchlisted film outside the alert window is reported
+rather than followed."""
 
 import json
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from sqlalchemy import select
 from tests.fixtures.tmdb import make_details
 from upmovies.app.models import Follow, ImportJob
 from upmovies.app.repos import import_job_repo
-from upmovies.catalog.models import Film, Person
+from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.imports.tmdb_account import (
     SOURCE,
@@ -29,44 +30,19 @@ BASE_URL = get_settings().tmdb_base_url.rstrip("/")
 ACCOUNT_ID = 42
 SESSION_ID = "sess-1"
 
-# Two watchlist movies and two favorites, one of which (1002) is on both lists — the overlap
-# the spec calls out, which must get both treatments.
-WATCHLIST_IDS = (1001, 1002)
-FAVORITE_IDS = (1002, 2001)
+# Three watchlist movies, one of them released in 2019 and so outside the alert window
+# (EF-21), and two favorites that nothing must ever read (EF-20).
+WATCHLIST_IDS = (1001, 1002, 1003)
+FAVORITE_IDS = (2001, 2002)
+OUTSIDE_WINDOW_TMDB_ID = 1003
 
-# Director, then billing slots 0, 1 and 2. Slot 2 is present in every payload and must never
-# become a follow.
-CREDITS = {
-    1001: {"director": 100, "cast": [200, 201, 202]},
-    1002: {"director": 101, "cast": [210, 211, 212]},
-    2001: {"director": 102, "cast": [220, 221, 222]},
+DETAILS: dict[int, tuple[str, str]] = {
+    1001: ("2099-06-01", "Post Production"),
+    1002: ("2099-09-01", "Planned"),
+    1003: ("2019-06-01", "Released"),
+    2001: ("1995-12-15", "Released"),
+    2002: ("1999-11-05", "Released"),
 }
-# The people of the two favorites — 1002 and 2001 — and nobody else's.
-PROMOTED_PEOPLE = {101, 210, 211, 102, 220, 221}
-EXCLUDED_PEOPLE = {202, 212, 222}
-
-
-def _credits(director_id: int, cast_ids: list[int]) -> dict:
-    return {
-        "crew": [
-            {
-                "id": director_id,
-                "name": f"Director {director_id}",
-                "credit_id": f"crew-{director_id}",
-                "department": "Directing",
-                "job": "Director",
-            }
-        ],
-        "cast": [
-            {
-                "id": person_id,
-                "name": f"Actor {person_id}",
-                "credit_id": f"cast-{person_id}",
-                "order": order,
-            }
-            for order, person_id in enumerate(cast_ids)
-        ],
-    }
 
 
 def _list_page(tmdb_ids) -> dict:
@@ -81,22 +57,62 @@ def _list_page(tmdb_ids) -> dict:
     }
 
 
-def _mock_lists(watchlist=WATCHLIST_IDS, favorites=FAVORITE_IDS) -> None:
-    respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/watchlist/movies").mock(
-        return_value=httpx.Response(200, json=_list_page(watchlist))
+def _mock_watchlist(tmdb_ids=WATCHLIST_IDS):
+    return respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/watchlist/movies").mock(
+        return_value=httpx.Response(200, json=_list_page(tmdb_ids))
     )
-    respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/favorite/movies").mock(
-        return_value=httpx.Response(200, json=_list_page(favorites))
+
+
+def _mock_favorites():
+    """Routed so that reading it would be a *visible* failure. If the import ever asks for the
+    favorites again (EF-20), `favorites.calls` says so — an unrouted respx request raises, but
+    a raise inside the runner only turns into a failed job, which is a much vaguer signal."""
+    return respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/favorite/movies").mock(
+        return_value=httpx.Response(200, json=_list_page(FAVORITE_IDS))
     )
+
+
+def _credits(tmdb_id: int) -> dict:
+    """A director and three billed cast for one film, ids derived from its own.
+
+    Present in every payload on purpose. The deleted people path followed a film's director
+    and top-2 billing, so a payload with no credits in it would make
+    `test_an_import_never_writes_a_person_follow` pass for the wrong reason — there would be
+    nobody to follow. It also gives the film a `credits_observed_at`, which is what the
+    freshness short-circuit in `film_id_for` reads on a second run."""
+    director = tmdb_id * 10
+    return {
+        "crew": [
+            {
+                "id": director,
+                "name": f"Director {director}",
+                "credit_id": f"crew-{director}",
+                "department": "Directing",
+                "job": "Director",
+            }
+        ],
+        "cast": [
+            {
+                "id": director + 1 + order,
+                "name": f"Actor {director + 1 + order}",
+                "credit_id": f"cast-{director + 1 + order}",
+                "order": order,
+            }
+            for order in range(3)
+        ],
+    }
 
 
 def _mock_details() -> None:
-    for tmdb_id, roles in CREDITS.items():
+    for tmdb_id, (release_date, status) in DETAILS.items():
         respx.get(f"{BASE_URL}/movie/{tmdb_id}").mock(
             return_value=httpx.Response(
                 200,
                 json=make_details(
-                    tmdb_id, credits=_credits(roles["director"], list(roles["cast"]))
+                    tmdb_id,
+                    release_date=release_date,
+                    status=status,
+                    credits=_credits(tmdb_id),
                 ),
             )
         )
@@ -109,7 +125,8 @@ def _mock_delete():
 
 
 def _mock_tmdb() -> None:
-    _mock_lists()
+    _mock_watchlist()
+    _mock_favorites()
     _mock_details()
     _mock_delete()
 
@@ -156,93 +173,122 @@ async def _rows(session, model) -> list:
     return list((await session.execute(select(model))).scalars().all())
 
 
-# --- the whole account ----------------------------------------------------------------------
+async def _follows(session) -> list[Follow]:
+    return await _rows(session, Follow)
+
+
+# --- the watchlist ----------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_the_two_lists_produce_the_expected_films_follows_and_watchlist(
-    session, session_factory, user
-):
+async def test_the_watchlist_produces_title_follows_and_a_report(session, session_factory, user):
     _mock_tmdb()
     job = await _run(session, session_factory, user)
 
     assert job.status == "succeeded"
     assert job.error is None
-    # Both lists, counted once the runner had read them — nothing knew the total before.
-    assert job.rows_done == job.rows_total == len(WATCHLIST_IDS) + len(FAVORITE_IDS)
+    # The watchlist alone, counted once the runner had read it — nothing knew the total before.
+    assert job.rows_done == job.rows_total == len(WATCHLIST_IDS)
 
-    # No resolution step, so nothing can go unplaced: the ids are authoritative.
-    assert job.unmatched == []
-
-    assert job.watchlist_created == 2
-    follows = await _rows(session, Follow)
+    assert (job.watchlist_created, job.follows_created) == (2, 2)
+    follows = await _follows(session)
+    assert len(follows) == 2
+    assert {f.entity_type for f in follows} == {"title"}
     assert {f.source for f in follows} == {"tmdb_import"}
-    titles = [f for f in follows if f.entity_type == "title"]
-    assert len(titles) == 2
-    # The two title follows are what `watchlist_created` counted (M8); `follows_created` is the
-    # distinct people of the two favorites.
-    assert job.follows_created == len(PROMOTED_PEOPLE)
-    assert len(follows) == 2 + len(PROMOTED_PEOPLE)
-    assert {f.entity_id for f in follows if f.entity_type == "person"} == {
-        str(p) for p in PROMOTED_PEOPLE
-    }
+
+    # The ids are authoritative, so the only row in the report is the one the window closed on.
+    assert job.unmatched == [{"name": "Film 1003", "year": 2021, "kind": "outside_window"}]
 
 
 @respx.mock
-async def test_a_favorite_only_film_contributes_people_but_never_a_catalog_row(
-    session, session_factory, user
-):
-    # The catalog is the upcoming-film spine: a film someone has favorited has nothing left to
-    # announce, so it is fetched for its credits and discarded (spec §3).
+async def test_the_favorites_list_is_never_read(session, session_factory, user):
+    """EF-20. It used to buy person follows for each favorite's director and top-2 billing;
+    a follow is binary now (EF-1), so a film favorited years ago would push every credit
+    change of its cast at the user."""
     _mock_tmdb()
+    favorites = _mock_favorites()
+
     await _run(session, session_factory, user)
 
-    films = {f.tmdb_id for f in await _rows(session, Film)}
-    assert films == set(WATCHLIST_IDS)
-    assert 2001 not in films
-
-    people = {p.id for p in await _rows(session, Person)}
-    assert PROMOTED_PEOPLE <= people
+    assert len(favorites.calls) == 0
+    assert {f.tmdb_id for f in await _rows(session, Film)}.isdisjoint(FAVORITE_IDS)
 
 
 @respx.mock
-async def test_a_film_on_both_lists_gets_both_treatments(session, session_factory, user):
-    # 1002 is watchlisted *and* favorited: the film is what they want telling about, and its
-    # people are what the favorite says about their taste (spec §3).
+async def test_an_import_never_writes_a_person_follow(session, session_factory, user):
     _mock_tmdb()
     await _run(session, session_factory, user)
 
-    film = (await session.execute(select(Film).where(Film.tmdb_id == 1002))).scalar_one()
-    follows = await _rows(session, Follow)
-    assert str(film.id) in {f.entity_id for f in follows if f.entity_type == "title"}
-    assert {"101", "210", "211"} <= {f.entity_id for f in follows if f.entity_type == "person"}
+    assert [f for f in await _follows(session) if f.entity_type != "title"] == []
+
+
+# --- the alert window --------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_billing_below_the_top_two_is_not_followed(session, session_factory, user):
+async def test_a_film_released_in_2019_is_skipped_as_outside_window(session, session_factory, user):
+    """EF-21, and the reason the report row names a cause rather than a list: the film *is*
+    there, and the user can go and look at it — the import simply has nothing to deliver on
+    it."""
+    _mock_tmdb()
+    job = await _run(session, session_factory, user)
+
+    film = (
+        await session.execute(select(Film).where(Film.tmdb_id == OUTSIDE_WINDOW_TMDB_ID))
+    ).scalar_one()
+    assert str(film.id) not in {f.entity_id for f in await _follows(session)}
+    assert job.unmatched == [{"name": "Film 1003", "year": 2021, "kind": "outside_window"}]
+    # The name and year are the *list payload's*, not the catalog's: they are what the user
+    # sees on the TMDB page they are looking at.
+    assert film.release_date.year == 2019
+
+
+@respx.mock
+async def test_a_film_outside_the_window_is_still_upserted(session, session_factory, user):
     _mock_tmdb()
     await _run(session, session_factory, user)
 
-    followed = {f.entity_id for f in await _rows(session, Follow) if f.entity_type == "person"}
-    assert followed.isdisjoint({str(p) for p in EXCLUDED_PEOPLE})
+    assert OUTSIDE_WINDOW_TMDB_ID in {f.tmdb_id for f in await _rows(session, Film)}
+
+
+@respx.mock
+async def test_a_canceled_film_is_skipped_however_recent_its_date(session, session_factory, user):
+    # `ALERT_WINDOW_DEAD_STATUSES` is `Canceled` alone (NEU-1417): a film called off next year
+    # has a date well inside the ceiling and nothing left to say.
+    _mock_tmdb()
+    _mock_watchlist((1001,))
+    respx.get(f"{BASE_URL}/movie/1001").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_details(
+                1001, release_date="2099-06-01", status="Canceled", credits=_credits(1001)
+            ),
+        )
+    )
+
+    job = await _run(session, session_factory, user)
+
+    assert await _follows(session) == []
+    assert job.unmatched == [{"name": "Film 1001", "year": 2021, "kind": "outside_window"}]
 
 
 @respx.mock
 async def test_a_film_tmdb_has_deleted_is_reported_rather_than_failing_the_job(
     session, session_factory, user
 ):
-    # The one thing that can still go wrong when the ids are authoritative: the user's own list
-    # names an entry TMDB has since removed.
+    # The one resolution failure left when the ids are authoritative: the user's own list names
+    # an entry TMDB has since removed. It keeps its own kind, because "we cannot find it" and
+    # "there is nothing left on it" are different things to go and do something about.
     _mock_tmdb()
     respx.get(f"{BASE_URL}/movie/1001").mock(return_value=httpx.Response(404))
 
     job = await _run(session, session_factory, user)
 
     assert job.status == "succeeded"
-    assert job.unmatched == [{"name": "Film 1001", "year": 2021, "kind": "tmdb_missing"}]
-    # The other three rows went through.
-    assert job.rows_done == 4
-    assert {f.tmdb_id for f in await _rows(session, Film)} == {1002}
+    assert {"name": "Film 1001", "year": 2021, "kind": "tmdb_missing"} in job.unmatched
+    # The other two rows went through.
+    assert job.rows_done == 3
+    assert {f.tmdb_id for f in await _rows(session, Film)} == {1002, 1003}
 
 
 # --- running it twice ------------------------------------------------------------------------
@@ -251,14 +297,15 @@ async def test_a_film_tmdb_has_deleted_is_reported_rather_than_failing_the_job(
 @respx.mock
 async def test_re_running_the_same_account_creates_nothing_new(session, session_factory, user):
     _mock_tmdb()
-    await _run(session, session_factory, user)
-    before = len(await _rows(session, Follow))
+    first = await _run(session, session_factory, user)
+    before = len(await _follows(session))
 
     second = await _run(session, session_factory, user)
 
     assert second.status == "succeeded"
     assert (second.follows_created, second.watchlist_created) == (0, 0)
-    assert len(await _rows(session, Follow)) == before
+    assert len(await _follows(session)) == before
+    assert second.unmatched == first.unmatched
 
 
 @respx.mock
@@ -271,7 +318,7 @@ async def test_a_second_import_leaves_the_follow_it_already_wrote(session, sessi
 
     await _run(session, session_factory, user)
 
-    assert str(film.id) in {f.entity_id for f in await _rows(session, Follow)}
+    assert str(film.id) in {f.entity_id for f in await _follows(session)}
 
 
 # --- the session ------------------------------------------------------------------------------
@@ -323,7 +370,7 @@ async def test_a_delete_that_fails_is_logged_rather_than_failing_the_import(
 ):
     # By this point the import has done everything it was asked to do, and TMDB expires an
     # unused session on its own — so "could not log out" must not become the job's outcome.
-    _mock_lists()
+    _mock_watchlist()
     _mock_details()
     respx.delete(f"{BASE_URL}/authentication/session").mock(return_value=httpx.Response(500))
     job = await _queue(session, user)
@@ -360,7 +407,7 @@ async def test_a_crash_mid_run_fails_the_job_and_keeps_the_rows_already_done(
     assert finished.error
     # Commit-per-row is what makes a partial import worth keeping.
     assert {f.tmdb_id for f in await _rows(session, Film)} == {1001}
-    assert len([f for f in await _rows(session, Follow) if f.entity_type == "title"]) == 1
+    assert len([f for f in await _follows(session) if f.entity_type == "title"]) == 1
 
 
 @respx.mock

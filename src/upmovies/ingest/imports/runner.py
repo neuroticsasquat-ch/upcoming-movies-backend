@@ -9,16 +9,13 @@ the user will hold open, and past most proxies' patience too.
 uploader can act on, then hands the parsed rows here and answers 202 with a job id to poll.
 
 What is left in this module is the half that is Letterboxd's: turning a title and a year into a
-TMDB id, and deciding which rows are candidates at all. What a matched film then *becomes* —
-the watchlist item and the title follow, or the person follows of a promoted rating — is in
-`ingest.imports.apply`, shared with the TMDB account import (D-16), which arrives at the same
-two treatments from ids it does not have to guess.
+TMDB id. What a matched film then *becomes* — the film in full and, if it is still inside the
+alert window, a title follow — is in `ingest.imports.apply`, shared with the TMDB account
+import (D-16), which arrives at the same treatment from ids it does not have to guess.
 
-**Rated films contribute people only** (spec §3, and the Problem section's reasoning). The
-catalog is the upcoming-film spine: a film someone rated four stars in 2019 has nothing left to
-announce, so it is fetched for its director and top billing and then discarded — no
-`catalog.film` row. Watchlist films *are* upserted in full, because they feed the provider poll
-set (D-27) and are the films the user is asking to be told about.
+**Only the watchlist is read** (EF-20). The `ratings.csv` half of this runner is gone with the
+follows it used to infer: a follow is binary now (EF-1), and a four-star rating is not a
+request to hear about everything that actor does next.
 
 Follows the pipeline contract the rest of `ingest` keeps (CLAUDE.md): its own session factory,
 a commit per row so a crash keeps the rows already done, a time-throttled heartbeat the UI
@@ -38,13 +35,8 @@ from upmovies.app.models import User
 from upmovies.app.repos import import_job_repo
 from upmovies.config import Settings
 from upmovies.db import SessionLocal
-from upmovies.ingest.imports.apply import (
-    Progress,
-    apply_film_people,
-    apply_watchlist_film,
-    finalize_failed,
-)
-from upmovies.ingest.imports.letterboxd import LetterboxdExport, RatingRow, WatchlistRow
+from upmovies.ingest.imports.apply import Progress, apply_watchlist_film, finalize_failed
+from upmovies.ingest.imports.letterboxd import LetterboxdExport, WatchlistRow
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.resolution import ResolvedTitle, resolve
 
@@ -54,14 +46,11 @@ SOURCE = "letterboxd"
 """`import_job.source` for these jobs."""
 
 FOLLOW_SOURCE = "letterboxd_import"
-"""`follow.source` and `watchlist_item.source` for every row this writes (D-10, D-14).
+"""`follow.source` for every row this writes (D-10, D-14).
 
-Note the second half: `NEU-1356-letterboxd-import.md` §3's table says the watchlist item is
-written `source=manual`, and that predates NEU-1349 defining the column's values. The model's
-CHECK enumerates `letterboxd_import` and says in as many words that D-15 writes it, which is
-both the later statement and the truthful one — `manual` means the user clicked the button.
-Nothing branches on the difference (only `derived_from_follow` changes behaviour, by making a
-removal a dismissal), so this is a naming correction, not a behavioural one."""
+Not `manual`, which `NEU-1356-letterboxd-import.md` §3's table asked for before NEU-1349
+defined the column's values: `app.follow`'s CHECK enumerates `letterboxd_import` and says in
+as many words that D-15 writes it, and `manual` means the user clicked the button."""
 
 
 async def run_letterboxd_import(job_id: UUID, export: LetterboxdExport, settings: Settings) -> None:
@@ -106,9 +95,6 @@ async def import_letterboxd(
         for watchlist_row in export.watchlist:
             await _import_watchlist_row(db, client, user, watchlist_row, progress)
             await progress.row_done(db, job_id)
-        for rating_row in export.ratings:
-            await _import_rating_row(db, client, user, rating_row, progress)
-            await progress.row_done(db, job_id)
 
         await progress.flush(db, job_id)
         await import_job_repo.finalize(db, job_id, status="succeeded")
@@ -122,34 +108,29 @@ async def _import_watchlist_row(
     row: WatchlistRow,
     progress: Progress,
 ) -> None:
-    """One `watchlist.csv` row: the film in full, a watchlist item, and a title follow."""
+    """One `watchlist.csv` row: the film in full, and a title follow if it is still inside the
+    alert window (EF-21).
+
+    Both failures are reported under `kind="watchlist"`, and deliberately: a title this could
+    not place and a title TMDB has since deleted are the same fact to a Letterboxd uploader —
+    the row is in their export, and it is not in their follows. `outside_window` is the one
+    that is genuinely different, because the film *was* placed and the user can go and look at
+    it; it names the cause instead of the list.
+
+    The name and year are the export's, verbatim, rather than the catalog's: the user is going
+    to look for this row in their own file."""
     hit = await _search(client, name=row.name, year=row.year)
-    if hit is None or not await apply_watchlist_film(
-        db, client, user, hit.tmdb_id, progress, source=FOLLOW_SOURCE
-    ):
+    if hit is None:
         progress.record_unmatched(name=row.name, year=row.year, kind="watchlist")
-
-
-async def _import_rating_row(
-    db: AsyncSession,
-    client: TMDBClient,
-    user: User,
-    row: RatingRow,
-    progress: Progress,
-) -> None:
-    """One `ratings.csv` row: person follows for a film rated four stars or better, nothing at
-    all for the rest.
-
-    A rating below the cut costs no request and is not unmatched — it was never a candidate, and
-    reporting it would bury the titles the user actually has to act on under their whole
-    three-star history."""
-    if not row.is_promoted:
         return
-    hit = await _search(client, name=row.name, year=row.year)
-    if hit is None or not await apply_film_people(
+
+    outcome = await apply_watchlist_film(
         db, client, user, hit.tmdb_id, progress, source=FOLLOW_SOURCE
-    ):
-        progress.record_unmatched(name=row.name, year=row.year, kind="rating")
+    )
+    if outcome == "outside_window":
+        progress.record_unmatched(name=row.name, year=row.year, kind="outside_window")
+    elif outcome == "tmdb_missing":
+        progress.record_unmatched(name=row.name, year=row.year, kind="watchlist")
 
 
 async def _search(client: TMDBClient, *, name: str, year: int | None) -> ResolvedTitle | None:

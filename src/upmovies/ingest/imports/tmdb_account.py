@@ -1,9 +1,15 @@
 """The TMDB account import, run as a background job (D-16).
 
 The second half of the approve flow `routers/imports_tmdb.py` starts. That route hands this a
-session id the user has just authorized, and this reads their watchlist and their favorites
-under it, writes the same two treatments the Letterboxd import writes
-(`ingest.imports.apply`), and then **deletes the session at TMDB**.
+session id the user has just authorized, and this reads **their watchlist** under it, writes
+the same treatment the Letterboxd import writes (`ingest.imports.apply`), and then **deletes
+the session at TMDB**.
+
+**The favorites list is not read** (EF-20). It used to buy person follows for each favorite's
+director and top-2 billing, and a follow is binary now (EF-1) — so a film somebody favorited
+years ago would push every credit change of its cast at them. The approve flow's scopes are
+unchanged: TMDB grants one session per approval and does not scope it per list, so there is
+nothing narrower to ask the user for.
 
 That last step is the design. The original ticket stored the session id per user, encrypted, so
 a later re-sync would not need another approval; the spec replaced it with a one-shot import
@@ -15,15 +21,17 @@ it — and a delete that itself fails is logged at WARNING rather than failing t
 by then the import has already done everything it was asked to do and the session expires at
 TMDB on its own.
 
-No resolution step, unlike Letterboxd: TMDB's ids are authoritative, so `unmatched` is empty
-except for the one thing that can still go wrong — TMDB answering 404 for a film its own list
-points at, which is reported `kind=tmdb_missing`.
+No resolution step, unlike Letterboxd: TMDB's ids are authoritative, so the only two rows that
+can reach the report name causes rather than lists — TMDB answering 404 for a film its own list
+points at (`kind=tmdb_missing`), and a film the alert window has closed on
+(`kind=outside_window`, EF-21).
 
 Follows the same pipeline contract as the Letterboxd runner: its own session factory, a commit
 per row, a throttled heartbeat, and a wrapper that always finalizes."""
 
 import logging
 from collections.abc import Callable, Sequence
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,12 +40,7 @@ from upmovies.app.models import User
 from upmovies.app.repos import import_job_repo
 from upmovies.config import Settings
 from upmovies.db import SessionLocal
-from upmovies.ingest.imports.apply import (
-    Progress,
-    apply_film_people,
-    apply_watchlist_film,
-    finalize_failed,
-)
+from upmovies.ingest.imports.apply import Progress, apply_watchlist_film, finalize_failed
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.schemas import TMDBMovieSummary
 
@@ -47,7 +50,7 @@ SOURCE = "tmdb"
 """`import_job.source` for these jobs."""
 
 FOLLOW_SOURCE = "tmdb_import"
-"""`follow.source` and `watchlist_item.source` for every row this writes (D-10, D-14)."""
+"""`follow.source` for every row this writes (D-10, D-14)."""
 
 MAX_ROWS_PER_LIST = 5_000
 """How much of one TMDB list this will read, matching `letterboxd.MAX_ROWS_PER_FILE`.
@@ -141,33 +144,23 @@ async def import_tmdb_account(
         await import_job_repo.mark_running(db, job_id)
         await db.commit()
 
-        # Both lists up front, because `rows_total` is the denominator the UI's progress bar
+        # The list up front, because `rows_total` is the denominator the UI's progress bar
         # needs and the callback could not know it: unlike an upload, nothing has read the
         # user's library at the point the job row is created.
         watchlist = _distinct(
             await client.account_watchlist_movies(account_id, session_id, limit=MAX_ROWS_PER_LIST)
         )
-        favorites = _distinct(
-            await client.account_favorite_movies(account_id, session_id, limit=MAX_ROWS_PER_LIST)
-        )
-        _warn_if_truncated(job_id, watchlist=len(watchlist), favorites=len(favorites))
-        await import_job_repo.set_rows_total(db, job_id, len(watchlist) + len(favorites))
+        _warn_if_truncated(job_id, watchlist=len(watchlist))
+        await import_job_repo.set_rows_total(db, job_id, len(watchlist))
         await db.commit()
 
         progress = Progress()
         for movie in watchlist:
-            if not await apply_watchlist_film(
+            outcome = await apply_watchlist_film(
                 db, client, user, movie.id, progress, source=FOLLOW_SOURCE
-            ):
-                _record_missing(progress, movie)
-            await progress.row_done(db, job_id)
-        # A favorite that is also on the watchlist gets both treatments (spec §3): the film is
-        # what they want telling about, and its people are what the favorite says about them.
-        for movie in favorites:
-            if not await apply_film_people(
-                db, client, user, movie.id, progress, source=FOLLOW_SOURCE
-            ):
-                _record_missing(progress, movie)
+            )
+            if outcome != "followed":
+                _record_skipped(progress, movie, kind=outcome)
             await progress.row_done(db, job_id)
 
         await progress.flush(db, job_id)
@@ -175,21 +168,24 @@ async def import_tmdb_account(
         await db.commit()
 
 
-def _record_missing(progress: Progress, movie: TMDBMovieSummary) -> None:
-    """Report a film TMDB's own list names but its `/movie/{id}` answers 404 for.
+def _record_skipped(
+    progress: Progress, movie: TMDBMovieSummary, *, kind: Literal["tmdb_missing", "outside_window"]
+) -> None:
+    """Report a film on the account's watchlist that produced no follow — TMDB's own
+    `/movie/{id}` answers 404 for it, or the alert window has closed on it (EF-21).
 
-    The title and year come from the list payload rather than from a lookup that has just
-    failed — they are what the user will recognise, and the only description of the film left
-    once TMDB has deleted the entry."""
+    The title and year come from the list payload in both cases. For a deleted entry they are
+    the only description of the film left; for a skipped one they are what the user will
+    recognise from the list they are looking at, which is TMDB's and not ours."""
     progress.record_unmatched(
         name=movie.title,
         year=movie.release_date.year if movie.release_date else None,
-        kind="tmdb_missing",
+        kind=kind,
     )
 
 
-def _warn_if_truncated(job_id: UUID, *, watchlist: int, favorites: int) -> None:
-    """Say so when a list came back at exactly the cap.
+def _warn_if_truncated(job_id: UUID, *, watchlist: int) -> None:
+    """Say so when the watchlist came back at exactly the cap.
 
     The cap truncates rather than refusing — unlike `letterboxd.MAX_ROWS_PER_FILE` there is no
     upload to hand back, and the alternative to importing the first five thousand is importing
@@ -199,14 +195,12 @@ def _warn_if_truncated(job_id: UUID, *, watchlist: int, favorites: int) -> None:
 
     Counting exactly the cap can be a false positive on a library that happens to be that size
     to the film; at five thousand that costs one log line and no behaviour."""
-    for name, count in (("watchlist", watchlist), ("favorites", favorites)):
-        if count >= MAX_ROWS_PER_LIST:
-            log.warning(
-                "tmdb import read only the first %s rows of the %s",
-                MAX_ROWS_PER_LIST,
-                name,
-                extra={"job_id": str(job_id), "list": name},
-            )
+    if watchlist >= MAX_ROWS_PER_LIST:
+        log.warning(
+            "tmdb import read only the first %s rows of the watchlist",
+            MAX_ROWS_PER_LIST,
+            extra={"job_id": str(job_id), "list": "watchlist"},
+        )
 
 
 def _distinct(movies: Sequence[TMDBMovieSummary]) -> list[TMDBMovieSummary]:

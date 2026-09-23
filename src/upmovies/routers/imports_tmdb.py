@@ -4,10 +4,13 @@ subscriber-only (D-39).
 Two routes, and between them the whole of the credential's life. `start` asks TMDB for a
 request token, records who it was issued to, and sends the user to themoviedb.org to approve
 it. `callback` takes the approved token back, exchanges it for a session id, and hands that
-session id to a background task that reads the user's watchlist and favorites and then
-**deletes it**. Nothing is stored: there is no `app.tmdb_link`, no encrypted credential and no
-unlink route, because a one-shot import whose last act is a delete needs none of them, and
-re-importing is the same one click as importing (see `docs/specs/NEU-1357-tmdb-account-import.md`).
+session id to a background task that reads the user's watchlist and then **deletes it**.
+The scopes TMDB grants are unchanged by EF-20 — a session is one approval, not one per list —
+but the import no longer touches the favorites half of what it could read.
+
+Nothing is stored: there is no `app.tmdb_link`, no encrypted credential and no unlink route,
+because a one-shot import whose last act is a delete needs none of them, and re-importing is
+the same one click as importing (see `docs/specs/NEU-1357-tmdb-account-import.md`).
 
 `app.tmdb_auth_request` is the only state either route keeps, and it exists for one reason:
 TMDB's redirect carries the request token and nothing else. Without a row saying who was sent
