@@ -147,7 +147,9 @@ Numbered so tickets can cite them (`D-n`).
   reason and re-evaluated next pass. Spec: `NEU-1370-sanity-holds.md`.
 - **D-9 Confidence is visible.** Every card on the feed, timeline and film page renders its
   `confidence` (`confirmed` / `unconfirmed`) as a badge; the "unconfirmed updates" section heading
-  stays. Superseded cards render the D-2 marker. Backend `EventOut` exposes `confidence`,
+  stays. [2026-09-20, NEU-1406: the heading clause is superseded — the section is renamed
+  "Not yet reported", because "unconfirmed" collided with this badge; the badge clause stands.]
+  Superseded cards render the D-2 marker. Backend `EventOut` exposes `confidence`,
   `status`, `superseded_by`, and `occurred_at` (the ADR-0016 residual: disclose it on the card
   as a small "first seen <date>" line on the film page).
 
