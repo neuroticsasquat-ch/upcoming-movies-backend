@@ -78,6 +78,7 @@ from upmovies.catalog.seed_grade import ROLE_ORDER
 from upmovies.ingest.runs import format_skip_detail
 from upmovies.ingest.sweep.collection_events import CollectionEventResult
 from upmovies.ingest.sweep.company_events import CompanyEventResult
+from upmovies.ingest.sweep.confirm_events import ConfirmEventResult
 from upmovies.ingest.sweep.credit_events import CreditDetachmentResult, CreditEventResult
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult
 from upmovies.ingest.sweep.field_events import FieldEventResult
@@ -148,6 +149,7 @@ def sweep_detail(
     released: ReleaseEventResult,
     companies: CompanyEventResult,
     collections: CollectionEventResult,
+    confirmed: ConfirmEventResult,
 ) -> str:
     """One line reporting all phases distinctly, for `finalize_run(detail=...)`."""
     parts = [
@@ -182,6 +184,9 @@ def sweep_detail(
         f"{collections.changes_read} changes, "
         f"{collections.skipped} already carded, {collections.held} held, "
         f"{collections.failures} failed",
+        f"confirmation: {confirmed.cards_confirmed} cards confirmed from "
+        f"{confirmed.stamped_read} stamped changes, "
+        f"{confirmed.cards_superseded} superseded, {confirmed.failures} failed",
     ]
     # Both beside the enumerate clause they belong to, ahead of the phases that follow it,
     # and inserted in reverse so they read `roles`, then `seed attachments`.
@@ -207,4 +212,6 @@ def sweep_detail(
         parts.append(f"companies aborted: {companies.abort_error}")
     if collections.aborted:
         parts.append(f"collections aborted: {collections.abort_error}")
+    if confirmed.aborted:
+        parts.append(f"confirmation aborted: {confirmed.abort_error}")
     return "; ".join(parts)

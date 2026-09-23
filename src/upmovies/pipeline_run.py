@@ -75,6 +75,7 @@ from upmovies.ingest.sweep import (
     AdmissionTranches,
     CollectionEventResult,
     CompanyEventResult,
+    ConfirmEventResult,
     CreditDetachmentResult,
     CreditEventResult,
     EnumerateResult,
@@ -83,6 +84,7 @@ from upmovies.ingest.sweep import (
     ReleaseEventResult,
     run_collection_events,
     run_company_events,
+    run_confirmation_events,
     run_credit_attachment_events,
     run_credit_detachment_events,
     run_field_change_events,
@@ -358,6 +360,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             lookback_days=settings.sweep_event_lookback_days,
             quarantine_hours=settings.sweep_credit_quarantine_hours,
             max_films_per_day=settings.sweep_company_sanity_max_films_per_day,
+            story_confirm_days=settings.sweep_story_confirm_days,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
         # The franchise half (EF-5, NEU-1434), reading the `collection_id` rows of
@@ -369,6 +372,17 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             run_id=run_id,
             now=now,
             lookback_days=settings.sweep_event_lookback_days,
+            quarantine_hours=settings.sweep_credit_quarantine_hours,
+            story_confirm_days=settings.sweep_story_confirm_days,
+            failure_threshold=settings.ingest_consecutive_failure_threshold,
+        )
+        # Last of all, and after every carder, because it reads what they stamped (D-1446.4).
+        # A story card the catalog has now caught up with stops being a rumor here — which is
+        # the flip NEU-1438's push window waits on, and the only writer of it.
+        confirmed = await run_confirmation_events(
+            session_factory=_session_factory,
+            run_id=run_id,
+            now=now,
             quarantine_hours=settings.sweep_credit_quarantine_hours,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
@@ -385,6 +399,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             released,
             companies,
             collections,
+            confirmed,
         )
     except Exception as e:
         log.exception("sweep crashed")
@@ -401,6 +416,7 @@ async def _finalize_sweep(
     released: ReleaseEventResult,
     companies: CompanyEventResult,
     collections: CollectionEventResult,
+    confirmed: ConfirmEventResult,
 ) -> None:
     """Write the sweep's terminal status: `failed` iff a phase gave up on consecutive
     failures, and the every-phase detail line either way — a run that aborted still reports
@@ -416,6 +432,7 @@ async def _finalize_sweep(
             ("release dates", released),
             ("companies", companies),
             ("collections", collections),
+            ("confirmation", confirmed),
         )
         if result.aborted
     ]
@@ -434,6 +451,7 @@ async def _finalize_sweep(
                 released,
                 companies,
                 collections,
+                confirmed,
             ),
         )
         await s.commit()

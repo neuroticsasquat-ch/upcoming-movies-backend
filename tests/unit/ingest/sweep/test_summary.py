@@ -5,6 +5,7 @@ from collections import Counter
 from upmovies.ingest.sweep import (
     CollectionEventResult,
     CompanyEventResult,
+    ConfirmEventResult,
     CreditDetachmentResult,
     CreditEventResult,
     EnumerateResult,
@@ -28,6 +29,7 @@ def test_reports_every_phase_distinctly():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "enumerate:" in detail
@@ -48,6 +50,7 @@ def test_the_collections_clause_reports_carded_held_and_read():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(changes_read=9, events_created=2, skipped=1, held=6),
+        ConfirmEventResult(),
     )
 
     assert "collections: 2 carded from 9 changes, 1 already carded, 6 held, 0 failed" in detail
@@ -64,6 +67,7 @@ def test_a_collections_abort_is_named():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
+        ConfirmEventResult(),
     )
 
     assert "collections aborted: aborted after 10 consecutive failures" in detail
@@ -79,6 +83,7 @@ def test_counts_every_failure_the_phases_recorded():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "5 failed" in detail
@@ -97,6 +102,7 @@ def test_names_the_phase_that_aborted():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "enumerate aborted: aborted after 10 consecutive failures" in detail
@@ -112,6 +118,7 @@ def test_a_clean_pass_says_nothing_about_aborting():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
 
@@ -128,6 +135,7 @@ def test_reports_what_the_field_change_phase_carded():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "events: 4 carded from 31 changes, 27 already carded, 1 failed" in detail
@@ -143,6 +151,7 @@ def test_names_the_field_change_phase_when_it_aborts():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "events aborted: aborted after 10 consecutive failures" in detail
@@ -160,6 +169,7 @@ def test_reports_what_the_credit_phase_carded():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "credits: 3 carded from 12 attachments, 9 already carded, 0 held, 1 failed" in detail
@@ -175,6 +185,7 @@ def test_names_the_credit_phase_when_it_aborts():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "credits aborted: aborted after 10 consecutive failures" in detail
@@ -203,6 +214,7 @@ def test_reports_admissions_against_skips_by_reason():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "12 admitted" in detail
@@ -222,6 +234,7 @@ def test_a_pass_that_skipped_nothing_still_reports_a_skip_total():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "3 admitted, skipped 0," in detail
@@ -237,6 +250,7 @@ def test_reports_what_the_release_date_phase_carded():
         ReleaseEventResult(changes_read=9, events_created=4, skipped=5),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "release dates: 4 carded from 9 changes, 5 already carded, 0 failed" in detail
@@ -252,6 +266,7 @@ def test_names_the_release_date_phase_when_it_aborts():
         ReleaseEventResult(aborted=True, abort_error="aborted after 10 consecutive failures"),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "release dates aborted: aborted after 10 consecutive failures" in detail
@@ -272,6 +287,7 @@ def test_reports_the_attachment_histogram():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "seed attachments: 1×8421, 2×932, 3+×140" in detail
@@ -289,6 +305,7 @@ def test_a_pass_that_reached_no_candidates_says_nothing_about_attachments():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     # The label, not the bare word: the credits clause legitimately says "from 0 attachments".
@@ -307,6 +324,7 @@ def test_the_credits_clause_reports_what_quarantine_is_holding():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "credits: 2 carded from 40 attachments, 1 already carded, 37 held, 0 failed" in detail
@@ -331,6 +349,7 @@ def test_reports_the_sanity_holds_apart_from_the_quarantine_count():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "4 held" in detail
@@ -349,6 +368,7 @@ def test_reports_a_quiet_holds_pass_as_zeroes_rather_than_dropping_the_clause():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "holds: 0 new, 0 cleared, 0 expired" in detail
@@ -371,6 +391,7 @@ def test_reports_which_roles_reached_the_candidates():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "roles: director×2, cast×4, followed×3" in detail
@@ -388,6 +409,7 @@ def test_the_role_clause_is_dropped_when_nothing_was_reached():
         ReleaseEventResult(),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
 
     assert "roles:" not in detail

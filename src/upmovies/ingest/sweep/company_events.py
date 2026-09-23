@@ -60,6 +60,7 @@ consecutive failures, and **no `finalize_run`** — all phases share one `ingest
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import UUID
@@ -73,6 +74,7 @@ from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.company_history import COMPANY_ADDED, COMPANY_REMOVED
+from upmovies.news.attachment_confirm import stamp_prior_story_cards
 from upmovies.news.catalog_events import (
     COMPANY_ATTACHED_EVENT_TYPE,
     COMPANY_EVENT_TYPES,
@@ -80,6 +82,7 @@ from upmovies.news.catalog_events import (
 )
 from upmovies.news.models import Event
 from upmovies.news.subject_key import company_ids_in, company_subject_token
+from upmovies.news.supersede import supersede_prior_entity_cards
 from upmovies.synthesize.deterministic import (
     CompaniesAttached,
     CompaniesDetached,
@@ -166,6 +169,10 @@ class CompanyEventResult:
     """Change rows the sanity check withheld this pass: one company reaching too many films in
     one observation day. Apart from `held`, because unlike quarantine's number every row
     counted here is a specific claim about a named company that somebody can go and look at."""
+    story_published: int = 0
+    """Change rows the backward stamp found a story card had already published (D-5, EF-13).
+    `CreditEventResult.story_published` for studios, and counted apart from `skipped` for the
+    same reason: these rows never enter this phase's backlog at all."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -516,49 +523,30 @@ async def _uncarded_changes(
     return tuple(kept)
 
 
-async def supersede_prior_company_cards(session: AsyncSession, *, removal: Event) -> int:
+async def supersede_prior_company_cards(
+    session: AsyncSession, *, removal: Event, company_ids: Sequence[int] | None = None
+) -> int:
     """Mark the attach card each company named on `removal` was current on (D-2).
 
-    Per company on the removal's `subject_key`: the most recent *published* `company_attached`
-    card that occurred before the removal is set `superseded` with `superseded_by` pointing at
-    the removal. Only the most recent one — an older card the same company is on was already
-    the earlier claim, not the one this removal corrects. Nothing is hidden or deleted; the
-    card keeps its place on every surface.
+    The rule and its reasoning are `news.supersede.supersede_prior_entity_cards`'; this is the
+    studio spelling of it — `company_attached` cards, matched on `company:<id>` tokens.
 
-    The card, not the company, is the unit of supersession: `status` lives on the event row, so
-    a card naming three studios is marked when any one of them leaves.
+    `company_ids` overrides where the ids come from (D-1446.5). The carding path here leaves it
+    unset and the ids are read off the removal's own `subject_key`, which is what a catalog
+    detach card carries. A **story**-formed `company_removed` card carries no token at all —
+    resolution runs after clustering — so its callers name the resolved companies explicitly.
 
     Returns the number of cards marked. Caller owns the commit; `removal` must be flushed so
     its id exists for the FK.
     """
-    # Resolve every target before marking any, for `supersede_prior_attachment_cards`' reason:
-    # marking inside the loop would autoflush the first UPDATE ahead of the next company's
-    # query, and a card two departing companies share would then fail the `published` filter
-    # for the second — handing back an older card that company is on.
-    targets: dict[UUID, Event] = {}
-    for company_id in company_ids_in(removal.subject_key):
-        token = company_subject_token(company_id)
-        stmt = (
-            select(Event)
-            .where(
-                Event.film_id == removal.film_id,
-                Event.event_type == COMPANY_ATTACHED_EVENT_TYPE,
-                Event.subject_key.any(token),  # pyright: ignore[reportArgumentType]
-                Event.status == "published",
-                Event.occurred_at < removal.occurred_at,
-            )
-            .order_by(Event.occurred_at.desc(), Event.created_at.desc())
-            .limit(1)
-        )
-        card = (await session.execute(stmt)).scalar_one_or_none()
-        if card is not None:
-            targets[card.id] = card
-    for card in targets.values():
-        card.status = "superseded"
-        card.superseded_by = removal.id
-    marked = len(targets)
-    await session.flush()
-    return marked
+    ids = company_ids_in(removal.subject_key) if company_ids is None else company_ids
+    return await supersede_prior_entity_cards(
+        session,
+        removal=removal,
+        attach_type=COMPANY_ATTACHED_EVENT_TYPE,
+        kind="company",
+        entity_ids=list(ids),
+    )
 
 
 async def _card_group(session: AsyncSession, *, group: CompanyGroup) -> bool:
@@ -618,6 +606,7 @@ async def run_company_events(
     lookback_days: int,
     quarantine_hours: int = 0,
     max_films_per_day: int = 0,
+    story_confirm_days: int = 0,
     failure_threshold: int = 10,
 ) -> CompanyEventResult:
     """Card every production-company attachment and detachment TMDB recorded in the window,
@@ -628,12 +617,25 @@ async def run_company_events(
     passes the tuned values, and every other caller gets the plain behaviour it was written
     against. No TMDB client, unlike the credit attachment phase: the two checks that need one
     are the person-date checks, which have no company analogue.
+
+    `story_confirm_days` is `SWEEP_STORY_CONFIRM_DAYS`, the same window the credit phase passes
+    to the same function, and defaults to off on the same reasoning.
     """
     result = CompanyEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
     heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
+    async with owned_session(session_factory) as s:
+        # Before the backlog is read, because stamping is what takes a row *out* of it
+        # (NEU-1371, D-5, and EF-13's organisation half). A trade breaking a studio's
+        # attachment days before TMDB records it is the ordinary case, and by the time the
+        # change lands the cluster stage has long finished with that story — so this backward
+        # direction is the only one the organisation kinds have (D-1446.6).
+        result.story_published = await stamp_prior_story_cards(
+            s, since=since, within_days=story_confirm_days, kinds=("company",)
+        )
+        await s.commit()
     async with owned_session(session_factory) as s:
         backlog = mark_window_attachments(await load_company_backlog(s, since=since))
         # Same session as the load: both gates read live `film_production_company` state

@@ -16,6 +16,10 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
 from upmovies.app.follow_queries import (
+    STORY_ATTACH_MENTION_TYPES,
+    STORY_DETACH_MENTION_TYPES,
+    STORY_PERSON_ATTACH_MENTION_TYPES,
+    STORY_PERSON_DETACH_MENTION_TYPES,
     entity_attachment_event_ids,
     entity_event_ids,
     first_association_clause,
@@ -25,8 +29,15 @@ from upmovies.app.follow_queries import (
     title_followed_by_any_user_clause,
 )
 from upmovies.app.models import Follow, User
-from upmovies.catalog.models import Film
-from upmovies.news.models import EventStory, Story, StoryPerson
+from upmovies.catalog.models import (
+    Collection,
+    Film,
+    FilmCompanyChange,
+    FilmFieldChange,
+    FilmProductionCompany,
+    ProductionCompany,
+)
+from upmovies.news.models import EventStory, Story, StoryEntity, StoryPerson
 from upmovies.news.subject_key import (
     collection_subject_token,
     company_subject_token,
@@ -766,7 +777,7 @@ async def test_the_cards_own_confirmation_does_not_block_it(
     session, user, make_film, story_card, stamped
 ):
     """D-1437.5, the carve-out. The story card published first (D-5) and TMDB then confirmed
-    the credit, which `news.credit_confirm` stamped with the card that published it — so the
+    the credit, which `news.attachment_confirm` stamped with the card that published it — so the
     credit standing there now is this card's own confirmation, and without the carve-out the
     card would drop off the timeline the morning it arrived.
 
@@ -850,13 +861,23 @@ async def test_a_mention_on_a_card_that_is_not_an_attachment_is_not_an_associati
     assert await _ids(session, _events(user.id)) == set()
 
 
-async def test_the_detach_arm_selects_nothing_at_m3(session, user, make_film, story_card):
-    """`STORY_DETACH_MENTION_TYPES` is empty because the story vocabulary has no detach type,
-    so the arm is spelled and dead. Pinned rather than left to be noticed: the day M4 fills the
-    constant, this test is the one that has to be rewritten, which is where the rule is."""
-    from upmovies.app.follow_queries import STORY_DETACH_MENTION_TYPES
+async def test_the_vocabulary_is_the_union_of_the_three_kinds(session, user, make_film, story_card):
+    """M4 filled the detach half of the vocabulary with the two organisation beats and left the
+    person half empty (NEU-1446) — the story vocabulary still has no `credit_removed`, so the
+    person detach arm is still spelled and dead.
 
-    assert STORY_DETACH_MENTION_TYPES == ()
+    Pinned as two statements rather than one: the public constants say what the whole
+    vocabulary *is*, and the per-kind constants are what the arms actually filter on. A widening
+    that reached only one of the two would be exactly the drift this pins."""
+    assert STORY_PERSON_ATTACH_MENTION_TYPES == ("casting",)
+    assert STORY_PERSON_DETACH_MENTION_TYPES == ()
+    assert set(STORY_ATTACH_MENTION_TYPES) == {
+        "casting",
+        "company_attached",
+        "collection_attached",
+    }
+    assert set(STORY_DETACH_MENTION_TYPES) == {"company_removed", "collection_removed"}
+
     film = await make_film(slug="uncredited", title="Uncredited")
     card = await story_card(film, event_type="credit_removed")
     await _mention(session, card)
@@ -865,17 +886,423 @@ async def test_the_detach_arm_selects_nothing_at_m3(session, user, make_film, st
     assert await _first(session, user) == set()
 
 
-async def test_the_clause_is_not_reached_by_a_non_person_narrowing(session, user, make_film):
-    """`only=("company", …)` has no arm here until M4 extends this builder to `story_entity`,
-    and until then it must select nothing rather than fall through to the person arm."""
-    assert await _first(session, user) == set()
-    assert first_association_clause(user_id=user.id, only=("company", str(COMPANY))) is None
+async def test_the_clause_is_not_reached_by_a_title_narrowing(session, user):
+    """`title` is the one type no arm here owns — its follows select films — so the clause must
+    come back `None` rather than union nothing or fall through to another kind's arm."""
+    assert first_association_clause(user_id=user.id, only=("title", str(uuid4()))) is None
+    assert first_association_clause(user_id=user.id, only=("company", str(COMPANY))) is not None
     assert (
-        await _ids(
-            session, first_association_event_ids(user_id=user.id, only=("company", str(COMPANY)))
-        )
-        == set()
+        first_association_clause(user_id=user.id, only=("franchise", str(COLLECTION))) is not None
     )
+
+
+# --- first_association_clause: the organisation arms (EF-13, D-1446.2) ----------------------
+
+ORG_ARMS = [
+    pytest.param("company", COMPANY, "company", id="company"),
+    pytest.param("franchise", COLLECTION, "collection", id="franchise"),
+]
+"""The follow's `entity_type`, the TMDB id, and `story_entity.kind` — the three spellings of
+one entity (CONTEXT.md **Franchise**), which is most of what these arms have to get right."""
+
+
+def _attach_type(kind: str) -> str:
+    return f"{kind}_attached"
+
+
+def _detach_type(kind: str) -> str:
+    return f"{kind}_removed"
+
+
+def _token(kind: str, entity_id: int) -> str:
+    return (company_subject_token if kind == "company" else collection_subject_token)(entity_id)
+
+
+_UNSET = object()
+"""`None` is a real `event_type` — the extraction pass writes it for a mention it could not tie
+to a beat — so the default cannot be spelled `None` without making that case untestable."""
+
+
+async def _org_mention(
+    session,
+    event,
+    *,
+    kind: str,
+    entity_id: int | None,
+    path: str = "accepted",
+    event_type: object = _UNSET,
+    story: Story | None = None,
+) -> None:
+    """A resolved `story_entity` row on one of `event`'s stories. `event_type` defaults to the
+    kind's attach beat, which is what makes the mention an attachment claim."""
+    story_id = (
+        story.id
+        if story is not None
+        else await session.scalar(
+            select(EventStory.story_id).where(EventStory.event_id == event.id)
+        )
+    )
+    session.add(
+        StoryEntity(
+            story_id=story_id,
+            kind=kind,
+            entity_id=entity_id,
+            name_as_written="Legendary Pictures",
+            path=path,
+            features={
+                "title_mentioned": None,
+                "event_type": _attach_type(kind) if event_type is _UNSET else event_type,
+            },
+            prompt_version="1",
+        )
+    )
+    await session.commit()
+
+
+async def _hold(session, film, *, kind: str, entity_id: int) -> None:
+    """The live attachment each kind reads: a `film_production_company` row, or the film's own
+    `collection_id`."""
+    if kind == "company":
+        session.add(ProductionCompany(id=entity_id, name="Legendary Pictures"))
+        await session.flush()
+        session.add(FilmProductionCompany(film_id=film.id, company_id=entity_id))
+    else:
+        session.add(Collection(id=entity_id, name="The Dune Collection"))
+        await session.flush()
+        film.collection_id = entity_id
+    await session.commit()
+
+
+async def _stamped_change(session, film, *, kind: str, entity_id: int, card, changed_at=NEWER):
+    """The change row D-5's stamp writes `carded_by_event_id` onto — the carve-out that keeps a
+    story card that published first on the timeline once TMDB confirms it."""
+    if kind == "company":
+        session.add(
+            FilmCompanyChange(
+                film_id=film.id,
+                company_id=entity_id,
+                change="added",
+                changed_at=changed_at,
+                carded_by_event_id=None if card is None else card.id,
+            )
+        )
+    else:
+        session.add(
+            FilmFieldChange(
+                film_id=film.id,
+                field="collection_id",
+                old_value=None,
+                new_value=entity_id,
+                changed_at=changed_at,
+                carded_by_event_id=None if card is None else card.id,
+            )
+        )
+    await session.commit()
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_story_formed_attach_card_is_an_organisations_first_association(
+    session, user, make_film, story_card, entity_type, entity_id, kind
+):
+    """EF-13 for studios and franchises: the trades say a studio has boarded a film it was not
+    on before, and its followers hear it once."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type=_attach_type(kind))
+    await _org_mention(session, card, kind=kind, entity_id=entity_id)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == {card.id}
+    assert await _ids(session, _events(user.id)) == {card.id}
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_second_story_on_the_same_organisation_card_is_still_one_event(
+    session, user, make_film, story_card, entity_type, entity_id, kind
+):
+    """The headline case, for the two kinds that arrived with M4: a second outlet *attaches* to
+    the existing card, so there is one event and there must be one row."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type=_attach_type(kind))
+    await _org_mention(session, card, kind=kind, entity_id=entity_id)
+    second = await _attach_story(session, card, url="https://variety.test/b")
+    await _org_mention(session, card, kind=kind, entity_id=entity_id, story=second)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    rows = (await session.execute(first_association_event_ids(user_id=user.id))).scalars().all()
+    assert list(rows) == [card.id]
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_second_organisation_card_on_the_same_film_is_not_selected(
+    session, user, make_film, story_card, entity_type, entity_id, kind
+):
+    """A split beat: two cards for one attachment must not become two timeline rows. The first
+    association happened once, on the earlier card."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    first = await story_card(film, event_type=_attach_type(kind), url="https://deadline.test/a")
+    first.created_at = datetime(2026, 9, 1, tzinfo=UTC)
+    later = await story_card(film, event_type=_attach_type(kind), url="https://variety.test/b")
+    later.created_at = datetime(2026, 9, 2, tzinfo=UTC)
+    await session.commit()
+    await _org_mention(session, first, kind=kind, entity_id=entity_id)
+    await _org_mention(session, later, kind=kind, entity_id=entity_id)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == {first.id}
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_an_earlier_catalog_card_naming_the_organisation_blocks_it(
+    session, user, make_film, story_card, add_event, entity_type, entity_id, kind
+):
+    """ "A card names this entity" means the same two things it means for a person — except
+    that for an organisation the catalog half is an *exact* id token rather than a name."""
+    film = await make_film(slug="theirs", title="Theirs")
+    earlier = await add_event(
+        film=film,
+        event_type=_attach_type(kind),
+        provenance="catalog",
+        subject_key=[_token(kind, entity_id)],
+    )
+    earlier.created_at = datetime(2026, 9, 1, tzinfo=UTC)
+    card = await story_card(film, event_type=_attach_type(kind))
+    card.created_at = datetime(2026, 9, 2, tzinfo=UTC)
+    await session.commit()
+    await _org_mention(session, card, kind=kind, entity_id=entity_id)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == set()
+    # The catalog card still reaches them, through the token branch.
+    assert await _ids(session, _events(user.id)) == {earlier.id}
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_baseline_attachment_blocks_the_first_association(
+    session, user, make_film, story_card, entity_type, entity_id, kind
+):
+    """No change row at all, so nobody ever carded this attachment: the studio was on the film
+    before anyone wrote about it, and the story is a retrospective rather than news."""
+    film = await make_film(slug="held", title="Held")
+    await _hold(session, film, kind=kind, entity_id=entity_id)
+    card = await story_card(film, event_type=_attach_type(kind))
+    await _org_mention(session, card, kind=kind, entity_id=entity_id)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == set()
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+@pytest.mark.parametrize("stamped", [True, False])
+async def test_the_organisation_cards_own_confirmation_does_not_block_it(
+    session, user, make_film, story_card, entity_type, entity_id, kind, stamped
+):
+    """D-5's carve-out for the two kinds M4 added. The story card published first and TMDB then
+    observed the change, which the sweep's backward stamp attributed to the card that published
+    it — so the attachment standing there now is this card's own confirmation.
+
+    Unstamped is the other side: the change blocks, and the sweep raises its own catalog card,
+    which the token branch selects. Either way the follower keeps exactly one beat."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type=_attach_type(kind))
+    await _org_mention(session, card, kind=kind, entity_id=entity_id)
+    await _hold(session, film, kind=kind, entity_id=entity_id)
+    await _stamped_change(
+        session, film, kind=kind, entity_id=entity_id, card=card if stamped else None
+    )
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == ({card.id} if stamped else set())
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_story_detachment_with_a_prior_attach_card_is_selected(
+    session, user, make_film, story_card, add_event, entity_type, entity_id, kind
+):
+    """The detach arm, live for the first time (M3 left it spelled and empty). A studio's exit
+    is news to its followers exactly once per attachment."""
+    film = await make_film(slug="left", title="Left")
+    attach = await add_event(
+        film=film,
+        event_type=_attach_type(kind),
+        provenance="catalog",
+        subject_key=[_token(kind, entity_id)],
+    )
+    attach.created_at = datetime(2026, 9, 1, tzinfo=UTC)
+    card = await story_card(film, event_type=_detach_type(kind))
+    card.created_at = datetime(2026, 9, 5, tzinfo=UTC)
+    await session.commit()
+    await _org_mention(session, card, kind=kind, entity_id=entity_id, event_type=_detach_type(kind))
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == {card.id}
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_detachment_already_reported_since_the_attachment_is_not_selected(
+    session, user, make_film, story_card, add_event, entity_type, entity_id, kind
+):
+    """ "First detachment" is "none since the last attach card", not "none ever" — and a
+    detach card published between the two is one the follower has already had."""
+    film = await make_film(slug="left", title="Left")
+    attach = await add_event(
+        film=film,
+        event_type=_attach_type(kind),
+        provenance="catalog",
+        subject_key=[_token(kind, entity_id)],
+    )
+    attach.created_at = datetime(2026, 9, 1, tzinfo=UTC)
+    earlier_detach = await add_event(
+        film=film,
+        event_type=_detach_type(kind),
+        provenance="catalog",
+        subject_key=[_token(kind, entity_id)],
+    )
+    earlier_detach.created_at = datetime(2026, 9, 3, tzinfo=UTC)
+    card = await story_card(film, event_type=_detach_type(kind))
+    card.created_at = datetime(2026, 9, 5, tzinfo=UTC)
+    await session.commit()
+    await _org_mention(session, card, kind=kind, entity_id=entity_id, event_type=_detach_type(kind))
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == set()
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_detachment_with_no_attach_card_at_all_is_still_selected(
+    session, user, make_film, story_card, entity_type, entity_id, kind
+):
+    """Where the baseline rule bites the other way round. Almost every studio on almost every
+    film is a baseline row with no attach card, so requiring one would silence essentially
+    every detachment — and a studio leaving a film we only ever held it on as a baseline is
+    genuinely the first detachment we have heard of."""
+    film = await make_film(slug="left", title="Left")
+    card = await story_card(film, event_type=_detach_type(kind))
+    await _org_mention(session, card, kind=kind, entity_id=entity_id, event_type=_detach_type(kind))
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == {card.id}
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+@pytest.mark.parametrize(
+    ("path", "resolved_id"),
+    [
+        pytest.param("accepted", True, id="accepted"),
+        pytest.param("tiebreak", True, id="tiebreak the resolve stage decided"),
+        pytest.param("tiebreak", False, id="tiebreak nobody named"),
+        pytest.param("unlinked", True, id="unlinked"),
+        pytest.param("not_in_tmdb", False, id="not_in_tmdb"),
+    ],
+)
+async def test_only_a_resolved_path_names_an_organisation(
+    session, user, make_film, story_card, entity_type, entity_id, kind, path, resolved_id
+):
+    """D-25 over `story_entity`, on `story_person`'s terms exactly: `unlinked` and
+    `not_in_tmdb` name nobody, and the `unlinked` row is given an id it would never be written
+    with so what is under test is the *path* and not the null."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type=_attach_type(kind))
+    await _org_mention(
+        session, card, kind=kind, entity_id=entity_id if resolved_id else None, path=path
+    )
+    await _follow(session, user, entity_type, str(entity_id))
+
+    selected = path in ("accepted", "tiebreak") and resolved_id
+    assert await _first(session, user) == ({card.id} if selected else set())
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+@pytest.mark.parametrize("mention_type", [None, "other", "announced", "release_date"])
+async def test_a_possessive_studio_mention_is_not_an_association(
+    session, user, make_film, story_card, entity_type, entity_id, kind, mention_type
+):
+    """ "Legendary's *Dune*" in an interview names the studio and claims nothing. The card may
+    be an attach card and the studio may be resolved, and it is still not news that anyone has
+    joined anything — the mention's own `event_type` is what says so."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type=_attach_type(kind))
+    await _org_mention(session, card, kind=kind, entity_id=entity_id, event_type=mention_type)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == set()
+
+
+@pytest.mark.parametrize(("entity_type", "entity_id", "kind"), ORG_ARMS)
+async def test_a_mention_on_an_announced_card_is_not_an_association(
+    session, user, make_film, story_card, entity_type, entity_id, kind
+):
+    """Both terms have to hold: an attach-typed mention on an `announced` card is a story about
+    a project that happens to name the studio behind it."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type="announced")
+    await _org_mention(session, card, kind=kind, entity_id=entity_id)
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _first(session, user) == set()
+    assert await _ids(session, _events(user.id)) == set()
+
+
+async def test_the_kinds_do_not_cross(session, user, make_film, story_card):
+    """`story_entity` holds both organisation kinds in one table, so the `kind` filter is
+    load-bearing rather than decorative: a collection mention whose `entity_id` happens to
+    equal a followed company's id must not select its card."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film, event_type="company_attached")
+    await _org_mention(
+        session, card, kind="collection", entity_id=COMPANY, event_type="company_attached"
+    )
+    await _follow(session, user, "company", str(COMPANY))
+
+    assert await _first(session, user) == set()
+
+
+async def test_the_one_builder_is_what_the_timeline_and_the_notify_pass_reach(monkeypatch):
+    """The ticket's own assertion (D-1446.6): `entity_attachment_event_ids` — and so the
+    timeline, the digest and the alert branch, which all compose it — reaches the organisation
+    arms through `first_association_clause` and not through a second spelling beside it.
+
+    Observed by monkeypatching the builder and reading the narrowing it is called with, because
+    the alternative (asserting on rendered SQL) would pass just as well against a copy."""
+    import upmovies.app.follow_queries as fq
+
+    calls: list[tuple[str, str] | None] = []
+    real = fq.first_association_clause
+
+    def spy(*, user_id, only=None):
+        calls.append(only)
+        return real(user_id=user_id, only=only)
+
+    monkeypatch.setattr(fq, "first_association_clause", spy)
+    user_id = uuid4()
+
+    fq.entity_attachment_event_ids(user_id)
+    fq.entity_attachment_event_ids(user_id, only=("company", str(COMPANY)))
+    fq.entity_event_ids("franchise", COLLECTION)
+
+    assert calls == [None, ("company", str(COMPANY)), ("franchise", str(COLLECTION))]
+
+
+async def test_the_notify_pass_reads_the_same_builder(monkeypatch):
+    """One step further out. The notify pass reaches the graph through `follow_reach` (the
+    alert branch, which needs the two halves apart) and `follow_scope` (the digest branch,
+    which wants them OR-ed), and both compose `entity_attachment_event_ids` — so the clause
+    they read is this one, organisation arms included."""
+    import upmovies.app.follow_queries as fq
+
+    calls: list[tuple[str, str] | None] = []
+    real = fq.first_association_clause
+
+    def spy(*, user_id, only=None):
+        calls.append(only)
+        return real(user_id=user_id, only=only)
+
+    monkeypatch.setattr(fq, "first_association_clause", spy)
+    user_id = uuid4()
+
+    fq.follow_reach(user_id)
+    fq.follow_scope(user_id)
+
+    assert calls == [None, None]
 
 
 # --- title_followed_by_any_user_clause: the poll set's rule 2 (D-1414.3, EF-14) --------------

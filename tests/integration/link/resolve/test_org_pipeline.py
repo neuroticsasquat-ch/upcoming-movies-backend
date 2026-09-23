@@ -7,7 +7,7 @@ needs neither a database nor a network. What only a database can prove is here.
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -29,7 +29,8 @@ from upmovies.link.resolve.org_pipeline import run_org_resolution
 from upmovies.link.resolve.scoring import Thresholds
 from upmovies.llm import OpenAICompatClient
 from upmovies.llm.types import Usage
-from upmovies.news.models import ResolutionCache, Story, StoryEntity
+from upmovies.news.models import Event, EventStory, ResolutionCache, Story, StoryEntity
+from upmovies.news.subject_key import company_subject_token
 
 BASE = "https://api.themoviedb.org/3"
 NOW = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
@@ -647,3 +648,128 @@ async def test_the_thresholds_are_threaded_through(session, session_factory):
 
     await session.refresh(mention)
     assert mention.path == "unlinked"
+
+
+# --- the supersession a resolved detach mention performs (D-1446.5) -------------------------
+
+
+async def _detach_card(session, story, *, event_type: str, confidence: str) -> Event:
+    """A story-formed detach card the cluster stage published, with no `subject_key`: an
+    organisation token cannot be written at clustering, which is the whole reason the
+    supersession has to wait for this stage."""
+    event = Event(
+        film_id=story.film_id,
+        event_type=event_type,
+        confidence=confidence,
+        provenance="story",
+        occurred_at=NOW,
+    )
+    session.add(event)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=story.id))
+    await session.flush()
+    return event
+
+
+async def _attach_card(session, film, *, token: str, event_type: str) -> Event:
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="confirmed",
+        provenance="catalog",
+        occurred_at=NOW - timedelta(days=30),
+        subject_key=[token],
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+@respx.mock
+async def test_a_confirmed_story_detachment_supersedes_on_resolution(session, session_factory):
+    """The moment the id and the card meet. The cluster stage published "Legendary is off the
+    film" as fact but could not say *which* studio in `subject_key`; this stage resolves the
+    mention, and the attach card the departure corrects is marked then (D-2)."""
+    film = await add_film(session, 1, title="Dune: Part Three")
+    await _attach_company(session, film, 3172, "Blumhouse")
+    attach = await _attach_card(
+        session, film, token=company_subject_token(3172), event_type="company_attached"
+    )
+    story = await _story(session, film)
+    await _mention(
+        session,
+        story,
+        "Blumhouse",
+        features={"title_mentioned": None, "event_type": "company_removed"},
+    )
+    card = await _detach_card(session, story, event_type="company_removed", confidence="confirmed")
+    _search("company", "Blumhouse", [company_row(3172, "Blumhouse")])
+    await session.commit()
+
+    await _resolve(session_factory, session)
+
+    superseded = (
+        await session.execute(
+            select(Event).where(Event.id == attach.id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert superseded.status == "superseded"
+    assert superseded.superseded_by == card.id
+
+
+@respx.mock
+async def test_a_rumored_story_detachment_supersedes_nothing(session, session_factory):
+    """As a rumor a trade's word supersedes nothing: one wrong report would hide a true
+    attachment. The card waits for `sweep.confirm_events` and the catalog's agreement."""
+    film = await add_film(session, 1, title="Dune: Part Three")
+    await _attach_company(session, film, 3172, "Blumhouse")
+    attach = await _attach_card(
+        session, film, token=company_subject_token(3172), event_type="company_attached"
+    )
+    story = await _story(session, film)
+    await _mention(
+        session,
+        story,
+        "Blumhouse",
+        features={"title_mentioned": None, "event_type": "company_removed"},
+    )
+    await _detach_card(session, story, event_type="company_removed", confidence="rumored")
+    _search("company", "Blumhouse", [company_row(3172, "Blumhouse")])
+    await session.commit()
+
+    await _resolve(session_factory, session)
+
+    still = (
+        await session.execute(
+            select(Event).where(Event.id == attach.id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert still.status == "published"
+
+
+@respx.mock
+async def test_an_attach_mention_supersedes_nothing(session, session_factory):
+    """The hook is a detachment's, and only a detachment's: a resolved `company_attached`
+    mention on a confirmed attach card corrects nothing."""
+    film = await add_film(session, 1, title="Dune: Part Three")
+    await _attach_company(session, film, 3172, "Blumhouse")
+    attach = await _attach_card(
+        session, film, token=company_subject_token(3172), event_type="company_attached"
+    )
+    story = await _story(session, film)
+    await _mention(session, story, "Blumhouse")
+    await _detach_card(session, story, event_type="company_attached", confidence="confirmed")
+    _search("company", "Blumhouse", [company_row(3172, "Blumhouse")])
+    await session.commit()
+
+    await _resolve(session_factory, session)
+
+    still = (
+        await session.execute(
+            select(Event).where(Event.id == attach.id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert still.status == "published"

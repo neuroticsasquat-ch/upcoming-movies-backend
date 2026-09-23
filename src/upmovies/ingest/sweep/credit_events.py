@@ -11,6 +11,13 @@ the system of record for its own scalar fields, so a `release_date` move *is* th
 — but a credit is community-edited, and one added by an anonymous editor is not a studio
 announcement. A removal is even less authoritative.
 
+This phase is **one of three carders that share the same short-circuit and the same flip**
+(EF-13, D-1446.3). Each calls `news.attachment_confirm.stamp_prior_story_cards` for its own
+kind before reading its backlog, so a change a trade already carded never enters it; and
+`sweep.confirm_events` runs after all three, turning a stamped story card from a rumor into
+fact once its change has cleared quarantine. The person half is this module's; the studio and
+franchise halves are `company_events`' and `collection_events`'.
+
 **First observation is a baseline** (§5.3) is inherited, not re-implemented: `film_credit_change`
 holds no rows at all for a film whose credits the catalog had never observed, so there is
 nothing here to read. The integration tests assert it anyway — it is the failure that would be
@@ -91,13 +98,13 @@ from upmovies.ingest.sweep.seeds import SessionFactory
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.credit_history import CREDIT_ADDED, CREDIT_REMOVED
 from upmovies.ingest.tmdb.upsert import ensure_person_details
+from upmovies.news.attachment_confirm import stamp_prior_story_cards
 from upmovies.news.catalog_events import (
     CREDIT_EVENT_TYPES,
     CREDIT_REMOVED_EVENT_TYPE,
     CREDIT_ROLE_EVENT_TYPES,
 )
-from upmovies.news.credit_confirm import stamp_prior_story_cards
-from upmovies.news.models import Event
+from upmovies.news.models import PERSON_KIND, Event
 from upmovies.news.subject_key import normalize_name
 from upmovies.synthesize.deterministic import (
     CreditAttached,
@@ -1027,7 +1034,7 @@ async def run_credit_attachment_events(
         # finished with that story and will never look at this film again, which is why the
         # backward direction has to live here rather than there.
         result.story_published = await stamp_prior_story_cards(
-            s, since=since, within_days=story_confirm_days
+            s, since=since, within_days=story_confirm_days, kinds=(PERSON_KIND,)
         )
         followed = set((await s.execute(followed_people())).scalars().all())
         backlog = await load_attachment_backlog(s, since=since)

@@ -130,6 +130,55 @@ COLLECTION_EVENT_TYPES: tuple[str, ...] = (
     COLLECTION_REMOVED_EVENT_TYPE,
 )
 
+# The two directions a `collection_id` change resolves into, named rather than spelled as a
+# bool so the pairing and grouping code reads the same way the studio half's does.
+COLLECTION_ADDED = "added"
+COLLECTION_REMOVED = "removed"
+
+# Which event type each direction cards as. The dict is the registration: a third direction
+# would fail to subscript it rather than card as something arbitrary.
+COLLECTION_CHANGE_EVENT_TYPES: dict[str, str] = {
+    COLLECTION_ADDED: COLLECTION_ATTACHED_EVENT_TYPE,
+    COLLECTION_REMOVED: COLLECTION_REMOVED_EVENT_TYPE,
+}
+
+
+def collection_field_events(old_value: object, new_value: object) -> tuple[tuple[str, int], ...]:
+    """The `(direction, collection_id)` pairs one `collection_id` field change becomes. Pure —
+    no DB, no clock.
+
+    Four transitions, three of which are beats:
+
+    - `NULL -> id` — one `added`. The film joined a franchise.
+    - `id -> NULL` — one `removed`. The film left one.
+    - `id -> id'` — one `removed` naming the old franchise and one `added` naming the new,
+      **in that order**, so a card pair rendered together reads as a move rather than as two
+      unrelated beats.
+    - anything else (`NULL -> NULL`, `id -> id`, a non-integer on either side) — nothing.
+
+    The trigger writes both sides as JSONB, so an absent value arrives as `None` and a present
+    one as an `int`. A value of any other type is data this function was not written against
+    and is dropped rather than guessed at, on `classify_field_change`'s rule — `bool` included,
+    since it is an `int` subclass and a `True` here would card as collection 1.
+
+    It lives here rather than beside its reader (`ingest.sweep.collection_events`, which owned
+    it until NEU-1446) for this module's own reason: two packages need the mapping and must not
+    disagree about it. The sweep turns these pairs into cards; `news.attachment_confirm` asks
+    the same question of the same rows to decide which story card already published one, and it
+    sits below the sweep in the import graph.
+    """
+    old = old_value if isinstance(old_value, int) and not isinstance(old_value, bool) else None
+    new = new_value if isinstance(new_value, int) and not isinstance(new_value, bool) else None
+    if old == new:
+        return ()
+    events: list[tuple[str, int]] = []
+    if old is not None:
+        events.append((COLLECTION_REMOVED, old))
+    if new is not None:
+        events.append((COLLECTION_ADDED, new))
+    return tuple(events)
+
+
 # Every event type a catalog change can raise. `release_date` is the odd one out among the
 # field-change types: a film's date may move repeatedly, so it is the only one of those
 # matched on *when* rather than on existence.

@@ -647,6 +647,12 @@ that becomes eligible just after one waits for the next. The ceiling is therefor
 — 120h at the default 7 days. Held rows are counted as **held** on the
 sweep detail line, apart from carded and already-carded. It is followed by the **sanity
 holds** (NEU-1370), which judge the person rather than the clock and do leave a row.
+
+It is also **the wait before a story card confirms** (EF-10). A card a trade broke ahead of the
+catalog publishes at once and is a rumor; the change row TMDB later writes is stamped with it
+immediately, and only once that row has cleared this same window — and the attachment is still
+standing — does the card become `confirmed`. One setting, one meaning, for all three kinds: the
+question is always "has this survived long enough to be believed".
 _Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
 moderation.
 
@@ -758,6 +764,14 @@ observed by diffing consecutive ingests (the credit history, `film_company_chang
 as an attachment for every entity somebody follows at that moment (EF-4); for everyone else
 the first observation is the baseline. Not to be confused with **Attach** above, which is a
 story joining an existing event.
+
+**A trade story can report an attachment before the catalog observes it**, for all three kinds
+(EF-13). The card publishes immediately and is a **rumor** until the catalog agrees: the change
+row TMDB later writes is stamped `carded_by_event_id` with the card that broke the beat, so it
+never cards twice, and once that row clears quarantine the card is upgraded in place to
+`confirmed` — which is what a push waits for (EF-10). A story-formed *detachment* that confirms
+supersedes the attachment card it contradicts, exactly as a catalog detachment would (D-2); as
+a rumor it supersedes nothing.
 _Avoid_: link (that is story→film), credit (only one of the three kinds), join (the SQL word).
 
 **Studio**:

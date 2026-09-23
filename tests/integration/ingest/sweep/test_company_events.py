@@ -17,7 +17,7 @@ from tests.fixtures.catalog import add_film
 from upmovies.catalog.models import FilmCompanyChange, FilmProductionCompany, ProductionCompany
 from upmovies.ingest.sweep import run_company_events
 from upmovies.ingest.tmdb.company_history import COMPANY_ADDED, COMPANY_REMOVED
-from upmovies.news.models import Event, EventSummary
+from upmovies.news.models import Event, EventStory, EventSummary, Story, StoryEntity
 from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL
 
 NOW = datetime(2026, 9, 20, 2, 0, tzinfo=UTC)
@@ -447,3 +447,87 @@ async def test_a_change_already_carded_by_a_story_is_read_past(session, session_
 
     assert (result.changes_read, result.events_created) == (0, 0)
     assert len(await _events(session, film)) == 1
+
+
+async def _story_card_with_mention(
+    session, film, *, company_id: int, event_type: str = "company_attached", occurred_at=OLDER
+) -> Event:
+    """What the cluster stage plus the resolve stage leave behind: a story card with no
+    `subject_key` of its own — an organisation token cannot be written at clustering — and a
+    resolved `news.story_entity` row on its story naming the studio."""
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="rumored",
+        provenance="story",
+        occurred_at=occurred_at,
+    )
+    session.add(event)
+    await session.flush()
+    story = Story(source="Deadline", url=f"https://deadline.test/{event.id}", title="Story")
+    session.add(story)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=story.id))
+    session.add(
+        StoryEntity(
+            story_id=story.id,
+            kind="company",
+            entity_id=company_id,
+            name_as_written="Legendary Pictures",
+            path="accepted",
+            features={"title_mentioned": None, "event_type": event_type},
+            prompt_version="1",
+        )
+    )
+    await session.flush()
+    return event
+
+
+async def test_a_studio_the_trades_broke_first_cards_once(session, session_factory, run_id):
+    """EF-13 end to end for studios: story day 0, TMDB day 2. The phase stamps the change
+    before it reads its own backlog, so the change never enters it and exactly one card exists
+    — the one the trades ran."""
+    film = await add_film(session, 60)
+    company = await _company(session, 100, "Legendary Pictures")
+    card = await _story_card_with_mention(session, film, company_id=company.id)
+    await _change(session, film, company)
+    await _attach_live(session, film, company)
+    await session.commit()
+
+    result = await _run(
+        session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, story_confirm_days=14
+    )
+
+    assert (result.story_published, result.changes_read, result.events_created) == (1, 0, 0)
+    assert [e.id for e in await _events(session, film)] == [card.id]
+    stamped = (
+        await session.execute(
+            select(FilmCompanyChange.carded_by_event_id).where(
+                FilmCompanyChange.film_id == film.id
+            ),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert stamped == card.id
+
+
+async def test_a_story_about_another_studio_leaves_the_change_to_the_sweep(
+    session, session_factory, run_id
+):
+    """Per studio, not per film: one story is never confirmation of every company change TMDB
+    has pending on a film."""
+    film = await add_film(session, 61)
+    company = await _company(session, 100, "Legendary Pictures")
+    other = await _company(session, 101, "Blumhouse")
+    await _story_card_with_mention(session, film, company_id=other.id)
+    await _change(session, film, company)
+    await _attach_live(session, film, company)
+    await session.commit()
+
+    result = await _run(
+        session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, story_confirm_days=14
+    )
+
+    assert (result.story_published, result.events_created) == (0, 1)
+    catalog_cards = [e for e in await _events(session, film) if e.provenance == "catalog"]
+    assert len(catalog_cards) == 1

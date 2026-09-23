@@ -302,7 +302,7 @@ def deliverable_events(since: datetime, *, include_upgrades: bool = False) -> Se
 
     **What is not yet true.** Nothing in the codebase writes that flip. `link.cluster` bumps
     `updated_at` on its attach paths but never touches `Event.confidence`, and D-5's stamp
-    (`news.credit_confirm`) writes `film_credit_change.carded_by_event_id` and deliberately
+    (`news.attachment_confirm`) writes `film_credit_change.carded_by_event_id` and deliberately
     leaves the card alone. So this arm is armed and currently catches nothing: the promotion
     that upgrades a `rumored` story card to `confirmed` is owed work in the link stage, not
     here. It is spelled now, and pinned by a test that performs the flip by hand, so that

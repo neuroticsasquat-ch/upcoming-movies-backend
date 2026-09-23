@@ -16,7 +16,7 @@ from sqlalchemy import select
 from tests.fixtures.catalog import add_film
 from upmovies.catalog.models import Collection, FilmFieldChange
 from upmovies.ingest.sweep import run_collection_events
-from upmovies.news.models import Event, EventSummary
+from upmovies.news.models import Event, EventStory, EventSummary, Story, StoryEntity
 from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL
 
 NOW = datetime(2026, 9, 20, 2, 0, tzinfo=UTC)
@@ -424,3 +424,85 @@ async def test_a_move_away_from_a_carded_arrival_cards_the_departure_too(
     assert arrival.superseded_by == departure.id
     assert departure.event_type == "collection_removed"
     assert moved_to.subject_key == [f"collection:{ALIEN}"]
+
+
+async def _story_card_with_mention(
+    session, film, *, collection_id: int, event_type: str = "collection_attached", occurred_at=OLDER
+) -> Event:
+    """A franchise story card as the cluster and resolve stages leave it: no `subject_key` of
+    its own, and a resolved `news.story_entity` row on its story naming the collection."""
+    event = Event(
+        film_id=film.id,
+        event_type=event_type,
+        confidence="rumored",
+        provenance="story",
+        occurred_at=occurred_at,
+    )
+    session.add(event)
+    await session.flush()
+    story = Story(source="Deadline", url=f"https://deadline.test/{event.id}", title="Story")
+    session.add(story)
+    await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=story.id))
+    session.add(
+        StoryEntity(
+            story_id=story.id,
+            kind="collection",
+            entity_id=collection_id,
+            name_as_written="The Dune Collection",
+            path="accepted",
+            features={"title_mentioned": None, "event_type": event_type},
+            prompt_version="1",
+        )
+    )
+    await session.flush()
+    return event
+
+
+async def test_a_franchise_the_trades_broke_first_cards_once(session, session_factory, run_id):
+    """EF-13 end to end for franchises. The phase stamps the `collection_id` row before reading
+    its own backlog, so the row never enters it and the trades' card is the only one."""
+    await _collection(session, DUNE, "Dune Collection")
+    # Filed at insert rather than by an UPDATE: the `film_field_change_trg` trigger is
+    # `BEFORE UPDATE`, so assigning the column afterwards would write a *second* history row
+    # and this test is about what one row does.
+    film = await add_film(session, 70, collection_id=DUNE)
+    card = await _story_card_with_mention(session, film, collection_id=DUNE)
+    await _change(session, film, old=None, new=DUNE)
+    await session.commit()
+
+    result = await _run(
+        session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, story_confirm_days=14
+    )
+
+    assert (result.story_published, result.changes_read, result.events_created) == (1, 0, 0)
+    assert [e.id for e in await _events(session, film)] == [card.id]
+
+
+async def test_a_move_is_carded_by_the_sweep_despite_the_story(session, session_factory, run_id):
+    """The move carve-out, from the carding side. One history row is two beats and has one
+    stamp column between them, so it is never stamped — and both cards are raised, which is
+    what stops a franchise the film really did leave going unreported.
+
+    The story's own card stands beside them; ADR-0014 promotion is what reconciles the pair,
+    not this phase."""
+    await _collection(session, ALIEN, "Alien Collection")
+    await _collection(session, DUNE, "Dune Collection")
+    film = await add_film(session, 71, collection_id=DUNE)
+    await _story_card_with_mention(session, film, collection_id=DUNE)
+    await _change(session, film, old=ALIEN, new=DUNE)
+    await session.commit()
+
+    result = await _run(
+        session_factory, run_id, quarantine_hours=QUARANTINE_HOURS, story_confirm_days=14
+    )
+
+    assert result.story_published == 0
+    assert (result.changes_read, result.events_created) == (2, 2)
+    stamped = (
+        await session.execute(
+            select(FilmFieldChange.carded_by_event_id).where(FilmFieldChange.film_id == film.id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    assert stamped is None
