@@ -1,13 +1,15 @@
 """The Letterboxd import runner (D-15): what a fixture export turns into, and what a second
 run of the same export does not.
 
-The acceptance criteria of `NEU-1356-letterboxd-import.md`, as EF-20 and EF-21 leave them —
-the full export, the alert window, the re-upload, and the crash — driven through
-`import_letterboxd` against a respx-mocked TMDB.
+The acceptance criteria of `NEU-1356-letterboxd-import.md`, as EF-20, EF-21 and EF-22 leave
+them — the full export, the alert window, the review list, the re-upload, and the crash —
+driven through `import_letterboxd` against a respx-mocked TMDB.
 
-**No person follow is ever written by an import any more** (EF-20), which is asserted for the
-whole run rather than per case: the ratings path that wrote them is gone, and the assertion is
-here so that nothing quietly grows a second one back."""
+**The run writes no follow at all** (EF-22): it stops at `awaiting_review` with a candidate per
+matched film, and the follows are the confirm's (`ingest.imports.review`), which the re-upload
+cases drive to show what a second import adds. **And no person follow, ever** (EF-20): the
+ratings path that wrote them is gone, and the assertion is here so that nothing quietly grows a
+second one back."""
 
 import httpx
 import pytest
@@ -17,11 +19,12 @@ from sqlalchemy import select
 from tests.fixtures.catalog import add_film
 from tests.fixtures.letterboxd import export_zip, ratings_csv, watchlist_csv
 from tests.fixtures.tmdb import make_details
-from upmovies.app.models import Follow, ImportJob
+from upmovies.app.models import Follow, ImportCandidate, ImportJob
 from upmovies.app.repos import import_job_repo
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.imports.letterboxd import parse_upload
+from upmovies.ingest.imports.review import confirm, discard_unconfirmed
 from upmovies.ingest.imports.runner import import_letterboxd, run_letterboxd_import
 from upmovies.ingest.tmdb.client import TMDBClient
 
@@ -159,6 +162,9 @@ async def user(make_user):
 
 
 async def _queue(session, user, export) -> ImportJob:
+    # What the upload route does before it opens a job: a list still waiting on review is
+    # superseded, or the one-active-import index would refuse the second run of these tests.
+    await discard_unconfirmed(session, user_id=user.id)
     job = await import_job_repo.create(
         session, user_id=user.id, source="letterboxd", rows_total=export.row_count
     )
@@ -183,42 +189,80 @@ async def _follows(session) -> list[Follow]:
     return await _rows(session, Follow)
 
 
+async def _candidates(session, job: ImportJob) -> dict[int, ImportCandidate]:
+    rows = await session.execute(
+        select(ImportCandidate)
+        .where(ImportCandidate.job_id == job.id)
+        .execution_options(populate_existing=True)
+    )
+    return {c.tmdb_id: c for c in rows.scalars().all()}
+
+
+async def _confirm_all(session, user, job: ImportJob) -> ImportJob:
+    """Confirm every selectable row, the way the review list opens: everything ticked."""
+    ids = [c.film_id for c in (await _candidates(session, job)).values() if c.selected]
+    return await confirm(session, user_id=user.id, job_id=job.id, film_ids=ids)
+
+
 # --- the whole export ----------------------------------------------------------------------
 
 
 @respx.mock
-async def test_a_fixture_export_produces_title_follows_and_a_report(
+async def test_a_fixture_export_stops_at_review_with_a_candidate_per_matched_film(
     session, session_factory, user, export
 ):
     _mock_tmdb()
     job = await _run(session, session_factory, user, export)
 
-    assert job.status == "succeeded"
+    assert job.status == "awaiting_review"
+    # Not finished from the user's side: the confirm stamps it.
+    assert job.finished_at is None
     # The ratings are not rows the runner steps through any more: `rows_total` is the watchlist.
     assert job.rows_done == job.rows_total == len(WATCHLIST)
     assert job.error is None
 
-    # Two of the four rows became follows; the other two are the whole of the report, and each
-    # names why it is there rather than only that it is.
-    assert (job.watchlist_created, job.follows_created) == (2, 2)
+    # Three of the four rows were matched and are on the list; two are ticked. The fourth could
+    # not be placed and is the whole of the report.
+    candidates = await _candidates(session, job)
+    assert {t: (c.selected, c.skip_reason) for t, c in candidates.items()} == {
+        1001: (True, None),
+        1002: (True, None),
+        OUTSIDE_WINDOW_TMDB_ID: (False, "outside_window"),
+    }
     assert job.unmatched == [
-        {"name": "Long Gone", "year": 2019, "kind": "outside_window"},
         {"name": "A Film That Does Not Exist", "year": 1999, "kind": "watchlist"},
     ]
+    # `watchlist_created` is what the list offers; `follows_created` waits for the confirm.
+    assert (job.watchlist_created, job.follows_created) == (2, 0)
 
+
+@respx.mock
+async def test_the_run_writes_no_follow_until_the_list_is_confirmed(
+    session, session_factory, user, export
+):
+    """EF-22: nothing is followed until the user has seen the list."""
+    _mock_tmdb()
+    job = await _run(session, session_factory, user, export)
+    assert await _follows(session) == []
+
+    confirmed = await _confirm_all(session, user, job)
+
+    assert confirmed.status == "succeeded"
+    assert confirmed.follows_created == 2
     follows = await _follows(session)
-    assert len(follows) == 2
     assert {f.entity_type for f in follows} == {"title"}
     assert {f.source for f in follows} == {"letterboxd_import"}
+    assert len(follows) == 2
 
 
 @respx.mock
 async def test_an_import_never_writes_a_person_follow(session, session_factory, user, export):
-    """EF-20, and the whole of why this ticket exists. A follow is binary (EF-1), so a person
+    """EF-20, and the whole of why NEU-1448 exists. A follow is binary (EF-1), so a person
     follow inferred from a four-star rating would push every credit change of somebody the user
-    once enjoyed at them."""
+    once enjoyed at them. Asserted after the confirm, which is where follows are written now."""
     _mock_tmdb()
-    await _run(session, session_factory, user, export)
+    job = await _run(session, session_factory, user, export)
+    await _confirm_all(session, user, job)
 
     assert [f for f in await _follows(session) if f.entity_type != "title"] == []
 
@@ -240,32 +284,107 @@ async def test_the_ratings_cost_no_requests_and_produce_no_report_rows(
     assert searched.isdisjoint({name for name, _, _ in RATINGS})
     assert {row["name"] for row in job.unmatched}.isdisjoint({name for name, _, _ in RATINGS})
     assert {f.tmdb_id for f in await _rows(session, Film)}.isdisjoint(RATED_TMDB_IDS)
+    assert set(await _candidates(session, job)).isdisjoint(RATED_TMDB_IDS)
+
+
+# --- the candidate row ---------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_candidate_carries_the_catalogs_title_and_headline_release(
+    session, session_factory, user
+):
+    """The catalog's title rather than the export's — the fixture TMDB calls 1001 `Movie 1001`
+    while the export says `Dune` — because a search rule placed this row, and the catalog's
+    title is how the user catches a wrong match before it becomes a follow."""
+    export = parse_upload(watchlist_csv([("Dune", 2021)]))
+    _mock_tmdb()
+
+    job = await _run(session, session_factory, user, export)
+
+    film = (await session.execute(select(Film).where(Film.tmdb_id == 1001))).scalar_one()
+    (candidate,) = (await _candidates(session, job)).values()
+    assert (candidate.film_id, candidate.tmdb_id) == (film.id, 1001)
+    assert candidate.title == "Movie 1001"
+    # No release rows in the payload, so the primary date is the headline, unconfirmed.
+    assert candidate.headline_release == {
+        "date": "2099-06-01",
+        "kind": "primary",
+        "country": None,
+        "bucket": None,
+    }
+    assert (candidate.selected, candidate.skip_reason) == (True, None)
+    assert (job.watchlist_created, job.follows_created) == (1, 0)
+    assert job.unmatched == []
+
+
+@respx.mock
+async def test_two_rows_that_resolve_to_one_film_are_one_candidate(session, session_factory, user):
+    # Two titles in the export, one film at TMDB: one proposal, counted once.
+    export = parse_upload(watchlist_csv([("Dune", 2021), ("Dune Part One", 2021)]))
+    _mock_tmdb()
+    respx.get(f"{BASE_URL}/search/movie", params={"query": "Dune Part One"}).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "page": 1,
+                "total_pages": 1,
+                "total_results": 1,
+                "results": [
+                    {
+                        "id": 1001,
+                        "title": "Dune Part One",
+                        "release_date": "2021-06-01",
+                        "popularity": 10.0,
+                    }
+                ],
+            },
+        )
+    )
+
+    job = await _run(session, session_factory, user, export)
+
+    assert list(await _candidates(session, job)) == [1001]
+    assert job.watchlist_created == 1
 
 
 # --- the alert window ----------------------------------------------------------------------
 
 
 @respx.mock
-async def test_a_film_released_in_2019_is_skipped_as_outside_window(
+async def test_a_film_released_in_2019_is_listed_unticked_as_outside_window(
     session, session_factory, user, export
 ):
-    """EF-21: the import proposes only films that can still deliver something. 2019 is past the
+    """EF-21: the import offers only films that can still deliver something. 2019 is past the
     365-day `PROVIDER_POLL_MAX_AGE_DAYS` ceiling, so there is no beat left for a follow on it
-    to carry."""
+    to carry — but it was matched, so it is on the list with its reason, not in the report."""
     _mock_tmdb()
     job = await _run(session, session_factory, user, export)
 
-    film = (
-        await session.execute(select(Film).where(Film.tmdb_id == OUTSIDE_WINDOW_TMDB_ID))
-    ).scalar_one()
-    assert str(film.id) not in {f.entity_id for f in await _follows(session)}
-    assert {"name": "Long Gone", "year": 2019, "kind": "outside_window"} in job.unmatched
+    candidate = (await _candidates(session, job))[OUTSIDE_WINDOW_TMDB_ID]
+    assert (candidate.selected, candidate.skip_reason) == (False, "outside_window")
+    assert "Long Gone" not in {row["name"] for row in job.unmatched}
+
+
+@respx.mock
+async def test_a_film_outside_the_window_is_not_followed_even_if_confirmed(
+    session, session_factory, user, export
+):
+    # The client sends the unticked row's id anyway: a skipped row is never selectable.
+    _mock_tmdb()
+    job = await _run(session, session_factory, user, export)
+    candidate = (await _candidates(session, job))[OUTSIDE_WINDOW_TMDB_ID]
+
+    confirmed = await confirm(session, user_id=user.id, job_id=job.id, film_ids=[candidate.film_id])
+
+    assert confirmed.follows_created == 0
+    assert await _follows(session) == []
 
 
 @respx.mock
 async def test_a_film_outside_the_window_is_still_upserted(session, session_factory, user, export):
-    """The window decides the *follow*, not the catalog row. The film is worth holding: the
-    next import, or a manual follow from the film page, finds it already there."""
+    """The window decides the *tick*, not the catalog row. The film is worth holding: the next
+    import, or a manual follow from the film page, finds it already there."""
     _mock_tmdb()
     await _run(session, session_factory, user, export)
 
@@ -289,25 +408,10 @@ async def test_a_canceled_film_is_skipped_however_recent_its_date(session, sessi
 
     job = await _run(session, session_factory, user, export)
 
-    assert await _follows(session) == []
-    assert job.unmatched == [{"name": "Dune", "year": 2021, "kind": "outside_window"}]
-
-
-@respx.mock
-async def test_an_upcoming_film_becomes_a_title_follow_carrying_the_import_source(
-    session, session_factory, user
-):
-    export = parse_upload(watchlist_csv([("Dune", 2021)]))
-    _mock_tmdb()
-
-    job = await _run(session, session_factory, user, export)
-
-    film = (await session.execute(select(Film).where(Film.tmdb_id == 1001))).scalar_one()
-    (follow,) = await _follows(session)
-    assert (follow.entity_type, follow.entity_id) == ("title", str(film.id))
-    assert follow.source == "letterboxd_import"
-    assert (job.watchlist_created, job.follows_created) == (1, 1)
+    (candidate,) = (await _candidates(session, job)).values()
+    assert (candidate.selected, candidate.skip_reason) == (False, "outside_window")
     assert job.unmatched == []
+    assert job.watchlist_created == 0
 
 
 @respx.mock
@@ -325,7 +429,10 @@ async def test_a_film_with_no_release_date_is_inside_the_window(session, session
 
     job = await _run(session, session_factory, user, export)
 
-    assert len(await _follows(session)) == 1
+    (candidate,) = (await _candidates(session, job)).values()
+    assert (candidate.selected, candidate.skip_reason) == (True, None)
+    # Nothing to lead with at all, and the row says so rather than inventing a date.
+    assert candidate.headline_release is None
     assert job.unmatched == []
 
 
@@ -338,15 +445,17 @@ async def test_re_uploading_the_same_export_creates_nothing_new(
 ):
     _mock_tmdb()
     first = await _run(session, session_factory, user, export)
+    await _confirm_all(session, user, first)
     before = len(await _follows(session))
 
     second = await _run(session, session_factory, user, export)
 
-    assert second.status == "succeeded"
-    assert (second.follows_created, second.watchlist_created) == (0, 0)
+    assert second.status == "awaiting_review"
+    # The same list, offered again: an already-followed film is still a film on the watchlist.
+    assert set(await _candidates(session, second)) == {*IN_WINDOW_TMDB_IDS, OUTSIDE_WINDOW_TMDB_ID}
+    await _confirm_all(session, user, second)
     assert len(await _follows(session)) == before
-    # The report is not idempotency-dependent: the title is still unplaceable, and the 2019
-    # film is still outside the window.
+    # The report is not idempotency-dependent: the title is still unplaceable.
     assert second.unmatched == first.unmatched
 
 
@@ -368,15 +477,32 @@ async def test_a_second_run_reads_a_fresh_films_credits_out_of_the_catalog(
     assert details_calls == []
 
 
+@respx.mock
+async def test_a_second_run_supersedes_the_first_list(session, session_factory, user, export):
+    """EF-22: starting another import discards an unconfirmed one — `failed`, `superseded`, and
+    its candidates gone — rather than being refused."""
+    _mock_tmdb()
+    first = await _run(session, session_factory, user, export)
+
+    second = await _run(session, session_factory, user, export)
+
+    first = await session.get(ImportJob, first.id, populate_existing=True)
+    assert (first.status, first.error) == ("failed", "superseded")
+    assert first.finished_at is not None
+    assert await _candidates(session, first) == {}
+    assert second.status == "awaiting_review"
+    assert len(await _candidates(session, second)) == 3
+
+
 # --- the mute ------------------------------------------------------------------------------
 
 
 @respx.mock
-async def test_an_import_follows_a_film_the_catalog_already_holds(
+async def test_an_import_proposes_a_film_the_catalog_already_holds(
     session, session_factory, user, export
 ):
-    """The follow is the whole of what an import writes for a listed film (EF-14): the mute it
-    used to have to leave alone (D-1414.9) went with the watchlist it corrected."""
+    """The follow is the whole of what a confirmed row writes (EF-14): the mute it used to have
+    to leave alone (D-1414.9) went with the watchlist it corrected."""
     film = await add_film(session, tmdb_id=1001, title="Dune", slug="dune")
     await session.commit()
 
@@ -384,10 +510,29 @@ async def test_an_import_follows_a_film_the_catalog_already_holds(
     job = await _run(session, session_factory, user, export)
 
     assert job.watchlist_created == 2
-    assert str(film.id) in {f.entity_id for f in await _follows(session)}
+    assert (await _candidates(session, job))[1001].film_id == film.id
 
 
 # --- the crash -----------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_each_row_is_committed_as_it_is_done(session, session_factory, user):
+    """The commit-per-row contract, candidates included: a crash on row two leaves row one's
+    film *and* its candidate committed, visible to a session that is not the runner's."""
+    export = parse_upload(watchlist_csv([("Dune", 2021), ("Arrival", 2016)]))
+    _mock_tmdb()
+    respx.get(f"{BASE_URL}/movie/1002").mock(return_value=httpx.Response(500))
+
+    job = await _queue(session, user, export)
+    with pytest.raises(Exception):  # noqa: B017 — any propagated failure is the crash
+        async with _client() as client:
+            await import_letterboxd(
+                session_factory=session_factory, client=client, job_id=job.id, export=export
+            )
+
+    assert {f.tmdb_id for f in await _rows(session, Film)} == {1001}
+    assert list(await _candidates(session, job)) == [1001]
 
 
 @respx.mock
@@ -409,7 +554,10 @@ async def test_a_crash_mid_run_fails_the_job_and_keeps_the_rows_already_done(
     finished = await session.get(ImportJob, job.id, populate_existing=True)
     assert finished.status == "failed"
     assert finished.error
-    # The first row survived whole: commit-per-row is what makes a partial import worth
+    # The first row's film survived whole: commit-per-row is what makes a partial import worth
     # keeping, and the alternative — one transaction for the job — would discard it.
     assert {f.tmdb_id for f in await _rows(session, Film)} == {1001}
-    assert len(await _follows(session)) == 1
+    # Its candidate did not: a failed job is never confirmed, and half a library offered as a
+    # list would look like the whole of one.
+    assert await _candidates(session, job) == {}
+    assert await _follows(session) == []

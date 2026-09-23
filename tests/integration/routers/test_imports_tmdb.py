@@ -6,6 +6,7 @@ is spawned, and above all what happens to the TMDB session when they refuse."""
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from sqlalchemy import select
 
 from tests.fixtures.users import ENTITLED_UNTIL, _build_authed_client
 from upmovies.app.models import ImportJob, TmdbAuthRequest
-from upmovies.app.repos import tmdb_auth_repo
+from upmovies.app.repos import import_job_repo, tmdb_auth_repo
 from upmovies.config import get_settings
 
 BASE_URL = get_settings().tmdb_base_url.rstrip("/")
@@ -299,6 +300,37 @@ async def test_a_second_import_while_one_runs_is_409_and_deletes_the_session(
     # The refused flow had already created a session at TMDB; nothing else would clean it up.
     deleted.assert_awaited_once()
     assert deleted.await_args.args[1] == "sess-2"
+
+
+@respx.mock
+async def test_a_callback_while_a_list_awaits_review_supersedes_it(
+    entitled_client, session, spawned
+):
+    """EF-22: an unconfirmed list is not an import in progress. Starting another discards it —
+    whichever kind of import either of them is."""
+    old = await import_job_repo.create(
+        session, user_id=entitled_client.user.id, source="letterboxd", rows_total=1
+    )
+    old.status = "awaiting_review"
+    await session.commit()
+
+    _mock_token()
+    await entitled_client.get("/me/import/tmdb/start", follow_redirects=False)
+    _mock_exchange()
+    r = await entitled_client.post(
+        "/me/import/tmdb/callback", json={"request_token": "tok-abc", "approved": True}
+    )
+
+    assert r.status_code == 202
+    jobs = {
+        j.id: j
+        for j in (
+            await session.execute(select(ImportJob).execution_options(populate_existing=True))
+        ).scalars()
+    }
+    assert (jobs[old.id].status, jobs[old.id].error) == ("failed", "superseded")
+    assert jobs[UUID(r.json()["job_id"])].status == "queued"
+    spawned.assert_awaited_once()
 
 
 @respx.mock

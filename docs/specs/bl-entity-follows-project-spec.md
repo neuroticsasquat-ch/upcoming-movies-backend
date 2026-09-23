@@ -442,6 +442,15 @@ Project `bl: Entity Follows` — https://linear.app/neuroticsasquatch/project/bl
 - Backend before frontend in every milestone; M2 before M3 in production (see §6).
 - `SWEEP_ADMIT_FOLLOWED=true` in Coolify with M2's sweep ticket (compose fallbacks are
   shadowed — AGENTS.md gotcha); `printenv` on the running container to confirm.
+- **M5: NEU-1449 and NEU-1450 deploy together.** The backend-first rule does not hold here.
+  NEU-1449 stops every import at `awaiting_review` with no follows written. The frontend
+  before NEU-1450 treats only `succeeded`/`failed` as terminal (`isTerminal` in
+  `frontend/src/api/imports.ts`), so in between every import would poll forever and follow
+  nothing. As built, the contract NEU-1450 reads differs from this spec's wording in three places:
+  - The routes are `/me/import/{id}` and `/me/import/{id}/confirm` (singular, as mounted).
+  - Confirming another user's job is a 404, as `GET` answers, not a 409.
+  - `watchlist_created` counts the films offered, meaning the ticked rows. `follows_created`
+    counts the rows confirmed.
 - The other 2026-09-20 session finishes NEU-1416 (M9 of Consumer Pivot); NEU-1420 is moved
   out of M9 into this project's M1 and re-described.
 - Everything runs in the container via `task`; before claiming any ticket done: `task format`,

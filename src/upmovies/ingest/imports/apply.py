@@ -12,16 +12,17 @@ favorites list that fed it. A follow is binary (EF-1), so a follow inferred from
 rating in 2019 would push on every credit change of somebody the user once enjoyed; nobody
 asked for that, and NEU-1432's migration has already deleted the rows the path wrote.
 
-**And it proposes only films that can still deliver something** (EF-21). A watchlisted film
-outside the alert window — called off, or released longer ago than the provider poll keeps
-looking — is upserted but not followed, and is reported as skipped so the user can see what the
-import declined rather than wondering where the title went.
+**It proposes; it does not follow** (EF-22). Each matched film becomes an
+`app.import_candidate` row, and the job stops at `awaiting_review` for the user to confirm the
+list — `ingest.imports.review` owns that half, and is where the follows are written.
 
-The `source` each runner writes is its own, because it is the one thing that genuinely differs:
-`letterboxd_import` or `tmdb_import` on every row (D-10).
+**And it only offers films that can still deliver something** (EF-21). A watchlisted film
+outside the alert window — called off, or released longer ago than the provider poll keeps
+looking — is upserted and listed, but unticked with `skip_reason = 'outside_window'`, so the
+user can see what the import declined rather than wondering where the title went.
 
 Also here: `Progress`, the running totals both runners keep, because the counts it reports are
-incremented inside `apply_watchlist_film`."""
+incremented inside `propose_film`."""
 
 import logging
 from dataclasses import dataclass, field
@@ -33,10 +34,9 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.dto import normalise_entity_id
-from upmovies.app.models import User
-from upmovies.app.repos import import_job_repo
-from upmovies.app.services import follow_service
+from upmovies.app.dto import headline_release_out
+from upmovies.app.repos import import_candidate_repo, import_job_repo
+from upmovies.catalog.headline_release import headline_releases
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import alert_window_clause
 from upmovies.config import get_settings
@@ -55,20 +55,14 @@ UnmatchedKind = Literal["watchlist", "rating", "tmdb_missing", "outside_window"]
 - `tmdb_missing` — TMDB has deleted the entry its own list still points at. The TMDB import's
   only resolution failure, because the ids there are authoritative (D-16); telling the user
   which list it was on would not help them find something that is gone.
-- `outside_window` — the film was placed, and is in the catalog, but is outside the alert
-  window (EF-21): there is nothing left for a follow on it to deliver.
-- `rating` — **historical**. The ratings path is deleted (EF-20) and nothing writes this any
-  more, but the column is JSONB and jobs that ran before this shipped still hold rows carrying
-  it. Kept so polling one of those does not 500 on its own report.
-
-**One stored column, two lists on the way out.** The runner writes every reported row here, in
-the order it read them, because that is one report and EF-22 (NEU-1449) lifts it whole onto
-`app.import_candidate`. `app.dto.ImportJobOut` splits it by kind: `outside_window` is not a
-failure — the film was matched and upserted — and the onboarding screen renders `unmatched` as
-"titles we could not match, go and follow them yourself", which for these rows would be false
-twice over and would invite exactly the follows EF-21 exists to prevent. Splitting in the read
-model rather than adding a second column keeps that distinction without a migration in and a
-migration out around one ticket."""
+- `outside_window` — **historical**. NEU-1448 reported a matched film outside the alert window
+  (EF-21) here; since EF-22 it is an `app.import_candidate` row with that `skip_reason`
+  instead, because it was matched and the review list is where matched films go.
+  `app.dto.ImportJobOut` drops rows of this kind on the way out, so the jobs that ran in
+  between still poll without a 500 and without a matched film reading as unmatched.
+- `rating` — **historical** on the same terms. The ratings path is deleted (EF-20) and nothing
+  writes this any more, but the column is JSONB and jobs that ran before this shipped still
+  hold rows carrying it. Kept so polling one of those does not 500 on its own report."""
 
 CREDITS_FRESH = timedelta(days=7)
 """How recently a watchlisted film's credits must have been read for an import to reuse them
@@ -87,10 +81,10 @@ than this puts rows into the table that nobody reads; writing less often makes a
 large library look stalled. The final write is unconditional, so the last rows are never left
 un-reported."""
 
-WatchlistOutcome = Literal["followed", "outside_window", "tmdb_missing"]
-"""What `apply_watchlist_film` did with one listed film. The two failures are reported
-differently by each runner — Letterboxd names the list, TMDB names the cause — so the caller is
-told which happened rather than only that nothing was written."""
+WatchlistOutcome = Literal["proposed", "outside_window", "tmdb_missing"]
+"""What `propose_film` did with one listed film. `outside_window` is still a candidate, just an
+unticked one, so only `tmdb_missing` leaves the runner anything to report — and it reports that
+its own way, Letterboxd naming the list and TMDB the cause."""
 
 
 @dataclass
@@ -128,56 +122,52 @@ class Progress:
         self._last_write = monotonic()
 
 
-async def apply_watchlist_film(
+async def propose_film(
     db: AsyncSession,
     client: TMDBClient,
-    user: User,
+    job_id: UUID,
     tmdb_id: int,
     progress: Progress,
-    *,
-    source: str,
 ) -> WatchlistOutcome:
-    """The only treatment an import has: the film in full, and a title follow if the film is
-    still inside the alert window.
+    """The only treatment an import has: the film in full, and a candidate for the review list
+    (EF-22) — ticked if the film is still inside the alert window, unticked with a reason if it
+    is not (EF-21). Committed, so the per-row contract holds for the candidate as it does for
+    the film.
 
-    One row, not two (M8). A title follow *is* the film being on the watchlist now, so the
-    watchlist item this used to write first — and the ordering rule that went with it — are
-    gone with the table.
-
-    **There is nothing beside the follow to reconcile** (EF-14): the mute that used to
-    survive an import went with the watchlist it corrected, so a listed film is a title follow
-    and that is the whole of it.
+    **No follow is written here.** The user has not seen the list yet; `ingest.imports.review`
+    writes the follows for the rows they confirm.
 
     **The film is upserted either way** (EF-21). The window is read off the stored row, so the
     upsert has to happen first; and a film somebody listed is worth holding in the catalog even
-    when this import will not propose it — the next import, or a manual follow, finds it
-    already there. What the window decides is the *follow*, not the row."""
+    when this import will not offer it — the next import, or a manual follow, finds it already
+    there. What the window decides is the *tick*, not the row."""
     film_id = await film_id_for(db, client, tmdb_id)
     if film_id is None:
         return "tmdb_missing"
-    if not await in_alert_window(db, film_id):
-        return "outside_window"
 
-    _, _, created = await follow_service.follow(
+    in_window = await in_alert_window(db, film_id)
+    title = (await db.execute(select(Film.title).where(Film.id == film_id))).scalar_one()
+    headline = (await headline_releases(db, [film_id], today=datetime.now(UTC).date())).get(film_id)
+    out = headline_release_out(headline)
+    added = await import_candidate_repo.add(
         db,
-        user=user,
-        entity_type="title",
-        # Through `normalise_entity_id` for the same reason the routes are:
-        # `app.follow.entity_id` is polymorphic text with no foreign key, so two spellings of
-        # one id are two follow rows that nothing will ever reconcile.
-        entity_id=normalise_entity_id("title", str(film_id)),
-        source=source,
+        job_id=job_id,
+        film_id=film_id,
+        tmdb_id=tmdb_id,
+        title=title,
+        headline_release=None if out is None else out.model_dump(mode="json"),
+        skip_reason=None if in_window else "outside_window",
     )
-    if created:
-        # Both counters, and deliberately: `watchlist_created` is the number the onboarding
-        # screen renders as "N watchlist films", and `follows_created` counts title follows
-        # now that there are no person follows left for it to count (EF-20). They are the same
-        # number for the whole of M5 — EF-22 (NEU-1449) moves the follow writes behind the
-        # confirm step and `follows_created` becomes the count of confirmed rows, which is
-        # where the two part company again.
+    await db.commit()
+    if not in_window:
+        return "outside_window"
+    if added:
+        # `watchlist_created` counts the films the import offers — the ticked rows, each once —
+        # and `follows_created` stays at zero until the confirm sets it to the rows the user
+        # kept. The two part company here (EF-22): a list of forty is not forty follows until
+        # somebody says so.
         progress.watchlist_created += 1
-        progress.follows_created += 1
-    return "followed"
+    return "proposed"
 
 
 async def in_alert_window(db: AsyncSession, film_id: UUID) -> bool:
@@ -244,7 +234,11 @@ async def finalize_failed(job_id: UUID, error: str) -> None:
     """Move a job to `failed` on its own session, for a runner whose own session is gone.
 
     Its own session factory rather than the runner's, because the crash this answers may be the
-    runner's session dying — reusing it would fail the write that records the failure."""
+    runner's session dying — reusing it would fail the write that records the failure.
+
+    The candidates the run had proposed go with it: a failed job is never confirmed, and a
+    half-read library offered as a list would look like the whole of one."""
     async with SessionLocal() as db:
         await import_job_repo.finalize(db, job_id, status="failed", error=error)
+        await import_candidate_repo.delete_for_jobs(db, [job_id])
         await db.commit()

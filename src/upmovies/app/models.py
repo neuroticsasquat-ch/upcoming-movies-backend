@@ -236,10 +236,24 @@ class Follow(Base):
 # upload returns instead, and what the onboarding UI polls (NEU-1358).
 
 IMPORT_SOURCES = ("letterboxd", "tmdb")
-IMPORT_STATUSES = ("queued", "running", "succeeded", "failed")
-ACTIVE_IMPORT_STATUSES = ("queued", "running")
+IMPORT_STATUSES = ("queued", "running", "awaiting_review", "succeeded", "failed")
+ACTIVE_IMPORT_STATUSES = ("queued", "running", "awaiting_review")
 """The statuses that count as "this user already has an import going" — the set the partial
-unique index below is built on, and the one `import_job_repo.active_for_user` asks about."""
+unique index below is built on, and the one `import_job_repo.active_for_user` asks about.
+
+`awaiting_review` is in it (EF-22) so that a user holds at most one unconfirmed list, but it is
+not a reason to refuse a new import the way the other two are: starting one *discards* the
+job waiting on review (`ingest.imports.review.discard_unconfirmed`) and only then asks whether
+anything is still going. The index is what makes that one-list rule true under a race."""
+
+IMPORT_SUPERSEDED = "superseded"
+"""`import_job.error` on a job discarded while it was `awaiting_review`, because the user
+started another import instead of confirming it (EF-22). `failed` plus this, rather than a
+sixth status, because every client already renders `failed` as terminal and nothing about a
+superseded list needs rendering differently — the user is looking at its replacement."""
+
+IMPORT_SKIP_REASONS = ("outside_window",)
+"""`import_candidate.skip_reason`: why a matched film is listed but not selectable (EF-21)."""
 
 
 class ImportJob(Base):
@@ -323,6 +337,62 @@ class ImportJob(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ImportCandidate(Base):
+    """One film an import proposes, waiting for the user to confirm it (EF-22).
+
+    The job resolves and upserts as it always did, then stops at `awaiting_review` with one of
+    these per matched film instead of writing follows: nothing is followed until the user has
+    seen the list. `POST /me/import/{id}/confirm` writes a title follow for each id it is sent
+    that is selectable here, and deletes the rows — they are a proposal, and once it has been
+    answered the follows are the record. A superseded or failed job loses them the same way, so
+    the table only ever holds lists somebody could still confirm.
+
+    `selected` is the tick the review list opens with: true for a film inside the alert window,
+    false with a `skip_reason` for one outside it (EF-21), which is listed so the user can see
+    what the import declined rather than wonder where the title went. A skipped row is never
+    selectable, whatever the client sends.
+
+    **Matched films only.** A title the import could not place has no film to point at, and
+    stays in `import_job.unmatched` exactly as NEU-1448 left it: that list tells the user to go
+    and follow something by hand, which is the opposite of what this one asks.
+
+    `title` and `headline_release` are snapshots taken when the row is written, so the review
+    list renders from this table alone. `title` is the catalog's rather than the export's, on
+    purpose: a Letterboxd row is matched by a search rule, and the catalog's title is how the
+    user catches a wrong match before it becomes a follow."""
+
+    __tablename__ = "import_candidate"
+    __table_args__ = (
+        CheckConstraint(
+            f"skip_reason IS NULL OR skip_reason IN ({_in_list(IMPORT_SKIP_REASONS)})",
+            name="ck_import_candidate_skip_reason",
+        ),
+        CheckConstraint(
+            "skip_reason IS NULL OR NOT selected", name="ck_import_candidate_skipped_unselected"
+        ),
+        # One row per film per job: two export rows that resolve to the same film are one
+        # proposal, and one follow if confirmed. Also the index the confirm and the read use.
+        Index("uq_import_candidate_job_film", "job_id", "film_id", unique=True),
+        {"schema": "app"},
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    job_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("app.import_job.id", ondelete="CASCADE"), nullable=False
+    )
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("catalog.film.id", ondelete="CASCADE"), nullable=False
+    )
+    tmdb_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    # `app.dto.HeadlineReleaseOut` as JSON, or NULL for a film with no date to lead with.
+    headline_release: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TmdbAuthRequest(Base):

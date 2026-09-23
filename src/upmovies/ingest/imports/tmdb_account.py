@@ -2,8 +2,9 @@
 
 The second half of the approve flow `routers/imports_tmdb.py` starts. That route hands this a
 session id the user has just authorized, and this reads **their watchlist** under it, writes
-the same treatment the Letterboxd import writes (`ingest.imports.apply`), and then **deletes
-the session at TMDB**.
+the same treatment the Letterboxd import writes (`ingest.imports.apply`) — candidates for the
+review list, no follows until the user confirms it (EF-22) — and then **deletes the session at
+TMDB**.
 
 **The favorites list is not read** (EF-20). It used to buy person follows for each favorite's
 director and top-2 billing, and a follow is binary now (EF-1) — so a film somebody favorited
@@ -21,26 +22,24 @@ it — and a delete that itself fails is logged at WARNING rather than failing t
 by then the import has already done everything it was asked to do and the session expires at
 TMDB on its own.
 
-No resolution step, unlike Letterboxd: TMDB's ids are authoritative, so the only two rows that
-can reach the report name causes rather than lists — TMDB answering 404 for a film its own list
-points at (`kind=tmdb_missing`), and a film the alert window has closed on
-(`kind=outside_window`, EF-21).
+No resolution step, unlike Letterboxd: TMDB's ids are authoritative, so the only row that can
+reach the report names a cause rather than a list — TMDB answering 404 for a film its own list
+points at (`kind=tmdb_missing`). A film the alert window has closed on (EF-21) is on the review
+list instead, unticked with its reason.
 
 Follows the same pipeline contract as the Letterboxd runner: its own session factory, a commit
 per row, a throttled heartbeat, and a wrapper that always finalizes."""
 
 import logging
 from collections.abc import Callable, Sequence
-from typing import Literal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.models import User
 from upmovies.app.repos import import_job_repo
 from upmovies.config import Settings
 from upmovies.db import SessionLocal
-from upmovies.ingest.imports.apply import Progress, apply_watchlist_film, finalize_failed
+from upmovies.ingest.imports.apply import Progress, finalize_failed, propose_film
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.schemas import TMDBMovieSummary
 
@@ -50,7 +49,7 @@ SOURCE = "tmdb"
 """`import_job.source` for these jobs."""
 
 FOLLOW_SOURCE = "tmdb_import"
-"""`follow.source` for every row this writes (D-10, D-14)."""
+"""`follow.source` for every row a confirm of one of these jobs writes (D-10, D-14)."""
 
 MAX_ROWS_PER_LIST = 5_000
 """How much of one TMDB list this will read, matching `letterboxd.MAX_ROWS_PER_FILE`.
@@ -129,7 +128,7 @@ async def import_tmdb_account(
     session_id: str,
     account_id: int,
 ) -> None:
-    """Run one account import to completion and finalize the job `succeeded`.
+    """Run one account import to completion and leave the job `awaiting_review` (EF-22).
 
     Raises on anything it cannot handle per row; `run_tmdb_import` is what turns that into a
     `failed` job and what deletes the session. Separate from the wrapper so a test can drive it
@@ -138,9 +137,6 @@ async def import_tmdb_account(
         job = await import_job_repo.get(db, job_id)
         if job is None:
             raise ValueError(f"import job {job_id} does not exist")
-        user = await db.get(User, job.user_id)
-        if user is None:
-            raise ValueError(f"import job {job_id} has no user")
         await import_job_repo.mark_running(db, job_id)
         await db.commit()
 
@@ -156,31 +152,25 @@ async def import_tmdb_account(
 
         progress = Progress()
         for movie in watchlist:
-            outcome = await apply_watchlist_film(
-                db, client, user, movie.id, progress, source=FOLLOW_SOURCE
-            )
-            if outcome != "followed":
-                _record_skipped(progress, movie, kind=outcome)
+            outcome = await propose_film(db, client, job_id, movie.id, progress)
+            if outcome == "tmdb_missing":
+                _record_missing(progress, movie)
             await progress.row_done(db, job_id)
 
         await progress.flush(db, job_id)
-        await import_job_repo.finalize(db, job_id, status="succeeded")
+        await import_job_repo.mark_awaiting_review(db, job_id)
         await db.commit()
 
 
-def _record_skipped(
-    progress: Progress, movie: TMDBMovieSummary, *, kind: Literal["tmdb_missing", "outside_window"]
-) -> None:
-    """Report a film on the account's watchlist that produced no follow — TMDB's own
-    `/movie/{id}` answers 404 for it, or the alert window has closed on it (EF-21).
+def _record_missing(progress: Progress, movie: TMDBMovieSummary) -> None:
+    """Report a film on the account's watchlist that TMDB's own `/movie/{id}` answers 404 for.
 
-    The title and year come from the list payload in both cases. For a deleted entry they are
-    the only description of the film left; for a skipped one they are what the user will
-    recognise from the list they are looking at, which is TMDB's and not ours."""
+    The title and year come from the list payload, because for a deleted entry they are the only
+    description of the film left."""
     progress.record_unmatched(
         name=movie.title,
         year=movie.release_date.year if movie.release_date else None,
-        kind=kind,
+        kind="tmdb_missing",
     )
 
 

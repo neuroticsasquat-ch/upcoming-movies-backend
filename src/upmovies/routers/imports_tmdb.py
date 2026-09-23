@@ -39,6 +39,7 @@ from upmovies.app.rate_limit import rate_limit
 from upmovies.app.repos import import_job_repo, tmdb_auth_repo
 from upmovies.config import Settings, get_settings
 from upmovies.deps import get_current_user, get_session, require_csrf
+from upmovies.ingest.imports.review import discard_unconfirmed
 from upmovies.ingest.imports.tmdb_account import SOURCE, delete_session, run_tmdb_import
 from upmovies.ingest.tmdb.client import TMDBAuthRejected, TMDBClient
 
@@ -189,11 +190,13 @@ def _require_still_entitled(user: User) -> None:
 
 
 async def _queue(db: AsyncSession, *, user: User, username: str) -> ImportJob:
-    """Open the job row, or 409 if this user already has one running.
+    """Open the job row, or 409 if this user already has one running. A job waiting on review
+    is discarded rather than refused (EF-22), in the same transaction as the new row.
 
     `rows_total=0` because nothing knows it yet: unlike an upload, which counts its rows while
     validating the file, the library this will read is behind a credential the job has not used
     yet. The runner sets it once it has both lists."""
+    await discard_unconfirmed(db, user_id=user.id)
     if await import_job_repo.active_for_user(db, user.id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="import_in_progress")
     job = await import_job_repo.create(

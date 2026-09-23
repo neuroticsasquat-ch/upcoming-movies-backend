@@ -6,6 +6,7 @@ from typing import NamedTuple
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -95,6 +96,28 @@ async def create(
     db.add(follow)
     await db.flush()
     return follow
+
+
+async def create_many_if_absent(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    entity_type: str,
+    entity_ids: Iterable[str],
+    source: str,
+) -> None:
+    """Follow each of `entity_ids` that is not already followed, in one statement.
+
+    An existing row is left untouched, `source` and `created_at` included — the same rule
+    `follow_service.follow` keeps one row at a time (D-15). No flush of ORM state: the rows are
+    written by Core, so a caller that wants them back reads them."""
+    rows = [
+        {"user_id": user_id, "entity_type": entity_type, "entity_id": e, "source": source}
+        for e in entity_ids
+    ]
+    if not rows:
+        return
+    await db.execute(insert(Follow).values(rows).on_conflict_do_nothing())
 
 
 async def list_for_user(db: AsyncSession, user_id: UUID) -> list[Follow]:
