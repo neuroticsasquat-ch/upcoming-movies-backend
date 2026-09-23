@@ -1,18 +1,22 @@
-"""`/me/import` (D-15): the upload's synchronous validation and the job poll, behind the
-entitlement gate (D-39).
+"""`/me/import` (D-15): the upload's synchronous validation, the job poll and the review
+list's confirm (EF-22), behind the entitlement gate (D-39).
 
 The runner itself is covered in `tests/integration/ingest/imports/` — here the task is
 stubbed out, because what these tests are about is what the *route* decides before anything is
 spawned."""
 
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
 
+from tests.fixtures.catalog import add_film
 from tests.fixtures.letterboxd import export_zip, ratings_csv, watchlist_csv
-from upmovies.app.models import ImportJob
+from tests.fixtures.users import _build_authed_client
+from upmovies.app.models import Follow, ImportCandidate, ImportJob
+from upmovies.app.repos import import_candidate_repo, import_job_repo
+from upmovies.catalog.models import Film
 from upmovies.routers.imports import MAX_UPLOAD_BYTES
 
 WATCHLIST = watchlist_csv([("Dune", 2021), ("Arrival", 2016)])
@@ -34,7 +38,46 @@ def spawned():
 
 
 async def _jobs(session) -> list[ImportJob]:
-    return list((await session.execute(select(ImportJob))).scalars().all())
+    return list(
+        (await session.execute(select(ImportJob).execution_options(populate_existing=True)))
+        .scalars()
+        .all()
+    )
+
+
+async def _follows(session) -> list[Follow]:
+    return list((await session.execute(select(Follow))).scalars().all())
+
+
+async def _candidates(session) -> list[ImportCandidate]:
+    return list((await session.execute(select(ImportCandidate))).scalars().all())
+
+
+async def _awaiting_review(
+    session, user, *, source: str = "letterboxd"
+) -> tuple[ImportJob, dict[str, Film]]:
+    """A job the runner has finished with, its list as the runner writes it: two films inside
+    the alert window, ticked, and one outside it, unticked with its reason."""
+    job = await import_job_repo.create(session, user_id=user.id, source=source, rows_total=3)
+    films = {
+        "zodiac": await add_film(session, tmdb_id=3001, title="Zodiac", slug="zodiac"),
+        "arrival": await add_film(session, tmdb_id=3002, title="Arrival", slug="arrival"),
+        "gone": await add_film(session, tmdb_id=3003, title="Long Gone", slug="long-gone"),
+    }
+    for key, film in films.items():
+        await import_candidate_repo.add(
+            session,
+            job_id=job.id,
+            film_id=film.id,
+            tmdb_id=film.tmdb_id,
+            title=film.title,
+            headline_release=None,
+            skip_reason="outside_window" if key == "gone" else None,
+        )
+    job.status = "awaiting_review"
+    job.watchlist_created = 2
+    await session.commit()
+    return job, films
 
 
 # --- the gate ------------------------------------------------------------------------------
@@ -168,7 +211,7 @@ async def test_polling_returns_the_job_row(entitled_client, session, spawned):
     assert body["rows_total"] == 2
     assert (body["rows_done"], body["watchlist_created"], body["follows_created"]) == (0, 0, 0)
     assert body["unmatched"] == []
-    assert body["skipped"] == []
+    assert body["candidates"] == []
     assert body["error"] is None
     assert body["finished_at"] is None
 
@@ -188,18 +231,14 @@ async def test_the_unmatched_report_is_rendered_for_the_poller(
 
     body = (await entitled_client.get(f"/me/import/{job.id}")).json()
     assert body["unmatched"] == [{"name": "A Film", "year": 1999, "kind": kind}]
-    assert body["skipped"] == []
 
 
-async def test_a_skipped_film_is_reported_apart_from_the_unmatched_ones(
+async def test_a_historical_outside_window_row_is_not_reported_as_unmatched(
     entitled_client, session, spawned
 ):
-    """EF-21's rows leave the stored column as `skipped`, not as a fourth `unmatched` kind.
-
-    The onboarding screen renders `unmatched` as "titles we could not match — go and follow
-    them yourself", which for a film that *was* matched would be false twice over and would
-    invite exactly the follows EF-21 exists to prevent. `skipped` is additive, so what the
-    screen already shows stays true until NEU-1450 renders the new list."""
+    """Jobs that ran between NEU-1448 and EF-22 stored a skipped film in `unmatched` with
+    `kind=outside_window`. Matched films are candidates now, so the row is dropped on the way
+    out rather than 500-ing the poll or telling the user a matched film could not be found."""
     await entitled_client.post("/me/import/letterboxd", files=_upload(EXPORT))
     (job,) = await _jobs(session)
     job.unmatched = [
@@ -212,7 +251,7 @@ async def test_a_skipped_film_is_reported_apart_from_the_unmatched_ones(
     body = (await entitled_client.get(f"/me/import/{job.id}")).json()
 
     assert body["unmatched"] == [{"name": "A Film", "year": 1999, "kind": "watchlist"}]
-    assert body["skipped"] == [{"title": "Long Gone", "year": 2019, "reason": "outside_window"}]
+    assert "skipped" not in body
 
 
 async def test_polling_someone_elses_job_is_404(entitled_client, session, make_user, spawned):
@@ -222,7 +261,6 @@ async def test_polling_someone_elses_job_is_404(entitled_client, session, make_u
     other = await make_user(
         email="other@example.com", entitled_until=entitled_client.user.entitled_until
     )
-    from tests.fixtures.users import _build_authed_client
 
     async with await _build_authed_client(session, other) as other_client:
         r = await other_client.get(f"/me/import/{job.id}")
@@ -236,3 +274,275 @@ async def test_polling_someone_elses_job_is_404(entitled_client, session, make_u
 async def test_polling_a_job_that_does_not_exist_is_404(entitled_client):
     r = await entitled_client.get(f"/me/import/{uuid4()}")
     assert r.status_code == 404
+
+
+# --- the review list (EF-22) ---------------------------------------------------------------
+
+
+async def test_polling_a_job_awaiting_review_returns_its_candidates(entitled_client, session):
+    job, films = await _awaiting_review(session, entitled_client.user)
+
+    body = (await entitled_client.get(f"/me/import/{job.id}")).json()
+
+    assert body["status"] == "awaiting_review"
+    assert (body["watchlist_created"], body["follows_created"]) == (2, 0)
+    # Ticked rows first, then the greyed ones, each group by title.
+    assert body["candidates"] == [
+        {
+            "film_id": str(films["arrival"].id),
+            "tmdb_id": 3002,
+            "title": "Arrival",
+            "headline_release": None,
+            "selected": True,
+            "skip_reason": None,
+        },
+        {
+            "film_id": str(films["zodiac"].id),
+            "tmdb_id": 3001,
+            "title": "Zodiac",
+            "headline_release": None,
+            "selected": True,
+            "skip_reason": None,
+        },
+        {
+            "film_id": str(films["gone"].id),
+            "tmdb_id": 3003,
+            "title": "Long Gone",
+            "headline_release": None,
+            "selected": False,
+            "skip_reason": "outside_window",
+        },
+    ]
+
+
+async def test_a_candidates_headline_release_is_rendered(entitled_client, session):
+    job, films = await _awaiting_review(session, entitled_client.user)
+    candidate = (
+        await session.execute(
+            select(ImportCandidate).where(ImportCandidate.film_id == films["zodiac"].id)
+        )
+    ).scalar_one()
+    candidate.headline_release = {
+        "date": "2099-06-01",
+        "kind": "upcoming",
+        "country": "US",
+        "bucket": "wide",
+    }
+    await session.commit()
+
+    body = (await entitled_client.get(f"/me/import/{job.id}")).json()
+
+    (zodiac,) = [c for c in body["candidates"] if c["title"] == "Zodiac"]
+    assert zodiac["headline_release"] == {
+        "date": "2099-06-01",
+        "kind": "upcoming",
+        "country": "US",
+        "bucket": "wide",
+    }
+
+
+async def test_confirm_follows_only_the_films_the_user_kept(entitled_client, session):
+    job, films = await _awaiting_review(session, entitled_client.user)
+
+    r = await entitled_client.post(
+        f"/me/import/{job.id}/confirm",
+        # Zodiac kept, Arrival unticked, the skipped film sent anyway, and an id that is on no
+        # list at all: only Zodiac is a selectable candidate among them.
+        json={"film_ids": [str(films["zodiac"].id), str(films["gone"].id), str(uuid4())]},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "succeeded"
+    assert body["follows_created"] == 1
+    assert body["finished_at"] is not None
+    # The list is answered; the follows are the record now.
+    assert body["candidates"] == []
+    assert await _candidates(session) == []
+
+    (follow,) = await _follows(session)
+    assert (follow.user_id, follow.entity_type) == (entitled_client.user.id, "title")
+    assert follow.entity_id == str(films["zodiac"].id)
+    assert follow.source == "letterboxd_import"
+
+
+async def test_confirm_writes_the_tmdb_import_source_for_a_tmdb_job(entitled_client, session):
+    job, films = await _awaiting_review(session, entitled_client.user, source="tmdb")
+
+    r = await entitled_client.post(
+        f"/me/import/{job.id}/confirm", json={"film_ids": [str(films["arrival"].id)]}
+    )
+
+    assert r.status_code == 200
+    (follow,) = await _follows(session)
+    assert follow.source == "tmdb_import"
+
+
+async def test_confirm_counts_a_kept_film_the_user_already_followed(entitled_client, session):
+    """`follows_created` counts the confirmed rows (EF-22) — the user now follows both — and the
+    existing follow is left as it was, `source` included (D-15)."""
+    job, films = await _awaiting_review(session, entitled_client.user)
+    session.add(
+        Follow(
+            user_id=entitled_client.user.id,
+            entity_type="title",
+            entity_id=str(films["zodiac"].id),
+            source="manual",
+        )
+    )
+    await session.commit()
+
+    r = await entitled_client.post(
+        f"/me/import/{job.id}/confirm",
+        json={"film_ids": [str(films["zodiac"].id), str(films["arrival"].id)]},
+    )
+
+    assert r.json()["follows_created"] == 2
+    follows = {f.entity_id: f.source for f in await _follows(session)}
+    assert follows == {
+        str(films["zodiac"].id): "manual",
+        str(films["arrival"].id): "letterboxd_import",
+    }
+
+
+async def test_confirming_nothing_finishes_the_job_with_no_follows(entitled_client, session):
+    job, _ = await _awaiting_review(session, entitled_client.user)
+
+    r = await entitled_client.post(f"/me/import/{job.id}/confirm", json={"film_ids": []})
+
+    assert (r.status_code, r.json()["status"], r.json()["follows_created"]) == (
+        200,
+        "succeeded",
+        0,
+    )
+    assert await _follows(session) == []
+
+
+async def test_confirming_twice_is_409(entitled_client, session):
+    job, films = await _awaiting_review(session, entitled_client.user)
+    body = {"film_ids": [str(films["zodiac"].id)]}
+    assert (
+        await entitled_client.post(f"/me/import/{job.id}/confirm", json=body)
+    ).status_code == 200
+
+    r = await entitled_client.post(f"/me/import/{job.id}/confirm", json=body)
+
+    assert r.status_code == 409
+    assert r.json()["detail"] == "import_not_awaiting_review"
+    assert len(await _follows(session)) == 1
+
+
+@pytest.mark.parametrize("job_status", ["queued", "running", "succeeded", "failed"])
+async def test_confirming_a_job_not_awaiting_review_is_409(entitled_client, session, job_status):
+    job, films = await _awaiting_review(session, entitled_client.user)
+    job.status = job_status
+    await session.commit()
+
+    r = await entitled_client.post(
+        f"/me/import/{job.id}/confirm", json={"film_ids": [str(films["zodiac"].id)]}
+    )
+
+    assert r.status_code == 409
+    assert await _follows(session) == []
+
+
+async def test_confirming_someone_elses_job_is_404(entitled_client, session, make_user):
+    """404, as the poll answers — not the 409 the ticket words it as, which would tell a
+    caller holding another user's job id that the job exists."""
+    other = await make_user(
+        email="other@example.com", entitled_until=entitled_client.user.entitled_until
+    )
+    job, films = await _awaiting_review(session, other)
+
+    r = await entitled_client.post(
+        f"/me/import/{job.id}/confirm", json={"film_ids": [str(films["zodiac"].id)]}
+    )
+
+    assert r.status_code == 404
+    assert r.json()["detail"] == "import_job_not_found"
+    assert await _follows(session) == []
+    (still,) = await _jobs(session)
+    assert still.status == "awaiting_review"
+
+
+async def test_confirming_a_job_that_does_not_exist_is_404(entitled_client):
+    r = await entitled_client.post(f"/me/import/{uuid4()}/confirm", json={"film_ids": []})
+    assert r.status_code == 404
+
+
+async def test_confirm_is_403_for_an_unentitled_user(authed_client, session):
+    job, films = await _awaiting_review(session, authed_client.user)
+
+    r = await authed_client.post(
+        f"/me/import/{job.id}/confirm", json={"film_ids": [str(films["zodiac"].id)]}
+    )
+
+    assert r.status_code == 403
+    assert r.json()["detail"] == "entitlement_required"
+    assert await _follows(session) == []
+
+
+async def test_confirm_requires_the_csrf_header(entitled_client, session):
+    job, films = await _awaiting_review(session, entitled_client.user)
+
+    r = await entitled_client.post(
+        f"/me/import/{job.id}/confirm",
+        json={"film_ids": [str(films["zodiac"].id)]},
+        headers={"X-CSRF-Token": "wrong"},
+    )
+
+    assert r.status_code == 403
+    assert r.json()["detail"] == "csrf_invalid"
+    assert await _follows(session) == []
+
+
+# --- a new import discards the list (EF-22) ------------------------------------------------
+
+
+async def test_an_upload_while_a_list_awaits_review_supersedes_it(
+    entitled_client, session, spawned
+):
+    old, _ = await _awaiting_review(session, entitled_client.user)
+
+    r = await entitled_client.post("/me/import/letterboxd", files=_upload(EXPORT))
+
+    assert r.status_code == 202
+    jobs = {j.id: j for j in await _jobs(session)}
+    assert (jobs[old.id].status, jobs[old.id].error) == ("failed", "superseded")
+    assert jobs[old.id].finished_at is not None
+    assert jobs[UUID(r.json()["job_id"])].status == "queued"
+    assert await _candidates(session) == []
+    spawned.assert_awaited_once()
+
+    # The superseded list cannot be confirmed afterwards.
+    confirm = await entitled_client.post(f"/me/import/{old.id}/confirm", json={"film_ids": []})
+    assert confirm.status_code == 409
+
+
+async def test_a_bad_upload_does_not_cost_the_user_their_list(entitled_client, session, spawned):
+    # The file is read before anything is discarded, so a 422 leaves the review list alone.
+    old, _ = await _awaiting_review(session, entitled_client.user)
+
+    r = await entitled_client.post("/me/import/letterboxd", files=_upload(RATINGS, "r.csv"))
+
+    assert r.status_code == 422
+    (job,) = await _jobs(session)
+    assert (job.id, job.status) == (old.id, "awaiting_review")
+    assert len(await _candidates(session)) == 3
+
+
+async def test_another_users_list_is_not_superseded_by_an_upload(
+    entitled_client, session, make_user, spawned
+):
+    other = await make_user(
+        email="other@example.com", entitled_until=entitled_client.user.entitled_until
+    )
+    theirs, _ = await _awaiting_review(session, other)
+
+    assert (
+        await entitled_client.post("/me/import/letterboxd", files=_upload(EXPORT))
+    ).status_code == 202
+
+    jobs = {j.id: j for j in await _jobs(session)}
+    assert jobs[theirs.id].status == "awaiting_review"
+    assert len(await _candidates(session)) == 3

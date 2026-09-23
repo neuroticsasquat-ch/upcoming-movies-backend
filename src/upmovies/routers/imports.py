@@ -1,10 +1,12 @@
 """`/me/import`: uploading a library from another service, and polling the job it starts
 (D-15), subscriber-only (D-39).
 
-Two responsibilities and no more. The upload **validates synchronously and enqueues** — a file
-this cannot read is a 422 the uploader can act on, and everything that survives that is handed
-to a background task with a 202, because resolving a library against TMDB is minutes of
-rate-limited requests (`ingest.imports.runner`). The poll returns the job row.
+Three responsibilities and no more. The upload **validates synchronously and enqueues** — a
+file this cannot read is a 422 the uploader can act on, and everything that survives that is
+handed to a background task with a 202, because resolving a library against TMDB is minutes of
+rate-limited requests (`ingest.imports.runner`). The poll returns the job row, and its review
+list once the job reaches `awaiting_review`. The confirm answers that list (EF-22) — for a
+TMDB account import as much as a Letterboxd one, since the job is the same row either way.
 
 The multipart body is read by hand rather than declared as `UploadFile`, which is the one
 unusual thing here and is deliberate. The spec's amendment requires the entitlement gate in
@@ -26,17 +28,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException
 
-from upmovies.app.dto import ImportJobOut, ImportJobStartedOut
+from upmovies.app.dto import (
+    ImportCandidateOut,
+    ImportConfirmIn,
+    ImportJobOut,
+    ImportJobStartedOut,
+)
 from upmovies.app.entitlements import require_entitled
-from upmovies.app.models import User
+from upmovies.app.models import ImportJob, User
 from upmovies.app.rate_limit import rate_limit
-from upmovies.app.repos import import_job_repo
+from upmovies.app.repos import import_candidate_repo, import_job_repo
 from upmovies.config import Settings, get_settings
 from upmovies.deps import get_session, require_csrf
 from upmovies.ingest.imports.letterboxd import (
     InvalidImportFile,
     LetterboxdExport,
     parse_upload,
+)
+from upmovies.ingest.imports.review import (
+    ImportJobNotFound,
+    ImportNotAwaitingReview,
+    confirm,
+    discard_unconfirmed,
 )
 from upmovies.ingest.imports.runner import SOURCE, run_letterboxd_import
 
@@ -98,9 +111,13 @@ async def start_letterboxd_import(
     are still looking at it: 413 for an upload past the cap, 422 for anything `parse_upload`
     cannot read — which since EF-20 includes a `ratings.csv` sent on its own — and 409 while one
     of this user's imports is still going, one at a time, because two would race each other for
-    the same rate-limited TMDB budget and for the same follow rows."""
+    the same rate-limited TMDB budget and for the same follow rows.
+
+    A job waiting on review is not "still going": it is discarded, and this one starts (EF-22).
+    After the file is read, so a bad upload does not cost the user the list they have."""
     export = await _parsed_upload(request)
 
+    await discard_unconfirmed(db, user_id=user.id)
     if await import_job_repo.active_for_user(db, user.id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="import_in_progress")
     job = await import_job_repo.create(
@@ -131,7 +148,48 @@ async def get_import_job(
     job = await import_job_repo.get_for_user(db, job_id=job_id, user_id=user.id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="import_job_not_found")
-    return ImportJobOut.model_validate(job)
+    return await _job_out(db, job)
+
+
+@router.post("/{job_id}/confirm", response_model=ImportJobOut, dependencies=[Depends(require_csrf)])
+async def confirm_import_job(
+    job_id: UUID,
+    body: ImportConfirmIn,
+    user: User = Depends(entitled),
+    db: AsyncSession = Depends(get_session),
+) -> ImportJobOut:
+    """Follow the films the user kept from the review list, and finish the job (EF-22). 200
+    with the job, now `succeeded`.
+
+    409 unless the job is `awaiting_review` — still running, already confirmed, or superseded
+    by a newer import. Another user's job is a 404, not the 409 the ticket words it as: the
+    poll answers 404 for it, and a confirm that said 409 instead would tell a caller holding
+    somebody else's job id that it exists.
+
+    Not on the `import` bucket, like the poll: it spends no TMDB quota, and one upload is
+    already one token from that bucket."""
+    try:
+        job = await confirm(db, user_id=user.id, job_id=job_id, film_ids=body.film_ids)
+    except ImportJobNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="import_job_not_found"
+        ) from None
+    except ImportNotAwaitingReview:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="import_not_awaiting_review"
+        ) from None
+    return await _job_out(db, job)
+
+
+async def _job_out(db: AsyncSession, job: ImportJob) -> ImportJobOut:
+    """The job as its owner reads it, with the review list while there is one to review."""
+    out = ImportJobOut.model_validate(job)
+    if job.status == "awaiting_review":
+        out.candidates = [
+            ImportCandidateOut.model_validate(c)
+            for c in await import_candidate_repo.list_for_job(db, job.id)
+        ]
+    return out
 
 
 async def _parsed_upload(request: Request) -> LetterboxdExport:

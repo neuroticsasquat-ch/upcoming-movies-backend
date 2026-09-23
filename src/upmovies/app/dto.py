@@ -301,14 +301,11 @@ def normalise_alert_stores(stores: list[str]) -> list[str]:
 # except `user_id`, which the caller is.
 
 
-SKIP_REASONS = ("outside_window",)
-"""The `kind` values in `app.import_job.unmatched` that mean "matched, and deliberately not
-followed" rather than "could not be placed".
-
-One stored column, two fields on the way out (see `ImportJobOut`). The column keeps every row
-the job reported, in the order it read them, because that is what the runner writes and what
-EF-22 (NEU-1449) will lift wholesale onto `app.import_candidate`; the split happens in the read
-model, where the two lists mean opposite things to the person reading them."""
+_MATCHED_KINDS = ("outside_window",)
+"""`kind` values in `app.import_job.unmatched` that name a film the import *did* match — written
+only by jobs that ran between NEU-1448 and EF-22 (NEU-1449), which moved those rows onto
+`app.import_candidate`. Dropped on the way out: a matched film listed under "titles we could
+not match" would be false, and would invite the very follow EF-21 declined."""
 
 
 class ImportUnmatchedOut(BaseModel):
@@ -326,34 +323,41 @@ class ImportUnmatchedOut(BaseModel):
     hold rows carrying it. Polling one of those must not 500 on its own report.
 
     A film the alert window closed on is **not** here — it was matched, and is in the catalog.
-    It goes to `ImportJobOut.skipped`."""
+    It is an `ImportCandidateOut` with a `skip_reason`."""
 
     name: str
     year: int | None = None
     kind: Literal["watchlist", "rating", "tmdb_missing"]
 
 
-class ImportSkippedOut(BaseModel):
-    """A film the import matched, upserted, and then deliberately did not follow (EF-21).
+class ImportCandidateOut(BaseModel):
+    """One film on an import's review list (EF-22), as `app.import_candidate` holds it.
 
-    Not a failure, which is the whole reason it is its own list rather than a fourth `kind` on
-    `unmatched`. The frontend renders `unmatched` as "titles we could not match", and tells the
-    user to go and follow them by hand — which for these rows would be false twice over, and
-    would invite exactly the follows EF-21 exists to prevent. A new field is additive: the
-    onboarding screen ignores it until NEU-1450 renders it, and what it already shows stays
-    true in the meantime.
+    `selected` is the tick the list opens with. A row with a `skip_reason` is unticked and not
+    selectable — the confirm ignores its id — and is listed so the user can see what the import
+    declined (EF-21). `title` is the catalog's, so a wrong Letterboxd match is visible before it
+    becomes a follow; `headline_release` is the date the row leads with, as on the follows
+    page, snapshotted when the job ran."""
 
-    `title` and `reason` rather than `name` and `kind`, matching the shape the ticket names and
-    the `skip_reason` column EF-22 gives each candidate next."""
+    model_config = ConfigDict(from_attributes=True)
 
+    film_id: UUID
+    tmdb_id: int
     title: str
-    year: int | None = None
-    reason: Literal["outside_window"]
+    headline_release: HeadlineReleaseOut | None
+    selected: bool
+    skip_reason: Literal["outside_window"] | None
 
 
-def _is_skip(row: object) -> bool:
-    """Whether one stored report row is a deliberate skip rather than a failure to place."""
-    return isinstance(row, dict) and row.get("kind") in SKIP_REASONS
+class ImportConfirmIn(BaseModel):
+    """The films the user kept from the review list (EF-22). Ids that are not selectable
+    candidates of the job are ignored rather than refused, so a stale list costs the user
+    nothing but the rows that went stale.
+
+    Capped at the size of the largest list an import can propose — both runners read at most
+    5,000 rows — so a body cannot ask the confirm to look up more ids than a job could hold."""
+
+    film_ids: list[UUID] = Field(max_length=5_000)
 
 
 class TMDBCallbackIn(BaseModel):
@@ -381,44 +385,33 @@ class ImportJobOut(BaseModel):
     status: str
     rows_total: int
     rows_done: int
-    # Two counts of the same thing for the whole of M5, and deliberately: `watchlist_created`
-    # is the number the onboarding screen renders as "N watchlist films", and `follows_created`
-    # counts title follows now that the people path that used to own it is gone (EF-20). EF-22
-    # (NEU-1449) parts them again — `follows_created` becomes the count of the rows the user
-    # confirmed, which is not every candidate the job proposed.
+    # `watchlist_created` is the films the job offered — the ticked rows of its review list —
+    # and `follows_created` the rows the user confirmed (EF-22): zero until the confirm, and
+    # not every film offered, because the user can untick some.
     watchlist_created: int
     follows_created: int
-    # Both read `app.import_job.unmatched` and split it by `kind`: one column, because the
-    # runner writes one ordered report and EF-22 lifts it whole onto `app.import_candidate`;
-    # two fields, because "we could not find this" and "we found it and it has nothing left to
-    # deliver" are opposite things to tell somebody.
+    # Titles the import could not place. Films it placed are `candidates`, ticked or not.
     unmatched: list[ImportUnmatchedOut]
-    skipped: list[ImportSkippedOut] = Field(default_factory=list, validation_alias="unmatched")
+    # The review list, only while `status` is `awaiting_review` (EF-22) and empty otherwise:
+    # the rows are deleted once the list is confirmed or superseded, when the follows — or the
+    # next import — are the record. Filled by the route, not read off the job row.
+    candidates: list[ImportCandidateOut] = Field(default_factory=list)
 
     @field_validator("unmatched", mode="before")
     @classmethod
     def _failures_only(cls, rows: object) -> object:
         if not isinstance(rows, list):
             return rows
-        return [r for r in rows if not _is_skip(r)]
-
-    @field_validator("skipped", mode="before")
-    @classmethod
-    def _skips_only(cls, rows: object) -> object:
-        if not isinstance(rows, list):
-            return rows
-        return [
-            {"title": r.get("name"), "year": r.get("year"), "reason": r.get("kind")}
-            for r in rows
-            if _is_skip(r)
-        ]
+        return [r for r in rows if not (isinstance(r, dict) and r.get("kind") in _MATCHED_KINDS)]
 
     # The TMDB account a `tmdb` job read, for "Imported from @user"; NULL on a Letterboxd job
     # and the only thing kept about that account (D-16).
     tmdb_username: str | None = None
     # Set only on a `failed` job. The runner writes `str(exception)` here, which is why the
     # route is the one place it is rendered: it is a one-line cause for a user to quote back,
-    # not a payload anything should branch on.
+    # not a payload anything should branch on — with one exception, `superseded`
+    # (`app.models.IMPORT_SUPERSEDED`), which is ours: the list was discarded because the user
+    # started another import before confirming it (EF-22).
     error: str | None = None
     created_at: datetime
     started_at: datetime | None = None

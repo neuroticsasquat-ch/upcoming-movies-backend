@@ -9,9 +9,11 @@ the user will hold open, and past most proxies' patience too.
 uploader can act on, then hands the parsed rows here and answers 202 with a job id to poll.
 
 What is left in this module is the half that is Letterboxd's: turning a title and a year into a
-TMDB id. What a matched film then *becomes* — the film in full and, if it is still inside the
-alert window, a title follow — is in `ingest.imports.apply`, shared with the TMDB account
-import (D-16), which arrives at the same treatment from ids it does not have to guess.
+TMDB id. What a matched film then *becomes* — the film in full and a candidate on the review
+list, ticked if it is still inside the alert window — is in `ingest.imports.apply`, shared with
+the TMDB account import (D-16), which arrives at the same treatment from ids it does not have to
+guess. **The run writes no follows** (EF-22): it ends at `awaiting_review`, and the user's
+confirm (`ingest.imports.review`) is what follows the films they kept.
 
 **Only the watchlist is read** (EF-20). The `ratings.csv` half of this runner is gone with the
 follows it used to infer: a follow is binary now (EF-1), and a four-star rating is not a
@@ -31,11 +33,10 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.app.models import User
 from upmovies.app.repos import import_job_repo
 from upmovies.config import Settings
 from upmovies.db import SessionLocal
-from upmovies.ingest.imports.apply import Progress, apply_watchlist_film, finalize_failed
+from upmovies.ingest.imports.apply import Progress, finalize_failed, propose_film
 from upmovies.ingest.imports.letterboxd import LetterboxdExport, WatchlistRow
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.resolution import ResolvedTitle, resolve
@@ -46,7 +47,7 @@ SOURCE = "letterboxd"
 """`import_job.source` for these jobs."""
 
 FOLLOW_SOURCE = "letterboxd_import"
-"""`follow.source` for every row this writes (D-10, D-14).
+"""`follow.source` for every row a confirm of one of these jobs writes (D-10, D-14).
 
 Not `manual`, which `NEU-1356-letterboxd-import.md` §3's table asked for before NEU-1349
 defined the column's values: `app.follow`'s CHECK enumerates `letterboxd_import` and says in
@@ -76,7 +77,7 @@ async def import_letterboxd(
     job_id: UUID,
     export: LetterboxdExport,
 ) -> None:
-    """Run one import to completion and finalize the job `succeeded`.
+    """Run one import to completion and leave the job `awaiting_review` (EF-22).
 
     Raises on anything it cannot handle per row; `run_letterboxd_import` is what turns that
     into a `failed` job. Separate from the wrapper so a test can drive it with its own session
@@ -85,37 +86,33 @@ async def import_letterboxd(
         job = await import_job_repo.get(db, job_id)
         if job is None:
             raise ValueError(f"import job {job_id} does not exist")
-        user = await db.get(User, job.user_id)
-        if user is None:
-            raise ValueError(f"import job {job_id} has no user")
         await import_job_repo.mark_running(db, job_id)
         await db.commit()
 
         progress = Progress()
         for watchlist_row in export.watchlist:
-            await _import_watchlist_row(db, client, user, watchlist_row, progress)
+            await _import_watchlist_row(db, client, job_id, watchlist_row, progress)
             await progress.row_done(db, job_id)
 
         await progress.flush(db, job_id)
-        await import_job_repo.finalize(db, job_id, status="succeeded")
+        await import_job_repo.mark_awaiting_review(db, job_id)
         await db.commit()
 
 
 async def _import_watchlist_row(
     db: AsyncSession,
     client: TMDBClient,
-    user: User,
+    job_id: UUID,
     row: WatchlistRow,
     progress: Progress,
 ) -> None:
-    """One `watchlist.csv` row: the film in full, and a title follow if it is still inside the
-    alert window (EF-21).
+    """One `watchlist.csv` row: the film in full, and a candidate for the review list — ticked
+    if it is still inside the alert window, unticked with a reason if not (EF-21, EF-22).
 
     Both failures are reported under `kind="watchlist"`, and deliberately: a title this could
     not place and a title TMDB has since deleted are the same fact to a Letterboxd uploader —
-    the row is in their export, and it is not in their follows. `outside_window` is the one
-    that is genuinely different, because the film *was* placed and the user can go and look at
-    it; it names the cause instead of the list.
+    the row is in their export, and it is not on the list. A film outside the window is not a
+    failure at all: it was placed, and it is on the list, greyed with its reason.
 
     The name and year are the export's, verbatim, rather than the catalog's: the user is going
     to look for this row in their own file."""
@@ -124,12 +121,8 @@ async def _import_watchlist_row(
         progress.record_unmatched(name=row.name, year=row.year, kind="watchlist")
         return
 
-    outcome = await apply_watchlist_film(
-        db, client, user, hit.tmdb_id, progress, source=FOLLOW_SOURCE
-    )
-    if outcome == "outside_window":
-        progress.record_unmatched(name=row.name, year=row.year, kind="outside_window")
-    elif outcome == "tmdb_missing":
+    outcome = await propose_film(db, client, job_id, hit.tmdb_id, progress)
+    if outcome == "tmdb_missing":
         progress.record_unmatched(name=row.name, year=row.year, kind="watchlist")
 
 
