@@ -4,9 +4,10 @@
 Three responsibilities and no more. The upload **validates synchronously and enqueues** — a
 file this cannot read is a 422 the uploader can act on, and everything that survives that is
 handed to a background task with a 202, because resolving a library against TMDB is minutes of
-rate-limited requests (`ingest.imports.runner`). The poll returns the job row, and its review
-list once the job reaches `awaiting_review`. The confirm answers that list (EF-22) — for a
-TMDB account import as much as a Letterboxd one, since the job is the same row either way.
+rate-limited requests (`ingest.imports.runner`). The poll — by id, or the caller's open import
+without one (NEU-1453) — returns the job row, and its review list once the job reaches
+`awaiting_review`. The confirm answers that list (EF-22) — for a TMDB account import as much as
+a Letterboxd one, since the job is the same row either way.
 
 The multipart body is read by hand rather than declared as `UploadFile`, which is the one
 unusual thing here and is deliberate. The spec's amendment requires the entitlement gate in
@@ -23,7 +24,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException
@@ -131,6 +132,31 @@ async def start_letterboxd_import(
     asyncio.create_task(run_letterboxd_import(job.id, export, settings))  # noqa: RUF006
     log.info("letterboxd import queued", extra={"job_id": str(job.id), "rows": export.row_count})
     return ImportJobStartedOut(job_id=job.id)
+
+
+@router.get(
+    "/active",
+    response_model=ImportJobOut,
+    responses={status.HTTP_204_NO_CONTENT: {"description": "The user has no open import."}},
+)
+async def get_open_import_job(
+    user: User = Depends(entitled),
+    db: AsyncSession = Depends(get_session),
+) -> ImportJobOut | Response:
+    """This user's open import — queued, running or awaiting review — or 204 when there is
+    none. This is how a page that did not start the job finds it again: a reload, another
+    device, or a browser that lost the id would otherwise strand a list waiting on review
+    until the user's next upload discarded it (NEU-1452).
+
+    204 rather than 404: having no open import is the ordinary state of an account, not a
+    lookup miss. Declared before `/{job_id}`, which would otherwise hand `active` to the UUID
+    parser and answer 422. Off the `import` bucket for the by-id poll's reason — this is read
+    on every mount of the pages that restore a job — and read-only: it never discards or
+    finishes the job it returns."""
+    job = await import_job_repo.active_for_user(db, user.id)
+    if job is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return await _job_out(db, job)
 
 
 @router.get("/{job_id}", response_model=ImportJobOut)

@@ -546,3 +546,95 @@ async def test_another_users_list_is_not_superseded_by_an_upload(
     jobs = {j.id: j for j in await _jobs(session)}
     assert jobs[theirs.id].status == "awaiting_review"
     assert len(await _candidates(session)) == 3
+
+
+# --- the open import (NEU-1453) ------------------------------------------------------------
+
+
+async def test_the_open_import_is_204_when_the_user_never_imported(entitled_client):
+    r = await entitled_client.get("/me/import/active")
+
+    # Not 422: `active` reached its own route rather than the by-id read's UUID parser.
+    assert r.status_code == 204
+    assert r.content == b""
+
+
+async def test_the_open_import_returns_a_list_awaiting_review_with_its_candidates(
+    entitled_client, session
+):
+    job, films = await _awaiting_review(session, entitled_client.user)
+
+    r = await entitled_client.get("/me/import/active")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["id"], body["status"]) == (str(job.id), "awaiting_review")
+    # Ticked and greyed rows alike, exactly as the by-id read renders them.
+    assert [(c["film_id"], c["selected"]) for c in body["candidates"]] == [
+        (str(films["arrival"].id), True),
+        (str(films["zodiac"].id), True),
+        (str(films["gone"].id), False),
+    ]
+    assert body == (await entitled_client.get(f"/me/import/{job.id}")).json()
+
+
+async def test_the_open_import_returns_a_running_job_without_candidates(entitled_client, session):
+    # Rows already written, so the empty list below is the status gate and not an empty table.
+    job, _ = await _awaiting_review(session, entitled_client.user)
+    job.status = "running"
+    await session.commit()
+
+    r = await entitled_client.get("/me/import/active")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["id"], body["status"]) == (str(job.id), "running")
+    assert body["candidates"] == []
+
+
+@pytest.mark.parametrize(
+    ("job_status", "error"),
+    [("succeeded", None), ("failed", "import_failed"), ("failed", "superseded")],
+)
+async def test_a_finished_import_is_not_open(entitled_client, session, job_status, error):
+    job, _ = await _awaiting_review(session, entitled_client.user)
+    job.status = job_status
+    job.error = error
+    await session.commit()
+
+    r = await entitled_client.get("/me/import/active")
+
+    assert r.status_code == 204
+
+
+async def test_the_open_import_is_never_another_users(entitled_client, session, make_user):
+    other = await make_user(
+        email="other@example.com", entitled_until=entitled_client.user.entitled_until
+    )
+    await _awaiting_review(session, other)
+
+    r = await entitled_client.get("/me/import/active")
+
+    assert r.status_code == 204
+
+
+async def test_the_open_import_does_not_touch_the_job(entitled_client, session):
+    job, _ = await _awaiting_review(session, entitled_client.user)
+
+    for _ in range(2):
+        assert (await entitled_client.get("/me/import/active")).status_code == 200
+
+    (after,) = await _jobs(session)
+    assert (after.id, after.status, after.finished_at) == (job.id, "awaiting_review", None)
+    assert len(await _candidates(session)) == 3
+
+
+async def test_the_open_import_requires_auth(client):
+    r = await client.get("/me/import/active")
+    assert r.status_code == 401
+
+
+async def test_the_open_import_is_403_for_an_unentitled_user(authed_client):
+    r = await authed_client.get("/me/import/active")
+    assert r.status_code == 403
+    assert r.json()["detail"] == "entitlement_required"
