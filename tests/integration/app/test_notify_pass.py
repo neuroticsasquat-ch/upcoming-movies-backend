@@ -24,10 +24,17 @@ from upmovies.app.services.notify_service import (
     notify_detail,
     run_notify_pass,
 )
-from upmovies.catalog.models import FilmCreditChange, Person
+from upmovies.catalog.models import (
+    FilmCompanyChange,
+    FilmCreditChange,
+    FilmProductionCompany,
+    Person,
+    ProductionCompany,
+)
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.runs import create_run, finalize_run
-from upmovies.news.models import Event, Story, StoryPerson
+from upmovies.ingest.sweep import confirm_stamped_cards
+from upmovies.news.models import Event, EventStory, Story, StoryEntity, StoryPerson
 from upmovies.news.subject_key import (
     COLLECTION_SUBJECT_PREFIX,
     COMPANY_SUBJECT_PREFIX,
@@ -1394,3 +1401,98 @@ async def test_the_detail_line_reports_the_push_count(
     await add_event(film=film, event_type="release_date", created_at=NEW)
 
     assert "1 alerts, 1 push" in notify_detail(await run_pass())
+
+
+async def test_a_studio_scoop_lines_the_digest_then_pushes_once_when_the_catalog_confirms(
+    session,
+    session_factory,
+    subscriber,
+    make_film,
+    add_event,
+    seed_watermark,
+    run_pass,
+    move_watermark,
+):
+    """EF-10 end to end for a studio, with the flip performed by its real writer.
+
+    `test_a_rumored_card_pushes_when_it_is_upgraded` pins the same shape with the upgrade done
+    by hand, because when it was written nothing performed one. This is that test closed: the
+    story card, the stamped change, `confirm_stamped_cards` at the end of the sweep, and one
+    push — the second pass's digest row is the first pass's row, and the unique key declines
+    it."""
+    await seed_watermark()
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    session.add(ProductionCompany(id=3172, name="Blumhouse"))
+    session.add(Follow(user_id=user.id, entity_type="company", entity_id="3172", source="manual"))
+    await session.commit()
+
+    # The card as the cluster stage published it: story provenance, `rumored`, and no
+    # organisation token — resolution runs later, which is why the follow reaches it through
+    # `first_association_clause` rather than through the token branch.
+    card = await add_event(
+        film=film,
+        event_type="company_attached",
+        provenance="story",
+        confidence="rumored",
+        created_at=NEW,
+        sources=({"url": "https://deadline.test/scoop"},),
+    )
+    story_id = await session.scalar(
+        select(EventStory.story_id).where(EventStory.event_id == card.id)
+    )
+    session.add(
+        StoryEntity(
+            story_id=story_id,
+            kind="company",
+            entity_id=3172,
+            name_as_written="Blumhouse",
+            path="accepted",
+            features={"title_mentioned": None, "event_type": "company_attached"},
+            prompt_version="1",
+        )
+    )
+    await session.commit()
+
+    waiting = await run_pass()
+
+    assert (waiting.alerts_queued, waiting.digests_queued) == (0, 1), (
+        "a rumored story card is digest-only until the catalog confirms it (EF-10)"
+    )
+
+    # TMDB observes the attachment; the sweep's backward pass stamps it with the card that
+    # published it, and the confirmation phase flips the card once the window has passed.
+    session.add(FilmProductionCompany(film_id=film.id, company_id=3172))
+    session.add(
+        FilmCompanyChange(
+            film_id=film.id,
+            company_id=3172,
+            change="added",
+            changed_at=LATER - timedelta(days=4),
+            carded_by_event_id=card.id,
+        )
+    )
+    await session.commit()
+    await move_watermark(BETWEEN)
+    assert await confirm_stamped_cards(session, now=LATER, quarantine=timedelta(hours=72)) == (
+        1,
+        1,
+        0,
+    )
+    await session.commit()
+
+    upgraded = await run_pass()
+
+    assert (upgraded.alerts_queued, upgraded.digests_queued) == (1, 0)
+    assert sorted(row.kind for row in await _rows(session)) == ["alert", "digest"]
+
+    # And only once: a third pass over an already-confirmed card selects nothing to flip, so
+    # `updated_at` does not move again and the window does not reopen.
+    await move_watermark(LATER)
+    assert await confirm_stamped_cards(session, now=LATER, quarantine=timedelta(hours=72)) == (
+        0,
+        0,
+        0,
+    )
+    await session.commit()
+    assert (await run_pass()).alerts_queued == 0

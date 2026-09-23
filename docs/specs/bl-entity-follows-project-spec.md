@@ -399,6 +399,15 @@ kinds).
 - `entity_attachment_event_ids` reads `story_entity` beside `story_person`, under EF-13's
   first-association predicate, which lives in one query builder used by both the timeline and
   the notify pass.
+- The cluster vocabulary gains `company_attached`, `company_removed`, `collection_attached`
+  and `collection_removed`; an organisation mention's `event_type` uses the same four values,
+  so a card type and a mention type are one word per beat.
+- `catalog.film_field_change` gains `carded_by_event_id` — one stamp shape for all three
+  kinds. Only its `collection_id` rows ever carry one, and a *move* (`id -> id'`) is never
+  stamped: one row, two beats, one stamp column.
+- A sweep step at the end of the pass flips a stamped story card from `rumored` to
+  `confirmed` once its change has cleared quarantine and live state still agrees, bumping
+  `updated_at` — the writer EF-10's push window reads.
 
 ### M5 — Imports you review
 

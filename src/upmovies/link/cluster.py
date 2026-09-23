@@ -17,12 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.catalog.models import Film
 from upmovies.catalog.queries import field_changed_at
 from upmovies.llm.types import CallLog, Completer, Prompt
+from upmovies.news.attachment_confirm import stamp_story_confirmed_changes
 from upmovies.news.catalog_events import (
     CATALOG_EVENT_TYPES,
     CREDIT_EVENT_TYPES,
     ONCE_PER_FILM_EVENT_TYPES,
 )
-from upmovies.news.credit_confirm import stamp_story_confirmed_changes
 from upmovies.news.models import (
     ORGANISATION_KINDS,
     Event,

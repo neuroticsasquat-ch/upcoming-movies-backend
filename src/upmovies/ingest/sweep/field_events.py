@@ -158,6 +158,13 @@ async def load_change_backlog(
     Plain dataclasses rather than ORM rows, as in the refresh phase: the backlog is read in
     one session and then worked through in a session per item, and a detached instance whose
     attributes happen to still be loaded is not a contract worth relying on.
+
+    **Rows a story already published are read past** (`carded_by_event_id`, D-5, D-1446.2), the
+    same term `sweep.credit_events.load_attachment_backlog` and `company_events`' loader carry.
+    Unconditional rather than per-field, because a stamped row is published already whatever
+    column it records — but in practice only the `collection_id` rows can ever carry one: the
+    status vocabulary is not the story vocabulary, so no story card can name a status change,
+    and `_already_carded` remains the whole of that half's suppression.
     """
     stmt = (
         select(
@@ -168,7 +175,11 @@ async def load_change_backlog(
             FilmFieldChange.new_value,
             FilmFieldChange.changed_at,
         )
-        .where(FilmFieldChange.field.in_(fields), FilmFieldChange.changed_at >= since)
+        .where(
+            FilmFieldChange.field.in_(fields),
+            FilmFieldChange.changed_at >= since,
+            FilmFieldChange.carded_by_event_id.is_(None),
+        )
         .order_by(FilmFieldChange.changed_at, FilmFieldChange.id)
     )
     return [

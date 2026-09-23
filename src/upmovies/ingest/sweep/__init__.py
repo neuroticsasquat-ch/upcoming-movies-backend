@@ -39,6 +39,13 @@ from upmovies.ingest.sweep.configuration import (
 from upmovies.ingest.sweep.configuration import (
     validate_sweep_configuration as validate_sweep_configuration,
 )
+from upmovies.ingest.sweep.confirm_events import ConfirmEventResult as ConfirmEventResult
+from upmovies.ingest.sweep.confirm_events import (
+    confirm_stamped_cards as confirm_stamped_cards,
+)
+from upmovies.ingest.sweep.confirm_events import (
+    run_confirmation_events as run_confirmation_events,
+)
 from upmovies.ingest.sweep.credit_events import AttachedCredit as AttachedCredit
 from upmovies.ingest.sweep.credit_events import (
     CreditDetachmentResult as CreditDetachmentResult,

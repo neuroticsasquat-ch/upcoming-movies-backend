@@ -16,7 +16,7 @@ hands them, and the router commits.
 
 `open_hold_keys` is the exception, and is here rather than in the sweep for a different
 reason: *two* readers outside the sweep now have to honour an open hold — the sweep's own
-backlog loader and the Tier-A short-circuit (`news.credit_confirm`, NEU-1371) — and the
+backlog loader and the Tier-A short-circuit (`news.attachment_confirm`, NEU-1371) — and the
 short-circuit cannot import `ingest.sweep`, which imports it.
 """
 

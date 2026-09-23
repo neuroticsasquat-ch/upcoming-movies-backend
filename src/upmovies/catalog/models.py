@@ -369,6 +369,7 @@ class FilmFieldChange(Base):
     __tablename__ = "film_field_change"
     __table_args__ = (
         Index("ix_film_field_change_lookup", "film_id", "field", "changed_at"),
+        Index("ix_film_field_change_carded_by", "carded_by_event_id"),
         {"schema": "catalog"},
     )
 
@@ -384,6 +385,26 @@ class FilmFieldChange(Base):
     changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    carded_by_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_film_field_change_carded_by"),
+        nullable=True,
+    )
+    """The event that published this change, when one has — `film_credit_change`'s column and
+    its `ON DELETE SET NULL` rationale, in full (D-1446.2).
+
+    **Only the `collection_id` rows ever carry it.** This table records every tracked column,
+    and a story cannot scoop a `status` change: `_already_carded` in `sweep.field_events` asks
+    "does this film already have one of these cards", which no story card can satisfy because
+    the status vocabulary is not the story vocabulary. The franchise half is the one that
+    needed a stamp, and it gets the same column shape the other two kinds use rather than a
+    time-based carve-out of its own — one stamp shape for all three (D-1446.2).
+
+    Written by `news.attachment_confirm.stamp_prior_story_cards` in the backward direction
+    only, by resolved `news.story_entity.entity_id` (D-1446.6). `sweep.collection_events`'
+    loader drops a stamped row, which is what stops a franchise a trade broke on Monday
+    surfacing as a second card when TMDB files it on Thursday.
+    """
 
 
 class FilmCredit(Base):
@@ -462,7 +483,7 @@ class FilmCreditChange(Base):
     """The event that published this attachment, when one has (NEU-1371, D-5). NULL is the
     ordinary state: most rows are carded by the sweep, which stamps nothing.
 
-    Set only by the Tier-A short-circuit (`news.credit_confirm`), in both directions — the
+    Set only by the Tier-A short-circuit (`news.attachment_confirm`), in both directions — the
     cluster stage stamps a pending change a new story card names, and the sweep loader stamps
     a pending change that finds an earlier story card. A stamped row is **published already**
     and is never carded by the sweep: `load_attachment_backlog` drops it, which is what stops

@@ -14,6 +14,7 @@ from upmovies.ingest.models import IngestRun, LinkRetrievalProbe, RunRetrievalHe
 from upmovies.ingest.sweep import (
     CollectionEventResult,
     CompanyEventResult,
+    ConfirmEventResult,
     CreditDetachmentResult,
     CreditEventResult,
     EnumerateResult,
@@ -93,6 +94,7 @@ async def test_admin_lists_the_sweep_with_every_phase_counter(admin_authed_clien
         ReleaseEventResult(changes_read=11, events_created=3, skipped=8),
         CompanyEventResult(),
         CollectionEventResult(),
+        ConfirmEventResult(),
     )
     run = IngestRun(
         kind="sweep", status="succeeded", items_processed=341, items_failed=1, detail=detail

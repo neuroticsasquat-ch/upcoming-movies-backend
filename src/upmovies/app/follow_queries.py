@@ -54,6 +54,8 @@ timeline would 500, and the batch passes would fail for every user over one bad 
 the cast means the WHERE (the type filter and the shape guard) has already run when it happens.
 """
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -80,16 +82,23 @@ from sqlalchemy.sql.selectable import Subquery
 
 from upmovies.app.models import Follow
 from upmovies.catalog.models import (
+    COLLECTION_FIELD,
     Film,
+    FilmCompanyChange,
     FilmCredit,
     FilmCreditChange,
+    FilmFieldChange,
     FilmProductionCompany,
     Person,
 )
 from upmovies.news.catalog_events import (
     CANCELED_EVENT_TYPE,
+    COLLECTION_ATTACHED_EVENT_TYPE,
     COLLECTION_EVENT_TYPES,
+    COLLECTION_REMOVED_EVENT_TYPE,
+    COMPANY_ATTACHED_EVENT_TYPE,
     COMPANY_EVENT_TYPES,
+    COMPANY_REMOVED_EVENT_TYPE,
     CREDIT_EVENT_TYPES,
     CREDIT_REMOVED_EVENT_TYPE,
     PERSON_ATTACHMENT_EVENT_TYPES,
@@ -99,6 +108,7 @@ from upmovies.news.models import (
     Event,
     EventStory,
     EventSummary,
+    StoryEntity,
     StoryPerson,
 )
 from upmovies.news.subject_key import (
@@ -121,7 +131,7 @@ and importing the repo here would put a repo on the batch passes' import path.""
 
 _PUBLISHED = "published"
 
-STORY_ATTACH_MENTION_TYPES: tuple[str, ...] = ("casting",)
+STORY_PERSON_ATTACH_MENTION_TYPES: tuple[str, ...] = ("casting",)
 """The `story_person.features->>'event_type'` values that name somebody in connection with an
 *attachment* (EF-13).
 
@@ -129,17 +139,48 @@ One member, and not `crew_attached`: the cluster vocabulary (`link.cluster._VALI
 such type, so a director signing on comes back classified `casting` and `casting` is the whole
 attach vocabulary on the mention side. Spelled as a constant here — rather than imported from
 `link.cluster`, which would pull the LLM gateway and the TMDB client onto a public read path, and
-rather than inlined — so a prompt that widens the vocabulary, and M4's organisation arm, have one
-place to widen."""
+rather than inlined — so a prompt that widens the vocabulary has one place to widen.
 
-STORY_DETACH_MENTION_TYPES: tuple[str, ...] = ()
-"""The mention `event_type` values that name somebody in connection with a *detachment*.
+**Person-only, and narrower than `STORY_ATTACH_MENTION_TYPES`** since M4 gave the organisation
+kinds their own types (NEU-1446). The person arm filters on this rather than on the whole
+vocabulary so that a *person* mention typed `company_attached` — a producer named in connection
+with the studio boarding, not with their own credit — is not read as that person's first
+association."""
 
-**Empty at M3, deliberately.** The story vocabulary has no detach type at all, so no
-story-backed detach card exists and `first_association_clause`'s detach arm selects nothing. The
-arm is spelled anyway, and pinned empty by a test: it is the seam M4 and any later prompt change
-fill, and the contract of this ticket is that both arms live in one builder rather than one
-arriving later beside it."""
+STORY_PERSON_DETACH_MENTION_TYPES: tuple[str, ...] = ()
+"""The `story_person` mention types that name somebody in connection with a *detachment*.
+
+**Still empty after M4, deliberately.** The story vocabulary has no `credit_removed` type — the
+four types EF-12 added are all organisation beats — so no story-formed person detach card
+exists and `_first_detachment_arm` selects nothing. The arm is spelled anyway, and pinned empty
+by a test: it is the seam any later prompt change fills, and the contract is that all six arms
+live in one builder rather than arriving one at a time beside it."""
+
+STORY_ATTACH_MENTION_TYPES: tuple[str, ...] = STORY_PERSON_ATTACH_MENTION_TYPES + (
+    COMPANY_ATTACHED_EVENT_TYPE,
+    COLLECTION_ATTACHED_EVENT_TYPE,
+)
+"""Every mention type, of either table, that names an entity in connection with an attachment —
+the attach half of EF-13's vocabulary across all three kinds.
+
+Derived rather than restated, and read by no arm: each arm filters on *its own kind's* type
+(`_ORGANISATION_BRANCHES` for the two organisation kinds), because a mention type is a card
+type on the organisation side — a studio attaching cards as `company_attached` and is mentioned
+as `company_attached` — while the person side's `casting` mention becomes a `crew_attached`
+card. What this constant is for is saying what the whole vocabulary *is*, in one place, so the
+prompt and the predicate can be checked against each other.
+
+Tuples throughout rather than frozensets, on `_ATTACH_CARD_TYPES`' reasoning: these are only
+ever rendered into an `IN`, and a set whose iteration order changes between processes makes two
+identical statements look different in a log or a plan cache."""
+
+STORY_DETACH_MENTION_TYPES: tuple[str, ...] = STORY_PERSON_DETACH_MENTION_TYPES + (
+    COMPANY_REMOVED_EVENT_TYPE,
+    COLLECTION_REMOVED_EVENT_TYPE,
+)
+"""The detach half of the same vocabulary. Empty until M4 and filled by it (NEU-1446) with the
+two organisation detach beats; the person half of it is still empty, and
+`STORY_PERSON_DETACH_MENTION_TYPES` says why."""
 
 _ATTACH_CARD_TYPES: tuple[str, ...] = tuple(sorted(CREDIT_EVENT_TYPES))
 """The card types a person *attaching* to a film can be, ordered so the rendered SQL is stable.
@@ -147,8 +188,10 @@ _ATTACH_CARD_TYPES: tuple[str, ...] = tuple(sorted(CREDIT_EVENT_TYPES))
 makes two identical statements look different in a log or a plan cache."""
 
 _CREDIT_CHANGE_ADDED = "added"
-"""`ingest.tmdb.credit_history.CREDIT_ADDED`, spelled rather than imported: that module imports
-`followed_people` from this one, so the import would be a cycle."""
+"""`ingest.tmdb.credit_history.CREDIT_ADDED`, and `ingest.tmdb.company_history.COMPANY_ADDED`,
+which are the same word for the same direction on two tables. Spelled rather than imported:
+both of those modules import `followed_people` from this one, so either import would be a
+cycle."""
 
 
 def _int_id_guard(entity_id: Any) -> ColumnElement[bool]:
@@ -528,9 +571,11 @@ def _entity_event_pairs(
     ] = []
     if wants("person"):
         branches.append(_person_attachment_pairs(user_id=user_id, entity_id=scoped_id))
-        first_association = first_association_clause(user_id=user_id, only=only)
-        if first_association is not None:
-            branches.append(first_association)
+    # Outside the per-type blocks, because the clause owns all three kinds now (EF-13,
+    # NEU-1446) and does its own narrowing: one call, whatever `only` says.
+    first_association = first_association_clause(user_id=user_id, only=only)
+    if first_association is not None:
+        branches.append(first_association)
     if wants("company"):
         branches.append(
             _organisation_attachment_pairs("company", user_id=user_id, entity_id=scoped_id)
@@ -576,17 +621,133 @@ def _person_attachment_pairs(
     )
 
 
-_ORGANISATION_BRANCHES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "company": (COMPANY_SUBJECT_PREFIX, COMPANY_EVENT_TYPES),
-    "franchise": (COLLECTION_SUBJECT_PREFIX, COLLECTION_EVENT_TYPES),
-}
-"""The two token-matched branches: the follow's `entity_type`, the `subject_key` prefix its ids
-carry, and the event types that carry them.
+@dataclass(frozen=True)
+class _Organisation:
+    """Everything that differs between the studio arm and the franchise arm of this module, in
+    one row per kind (D-1446.1's matrix).
 
-The follow row says `franchise` where the catalog and the token say `collection` — the
-glossary's two words for one thing (CONTEXT.md **Franchise**), and the reason this mapping
-exists rather than an f-string per branch. Both prefixes are read from `news.subject_key`,
-where the carding paths write them, never restated."""
+    The follow row says `franchise` where the catalog, the `subject_key` token and
+    `news.story_entity.kind` all say `collection` — the glossary's two words for one thing
+    (CONTEXT.md **Franchise**) — so a mapping is unavoidable, and one mapping is the point: the
+    token branch (D-1437.4), the first-association arms (EF-13) and the detach arms all read
+    the same row, and a second table beside it is how a card type and its mention type would
+    come to disagree.
+    """
+
+    kind: str
+    """`news.story_entity.kind`, and `news.resolution_cache.kind` — catalog spelling."""
+    prefix: str
+    """The `news.subject_key` namespace this kind's ids are carded under."""
+    event_types: tuple[str, ...]
+    """The attach and detach card types, in that order (`COMPANY_EVENT_TYPES`)."""
+    attachment: Callable[[type[StoryEntity]], ColumnElement[bool]]
+    """EXISTS: the enclosing `Event`'s film currently holds the mention's entity — i.e. the
+    attachment is *standing now*, whatever carded it. `_holds_a_credit` for organisations, and
+    a callable rather than a prebuilt fragment because each arm aliases the mention table for
+    itself and an expression built against the unaliased class would not follow it there."""
+    stamped: Callable[[type[StoryEntity]], ColumnElement[bool]]
+    """EXISTS: a change row recording that attachment, stamped `carded_by_event_id` = the
+    enclosing `Event` — D-5's stamp, and the carve-out that keeps a story card that published
+    first on the timeline once TMDB confirms it (`_credit_carded_by_this_event`'s reasoning,
+    D-1437.5). The two kinds read different tables, which is the whole of what differs."""
+
+    @property
+    def attach_type(self) -> str:
+        return self.event_types[0]
+
+    @property
+    def detach_type(self) -> str:
+        return self.event_types[1]
+
+
+def _org_token(prefix: str, mention: type[StoryEntity]) -> ColumnElement[str]:
+    """The `news.subject_key` token a card naming this mention's entity would carry.
+
+    Built by concatenation and compared as text, on `_organisation_attachment_pairs`' terms:
+    `subject_key` is a text array, and the token is the only identity a catalog organisation
+    card ever holds."""
+    return literal(prefix).concat(cast(mention.entity_id, Text))
+
+
+def _company_attached_now(mention: type[StoryEntity]) -> ColumnElement[bool]:
+    return (
+        select(literal(1))
+        .select_from(FilmProductionCompany)
+        .where(
+            FilmProductionCompany.film_id == Event.film_id,
+            FilmProductionCompany.company_id == mention.entity_id,
+        )
+        .correlate(Event, mention)
+        .exists()
+    )
+
+
+def _company_change_carded_by_this_event(mention: type[StoryEntity]) -> ColumnElement[bool]:
+    return (
+        select(literal(1))
+        .select_from(FilmCompanyChange)
+        .where(
+            FilmCompanyChange.film_id == Event.film_id,
+            FilmCompanyChange.company_id == mention.entity_id,
+            FilmCompanyChange.change == _CREDIT_CHANGE_ADDED,
+            FilmCompanyChange.carded_by_event_id == Event.id,
+        )
+        .correlate(Event, mention)
+        .exists()
+    )
+
+
+def _collection_attached_now(mention: type[StoryEntity]) -> ColumnElement[bool]:
+    return (
+        select(literal(1))
+        .select_from(Film)
+        .where(Film.id == Event.film_id, Film.collection_id == mention.entity_id)
+        .correlate(Event, mention)
+        .exists()
+    )
+
+
+def _collection_change_carded_by_this_event(mention: type[StoryEntity]) -> ColumnElement[bool]:
+    """The franchise stamp, which has no direction column to filter on: `film_field_change`
+    records the `collection_id` column itself, so "the film joined *this* collection" is
+    `new_value = <id>` and nothing else.
+
+    The comparison goes the other way round — the id is lifted into JSONB rather than the
+    column flattened out of it. `new_value` is a bare JSONB scalar, not an object, so the
+    index-expression accessors (`.as_integer()`, `.astext`) refuse it outright; and `to_jsonb`
+    normalizes numerically, so a value the trigger wrote as `726871` matches whether or not
+    Postgres has since rewritten its representation."""
+    return (
+        select(literal(1))
+        .select_from(FilmFieldChange)
+        .where(
+            FilmFieldChange.film_id == Event.film_id,
+            FilmFieldChange.field == COLLECTION_FIELD,
+            FilmFieldChange.new_value == func.to_jsonb(mention.entity_id),
+            FilmFieldChange.carded_by_event_id == Event.id,
+        )
+        .correlate(Event, mention)
+        .exists()
+    )
+
+
+_ORGANISATION_BRANCHES: dict[str, _Organisation] = {
+    "company": _Organisation(
+        kind="company",
+        prefix=COMPANY_SUBJECT_PREFIX,
+        event_types=COMPANY_EVENT_TYPES,
+        attachment=_company_attached_now,
+        stamped=_company_change_carded_by_this_event,
+    ),
+    "franchise": _Organisation(
+        kind="collection",
+        prefix=COLLECTION_SUBJECT_PREFIX,
+        event_types=COLLECTION_EVENT_TYPES,
+        attachment=_collection_attached_now,
+        stamped=_collection_change_carded_by_this_event,
+    ),
+}
+"""The two organisation kinds, keyed by the follow's `entity_type`."""
 
 
 def _organisation_attachment_pairs(
@@ -599,7 +760,8 @@ def _organisation_attachment_pairs(
     nothing is cast, so a malformed `entity_id` would build a token that matches nothing rather
     than abort the statement — and is kept so that every id branch in this module reads the
     same way."""
-    prefix, event_types = _ORGANISATION_BRANCHES[entity_type]
+    org = _ORGANISATION_BRANCHES[entity_type]
+    prefix, event_types = org.prefix, org.event_types
     followed = _text_id_source(entity_type, user_id=user_id, entity_id=entity_id)
     return (
         select(*_pair(entity_type, followed.c.entity_id))
@@ -704,16 +866,23 @@ def first_association_clause(
     were not on before. That is this clause, and everything else a story says about them is
     nothing to their followers.
 
-    **One builder, two arms, and M4 extends it in place** (NEU-1446): the `story_entity` arm for
-    studios and franchises goes *inside* this function, beside the person arm, because the
-    timeline and the notify pass both reach the rule through here — and so, now, does every
-    entity page (EF-18) — and a second builder beside it is how they would come to disagree.
+    **One builder, six arms — an attach and a detach arm per kind** (EF-13 for all three,
+    NEU-1446). The `story_entity` arms for studios and franchises live *inside* this function
+    beside the person arm, because the timeline, the digest, the notify pass and every entity
+    page (EF-18) all reach the rule through here, and a second builder beside it is how they
+    would come to disagree. `None` now only for `title`, whose follows select films.
+
+    The three kinds differ in exactly four places — the mention table, the card and mention
+    type, what "currently attached" reads, and which change table carries D-5's stamp — and the
+    organisation half of that is one row per kind in `_ORGANISATION_BRANCHES`. The *rule* below
+    is one rule, stated for a person and true of all three.
 
     The attach arm, for a published event `E` on film `F` and a resolved mention `M` of a
     followed person `P` on one of `E`'s stories:
 
     1. `E` is a `casting` / `crew_attached` card and `M.features->>'event_type'` is an attach
-       type (`STORY_ATTACH_MENTION_TYPES`). The card has to be an attach card *and* the mention
+       type (`STORY_PERSON_ATTACH_MENTION_TYPES`; for an organisation, the kind's own attach
+       type, which is the card's type too). The card has to be an attach card *and* the mention
        has to be named in connection with the attachment beat.
     2. No earlier published attach card for `P` on `F` — by name token or by a resolved attach
        mention, the same two mechanisms the branch itself uses, so "a card names `P`" means one
@@ -735,23 +904,54 @@ def first_association_clause(
     the card *is* his first association with the film as far as we know, and it reaches his
     followers once. Accepted.
 
-    The detach arm is the mirror — a `credit_removed` card, a detach-typed mention, and no
-    published `credit_removed` for `P` on `F` since the last attach card — and it selects
-    nothing at M3, because `STORY_DETACH_MENTION_TYPES` is empty. See that constant.
+    The detach arm is the mirror — a detach card, a detach-typed mention, and no published
+    detach card for the entity on `F` since the latest published attach card for it. With **no
+    attach card at all** it still selects, provided no detach card precedes `E`: a story
+    reporting a studio's exit from a film we only ever held it on as a baseline is the first
+    detachment we have heard of. The *person* detach arm is the same rule and still selects
+    nothing at all, because the story vocabulary has no `credit_removed` type — see
+    `STORY_PERSON_DETACH_MENTION_TYPES` and `_first_detachment_arm`.
 
-    **A card can appear more than once**, keyed to a different person each time, and twice for
-    one person when two of its stories mention them. The arms cannot repeat a row between them
-    — they are disjoint by `event_type` — and neither consumer minds: the pairs *are* the
-    attribution EF-15 wants, and the id readers de-duplicate on the primary key
-    (`first_association_event_ids`, `entity_attachment_event_ids`).
+    The organisation arms do **not** re-check the mention against `E.subject_key` either, and
+    for a harder reason than the person arm's: a story card *cannot* carry an organisation
+    token, because resolution runs after clustering and the id is not known when `subject_key`
+    is written. So a `company_attached` card about studio A whose story also names studio B,
+    typed `company_attached`, reaches B's followers when B holds no company row on the film and
+    no attach card — the same "first association in our data" reading the person arm accepted.
+
+    **A card can appear more than once**, keyed to a different entity each time, and twice for
+    one entity when two of its stories mention it. The six arms cannot repeat a row between
+    them — they are disjoint by `event_type`, across kinds as well as within one — and neither
+    consumer minds: the pairs *are* the attribution EF-15 wants, and the id readers
+    de-duplicate on the primary key (`first_association_event_ids`,
+    `entity_attachment_event_ids`).
     """
-    if only is not None and only[0] != "person":
+    if only is not None and only[0] == "title":
         return None
     entity_id = None if only is None else only[1]
-    return union_all(
-        _first_association_arm(user_id=user_id, entity_id=entity_id),
-        _first_detachment_arm(user_id=user_id, entity_id=entity_id),
-    )
+
+    def wants(entity_type: str) -> bool:
+        return only is None or only[0] == entity_type
+
+    arms: list[Select[tuple[str, str, UUID, datetime]]] = []
+    if wants("person"):
+        arms.append(_first_association_arm(user_id=user_id, entity_id=entity_id))
+        arms.append(_first_detachment_arm(user_id=user_id, entity_id=entity_id))
+    for entity_type in _ORGANISATION_BRANCHES:
+        if wants(entity_type):
+            arms.append(
+                _organisation_association_arm(
+                    entity_type, user_id=user_id, entity_id=entity_id, attaching=True
+                )
+            )
+            arms.append(
+                _organisation_association_arm(
+                    entity_type, user_id=user_id, entity_id=entity_id, attaching=False
+                )
+            )
+    if not arms:
+        return None
+    return union_all(*arms)
 
 
 def first_association_event_ids(
@@ -857,7 +1057,7 @@ def _first_association_arm(
     person = aliased(Person)
     prior = aliased(Event)
     card_types = _ATTACH_CARD_TYPES
-    mention_types = STORY_ATTACH_MENTION_TYPES
+    mention_types = STORY_PERSON_ATTACH_MENTION_TYPES
     earlier_attach_card = (
         select(literal(1))
         .select_from(prior)
@@ -891,9 +1091,11 @@ def _first_association_arm(
 def _first_detachment_arm(
     *, user_id: UUID | None, entity_id: str | None
 ) -> Select[tuple[str, str, UUID, datetime]]:
-    """The detach arm of `first_association_clause`, which selects nothing while
-    `STORY_DETACH_MENTION_TYPES` is empty — spelled in full because M4 fills that constant, and
-    an arm written then is an arm written against a rule nobody is holding in their head.
+    """The **person** detach arm of `first_association_clause`, which selects nothing while
+    `STORY_PERSON_DETACH_MENTION_TYPES` is empty — spelled in full because the day a prompt
+    fills that constant, an arm written then is an arm written against a rule nobody is holding
+    in their head. M4 filled the *organisation* half of the vocabulary and left this one empty
+    (NEU-1446); `_organisation_association_arm` is where the live detach rule runs.
 
     "First detachment" is "no published `credit_removed` card for this person on this film since
     the last attach card for them", not "no `credit_removed` card ever": a person who joins,
@@ -912,7 +1114,7 @@ def _first_detachment_arm(
                 attach,
                 mention=mention,
                 person=person,
-                mention_types=STORY_ATTACH_MENTION_TYPES,
+                mention_types=STORY_PERSON_ATTACH_MENTION_TYPES,
             ),
         )
         .correlate(Event, mention, person)
@@ -930,7 +1132,7 @@ def _first_detachment_arm(
                 removal,
                 mention=mention,
                 person=person,
-                mention_types=STORY_DETACH_MENTION_TYPES,
+                mention_types=STORY_PERSON_DETACH_MENTION_TYPES,
             ),
             # No attach card at all (the `IS NULL` arm) means *every* earlier detach card
             # counts, so this one is not the first. The spec's "since the latest published
@@ -947,10 +1149,172 @@ def _first_detachment_arm(
         user_id=user_id,
         entity_id=entity_id,
         card_types=(CREDIT_REMOVED_EVENT_TYPE,),
-        mention_types=STORY_DETACH_MENTION_TYPES,
+        mention_types=STORY_PERSON_DETACH_MENTION_TYPES,
         mention=mention,
         person=person,
         extra=[~detached_since],
+    )
+
+
+def _organisation_mentioning_pairs(
+    entity_type: str,
+    *,
+    user_id: UUID | None,
+    entity_id: str | None,
+    card_type: str,
+    mention: type[StoryEntity],
+    extra: list[ColumnElement[bool]],
+) -> Select[tuple[str, str, UUID, datetime]]:
+    """`_mentioning_pairs` for `news.story_entity`: published cards of `card_type` carrying a
+    resolved mention of that same type, of an organisation in scope, keyed to it.
+
+    One `card_type` rather than a tuple, and the mention filtered on the same value, because
+    the organisation vocabulary is symmetric where the person one is not — a company attaching
+    cards as `company_attached` and is mentioned as `company_attached`, while a director
+    attaching cards as `crew_attached` and is mentioned as `casting`.
+
+    `RESOLVED_MENTION_PATHS` is the cut (D-25), exactly as on the person side, and `kind` is
+    the second half of it: `story_entity` holds both organisation kinds in one table, so a
+    collection mention whose `entity_id` happens to equal a followed company id would otherwise
+    match. There is **no join to the catalog** — `entity_id` is the key this projects and the
+    key the follow graph holds, so unlike the person arm nothing has to be joined in for a
+    name. An unresolved mention carries `entity_id` NULL and drops out of the `IN` on its own.
+    """
+    org = _ORGANISATION_BRANCHES[entity_type]
+    return (
+        select(*_pair(entity_type, mention.entity_id))
+        .select_from(Event)
+        .join(EventStory, EventStory.event_id == Event.id)
+        .join(mention, mention.story_id == EventStory.story_id)
+        .where(
+            Event.status == _PUBLISHED,
+            Event.event_type == card_type,
+            mention.kind == org.kind,
+            mention.path.in_(RESOLVED_MENTION_PATHS),
+            mention.entity_id.in_(
+                _int_id_source(entity_type, user_id=user_id, entity_id=entity_id)
+            ),
+            mention.features["event_type"].astext == card_type,
+            *extra,
+        )
+        .correlate(None)
+    )
+
+
+def _card_names_organisation(
+    card: type[Event], *, mention: type[StoryEntity], org: _Organisation, card_type: str
+) -> ColumnElement[bool]:
+    """ "`card` names this organisation" — `_card_names_person` for the two kinds that are
+    matched by id, in the same two ways a card can name anybody.
+
+    The catalog path is the `company:<id>` / `collection:<id>` token the sweep writes
+    (NEU-1433, NEU-1434), and it is *exact* where the person side's normalized name is
+    lossy. The story path is a resolved mention of the same entity, typed as the same beat, on
+    one of the card's stories — which is the only way a story card can name an organisation at
+    all, since resolution runs after `subject_key` is written."""
+    prior_story = aliased(EventStory)
+    prior_mention = aliased(StoryEntity)
+    return or_(
+        _org_token(org.prefix, mention) == any_(card.subject_key),
+        select(literal(1))
+        .select_from(prior_story)
+        .join(prior_mention, prior_mention.story_id == prior_story.story_id)
+        .where(
+            prior_story.event_id == card.id,
+            prior_mention.kind == org.kind,
+            prior_mention.entity_id == mention.entity_id,
+            prior_mention.path.in_(RESOLVED_MENTION_PATHS),
+            prior_mention.features["event_type"].astext == card_type,
+        )
+        .correlate(card, mention)
+        .exists(),
+    )
+
+
+def _organisation_association_arm(
+    entity_type: str, *, user_id: UUID | None, entity_id: str | None, attaching: bool
+) -> Select[tuple[str, str, UUID, datetime]]:
+    """One organisation arm of `first_association_clause` — attach when `attaching`, detach
+    otherwise. See that docstring for the terms; this is the person arms' rule over
+    `news.story_entity` and the kind's own tables.
+
+    The two directions are one function rather than two, unlike the person half, because for an
+    organisation they really are mirrors: the card type flips, and the attach arm's "nothing is
+    attached, or what is attached is this card's own confirmation" becomes the detach arm's
+    "no detach card since the last attach card". The person half keeps two functions because
+    its two directions read different tables for *who* (`subject_key` names versus nothing at
+    all) and its detach arm carries a rule about a case that cannot arise.
+    """
+    org = _ORGANISATION_BRANCHES[entity_type]
+    mention = aliased(StoryEntity)
+    card_type = org.attach_type if attaching else org.detach_type
+    if attaching:
+        prior = aliased(Event)
+        earlier_attach_card = (
+            select(literal(1))
+            .select_from(prior)
+            .where(
+                prior.film_id == Event.film_id,
+                prior.status == _PUBLISHED,
+                prior.event_type == org.attach_type,
+                prior.created_at < Event.created_at,
+                _card_names_organisation(
+                    prior, mention=mention, org=org, card_type=org.attach_type
+                ),
+            )
+            .correlate(Event, mention)
+            .exists()
+        )
+        extra = [
+            ~earlier_attach_card,
+            or_(~org.attachment(mention), org.stamped(mention)),
+        ]
+    else:
+        attach = aliased(Event)
+        removal = aliased(Event)
+        latest_attach_card = (
+            select(func.max(attach.created_at))
+            .where(
+                attach.film_id == Event.film_id,
+                attach.status == _PUBLISHED,
+                attach.event_type == org.attach_type,
+                _card_names_organisation(
+                    attach, mention=mention, org=org, card_type=org.attach_type
+                ),
+            )
+            .correlate(Event, mention)
+            .scalar_subquery()
+        )
+        detached_since = (
+            select(literal(1))
+            .select_from(removal)
+            .where(
+                removal.film_id == Event.film_id,
+                removal.status == _PUBLISHED,
+                removal.event_type == org.detach_type,
+                removal.created_at < Event.created_at,
+                _card_names_organisation(
+                    removal, mention=mention, org=org, card_type=org.detach_type
+                ),
+                # `_first_detachment_arm`'s guard, for the same reason and with the same
+                # consequence: with no attach card at all there is nothing "since the latest
+                # attach card" can measure from, so *every* earlier detach card counts and this
+                # one is not the first. Without the `IS NULL` arm the comparison would be NULL
+                # rather than true, the EXISTS would be empty, and a studio's second reported
+                # exit from a film it was only ever a baseline row on would deliver twice.
+                or_(latest_attach_card.is_(None), removal.created_at > latest_attach_card),
+            )
+            .correlate(Event, mention)
+            .exists()
+        )
+        extra = [~detached_since]
+    return _organisation_mentioning_pairs(
+        entity_type,
+        user_id=user_id,
+        entity_id=entity_id,
+        card_type=card_type,
+        mention=mention,
+        extra=extra,
     )
 
 

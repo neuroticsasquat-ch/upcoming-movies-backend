@@ -26,12 +26,17 @@ in full: a `path` still NULL is re-selected next run, which is the right resting
 TMDB blip, and a tiebreak *answer* that arrived and could not be used leaves the deterministic
 route standing rather than buying another call every run.
 
-**This pass does not card anything and does not stamp anything.** A resolved mention is a fact
-about a story, and turning it into an alert a studio's followers receive — or into the stamp
-that stops a catalog change raising a second card — is EF-13's first-association builder
-(NEU-1446), which reads these rows. Until it lands the rows accumulate and are visible on
-`/admin/resolution`, which is the intended resting state for the two tickets deploying
-together.
+**This pass cards nothing and stamps nothing.** A resolved mention is a fact about a story;
+turning it into an alert a studio's followers receive is EF-13's first-association builder
+(`app.follow_queries.first_association_clause`), and turning it into the stamp that stops a
+catalog change raising a second card is the sweep's backward pass
+(`news.attachment_confirm`). Both read these rows; neither runs here.
+
+The one write this pass makes beyond the mention row is a **supersession**, and it is here
+because of where the ids are: a story-formed `company_removed` / `collection_removed` card
+published as fact carries no organisation token — `subject_key` is written at clustering,
+before this stage — so the moment its mention resolves is the one moment the card and the id
+it corrects are both in hand (D-1446.5). See `_supersede_for_confirmed_detachment`.
 """
 
 import logging
@@ -43,6 +48,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film
+from upmovies.ingest.sweep.collection_events import supersede_prior_collection_cards
+from upmovies.ingest.sweep.company_events import supersede_prior_company_cards
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.upsert import upsert_organisation
 from upmovies.link.linker import story_dek
@@ -63,10 +70,33 @@ from upmovies.link.resolve.pipeline import (
 from upmovies.link.resolve.scoring import Path, Thresholds, cap_confidence
 from upmovies.link.resolve.tiebreak import OrgTiebreakQuestion, TiebreakReply, ask_org_tiebreak
 from upmovies.llm.types import CallLog, Completer, StageGateway, Usage
-from upmovies.news.models import ResolutionCache, Story, StoryEntity
+from upmovies.news.catalog_events import (
+    COLLECTION_REMOVED_EVENT_TYPE,
+    COMPANY_REMOVED_EVENT_TYPE,
+)
+from upmovies.news.models import (
+    RESOLVED_MENTION_PATHS,
+    Event,
+    EventStory,
+    ResolutionCache,
+    Story,
+    StoryEntity,
+)
 from upmovies.news.source_quality import domain_for_story
 
 log = logging.getLogger(__name__)
+
+COMPANY_KIND = "company"
+"""`story_entity.kind` for a studio — the branch the supersession below routes on."""
+
+_DETACH_TYPES: dict[str, str] = {
+    COMPANY_KIND: COMPANY_REMOVED_EVENT_TYPE,
+    "collection": COLLECTION_REMOVED_EVENT_TYPE,
+}
+"""The detach card type each `story_entity.kind` can appear on.
+
+Keyed by kind rather than derived from a card, because the question runs the other way here: a
+resolved mention asks *which* card type would make it a detachment."""
 
 
 async def run_org_resolution(
@@ -184,6 +214,11 @@ async def _resolve_one_organisation(
     if cached is not None:
         result.cache_hits += 1
         _write_decision(row, cached, now=now)
+        # Both exits from this function resolve the mention, so both owe the supersession
+        # hook. A cached decision is a decision (D-24) — the second outlet naming the same
+        # studio leaving the same film resolves off the cache and still names what its card
+        # supersedes.
+        await _supersede_for_confirmed_detachment(session, row)
         return cached.path
 
     mention = _mention_from(row)
@@ -224,6 +259,7 @@ async def _resolve_one_organisation(
         if hit is not None:
             await upsert_organisation(session, hit)
     _write_decision(row, decision, now=now)
+    await _supersede_for_confirmed_detachment(session, row)
     if decision.accepted and domain is not None:
         await _cache_decision(
             session,
@@ -235,6 +271,59 @@ async def _resolve_one_organisation(
             now=now,
         )
     return decision.path
+
+
+async def _supersede_for_confirmed_detachment(session: AsyncSession, row: StoryEntity) -> int:
+    """A story-formed detach card that is already `confirmed` supersedes the attach card it
+    contradicts, the moment the mention naming the departing entity resolves (D-1446.5).
+
+    This is the one place the id and the card meet for a card the cluster stage published as
+    fact. `subject_key` was written at clustering, before resolution, so the card carries no
+    organisation token and cannot name what it supersedes; the resolved `entity_id` on this row
+    is what names it. **Rumored cards are deliberately left alone** — as a rumor a trade's word
+    supersedes nothing, or one wrong report would hide a true attachment — and are picked up by
+    `ingest.sweep.confirm_events` if and when the catalog confirms them.
+
+    The card's confidence is re-read rather than assumed: a mention resolves on its own pass,
+    minutes to days after its card published.
+
+    D-6 promotion — a confirmed story attaching to a card that published `rumored` — would be a
+    third route to the same supersession. There is no hook for it here because **nothing
+    performs that promotion yet**: `link.cluster`'s attach paths bump `updated_at` and never
+    touch `Event.confidence` (`app.services.notify_service.deliverable_events` says so at
+    length). Whoever lands it owns adding the call; until then these two routes are exhaustive.
+    """
+    if row.entity_id is None or row.path not in RESOLVED_MENTION_PATHS:
+        return 0
+    detach_type = _DETACH_TYPES.get(row.kind)
+    if detach_type is None or (row.features or {}).get("event_type") != detach_type:
+        return 0
+    card = (
+        (
+            await session.execute(
+                select(Event)
+                .join(EventStory, EventStory.event_id == Event.id)
+                .where(
+                    EventStory.story_id == row.story_id,
+                    Event.event_type == detach_type,
+                    Event.provenance == "story",
+                    Event.confidence == "confirmed",
+                    Event.status == "published",
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if card is None:
+        return 0
+    if row.kind == COMPANY_KIND:
+        return await supersede_prior_company_cards(
+            session, removal=card, company_ids=[row.entity_id]
+        )
+    return await supersede_prior_collection_cards(
+        session, removal=card, collection_ids=[row.entity_id]
+    )
 
 
 async def _break_the_tie(

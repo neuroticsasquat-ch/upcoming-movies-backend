@@ -48,6 +48,7 @@ consecutive failures, and **no `finalize_run`** — all phases share one `ingest
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -61,13 +62,18 @@ from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.field_events import COLLECTION_FIELD, load_change_backlog
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
+from upmovies.news.attachment_confirm import stamp_prior_story_cards
 from upmovies.news.catalog_events import (
+    COLLECTION_ADDED,
     COLLECTION_ATTACHED_EVENT_TYPE,
+    COLLECTION_CHANGE_EVENT_TYPES,
     COLLECTION_EVENT_TYPES,
-    COLLECTION_REMOVED_EVENT_TYPE,
+    COLLECTION_REMOVED,
+    collection_field_events,
 )
 from upmovies.news.models import Event
 from upmovies.news.subject_key import collection_ids_in, collection_subject_token
+from upmovies.news.supersede import supersede_prior_entity_cards
 from upmovies.synthesize.deterministic import (
     CollectionAttached,
     CollectionDetached,
@@ -77,48 +83,6 @@ from upmovies.synthesize.deterministic import (
 )
 
 log = logging.getLogger(__name__)
-
-# The two directions a `collection_id` change resolves into, named rather than spelled as a
-# bool so the pairing and grouping code reads the same way the studio half's does.
-COLLECTION_ADDED = "added"
-COLLECTION_REMOVED = "removed"
-
-# Which event type each direction cards as. The dict is the registration: a third direction
-# would fail to subscript it rather than card as something arbitrary.
-COLLECTION_CHANGE_EVENT_TYPES: dict[str, str] = {
-    COLLECTION_ADDED: COLLECTION_ATTACHED_EVENT_TYPE,
-    COLLECTION_REMOVED: COLLECTION_REMOVED_EVENT_TYPE,
-}
-
-
-def collection_field_events(old_value: object, new_value: object) -> tuple[tuple[str, int], ...]:
-    """The `(direction, collection_id)` pairs one `collection_id` field change becomes. Pure —
-    no DB, no clock.
-
-    Four transitions, three of which are beats:
-
-    - `NULL -> id` — one `added`. The film joined a franchise.
-    - `id -> NULL` — one `removed`. The film left one.
-    - `id -> id'` — one `removed` naming the old franchise and one `added` naming the new,
-      **in that order**, so a card pair rendered together reads as a move rather than as two
-      unrelated beats.
-    - anything else (`NULL -> NULL`, `id -> id`, a non-integer on either side) — nothing.
-
-    The trigger writes both sides as JSONB, so an absent value arrives as `None` and a present
-    one as an `int`. A value of any other type is data this function was not written against
-    and is dropped rather than guessed at, on `classify_field_change`'s rule — `bool` included,
-    since it is an `int` subclass and a `True` here would card as collection 1.
-    """
-    old = old_value if isinstance(old_value, int) and not isinstance(old_value, bool) else None
-    new = new_value if isinstance(new_value, int) and not isinstance(new_value, bool) else None
-    if old == new:
-        return ()
-    events: list[tuple[str, int]] = []
-    if old is not None:
-        events.append((COLLECTION_REMOVED, old))
-    if new is not None:
-        events.append((COLLECTION_ADDED, new))
-    return tuple(events)
 
 
 @dataclass(frozen=True)
@@ -184,6 +148,11 @@ class CollectionEventResult:
     already reverted and so never true. Read against `changes_read` and **not** as a health
     signal, for the reason `CreditEventResult.held` documents — in steady state the reverted
     rows dominate it, which is the gate working."""
+    story_published: int = 0
+    """`film_field_change` rows the backward stamp found a story card had already published
+    (D-5, EF-13). `CreditEventResult.story_published` for franchises, counted in *rows* rather
+    than in directions — unlike `changes_read` — because the stamp is a column on the row and a
+    move is deliberately never stamped (`news.attachment_confirm`)."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -438,49 +407,27 @@ async def _uncarded_changes(
     return tuple(kept)
 
 
-async def supersede_prior_collection_cards(session: AsyncSession, *, removal: Event) -> int:
+async def supersede_prior_collection_cards(
+    session: AsyncSession, *, removal: Event, collection_ids: Sequence[int] | None = None
+) -> int:
     """Mark the arrival card each collection named on `removal` was current on (D-2).
 
-    Per collection on the removal's `subject_key`: the most recent *published*
-    `collection_attached` card that occurred before the removal is set `superseded` with
-    `superseded_by` pointing at the removal. Only the most recent one — an older card the same
-    collection is on was already the earlier claim, not the one this removal corrects. Nothing
-    is hidden or deleted; the card keeps its place on every surface.
-
-    The card, not the collection, is the unit of supersession: `status` lives on the event row,
-    so a card naming two franchises is marked when the film leaves either.
+    `supersede_prior_company_cards` for franchises, in full: the rule lives in
+    `news.supersede.supersede_prior_entity_cards` and this is the `collection_attached` /
+    `collection:<id>` spelling of it, with the same `collection_ids` override for a
+    story-formed `collection_removed` card, which carries no token (D-1446.5).
 
     Returns the number of cards marked. Caller owns the commit; `removal` must be flushed so
     its id exists for the FK.
     """
-    # Resolve every target before marking any, for `supersede_prior_company_cards`' reason:
-    # marking inside the loop would autoflush the first UPDATE ahead of the next collection's
-    # query, and a card two departed collections share would then fail the `published` filter
-    # for the second — handing back an older card that collection is on.
-    targets: dict[UUID, Event] = {}
-    for collection_id in collection_ids_in(removal.subject_key):
-        token = collection_subject_token(collection_id)
-        stmt = (
-            select(Event)
-            .where(
-                Event.film_id == removal.film_id,
-                Event.event_type == COLLECTION_ATTACHED_EVENT_TYPE,
-                Event.subject_key.any(token),  # pyright: ignore[reportArgumentType]
-                Event.status == "published",
-                Event.occurred_at < removal.occurred_at,
-            )
-            .order_by(Event.occurred_at.desc(), Event.created_at.desc())
-            .limit(1)
-        )
-        card = (await session.execute(stmt)).scalar_one_or_none()
-        if card is not None:
-            targets[card.id] = card
-    for card in targets.values():
-        card.status = "superseded"
-        card.superseded_by = removal.id
-    marked = len(targets)
-    await session.flush()
-    return marked
+    ids = collection_ids_in(removal.subject_key) if collection_ids is None else collection_ids
+    return await supersede_prior_entity_cards(
+        session,
+        removal=removal,
+        attach_type=COLLECTION_ATTACHED_EVENT_TYPE,
+        kind="collection",
+        entity_ids=list(ids),
+    )
 
 
 async def _card_group(session: AsyncSession, *, group: CollectionGroup) -> bool:
@@ -541,6 +488,7 @@ async def run_collection_events(
     now: datetime,
     lookback_days: int,
     quarantine_hours: int = 0,
+    story_confirm_days: int = 0,
     failure_threshold: int = 10,
 ) -> CollectionEventResult:
     """Card every franchise arrival and departure TMDB recorded in the window, less the ones
@@ -551,12 +499,23 @@ async def run_collection_events(
     and every other caller gets the plain behaviour it was written against. No burst threshold,
     unlike the studio half, and no TMDB client, unlike the credit attachment phase; the module
     docstring says why for both.
+
+    `story_confirm_days` is `SWEEP_STORY_CONFIRM_DAYS`, defaulting off on the same reasoning.
     """
     result = CollectionEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
     heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
+    async with owned_session(session_factory) as s:
+        # Before the backlog is read, because stamping is what takes a row *out* of it — the
+        # studio phase's comment in full (NEU-1371, D-5, D-1446.6). A *move* is never stamped:
+        # one history row carries two beats and has one stamp column between them, so stamping
+        # it for the arrival would suppress the departure card too.
+        result.story_published = await stamp_prior_story_cards(
+            s, since=since, within_days=story_confirm_days, kinds=("collection",)
+        )
+        await s.commit()
     async with owned_session(session_factory) as s:
         backlog = mark_window_reverts(await load_collection_backlog(s, since=since))
         # Same session as the load: the gate reads live `film.collection_id` against the
