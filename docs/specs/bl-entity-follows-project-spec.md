@@ -462,3 +462,13 @@ Project `bl: Entity Follows` — https://linear.app/neuroticsasquatch/project/bl
 - Whether `company_attached` should be `confirmed` rather than `rumored` once quarantine has
   cleared; measure how often TMDB reverts a company row before deciding.
 - Expiring `awaiting_review` jobs on a clock rather than on the next import.
+- **`GET /me/follows` is unpaginated by decision, not oversight (NEU-1451, 2026-09-23).** EF-15's
+  flat list with a client-side filter stands. Measured post-NEU-1440: 113 / 348 / 694 ms server
+  and 0.32 / 1.58 / 3.17 MB (0.19 MB gzipped at 5k) for 1k / 5k / 10k title follows, four
+  linear passes with `last_activity_at` the largest. Accepted because EF-21 bounds what an
+  import can create to in-window films (~9.5k exist in the whole catalog) and every follow
+  button reads the whole list for its state. Shipped instead: app-wide gzip, a WARNING past
+  2,000 follows, and `scripts/bench_follows.py`. **Reopen** (server-side `limit`/cursor +
+  `types`/`q`/`sort`, plus a keys view for the buttons, cross-repo) if a writer can create
+  follows outside the window, the warning fires in production, or a fifth pass is proposed.
+  Spec: `NEU-1451-follows-list-ceiling.md`.

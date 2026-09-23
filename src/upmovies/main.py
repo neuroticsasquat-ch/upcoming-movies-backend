@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.gzip import GZipMiddleware
 
 from upmovies.app.rate_limit import (
     RateLimited,
@@ -106,6 +107,21 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token"],
     )
+    # Every response of 1 KB or more goes out gzipped to a client that accepts it (NEU-1451).
+    # Added for `GET /me/follows`, which is unpaginated by decision and whose payload, not its
+    # query time, is what a user on a real connection feels: 1.58 MB becomes 0.19 MB at 5,000
+    # follows. The feed, timeline, calendar and iCal feed benefit on the same terms.
+    #
+    # BREACH, before anyone lowers the floor: the attack needs a secret and attacker-controlled
+    # input reflected into the *same* compressed body. The one response here that carries a
+    # secret is `GET /me` (the CSRF token, NEU-1382), and it reflects nothing from the request —
+    # its body is the account row. `minimum_size=1024` also keeps that small body out of the
+    # compressor altogether, as belt and braces; a route that ever puts a token next to echoed
+    # input must be exempted, not left to the floor.
+    #
+    # Level 6, not Starlette's default 9: on a 3 MB follows list 9 cost ~115 ms of CPU against
+    # ~30 ms for 6, for 2% fewer bytes (`scripts/bench_follows.py`).
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
     # The 429 the rate-limit dependency raises. A handler rather than an `HTTPException`
     # because the body carries the bucket and the wait alongside the detail string, and
     # FastAPI's own handler renders only `{"detail": ...}` (`app/rate_limit.py`).
