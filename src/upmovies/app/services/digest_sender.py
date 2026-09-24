@@ -1,5 +1,6 @@
 """The digest sender: one mail per user on their cadence, carrying the `queued` digest rows the
-decision pass wrote for them and — weekly — their slate (D-33).
+decision pass wrote for them and — weekly, and daily on the slate day — their slate (D-33,
+DC-2).
 
 `python -m upmovies.pipeline_run digest {daily|weekly}` runs this on two Coolify slots, one per
 cadence. It is the digest counterpart of `alert_sender`: the decision pass
@@ -26,18 +27,24 @@ hands that to `Mailer.deliver`, and `render_digest` — what the admin preview a
 call — returns it without sending. `digest_context` is the only place the template's dict is
 built, so the three cannot disagree about what the mail says.
 
-**The weekly send is the "your slate" mail (D-33).** Before the timeline section it lists the
-upcoming US dates — theatrical, digital and physical — for every film the user follows by
+**The weekly send is the "your slate" mail (D-33), and so is the daily one on the slate day
+(DC-2).** The weekly always carries the slate; the daily carries it only when the run's `today`
+falls on `SLATE_WEEKDAY`, so a daily reader sees upcoming dates once a week, on the day the
+weekly readers do. Before the timeline section it lists the upcoming US dates — theatrical,
+digital and physical — for every film the user follows by
 title in the next `SLATE_WINDOW_DAYS` (`app.follow_queries.title_follow_film_ids`, EF-14),
 joined to `film_release_date` directly rather than to notification
 rows: a date that has not *moved* produces
 no event, and the slate's job is to say what is coming, not what changed. Each film's date per
 release type is the governing one — the earliest row in the (film, US, type) subject, the same
 collapse `public.service.get_calendar` and `catalog.headline_release` apply — so the slate
-cannot name a date the calendar would not.
+cannot name a date the calendar would not. A date **set or moved since the previous slate
+day** carries a `new` or `moved` marker (DC-9), read from the release-date card that set or
+moved it — see `load_slate_markers`.
 
 **A user with nothing queued and an empty slate gets no mail.** A digest with nothing to say
-is worse than no digest, and it is the ordinary case for a quiet week.
+is worse than no digest, and it is the ordinary case for a quiet week. The converse holds on
+both cadences whenever the slate is in: nothing queued and a non-empty slate is a mail.
 
 **The access gate is re-read here, and it covers the slate** (D-37, D-39). The decision pass
 already suppressed rows for unentitled and unverified users, so on the row side this is belt
@@ -65,7 +72,7 @@ turns the digest off for a year and back on will get a tall first digest.
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -94,13 +101,21 @@ from upmovies.app.services.alert_sender import (
 )
 from upmovies.app.verification import verified_user_clause
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
-from upmovies.catalog.models import Collection, Film, FilmReleaseDate, Person, ProductionCompany
+from upmovies.catalog.models import (
+    Collection,
+    Film,
+    FilmReleaseDate,
+    FilmReleaseDateChange,
+    Person,
+    ProductionCompany,
+)
 from upmovies.catalog.ref import collection_ref, company_ref, person_ref
 from upmovies.catalog.release_grade import PRIMARY_REGION, RELEASE_TYPE_BUCKETS
-from upmovies.config import Settings
+from upmovies.config import WEEKDAYS, Settings
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
+from upmovies.ingest.tmdb.release_date_history import RELEASE_DATE_MOVED, RELEASE_DATE_SET
 from upmovies.mail import (
     Envelope,
     MailConfigurationError,
@@ -139,7 +154,7 @@ SEND_CADENCES: tuple[DigestCadence, ...] = ("daily", "weekly")
 sent for it, by definition."""
 
 SLATE_WINDOW_DAYS = 30
-"""How many dates the weekly slate covers: today and the 29 after it. "The next 30 days" is
+"""How many dates the slate covers: today and the 29 after it. "The next 30 days" is
 thirty dates, not a 31-day span with both ends in."""
 
 DIGEST_MAX_ENTRIES = 20
@@ -151,6 +166,18 @@ SLATE_RELEASE_TYPES: tuple[int, ...] = tuple(sorted(RELEASE_TYPE_BUCKETS))
 """TMDB release types the slate lists: the theatrical arc and the US home release — every
 displayable bucket, US only, which is the region the home release is displayable in at all
 (`catalog.release_grade`)."""
+
+SLATE_MARKER_DAYS = 7
+"""How far back a slate row looks for the release-date card that set or moved it (DC-9): the
+run's UTC day and the six before it. Calendar days rather than a rolling `now - 7d` because the
+run knows its day and not its slot's time. That is "since the previous slate day" as long as
+the sweep that cards a date runs ahead of the digest slot, which it is scheduled to: the
+previous slate day's cards were then in the previous slate. A card created on that day
+*after* its digest slot — a late or re-run chain — falls in neither window and is never
+marked. Accepted: a missing marker costs a reader a hint, while a doubled one would call the
+same move news two weeks running."""
+
+SlateMarker = Literal["new", "moved"]
 
 _SLATE_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical")
 """Two rows sharing a date: the theatrical arc first, then the home release in the order it
@@ -202,6 +229,15 @@ def digest_beat_label(event_type: str) -> str:
 def day_heading(d: date) -> str:
     """The feed's day heading, spelled the same way (`public.service._day_heading`)."""
     return f"{_WEEKDAYS[d.weekday()]}, {_MONTHS[d.month - 1]} {d.day}, {d.year}"
+
+
+def carries_slate(cadence: DigestCadence, today: date, settings: Settings) -> bool:
+    """Whether this cadence's mail carries the slate on `today` (DC-2): the weekly always, the
+    daily only on `SLATE_WEEKDAY`. The weekly is not held to the weekday because the repo
+    cannot see the Coolify schedule — the setting documents the day that slot must run on."""
+    if cadence == "weekly":
+        return True
+    return today.weekday() == WEEKDAYS.index(settings.slate_weekday)
 
 
 def release_label(release_type: int) -> str:
@@ -433,6 +469,9 @@ class SlateItem:
     release_label: str
     film_url: str
     poster_url: str | None
+    marker: SlateMarker | None = None
+    """`new` or `moved` when the date was set or moved since the previous slate day (DC-9);
+    None for a date that has not changed, which carries nothing."""
 
 
 @dataclass(frozen=True)
@@ -497,11 +536,11 @@ class DigestSendResult:
 
     cadence: str
     users_considered: int = 0
-    """Users on this cadence with something to look at — a `queued` digest row, or (weekly) a
-    follow that might put a date on the slate. The working set, not the user table."""
+    """Users on this cadence with something to look at — a `queued` digest row, or (when the
+    slate is in) a follow that might put a date on it. The working set, not the user table."""
     mails_sent: int = 0
     """Mails handed to the provider: inboxes touched, one per user. Reported beside `sent`
-    because a weekly mail can carry a slate and no rows at all."""
+    because a slate mail can carry no rows at all."""
     sent: int = 0
     failed: int = 0
     suppressed: int = 0
@@ -534,7 +573,7 @@ class DigestOutcome:
 
 
 async def load_recipients(
-    session: AsyncSession, *, cadence: DigestCadence
+    session: AsyncSession, *, cadence: DigestCadence, with_slate: bool
 ) -> list[DigestRecipient]:
     """Every user on `cadence` with something this slot might mail, oldest account first.
 
@@ -545,11 +584,13 @@ async def load_recipients(
 
     The gate is read as a column rather than a filter, for the reason the alert sender gives:
     a user it refuses is owed `suppressed` rows, not silence. The `EXISTS` terms keep the pass
-    proportional to what is owed rather than to signups: on the daily cadence only a queued row
-    puts a user in the set; weekly adds anyone with a **follow**, because the slate is computed
-    from the follow graph (M8) and needs no row at all. A follow that covers nothing dated
-    costs one empty slate query and no mail — "nothing queued and an empty slate gets no mail"
-    already covers it."""
+    proportional to what is owed rather than to signups: without the slate only a queued row
+    puts a user in the set; `with_slate` — the weekly, and the daily on the slate day
+    (`carries_slate`) — adds anyone with a **follow**, because the slate is computed from the
+    follow graph (M8) and needs no row at all. Without that term a daily reader with an empty
+    queue would never be looked at on the slate day, and a full slate would go unsent (DC-2).
+    A follow that covers nothing dated costs one empty slate query and no mail — "nothing
+    queued and an empty slate gets no mail" already covers it."""
     queued_digest = exists().where(
         Notification.user_id == User.id,
         Notification.kind == DIGEST_KIND,
@@ -557,7 +598,7 @@ async def load_recipients(
         Notification.status == "queued",
     )
     owed = queued_digest
-    if cadence == "weekly":
+    if with_slate:
         owed = or_(queued_digest, exists().where(Follow.user_id == User.id))
     rows = await session.execute(
         select(
@@ -799,6 +840,8 @@ async def load_slate(
     The calendar's popularity, runtime and adult cuts are deliberately absent. Those keep noise
     off a public listing; a film the user followed by name is not noise to them. A film with no
     slug is skipped for the reason the decision pass skips it — no page to link.
+
+    Each row's marker is `load_slate_markers`' answer for its (film, bucket).
     """
     governing = (
         select(
@@ -821,6 +864,7 @@ async def load_slate(
             select(
                 governing.c.governing_date,
                 governing.c.release_type,
+                Film.id.label("film_id"),
                 Film.tmdb_id,
                 Film.title,
                 Film.poster_path,
@@ -843,6 +887,7 @@ async def load_slate(
             r.tmdb_id,
         ),
     )
+    markers = await load_slate_markers(session, film_ids={row.film_id for row in rows}, today=today)
     by_day: dict[date, list[SlateItem]] = {}
     for row in ordered:
         by_day.setdefault(row.governing_date, []).append(
@@ -851,9 +896,107 @@ async def load_slate(
                 release_label=release_label(row.release_type),
                 film_url=film_url(row.tmdb_id, row.title, settings.public_base_url),
                 poster_url=poster_url(row.poster_path, settings.tmdb_image_base),
+                marker=markers.get((row.film_id, RELEASE_TYPE_BUCKETS[row.release_type])),
             )
         )
     return tuple(SlateDay(day=day, items=tuple(items)) for day, items in by_day.items())
+
+
+def slate_marker(changes: Iterable[str]) -> SlateMarker | None:
+    """One slate row's marker from the changes its date went through inside the marker window
+    (DC-9), each `set` or `moved` as `film_release_date_change` records them. Pure.
+
+    None when there were none. **new** when any of them *set* the date — the subject had no
+    date on the previous slate day, so relative to that slate the date is new however often it
+    has moved since; **moved** otherwise."""
+    seen = set(changes)
+    if not seen:
+        return None
+    return "new" if RELEASE_DATE_SET in seen else "moved"
+
+
+def change_from_summary(summary: str | None, bucket: str) -> str:
+    """The fallback for a card whose change is not persisted (DC-9): the deterministic body's
+    own verb for this market — "US wide release date set to …" is a `set`, and anything else
+    ("moved from", "slipped from", or a body an admin rewrote) is read as `moved`, the spec's
+    "moved otherwise"."""
+    if summary is not None and f"{PRIMARY_REGION} {bucket} release date set to" in summary:
+        return RELEASE_DATE_SET
+    return RELEASE_DATE_MOVED
+
+
+async def load_slate_markers(
+    session: AsyncSession, *, film_ids: set[UUID], today: date
+) -> dict[tuple[UUID, str], SlateMarker]:
+    """Per (film, bucket), the slate marker the row carries (DC-9) — absent for a date nothing
+    set or moved in the `SLATE_MARKER_DAYS` window ending on `today`.
+
+    The cards read are the published `release_date` cards on these films whose `subject_key`
+    covers a `US:<bucket>` token (D-26) and whose `created_at` falls in the window. Only the
+    sweep's catalog cards carry those tokens — a story-borne release-date card has no subject,
+    and the sweep refuses to card a second time a move a story already reported — so this is
+    a read of the same observations the slate's dates came from.
+
+    Whether a card set or moved a market's date is read from the **persisted change**: the
+    card's `occurred_at` is the observation's `changed_at` (`sweep.release_events`), so the
+    `film_release_date_change` row for (film, `changed_at`, US, type) is the change itself.
+    Only a card with no such row falls back to the verb in its summary
+    (`change_from_summary`)."""
+    if not film_ids:
+        return {}
+    window_start = datetime.combine(
+        today - timedelta(days=SLATE_MARKER_DAYS - 1), time.min, tzinfo=UTC
+    )
+    window_end = datetime.combine(today + timedelta(days=1), time.min, tzinfo=UTC)
+    tokens = [f"{PRIMARY_REGION}:{bucket}" for bucket in _SLATE_BUCKET_ORDER]
+    rows = await session.execute(
+        select(
+            Event.id,
+            Event.film_id,
+            Event.subject_key,
+            EventSummary.summary,
+            FilmReleaseDateChange.release_type,
+            FilmReleaseDateChange.change,
+        )
+        .outerjoin(EventSummary, EventSummary.event_id == Event.id)
+        .outerjoin(
+            FilmReleaseDateChange,
+            and_(
+                FilmReleaseDateChange.film_id == Event.film_id,
+                FilmReleaseDateChange.changed_at == Event.occurred_at,
+                FilmReleaseDateChange.iso_3166_1 == PRIMARY_REGION,
+            ),
+        )
+        .where(
+            Event.film_id.in_(film_ids),
+            Event.event_type == "release_date",
+            Event.status == "published",
+            Event.created_at >= window_start,
+            Event.created_at < window_end,
+            Event.subject_key.overlap(tokens),
+        )
+    )
+    cards: dict[UUID, tuple[UUID, list[str], str | None]] = {}
+    persisted: dict[UUID, dict[str, str]] = {}
+    for row in rows:
+        cards[row.id] = (row.film_id, row.subject_key, row.summary)
+        bucket = (
+            RELEASE_TYPE_BUCKETS.get(row.release_type) if row.release_type is not None else None
+        )
+        if bucket is not None:
+            persisted.setdefault(row.id, {})[bucket] = row.change
+    changes: dict[tuple[UUID, str], list[str]] = {}
+    prefix = f"{PRIMARY_REGION}:"
+    for card_id, (film_id, subject_key, summary) in cards.items():
+        for token in subject_key:
+            if not token.startswith(prefix):
+                continue
+            bucket = token.removeprefix(prefix)
+            change = persisted.get(card_id, {}).get(bucket) or change_from_summary(summary, bucket)
+            changes.setdefault((film_id, bucket), []).append(change)
+    return {
+        key: marker for key, seen in changes.items() if (marker := slate_marker(seen)) is not None
+    }
 
 
 async def load_batch(
@@ -867,16 +1010,17 @@ async def load_batch(
 ) -> DigestBatch:
     """Everything one user's digest would carry on this cadence.
 
-    The slate is loaded only for a weekly send *and* only for a user the gate admits: for a
-    refused user the answer is already "no mail", and reading their follows would be work in
-    service of a section that must not be sent (D-39). `include_slate` overrides that rule
-    when given — `render_digest` uses it to show a lapsed user's slate to an admin without
-    touching the send path."""
+    The slate is loaded only when the cadence carries it today (`carries_slate`: the weekly,
+    or the daily on the slate day) *and* only for a user the gate admits: for a refused user
+    the answer is already "no mail", and reading their follows would be work in service of a
+    section that must not be sent (D-39). `include_slate` overrides that rule when given —
+    `render_digest` uses it to show a lapsed user's slate to an admin without touching the
+    send path."""
     entries, unsendable = await load_entries(
         session, user_id=recipient.user_id, today=today, settings=settings
     )
     if include_slate is None:
-        include_slate = cadence == "weekly" and recipient.deliverable
+        include_slate = carries_slate(cadence, today, settings) and recipient.deliverable
     slate: tuple[SlateDay, ...] = ()
     if include_slate:
         slate = await load_slate(session, user_id=recipient.user_id, today=today, settings=settings)
@@ -988,6 +1132,7 @@ def digest_context(
                         "release_label": item.release_label,
                         "film_url": item.film_url,
                         "poster_url": item.poster_url,
+                        "marker": item.marker,
                     }
                     for item in d.items
                 ],
@@ -1036,7 +1181,8 @@ async def render_digest(
     """The digest this user would get on `cadence` today, rendered and not sent — what the
     admin preview and test-send call, and nothing else (M3).
 
-    The gate is ignored (`deliverable=True`) and the slate follows the cadence alone: an admin
+    The gate is ignored (`deliverable=True`) and the slate follows the cadence and the day
+    alone (`carries_slate`), so a daily preview on the slate day shows the slate: an admin
     looking at a lapsed user's mail wants to see what it would say, and whether it would be
     *sent* is `send_digests`' question, which still answers it. Marks nothing, commits
     nothing. None when there is nothing to say; `LookupError` for an unknown user."""
@@ -1054,7 +1200,7 @@ async def render_digest(
         cadence=cadence,
         today=today,
         settings=settings,
-        include_slate=cadence == "weekly",
+        include_slate=carries_slate(cadence, today, settings),
     )
     return render_batch(batch, cadence=cadence, today=today, settings=settings)
 
@@ -1129,7 +1275,9 @@ async def send_digests(
     heartbeat = Heartbeat(session_factory, run_id)
 
     async with owned_session(session_factory) as s:
-        recipients = await load_recipients(s, cadence=cadence)
+        recipients = await load_recipients(
+            s, cadence=cadence, with_slate=carries_slate(cadence, today, settings)
+        )
     result.users_considered = len(recipients)
     log.info("digest %s: %d users to consider", cadence, result.users_considered)
 

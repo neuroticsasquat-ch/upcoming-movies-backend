@@ -28,7 +28,7 @@
                 <p style="margin:0 0 4px;font-size:16px;font-weight:600;line-height:1.3;">
                   <a href="{{ item.film_url }}" style="color:#1a1a1a;text-decoration:none;">{{ item.title }}</a>
                 </p>
-                <p style="margin:0;font-size:14px;color:#555555;">{{ item.release_label }}</p>
+                <p style="margin:0;font-size:14px;color:#555555;">{{ item.release_label }}{% if item.marker == "new" %} <span style="display:inline-block;padding:2px 6px;border-radius:4px;background:#dcfce7;color:#166534;font-size:10px;font-weight:500;line-height:1;letter-spacing:0.025em;text-transform:uppercase;vertical-align:middle;">New</span>{% elif item.marker == "moved" %} <span style="display:inline-block;padding:2px 6px;border-radius:4px;background:#e0e7ff;color:#3730a3;font-size:10px;font-weight:500;line-height:1;letter-spacing:0.025em;text-transform:uppercase;vertical-align:middle;">Moved</span>{% endif %}</p>
               </td>
             </tr>
           </table>

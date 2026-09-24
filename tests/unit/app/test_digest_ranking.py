@@ -1,5 +1,6 @@
-"""The digest's pure functions (NEU-1460): how film entries rank, how beats order, how dates
-and the status line read, and what the subject and preheader say.
+"""The digest's pure functions (NEU-1460, NEU-1462): how film entries rank, how beats order,
+how dates and the status line read, what the subject and preheader say, which day the daily
+carries the slate, and which marker a slate row wears.
 
 Hand-built entries throughout — none of this touches the database, which is the point of the
 functions being pure. `test_digest_sender.py` proves the loader feeds them what they expect."""
@@ -22,12 +23,15 @@ from upmovies.app.services.digest_sender import (
     SlateItem,
     arc_stage_label,
     beat_order_key,
+    carries_slate,
+    change_from_summary,
     digest_context,
     digest_preheader,
     digest_subject,
     long_date,
     rank_entries,
     short_date,
+    slate_marker,
     status_line,
 )
 from upmovies.catalog.headline_release import HeadlineRelease
@@ -337,3 +341,90 @@ def test_a_slate_only_context_has_no_lead():
     )
 
     assert (context["lead"], context["entries"]) == (None, [])
+
+
+# --- the slate day and the slate markers (NEU-1462) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("weekday", "today", "expected"),
+    [
+        ("thursday", date(2026, 9, 24), True),  # a Thursday
+        ("thursday", date(2026, 9, 25), False),
+        ("friday", date(2026, 9, 25), True),
+        ("monday", date(2026, 9, 21), True),
+        ("sunday", date(2026, 9, 27), True),
+        ("sunday", date(2026, 9, 21), False),
+    ],
+)
+def test_the_daily_carries_the_slate_on_the_slate_weekday_only(weekday, today, expected):
+    settings = get_settings().model_copy(update={"slate_weekday": weekday})
+
+    assert carries_slate("daily", today, settings) is expected
+
+
+@pytest.mark.parametrize("today", [date(2026, 9, 21) + timedelta(days=n) for n in range(7)])
+def test_the_weekly_carries_the_slate_whatever_day_it_runs(today):
+    """The setting documents the weekly slot's day; it does not gate it (DC-2)."""
+    assert carries_slate("weekly", today, get_settings()) is True
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ([], None),
+        (["set"], "new"),
+        (["moved"], "moved"),
+        (["moved", "moved"], "moved"),
+        # Set and then moved inside one window: the previous slate had no date at all.
+        (["set", "moved"], "new"),
+        (["moved", "set"], "new"),
+    ],
+)
+def test_a_slate_marker_is_new_when_any_change_set_the_date_and_moved_otherwise(changes, expected):
+    assert slate_marker(changes) == expected
+
+
+@pytest.mark.parametrize(
+    ("summary", "bucket", "expected"),
+    [
+        ("US wide release date set to 14 October 2026.", "wide", "set"),
+        ("US wide release date slipped from 1 October 2026 to 14 October 2026.", "wide", "moved"),
+        ("US wide release date moved from 14 October 2026 to 1 October 2026.", "wide", "moved"),
+        # One card, two markets: each reads its own clause.
+        (
+            "US limited release date set to 2 October 2026. "
+            "US wide release date moved from 9 October 2026 to 16 October 2026.",
+            "limited",
+            "set",
+        ),
+        (
+            "US limited release date set to 2 October 2026. "
+            "US wide release date moved from 9 October 2026 to 16 October 2026.",
+            "wide",
+            "moved",
+        ),
+        # An admin-rewritten body, or none at all, is "moved otherwise".
+        ("The date is now 14 October.", "wide", "moved"),
+        (None, "wide", "moved"),
+    ],
+)
+def test_the_summary_fallback_reads_the_markets_own_verb(summary, bucket, expected):
+    assert change_from_summary(summary, bucket) == expected
+
+
+def test_the_context_carries_each_slate_rows_marker():
+    items = (
+        SlateItem(title="A", release_label="Wide release", film_url="u", poster_url=None),
+        SlateItem(
+            title="B", release_label="Wide release", film_url="u", poster_url=None, marker="new"
+        ),
+    )
+    batch = DigestBatch(
+        recipient=RECIPIENT, entries=(), unsendable=(), slate=(SlateDay(day=TODAY, items=items),)
+    )
+
+    context = digest_context(batch, cadence="daily", today=TODAY, settings=get_settings())
+
+    (day,) = cast(list[dict[str, object]], context["slate"])
+    assert [e["marker"] for e in cast(list[dict[str, object]], day["entries"])] == [None, "new"]

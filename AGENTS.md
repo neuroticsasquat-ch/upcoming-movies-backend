@@ -36,8 +36,8 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
 | `notify` | daily, **after** `daily` | the M7 decision pass, then the mail and push sends (D-31, NEU-1379/1380/1387) |
-| `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user (D-33, NEU-1381) |
-| `digest weekly` | weekly, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
+| `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user, with the slate on `SLATE_WEEKDAY` (D-33, DC-2, NEU-1381/1462) |
+| `digest weekly` | weekly on `SLATE_WEEKDAY`, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
 
 **`providers` is a new slot and must be added in the Coolify UI** — nothing in the repo creates
 it, so merging this leaves the poll never running, with no failing check to say so. Put it beside
@@ -120,9 +120,18 @@ mail prerequisites (`MAIL_PROVIDER`, `MAIL_FROM`, `PUBLIC_BASE_URL`, `TMDB_IMAGE
 frontend `/settings` route) and its `failed`-is-terminal rule. Specific to them:
 
 - **Run them after `notify`, on the same day.** The digest mails the `digest` rows the
-  decision pass queued; a slot that runs before it mails yesterday's. The weekly slot's day is
-  the product's "your slate" day — pick one and keep it, since the mail says "the next 30
-  days" and a moved slot shifts what that window means.
+  decision pass queued; a slot that runs before it mails yesterday's.
+- **The weekly slot must run on `SLATE_WEEKDAY` (DC-2, NEU-1462).** That setting (default
+  `thursday`, seeded in `docker-compose.prod.yml`) is the product's one slate day: the
+  `digest daily` slot reads it and puts the slate in front of a daily reader's cards on that
+  weekday — and mails a daily reader with an empty queue and a non-empty slate, as the weekly
+  does. The weekly slot always carries the slate whatever day it runs, because the repo cannot
+  see the Coolify schedule, so nothing fails if the two disagree: daily and weekly readers
+  simply get their slates on different days. If the weekly slot is scheduled on another day,
+  move it, or set `SLATE_WEEKDAY` to match in the Coolify UI (the compose value is a seed, per
+  the gotcha below). Keep the day fixed once chosen: the slate's `new` / `moved` markers look
+  back seven days, which is "since the previous slate day" only while the slate runs weekly on
+  one weekday.
 - **Nothing here has a watermark.** The backlog is the `queued` rows, so a failed run leaves
   exactly what did not go out for the next slot, and a first run is not a cold start — it
   mails whatever the notify pass has queued since it was turned on.

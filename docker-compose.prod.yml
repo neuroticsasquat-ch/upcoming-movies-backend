@@ -79,6 +79,10 @@ services:
       # daily check cannot also expect the weekly ping (D-33, NEU-1381).
       HEALTHCHECK_DIGEST_DAILY_URL: "${HEALTHCHECK_DIGEST_DAILY_URL:-}"
       HEALTHCHECK_DIGEST_WEEKLY_URL: "${HEALTHCHECK_DIGEST_WEEKLY_URL:-}"
+      # The slate day (DC-2, NEU-1462): the daily slot puts the slate in front of a daily
+      # reader's cards on this weekday, and the weekly slot must be *scheduled* on it — Coolify's
+      # schedule is not something this file can set, so the two agree only by hand (AGENTS.md).
+      SLATE_WEEKDAY: "${SLATE_WEEKDAY:-thursday}"
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail

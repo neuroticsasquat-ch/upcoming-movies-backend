@@ -215,6 +215,33 @@ def test_an_unknown_mail_provider_fails_the_container_at_boot(monkeypatch):
         Settings()  # type: ignore[call-arg]
 
 
+def test_the_slate_weekday_defaults_to_thursday_and_reads_from_env(monkeypatch):
+    """DC-2: the product's slate day is Thursday unless Coolify says otherwise."""
+    _set_required(monkeypatch)
+    monkeypatch.delenv("SLATE_WEEKDAY", raising=False)
+    assert Settings().slate_weekday == "thursday"  # type: ignore[call-arg]
+    monkeypatch.setenv("SLATE_WEEKDAY", "monday")
+    assert Settings().slate_weekday == "monday"  # type: ignore[call-arg]
+
+
+def test_an_unknown_slate_weekday_fails_the_container_at_boot(monkeypatch):
+    """A misspelled day must not boot into a daily slot that never carries the slate."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SLATE_WEEKDAY", "Thursday")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_weekdays_are_in_date_weekday_order():
+    """`carries_slate` indexes `WEEKDAYS` by `date.weekday()`; 2026-09-21 is a Monday."""
+    from datetime import date, timedelta
+
+    from upmovies.config import WEEKDAYS
+
+    for n, name in enumerate(WEEKDAYS):
+        assert f"{date(2026, 9, 21) + timedelta(days=n):%A}".lower() == name
+
+
 def test_settings_provider_credentials_are_optional(monkeypatch):
     """Adding these as required fields would break every deploy that does not use them
     (design §8) — which today is all of them."""
@@ -573,6 +600,9 @@ _PINNED_PROD_FALLBACKS = (
     # same way a stale K does: silently, with a green deploy.
     ("PROVIDER_POLL_MIN_AGE_DAYS", "provider_poll_min_age_days"),
     ("PROVIDER_POLL_MAX_AGE_DAYS", "provider_poll_max_age_days"),
+    # The slate day (NEU-1462). Not a tuning constant either, but a stale fallback would move
+    # every daily reader's slate off the day the weekly slot is scheduled on, silently.
+    ("SLATE_WEEKDAY", "slate_weekday"),
 )
 
 

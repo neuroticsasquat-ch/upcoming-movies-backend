@@ -27,7 +27,7 @@ YOUR SLATE — the next {{ slate_window_days }} days of films you follow
 {% for day in slate %}
 {{ day.heading }}
 {% for item in day.entries %}
-  {{ item.title }} — {{ item.release_label }}
+  {{ item.title }} — {{ item.release_label }}{{ " [" ~ item.marker ~ "]" if item.marker else "" }}
   {{ item.film_url }}
 {% endfor %}
 

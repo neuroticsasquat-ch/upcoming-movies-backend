@@ -1,7 +1,7 @@
-"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461): what the daily and weekly
-digests say, laid out as film entries — a header, a "Following:" line, dated and sourced beats —
-beside the slate, under a wordmark, with the lead film as a lead card and the rest as compact
-rows.
+"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462): what the daily and
+weekly digests say, laid out as film entries — a header, a "Following:" line, dated and sourced
+beats — beside the slate and its new/moved markers, under a wordmark, with the lead film as a
+lead card and the rest as compact rows.
 
 Beside `test_alert_template.py` for its reason: `test_templates.py` asserts the rendering
 rules against whichever template is handy; this asserts the digest's own copy. The context is
@@ -26,7 +26,31 @@ SLATE = [
                 "release_label": "Wide release",
                 "film_url": "https://app.example.com/film/1234-dune-part-three",
                 "poster_url": "https://image.tmdb.org/t/p/w154/dune.jpg",
+                "marker": None,
             }
+        ],
+    },
+]
+
+
+def _slate_row(title: str, marker: str | None) -> dict[str, object]:
+    slug = title.lower().replace(" ", "-")
+    return {
+        "title": title,
+        "release_label": "Wide release",
+        "film_url": f"https://app.example.com/film/1-{slug}",
+        "poster_url": None,
+        "marker": marker,
+    }
+
+
+MARKED_SLATE = [
+    {
+        "heading": "Friday, September 25, 2026",
+        "entries": [
+            _slate_row("Arrival", "new"),
+            _slate_row("Blade", "moved"),
+            _slate_row("Casino", None),
         ],
     },
 ]
@@ -295,6 +319,40 @@ def test_the_slate_lists_every_date_film_and_release_kind_in_both_parts():
                 assert item["release_label"] in part
                 assert item["film_url"] in part
     assert "New on your timeline" not in envelope.html
+
+
+def test_a_slate_marker_is_bracketed_in_text_and_a_pill_in_html():
+    """DC-9: `[new]` / `[moved]` after the release kind in text, a pill in HTML, and nothing
+    at all on a row whose date did not change."""
+    envelope = _digest(slate=MARKED_SLATE, subject="Your slate: 3 upcoming dates")
+
+    lines = envelope.text.splitlines()
+    assert "  Arrival — Wide release [new]" in lines
+    assert "  Blade — Wide release [moved]" in lines
+    assert "  Casino — Wide release" in lines
+    html = envelope.html
+    arrival = html[html.index(">Arrival<") : html.index(">Blade<")]
+    blade = html[html.index(">Blade<") : html.index(">Casino<")]
+    casino = html[html.index(">Casino<") :]
+    assert ">New</span>" in arrival and ">Moved</span>" not in arrival
+    assert ">Moved</span>" in blade and ">New</span>" not in blade
+    assert ">New</span>" not in casino and ">Moved</span>" not in casino
+
+
+def test_a_slate_marker_pill_is_shaped_like_the_unconfirmed_pill():
+    """One pill shape in the mail (NEU-1461): only the colours tell the two apart."""
+    html = _digest(slate=MARKED_SLATE, entries=[HEAT]).html
+
+    def pill(word: str) -> str:
+        end = html.index(f">{word}</span>")
+        return html[html.rindex("<span", 0, end) : end]
+
+    shape = "padding:2px 6px;border-radius:4px;"
+    for word in ("New", "Moved", "Unconfirmed"):
+        assert shape in pill(word)
+        assert "text-transform:uppercase" in pill(word)
+    assert "background:#dcfce7" in pill("New")
+    assert "background:#e0e7ff" in pill("Moved")
 
 
 def test_the_slate_comes_before_the_timeline():
