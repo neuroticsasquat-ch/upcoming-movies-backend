@@ -213,9 +213,18 @@ and a way to *look* at a digest without sending one.
 - **DC-10 (headers) `List-Unsubscribe` and one-click.** `Envelope` gains
   `headers: Mapping[str, str]` (default empty); the Resend transport passes them as the
   API's `headers` object; the noop transport keeps them on the envelope for tests. The digest
-  sets `List-Unsubscribe: <{PUBLIC_API_BASE}/digest/unsubscribe/{token}>` and
+  sets `List-Unsubscribe: <{API_BASE_URL}/digest/unsubscribe/{token}>` and
   `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. The alert mail sets neither (alerts are
   a follow's consequence, not a subscription — the footer's settings link stands).
+  - **`API_BASE_URL` is new.** The backend has no setting for its own public origin:
+    `PUBLIC_BASE_URL` is the frontend's, and the one API-origin link a user already holds (the
+    `.ics` URL) is assembled by the frontend. A mail header has no frontend to assemble it, so
+    the setting lands here: `API_BASE_URL` (str, default `http://localhost:8000`, no trailing
+    slash), validated in `validate_mail_configuration` beside `PUBLIC_BASE_URL` — a
+    transmitting provider with the default value is the same misconfiguration a localhost
+    `PUBLIC_BASE_URL` is. Seeded in `docker-compose.prod.yml`; **set in Coolify on deploy**
+    (`§7`). It is not routed through the frontend origin because the production proxy shape is
+    not the backend's to know.
   - **Token:** `user_settings.unsubscribe_token` (text, unique, NOT NULL, generated like
     `ical_token` via a `new_unsubscribe_token()` in `app/tokens.py`; backfilled by the
     migration for existing rows; created with the settings row). Opaque, never expires, not
@@ -297,6 +306,7 @@ JustWatch credit in place. Everything in §5 *The mail* and *The slate*.
 **Shared contracts**
 
 - `Envelope.headers`; Resend `headers` passthrough; noop keeps them.
+- `API_BASE_URL` setting (DC-10), the origin every API-side link in a mail is built on.
 - `user_settings.unsubscribe_token` + migration + `new_unsubscribe_token()`.
 - `POST|GET /digest/unsubscribe/{token}` as in DC-10; rate-limit bucket `digest_unsubscribe`.
 - `GET /me/settings` does **not** expose the token.
@@ -345,6 +355,10 @@ label; tickets carry `loop-ready` + `repo:<name>`.
   two must agree or daily and weekly readers get their slates on different days.
 - **M2 migration** backfills `unsubscribe_token` for existing settings rows; the header is
   emitted only once the column exists, so deploy the migration with the code (one PR).
+- **`API_BASE_URL` must be set in Coolify** with M2's deploy — the API's public origin (e.g.
+  `https://api.<domain>`), no trailing slash. Unset, the boot-time mail validation refuses a
+  transmitting provider, so a missed variable fails loudly rather than mailing a localhost
+  unsubscribe link.
 - **M4 after M1:** the copy promises a Thursday slate to daily readers.
 - Resend must accept the `headers` object (it does; documented API) — the transport test
   asserts the wire shape.
