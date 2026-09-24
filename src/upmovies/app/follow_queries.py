@@ -73,6 +73,7 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    union,
     union_all,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -588,6 +589,55 @@ def _entity_event_pairs(
     if not branches:
         return None
     return union_all(*branches)
+
+
+def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
+    """`(entity_type, entity_id, event_id)` — which of this user's follows reached which
+    published card (DC-6), across both grains.
+
+    The one builder the digest reads for its "Following:" line. The sender joins it to the
+    batch's event ids and names the entity rows; `_entity_event_pairs` stays private behind it,
+    so the line and the timeline cannot come to different answers about what an entity follow
+    delivers.
+
+    Two arms:
+
+    - every row `_entity_event_pairs` yields for this user's person, studio and franchise
+      follows (all five branches, EF-15's attribution), with `created_at` dropped;
+    - a **title** arm, `('title', film_id, event_id)` for every published card whose film is
+      in `title_follow_film_ids` — `status = 'published'` on the entity branches' terms, as in
+      `follow_last_activity`. Keyed by the card's own `film_id`, so the id is the canonical
+      UUID text whatever case the follow row was stored in.
+
+    **The title arm is not for the line.** The mail renders only the entity rows, and omits the
+    line when an entry has none: a reader who followed the film by name asked for it, and does
+    not need telling why it arrived. The arm is here so the preview and the tests can assert an
+    entry's *full* reach — a film reached by a title follow and a director follow yields both
+    rows, and the director is still named.
+
+    **De-duplicated** (`UNION`, not `UNION ALL`): a writer-director's `canceled` card comes out
+    of `_canceled_pairs` once per credit, and a pair is a reason, not a count. Two follows
+    reaching the same card are two reasons and stay two rows.
+
+    No window, no mute and no visibility term (EF-14): what the follows reach, and nothing
+    subtracted. Visibility stays the caller's, as on `entity_attachment_event_ids`.
+    """
+    title = (
+        select(
+            cast(literal("title"), Text).label("entity_type"),
+            cast(Event.film_id, Text).label("entity_id"),
+            Event.id.label("event_id"),
+        )
+        .where(Event.status == _PUBLISHED, Event.film_id.in_(title_follow_film_ids(user_id)))
+        .correlate(None)
+    )
+    pairs = _entity_event_pairs(user_id=user_id, only=None)
+    # `only=None` wants every type, so the person branch alone makes this non-empty.
+    assert pairs is not None
+    reached = pairs.subquery("reached")
+    entity = select(reached.c.entity_type, reached.c.entity_id, reached.c.event_id)
+    attributed = union(entity, title).subquery("attributed")
+    return select(attributed.c.entity_type, attributed.c.entity_id, attributed.c.event_id)
 
 
 def _person_attachment_pairs(

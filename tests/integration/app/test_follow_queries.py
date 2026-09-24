@@ -24,6 +24,7 @@ from upmovies.app.follow_queries import (
     entity_event_ids,
     first_association_clause,
     first_association_event_ids,
+    follow_attribution_pairs,
     follow_last_activity,
     title_follow_film_ids,
     title_followed_by_any_user_clause,
@@ -667,6 +668,140 @@ async def test_last_activity_is_bounded_by_an_int32_entity_id(session, user, mak
     await _follow(session, user, "person", "9999999999")
 
     assert (await session.execute(follow_last_activity(user.id))).all() == []
+
+
+# --- follow_attribution_pairs (DC-6) ---------------------------------------------------------
+
+
+async def _attribution(session, user_id) -> list[tuple]:
+    """Sorted rather than a set, so a pair reached twice would show up twice."""
+    return sorted(tuple(row) for row in (await session.execute(follow_attribution_pairs(user_id))))
+
+
+async def test_attribution_keys_a_person_card_to_the_person(
+    session, user, make_film, attach_card, add_event
+):
+    """The card the follow delivered, and nothing else on its film: a director follow is not a
+    subscription to the film's trailer (EF-3), so the trailer has no one to attribute it to."""
+    film = await make_film(slug="theirs", title="Theirs")
+    card = await attach_card(film, event_type="crew_attached")
+    await add_event(film=film, event_type="trailer")
+    await _follow(session, user, "person", str(DIRECTOR))
+
+    assert await _attribution(session, user.id) == [("person", str(DIRECTOR), card.id)]
+
+
+async def test_attribution_keys_a_first_association_to_the_person_it_names(
+    session, user, make_film, story_card
+):
+    """The story-backed branch: no `subject_key` on the card, so the person comes from its
+    story's resolved mention (D-1437.5) — and the key comes out with it."""
+    film = await make_film(slug="uncredited", title="Uncredited")
+    card = await story_card(film)
+    await _mention(session, card)
+    await _follow(session, user, "person", str(DIRECTOR))
+
+    assert await _attribution(session, user.id) == [("person", str(DIRECTOR), card.id)]
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "entity_id", "token", "event_type"),
+    [
+        pytest.param(
+            "company", COMPANY, company_subject_token(COMPANY), "company_attached", id="studio"
+        ),
+        pytest.param(
+            "franchise",
+            COLLECTION,
+            collection_subject_token(COLLECTION),
+            "collection_attached",
+            id="franchise",
+        ),
+    ],
+)
+async def test_attribution_keys_an_organisation_card_to_the_organisation(
+    session, user, make_film, add_event, entity_type, entity_id, token, event_type
+):
+    """The follow graph's word for the type — `franchise`, not the catalog's `collection` — is
+    what comes back, because the sender resolves names by the follow it came through."""
+    film = await make_film(slug="theirs", title="Theirs")
+    card = await add_event(film=film, event_type=event_type, subject_key=[token])
+    await _follow(session, user, entity_type, str(entity_id))
+
+    assert await _attribution(session, user.id) == [(entity_type, str(entity_id), card.id)]
+
+
+async def test_attribution_keys_every_published_beat_on_a_title_followed_film_to_the_title(
+    session, user, make_film, add_event
+):
+    """The title arm: every published beat on the film, whatever its type and however old the
+    film (EF-14) — no window and no mute stand between a follow and its reach. A superseded
+    card is not a beat to deliver (D-2), on the entity branches' terms."""
+    film = await make_film(
+        slug="asked-for", title="Asked For", release_date=TODAY - timedelta(days=365 * 12)
+    )
+    film.status = "Released"
+    await session.commit()
+    casting = await add_event(film=film, event_type="casting")
+    trailer = await add_event(film=film, event_type="trailer")
+    await add_event(film=film, event_type="casting", status="superseded")
+    await _follow(session, user, "title", str(film.id))
+
+    assert await _attribution(session, user.id) == sorted(
+        [("title", str(film.id), casting.id), ("title", str(film.id), trailer.id)]
+    )
+
+
+async def test_a_card_reached_by_a_title_and_a_director_follow_yields_both_rows(
+    session, user, make_film, attach_card
+):
+    """DC-6's own case: the reader asked for the film by name *and* follows its director. The
+    mail still names the director, so the entity row must survive beside the title row rather
+    than be folded into it."""
+    film = await make_film(slug="both", title="Both")
+    card = await attach_card(film, event_type="crew_attached")
+    await _follow(session, user, "title", str(film.id))
+    await _follow(session, user, "person", str(DIRECTOR))
+
+    assert await _attribution(session, user.id) == sorted(
+        [("person", str(DIRECTOR), card.id), ("title", str(film.id), card.id)]
+    )
+
+
+async def test_an_event_no_follow_reaches_yields_no_row(
+    session, user, make_user, make_film, attach_card, add_event
+):
+    """Another user's follows reach these cards; this user's reach nothing."""
+    other = await make_user(email="other@example.com")
+    film = await make_film(slug="theirs", title="Theirs")
+    await attach_card(film)
+    await add_event(film=film, event_type="trailer")
+    await _follow(session, other, "title", str(film.id))
+    await _follow(session, other, "person", str(DIRECTOR))
+    await _follow(session, user, "company", str(COMPANY))
+
+    assert await _attribution(session, user.id) == []
+
+
+async def test_attribution_is_one_row_per_follow_and_event(
+    session, user, make_film, attach_companies, canceled_card
+):
+    """A writer-director's `canceled` card comes out of `_canceled_pairs` once per credit; the
+    sender names each follow once, so the builder folds that to one row. The studio follow
+    reaching the same card is a different reason, and keeps its own row."""
+    from tests.fixtures.catalog import add_credit
+
+    film = await make_film(slug="called-off", title="Called Off")
+    await add_credit(session, film, DIRECTOR, credit_type="crew", job="Director")
+    await add_credit(session, film, DIRECTOR, credit_type="crew", job="Writer")
+    await attach_companies(film, [(COMPANY, "A Studio")])
+    card = await canceled_card(film)
+    await _follow(session, user, "person", str(DIRECTOR))
+    await _follow(session, user, "company", str(COMPANY))
+
+    assert await _attribution(session, user.id) == sorted(
+        [("company", str(COMPANY), card.id), ("person", str(DIRECTOR), card.id)]
+    )
 
 
 # --- first_association_clause (EF-13, D-1437.5) ----------------------------------------------
