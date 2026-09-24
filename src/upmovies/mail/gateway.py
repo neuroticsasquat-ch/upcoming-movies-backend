@@ -28,7 +28,7 @@ from upmovies.mail import templates
 from upmovies.mail.noop import NoopTransport
 from upmovies.mail.registry import MAIL_PROVIDERS, NOOP, RESEND, TRANSMITTING_PROVIDERS
 from upmovies.mail.resend import DEFAULT_MAIL_RETRY_POLICY, ResendClient
-from upmovies.mail.types import MessageId, Transport
+from upmovies.mail.types import Envelope, MessageId, Transport
 
 
 class MissingCredentialError(RuntimeError):
@@ -157,10 +157,20 @@ class MailGateway:
 
         Rendering happens before the transport is touched, so a template fault costs no
         connection and no provider call — and, more to the point, cannot half-send."""
-        if self._closed:
-            raise RuntimeError("this MailGateway is closed: its transport has been released")
+        self._check_open()
         envelope = templates.render(template, dict(context), sender=self._settings.mail_from, to=to)
         return await self._resolve().send(envelope)
+
+    async def deliver(self, envelope: Envelope) -> MessageId:
+        """Send an already-rendered `envelope` as it stands, returning the provider's id.
+
+        No render: the caller built the `Envelope`, and it is exactly what the transport gets."""
+        self._check_open()
+        return await self._resolve().send(envelope)
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("this MailGateway is closed: its transport has been released")
 
     def _resolve(self) -> Transport:
         if self._transport is None:

@@ -71,14 +71,24 @@ class TemplateRenderError(MailError):
 
 
 class Mailer(Protocol):
-    """What a caller needs in order to send mail: a template name, a recipient, a context.
+    """What a caller needs in order to send mail: a template name, a recipient, a context — or
+    an `Envelope` the caller has already rendered.
 
     A Protocol for the same reason `StageGateway` is one — routes and services are written
     against the surface, not against `MailGateway`, which reads `Settings` and owns an HTTP
     connection pool. A test substitutes `NoopTransport`-backed gateway, or its own stub,
-    without either importing the application's configuration."""
+    without either importing the application's configuration.
+
+    Two ways in, for two kinds of caller. The transactional mails (verify, reset, email
+    change, the alert) render inside `send`: nothing else ever needs their `Envelope`. The
+    digest renders first, through `digest_sender.render_batch`, and hands the result to
+    `deliver` — because an admin preview and a test-send need that same `Envelope` without a
+    send, and a second render path for them would be a second answer to "what does the mail
+    say" (NEU-1460, D-1460.1)."""
 
     async def send(self, *, to: str, template: str, context: dict[str, Any]) -> MessageId: ...
+
+    async def deliver(self, envelope: Envelope) -> MessageId: ...
 
 
 class Transport(Protocol):

@@ -1,7 +1,1 @@
-{% if slate_count and update_count %}
-Your slate: {{ slate_count }} upcoming date{{ 's' if slate_count != 1 else '' }} and {{ update_count }} update{{ 's' if update_count != 1 else '' }}
-{% elif slate_count %}
-Your slate: {{ slate_count }} upcoming date{{ 's' if slate_count != 1 else '' }}
-{% elif update_count %}
-Your {{ cadence }} digest: {{ update_count }} update{{ 's' if update_count != 1 else '' }}
-{% endif %}
+{{ subject }}

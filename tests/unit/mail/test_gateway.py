@@ -7,6 +7,7 @@ import respx
 
 from upmovies.config import get_settings
 from upmovies.mail import (
+    Envelope,
     MailConfigurationError,
     Mailer,
     MailGateway,
@@ -133,6 +134,34 @@ async def test_sending_through_a_closed_gateway_is_refused():
         pass
     with pytest.raises(RuntimeError, match="closed"):
         await mail.send(to="a@example.com", template="verify", context=VERIFY_CONTEXT)
+
+
+async def test_deliver_hands_the_envelope_to_the_transport_as_it_stands():
+    """The digest's way in (D-1460.1): the caller rendered it, so the transport gets exactly
+    that value — no second render, nothing re-read from settings."""
+    envelope = Envelope(
+        sender="Someone Else <x@example.com>",
+        to="ada@example.com",
+        subject="Already rendered",
+        text="Plain.",
+        html="<p>Plain.</p>",
+    )
+    transport = NoopTransport()
+    async with MailGateway(settings_with(**NOOP_CONFIG), transport=transport) as mail:
+        await mail.deliver(envelope)
+
+    assert transport.sent == [envelope]
+
+
+async def test_delivering_through_a_closed_gateway_is_refused():
+    transport = NoopTransport()
+    mail = MailGateway(settings_with(**NOOP_CONFIG), transport=transport)
+    async with mail:
+        pass
+    envelope = Envelope(sender="s@example.com", to="a@example.com", subject="S", text="T", html="")
+    with pytest.raises(RuntimeError, match="closed"):
+        await mail.deliver(envelope)
+    assert transport.sent == []
 
 
 async def test_the_gateway_names_the_provider_a_message_id_should_be_read_against():
