@@ -6,7 +6,8 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.1",
-    "sqlalchemy[asyncio]>=2.0.52",
+    # <2.1: its TypeVarTuple Select/Row typing fails pyright across the codebase; lift with that migration.
+    "sqlalchemy[asyncio]>=2.0.52,<2.1",
     "asyncpg>=0.31.0",
     "alembic>=1.19.1",
     "pydantic>=2.13.4",
