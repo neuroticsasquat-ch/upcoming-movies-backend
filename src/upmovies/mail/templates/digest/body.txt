@@ -1,21 +1,4 @@
-Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
-
-{% if slate %}
-YOUR SLATE — the next {{ slate_window_days }} days of films you follow
-
-{% for day in slate %}
-{{ day.heading }}
-{% for item in day.entries %}
-  {{ item.title }} — {{ item.release_label }}
-  {{ item.film_url }}
-{% endfor %}
-
-{% endfor %}
-{% endif %}
-{% if entries %}
-NEW ON YOUR TIMELINE
-
-{% for entry in entries %}
+{% macro film_entry(entry) %}
 {{ entry.title }} ({{ entry.parenthetical }})
 {{ entry.status }}
 {% if entry.following %}
@@ -33,7 +16,29 @@ Following: {% for f in entry.following %}{{ f.name }} <{{ f.url }}>{% if not loo
 Availability from JustWatch
 {% endif %}
 {{ entry.film_url }}
+{% endmacro %}
+{{ product_name }}
 
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+{% if slate %}
+YOUR SLATE — the next {{ slate_window_days }} days of films you follow
+
+{% for day in slate %}
+{{ day.heading }}
+{% for item in day.entries %}
+  {{ item.title }} — {{ item.release_label }}
+  {{ item.film_url }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+{% if lead %}
+NEW ON YOUR TIMELINE
+
+{{ film_entry(lead) }}
+{% for entry in entries %}
+{{ film_entry(entry) }}
 {% endfor %}
 {% if overflow_line %}
 {{ overflow_line }}

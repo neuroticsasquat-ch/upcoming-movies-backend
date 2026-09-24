@@ -5,6 +5,7 @@ Hand-built entries throughout — none of this touches the database, which is th
 functions being pure. `test_digest_sender.py` proves the loader feeds them what they expect."""
 
 from datetime import UTC, date, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -59,14 +60,15 @@ def _beat(
     )
 
 
-def _entry(title: str, *types: str, tmdb_id: int = 1) -> DigestEntry:
+def _entry(title: str, *types: str, tmdb_id: int = 1, poster: str | None = None) -> DigestEntry:
     return DigestEntry(
         film=DigestFilm(
             film_id=uuid4(),
             tmdb_id=tmdb_id,
             title=title,
             film_url=f"https://app.example.test/film/{tmdb_id}",
-            poster_url=None,
+            poster_url=poster and f"https://image.test/w154{poster}",
+            lead_poster_url=poster and f"https://image.test/w185{poster}",
         ),
         header=DigestHeader(parenthetical="2026", status="Announced"),
         following=(),
@@ -303,3 +305,35 @@ def test_the_justwatch_credit_and_the_following_line_are_the_entrys():
 
     assert (plain.credits_justwatch, streaming.credits_justwatch) == (False, True)
     assert plain.entity_following == ()
+
+
+# --- context (DC-14) ---------------------------------------------------------------------
+
+
+def test_the_context_leads_with_the_first_ranked_entry_at_the_lead_poster_size():
+    """The lead card is the lead film — the entry the subject names — at `w185`; the rows
+    after it keep the compact `w154`."""
+    lead = _entry("Lead", "release_date", poster="/lead.jpg")
+    row = _entry("Row", "casting", poster="/row.jpg")
+
+    context = digest_context(
+        _batch(*rank_entries([row, lead])), cadence="weekly", today=TODAY, settings=get_settings()
+    )
+
+    lead_card = cast(dict[str, object], context["lead"])
+    rows = cast(list[dict[str, object]], context["entries"])
+    assert (lead_card["title"], lead_card["poster_url"]) == (
+        "Lead",
+        "https://image.test/w185/lead.jpg",
+    )
+    assert [(e["title"], e["poster_url"]) for e in rows] == [
+        ("Row", "https://image.test/w154/row.jpg")
+    ]
+
+
+def test_a_slate_only_context_has_no_lead():
+    context = digest_context(
+        _batch(slate=1), cadence="weekly", today=TODAY, settings=get_settings()
+    )
+
+    assert (context["lead"], context["entries"]) == (None, [])

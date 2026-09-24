@@ -1,3 +1,5 @@
+{{ product_name }}
+
 Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
 
 {% if items | length == 1 %}
@@ -9,6 +11,9 @@ Something moved on a film you are watching.
 {% for item in items %}
 {{ item.title }} — {{ item.beat }}
 {{ item.summary }}
+{% if item.credits_justwatch %}
+Availability from JustWatch
+{% endif %}
 {{ item.film_url }}
 
 {% endfor %}

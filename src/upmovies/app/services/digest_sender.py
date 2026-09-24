@@ -85,6 +85,8 @@ from upmovies.app.models import (
 from upmovies.app.services.alert_sender import (
     BEAT_LABELS,
     EMAIL_CHANNEL,
+    JUSTWATCH_EVENT_TYPE,
+    LEAD_POSTER_SIZE,
     film_url,
     mark,
     poster_url,
@@ -221,10 +223,6 @@ _COUNTRY_CAP = 3
 _DIRECTOR_CAP = 2
 """`filmParenthetical`'s caps (`lib/format.ts`): the feed row has the width for three
 countries and two directors, and the mail's header is that row."""
-
-JUSTWATCH_EVENT_TYPE = "now_available"
-"""The beat whose data is JustWatch's, via TMDB's watch-provider endpoint — the condition on
-that data is a visible credit wherever it is shown (DC-17)."""
 
 _FOLLOWING_ROUTES: dict[str, str] = {
     "person": "person",
@@ -364,6 +362,10 @@ class DigestFilm:
     title: str
     film_url: str
     poster_url: str | None
+    """The compact row's poster (`w154`, shown at 62px)."""
+    lead_poster_url: str | None
+    """The lead card's poster (`w185`, shown at 92px, DC-14). Built for every film because
+    which film leads is decided by ranking the whole batch, after the lookups."""
 
 
 @dataclass(frozen=True)
@@ -677,6 +679,9 @@ async def load_entries(
                     title=film.title,
                     film_url=film_url(film.tmdb_id, film.title, settings.public_base_url),
                     poster_url=poster_url(film.poster_path, settings.tmdb_image_base),
+                    lead_poster_url=poster_url(
+                        film.poster_path, settings.tmdb_image_base, size=LEAD_POSTER_SIZE
+                    ),
                 ),
                 header=DigestHeader(
                     parenthetical=film_parenthetical(
@@ -924,6 +929,34 @@ def digest_preheader(batch: DigestBatch) -> str:
     return " ".join(parts)
 
 
+def _entry_context(entry: DigestEntry, *, poster_url: str | None, today: date) -> dict[str, object]:
+    """One film entry as the template renders it, lead card and compact row alike — they
+    differ in layout and poster size only, and the size is the caller's choice."""
+    return {
+        "title": entry.film.title,
+        "film_url": entry.film.film_url,
+        "poster_url": poster_url,
+        "parenthetical": entry.header.parenthetical,
+        "status": entry.header.status,
+        "following": [{"name": f.name, "url": f.url} for f in entry.entity_following],
+        "beats": [
+            {
+                "date": short_date(beat.day, today=today),
+                "label": beat.label,
+                "unconfirmed": beat.confidence == "rumored",
+                "summary": beat.summary,
+                "source": (
+                    {"name": beat.source.name, "url": beat.source.url}
+                    if beat.source is not None
+                    else None
+                ),
+            }
+            for beat in entry.beats
+        ],
+        "credits_justwatch": entry.credits_justwatch,
+    }
+
+
 def digest_context(
     batch: DigestBatch, *, cadence: DigestCadence, today: date, settings: Settings
 ) -> dict[str, object]:
@@ -932,6 +965,11 @@ def digest_context(
 
     Raises `ValueError` (through `digest_subject`) for a batch with nothing to say:
     `render_batch` never builds one, so a caller that does has skipped that check."""
+    # The lead film renders as the lead card, every other entry as a compact row (DC-14).
+    # Split here rather than on `loop.first` in the template, so which entry leads is decided
+    # in the one place the subject's lead film is (DC-7).
+    rendered = batch.rendered_entries
+    lead = rendered[0] if rendered else None
     return {
         "product_name": settings.product_name,
         "display_name": batch.recipient.display_name,
@@ -956,31 +994,14 @@ def digest_context(
             }
             for d in batch.slate
         ],
+        "lead": (
+            _entry_context(lead, poster_url=lead.film.lead_poster_url, today=today)
+            if lead is not None
+            else None
+        ),
         "entries": [
-            {
-                "title": entry.film.title,
-                "film_url": entry.film.film_url,
-                "poster_url": entry.film.poster_url,
-                "parenthetical": entry.header.parenthetical,
-                "status": entry.header.status,
-                "following": [{"name": f.name, "url": f.url} for f in entry.entity_following],
-                "beats": [
-                    {
-                        "date": short_date(beat.day, today=today),
-                        "label": beat.label,
-                        "unconfirmed": beat.confidence == "rumored",
-                        "summary": beat.summary,
-                        "source": (
-                            {"name": beat.source.name, "url": beat.source.url}
-                            if beat.source is not None
-                            else None
-                        ),
-                    }
-                    for beat in entry.beats
-                ],
-                "credits_justwatch": entry.credits_justwatch,
-            }
-            for entry in batch.rendered_entries
+            _entry_context(entry, poster_url=entry.film.poster_url, today=today)
+            for entry in rendered[1:]
         ],
         "overflow": batch.overflow,
         "overflow_line": (
