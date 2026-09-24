@@ -1,6 +1,7 @@
-"""The `digest` template's copy (NEU-1381, NEU-1460): what the daily and weekly digests say,
-laid out as film entries — a header, a "Following:" line, dated and sourced beats — beside the
-slate.
+"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461): what the daily and weekly
+digests say, laid out as film entries — a header, a "Following:" line, dated and sourced beats —
+beside the slate, under a wordmark, with the lead film as a lead card and the rest as compact
+rows.
 
 Beside `test_alert_template.py` for its reason: `test_templates.py` asserts the rendering
 rules against whichever template is handy; this asserts the digest's own copy. The context is
@@ -98,6 +99,9 @@ def _digest(
     overflow=0,
     **overrides,
 ):
+    """`entries` in mail order; the first becomes the context's `lead`, as `digest_context`
+    splits it."""
+    lead, *rest = list(entries) or [None]
     context: dict[str, object] = {
         "product_name": "Backlotter",
         "display_name": "Ada",
@@ -107,7 +111,8 @@ def _digest(
         "subject": subject,
         "preheader": preheader,
         "slate": list(slate),
-        "entries": list(entries),
+        "lead": lead,
+        "entries": rest,
         "overflow": overflow,
         "overflow_line": (
             f"and {overflow} more film{'' if overflow == 1 else 's'} on your timeline"
@@ -300,6 +305,63 @@ def test_the_slate_comes_before_the_timeline():
         assert part.index("your slate") < part.index("on your timeline")
 
 
+def test_both_parts_open_with_the_wordmark():
+    """DC-14: one line of text naming the product heads the card — the same line the alert
+    opens with, so the two mails read as one sender."""
+    envelope = _digest(entries=ENTRIES, preheader="Also: Zodiac — now streaming")
+
+    assert envelope.text.startswith("Backlotter\n\nHi Ada,")
+    assert envelope.html.index("Also: Zodiac") < envelope.html.index(">Backlotter</p>")
+    assert envelope.html.index(">Backlotter</p>") < envelope.html.index("Hi Ada")
+
+
+def test_the_lead_card_renders_for_the_first_entry_only():
+    """DC-14: the lead film is the lead card — 92px poster; every other entry is a compact
+    row with the 62px one."""
+    lead = {**ZODIAC, "poster_url": "https://image.tmdb.org/t/p/w185/zodiac.jpg"}
+    row = {**HEAT, "poster_url": "https://image.tmdb.org/t/p/w154/heat.jpg"}
+    third = {**ZODIAC, "title": "Seven", "film_url": "https://x.test/7"}
+
+    html = _digest(entries=[lead, row, third]).html
+
+    assert html.count('width="92"') == 2  # the lead's poster cell and its <img>
+    assert f'<img src="{lead["poster_url"]}" width="92"' in html
+    assert f'<img src="{row["poster_url"]}" width="62"' in html
+    assert f'<img src="{third["poster_url"]}" width="62"' in html
+    assert html.index(lead["poster_url"]) < html.index("Heat 2")
+
+
+def test_every_image_is_sized_as_specified():
+    """Only two poster widths exist: 92px on the lead card, 62px on compact rows and the
+    slate — each `<img` carries the width as an attribute and in its style, because Outlook
+    reads the one and every other client the other."""
+    lead = {**ZODIAC, "poster_url": "https://image.tmdb.org/t/p/w185/zodiac.jpg"}
+    row = {**HEAT, "poster_url": "https://image.tmdb.org/t/p/w154/heat.jpg"}
+
+    html = _digest(slate=SLATE, entries=[lead, row]).html
+
+    imgs = re.findall(r'<img [^>]*width="(\d+)"[^>]*width:(\d+)px', html)
+    assert imgs == [("62", "62"), ("92", "92"), ("62", "62")]
+
+
+def test_a_digest_of_one_entry_has_a_lead_card_and_no_rows():
+    lead = {**ZODIAC, "poster_url": "https://image.tmdb.org/t/p/w185/zodiac.jpg"}
+
+    html = _digest(entries=[lead]).html
+
+    assert f'<img src="{lead["poster_url"]}" width="92"' in html
+    assert 'width="62"' not in html
+
+
+def test_the_unconfirmed_marker_is_the_feeds_amber_pill():
+    html = _digest(entries=[ZODIAC, HEAT]).html
+
+    pill = html[html.rindex("<span", 0, html.index("Unconfirmed")) : html.index("Unconfirmed")]
+    assert "background:#fef3c7" in pill
+    assert "color:#92400e" in pill
+    assert "text-transform:uppercase" in pill
+
+
 def test_the_poster_is_rendered_when_there_is_one_and_omitted_when_there_is_not():
     with_poster = _digest(entries=[ZODIAC]).html
     without = _digest(entries=[HEAT]).html
@@ -321,7 +383,7 @@ def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
 def test_display_name_is_optional_the_way_every_other_template_makes_it():
     envelope = _digest(entries=ENTRIES, display_name="")
 
-    assert envelope.text.startswith("Hi,")
+    assert envelope.text.startswith("Backlotter\n\nHi,")
 
 
 def test_markup_escapes_in_html_and_not_in_text():

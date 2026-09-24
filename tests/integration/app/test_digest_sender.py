@@ -239,7 +239,9 @@ async def test_the_weekly_digest_carries_the_slate_and_one_ranked_entry_per_film
     assert "September 15, 2026" not in timeline
     assert f"{BASE_URL}/film/{dune.tmdb_id}-dune-part-three" in text
     assert f"{BASE_URL}/settings" in text
-    assert f"{IMAGE_BASE}/w154/dune.jpg" in envelope.html
+    # Dune is on the slate as a 62px row and leads the timeline as the 92px lead card (DC-14).
+    assert f'<img src="{IMAGE_BASE}/w154/dune.jpg" width="62"' in envelope.html
+    assert f'<img src="{IMAGE_BASE}/w185/dune.jpg" width="92"' in envelope.html
     assert [row.status for row in await _rows(session)] == ["sent"] * 3
     assert all(row.sent_at is not None for row in await _rows(session))
 
