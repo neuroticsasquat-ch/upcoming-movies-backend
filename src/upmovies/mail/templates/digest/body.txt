@@ -12,20 +12,34 @@ YOUR SLATE — the next {{ slate_window_days }} days of films you follow
 
 {% endfor %}
 {% endif %}
-{% if days %}
+{% if entries %}
 NEW ON YOUR TIMELINE
 
-{% for day in days %}
-{{ day.heading }}
-{% for film in day.films %}
-  {{ film.title }}
-{% for event in film.events %}
-  {{ event.beat }}: {{ event.summary }}
+{% for entry in entries %}
+{{ entry.title }} ({{ entry.parenthetical }})
+{{ entry.status }}
+{% if entry.following %}
+Following: {% for f in entry.following %}{{ f.name }} <{{ f.url }}>{% if not loop.last %}, {% endif %}{% endfor %}
+
+{% endif %}
+{% for beat in entry.beats %}
+{{ beat.date }} · {{ beat.label }}{% if beat.unconfirmed %} [unconfirmed]{% endif %} · {{ beat.summary }}
+{% if beat.source %}
+  via {{ beat.source.name }}{% if beat.source.url %} — {{ beat.source.url }}{% endif %}
+
+{% endif %}
 {% endfor %}
-  {{ film.film_url }}
-{% endfor %}
+{% if entry.credits_justwatch %}
+Availability from JustWatch
+{% endif %}
+{{ entry.film_url }}
 
 {% endfor %}
+{% if overflow_line %}
+{{ overflow_line }}
+{{ timeline_url }}
+
+{% endif %}
 {% endif %}
 You are getting this {{ cadence }} digest because you follow people, companies, franchises and
 films on {{ product_name }}, and because films you follow have dates coming up. Change
