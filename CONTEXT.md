@@ -860,11 +860,39 @@ _Avoid_: alert types, notification settings (those are the user's prefs *over* t
 coverage (retired).
 
 **Digest**:
-The batched delivery of a user's timeline — daily or weekly, their choice — for everything the
-push whitelist does not cover. It carries every card the timeline carries, `rumored` ones
-included (EF-7, EF-10; NEU-1437): confirmation is what a *push* waits for, not a digest line.
-The weekly "your slate" mail is a digest; its slate is the films the user follows.
-_Avoid_: newsletter, summary email, notification.
+The batched delivery of a user's timeline — daily or weekly, their choice, never both — for
+everything the push whitelist does not cover. It carries every card the timeline carries,
+`rumored` ones included (EF-7, EF-10; NEU-1437): confirmation is what a *push* waits for, not a
+digest line. A digest reads by **film entry**, not by day: one entry per film, its beats in the
+order they were published, entries ranked by their most significant beat — the day grouping is
+the feed's, not the mail's. On the **slate day** either cadence carries the **slate** in front.
+_Avoid_: newsletter, summary email, notification, "the weekly slate mail" (the slate is a
+section, not a cadence).
+
+**Slate**:
+The upcoming US dates — theatrical, digital and physical — for the films a user follows by
+title, over the next 30 days, soonest first. The same set the my-films calendar and the `.ics`
+feed list (EF-14): a slate cannot name a date the calendar would not. A date set or moved since
+the previous slate day is marked as such.
+_Avoid_: calendar (that is the surface), upcoming releases (that is the public page), watchlist.
+
+**Slate day**:
+The one weekday, product-wide, on which a digest carries the slate: the weekly cadence's
+send day, and the daily cadence's one slate-bearing morning. Thursday.
+_Avoid_: digest day, send day.
+
+**Lead film** (of a digest):
+The film entry ranked first — the most significant beat in the mail, by the feed's beat
+significance, title breaking ties. It names the subject line and renders as the mail's lead
+card; every other entry is compact.
+_Avoid_: hero, headline (that is a release date), top story.
+
+**Film entry** (in a digest):
+One film's block in a digest: the film's header (title, parenthetical, headline release),
+which follows put it in the mail, and its beat lines. A digest shows at most a fixed number of
+entries and links to the timeline for the rest; the cut is presentation, the queue is still
+sent.
+_Avoid_: card (that is one beat on screen), item, row.
 
 **Home-release date**:
 A US digital (TMDB type 4) or physical (type 5) release date. Part of the displayable set beside
