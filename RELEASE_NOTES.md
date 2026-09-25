@@ -1,5 +1,22 @@
 # Release notes
 
+## 1.1.0 — 2026-09-25
+
+### Digest
+
+- Film entries — ranked, attributed, dated, sourced, capped ([NEU-1460](https://linear.app/neuroticsasquatch/issue/NEU-1460)) ([#376](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/376))
+- Slate day for the daily cadence and new/moved slate markers ([NEU-1462](https://linear.app/neuroticsasquatch/issue/NEU-1462)) ([#379](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/379))
+- One-click unsubscribe — Envelope headers, token and routes ([NEU-1463](https://linear.app/neuroticsasquatch/issue/NEU-1463)) ([#380](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/380))
+- Admin digest preview and test-send routes ([NEU-1464](https://linear.app/neuroticsasquatch/issue/NEU-1464)) ([#381](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/381))
+
+### Follows
+
+- Follow_attribution_pairs — which follow reached which event ([NEU-1459](https://linear.app/neuroticsasquatch/issue/NEU-1459)) ([#375](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/375))
+
+### Mail
+
+- Digest and alert visual pass — wordmark, lead card, compact rows ([NEU-1461](https://linear.app/neuroticsasquatch/issue/NEU-1461)) ([#378](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/378))
+
 ## 1.0.0 — 2026-09-23
 
 ### Api
