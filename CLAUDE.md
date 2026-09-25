@@ -62,9 +62,9 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
   is the D-27 watch-provider poll, on a fourth slot for the same reasons; `notify` is M7's
   decision pass (D-31) *and* the alert send that follows it in the same run, scheduled after the
   daily chain because it reads what that chain published; `digest {daily|weekly}` mails each
-  user on that cadence the digest rows `notify` queued, weekly with the "your slate" section
-  (D-33), on one slot per cadence after `notify`. Each pings a healthchecks.io deadman
-  (`/start`, base, `/fail`).
+  user on that cadence the digest rows `notify` queued, with the "your slate" section weekly
+  and — daily — on `SLATE_WEEKDAY` (D-33, DC-2), on one slot per cadence after `notify`. Each
+  pings a healthchecks.io deadman (`/start`, base, `/fail`).
 
 ### Layout (`src/upmovies/`)
 

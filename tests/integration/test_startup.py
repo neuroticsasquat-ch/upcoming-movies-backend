@@ -100,6 +100,7 @@ RESEND_MAIL: dict[str, object] = {
     "mail_provider": "resend",
     "mail_from": "Backlotter <no-reply@upmovies.test>",
     "resend_api_key": "re_test",
+    "api_base_url": "https://api.upmovies.test",
 }
 NOOP_MAIL: dict[str, object] = {
     "mail_provider": "noop",

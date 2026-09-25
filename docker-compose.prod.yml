@@ -51,6 +51,13 @@ services:
       # https://backlotter.com in the deploy environment (unset = empty string overrides the
       # code default; the fallback below prevents silent misconfiguration).
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://backlotter.com}"
+      # The API's own public origin, no trailing slash (DC-10) — the digest's List-Unsubscribe
+      # link is built on it, and a mailbox provider POSTs to it from its own servers. Seeded at
+      # the prod origin like PUBLIC_BASE_URL above, so a fresh deploy is right without a UI
+      # edit. DEPLOY CHECKLIST (NEU-1463): confirm the Coolify entry with `printenv`. Boot
+      # validation refuses MAIL_PROVIDER=resend only on the *code* default (localhost), which
+      # this fallback means prod never reaches — it guards other environments, not this one.
+      API_BASE_URL: "${API_BASE_URL:-https://api.backlotter.com}"
       # TMDB's image CDN, without a size segment — the base the *mail* builds absolute poster
       # URLs from (NEU-1380), and it must agree with the frontend's VITE_TMDB_IMAGE_BASE. Here
       # for the Coolify reason the mail block below gives: a variable absent from the file at
@@ -79,6 +86,10 @@ services:
       # daily check cannot also expect the weekly ping (D-33, NEU-1381).
       HEALTHCHECK_DIGEST_DAILY_URL: "${HEALTHCHECK_DIGEST_DAILY_URL:-}"
       HEALTHCHECK_DIGEST_WEEKLY_URL: "${HEALTHCHECK_DIGEST_WEEKLY_URL:-}"
+      # The slate day (DC-2, NEU-1462): the daily slot puts the slate in front of a daily
+      # reader's cards on this weekday, and the weekly slot must be *scheduled* on it — Coolify's
+      # schedule is not something this file can set, so the two agree only by hand (AGENTS.md).
+      SLATE_WEEKDAY: "${SLATE_WEEKDAY:-thursday}"
       # Candidate retrieval's T and K. Passed through so tuning them is a Coolify env change
       # rather than a redeploy. The fallbacks repeat the code defaults deliberately, same
       # reason as PUBLIC_BASE_URL above: unset would otherwise pass an empty string and fail
@@ -241,6 +252,7 @@ services:
       RATE_LIMIT_IMPORT: "${RATE_LIMIT_IMPORT:-6/0.1}"
       RATE_LIMIT_PUBLIC: "${RATE_LIMIT_PUBLIC:-240/120}"
       RATE_LIMIT_ICS: "${RATE_LIMIT_ICS:-30/30}"
+      RATE_LIMIT_DIGEST_UNSUBSCRIBE: "${RATE_LIMIT_DIGEST_UNSUBSCRIBE:-300/300}"
       # The secret the SSR Worker signs its API calls with, so it can name the visitor it is
       # rendering for instead of being metered as one caller. Seeded **empty**, like
       # TURNSTILE_SECRET above: unset means the signature header is ignored, never that a

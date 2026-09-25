@@ -36,8 +36,8 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
 | `notify` | daily, **after** `daily` | the M7 decision pass, then the mail and push sends (D-31, NEU-1379/1380/1387) |
-| `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user (D-33, NEU-1381) |
-| `digest weekly` | weekly, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
+| `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user, with the slate on `SLATE_WEEKDAY` (D-33, DC-2, NEU-1381/1462) |
+| `digest weekly` | weekly on `SLATE_WEEKDAY`, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
 
 **`providers` is a new slot and must be added in the Coolify UI** — nothing in the repo creates
 it, so merging this leaves the poll never running, with no failing check to say so. Put it beside
@@ -120,15 +120,35 @@ mail prerequisites (`MAIL_PROVIDER`, `MAIL_FROM`, `PUBLIC_BASE_URL`, `TMDB_IMAGE
 frontend `/settings` route) and its `failed`-is-terminal rule. Specific to them:
 
 - **Run them after `notify`, on the same day.** The digest mails the `digest` rows the
-  decision pass queued; a slot that runs before it mails yesterday's. The weekly slot's day is
-  the product's "your slate" day — pick one and keep it, since the mail says "the next 30
-  days" and a moved slot shifts what that window means.
+  decision pass queued; a slot that runs before it mails yesterday's.
+- **The weekly slot must run on `SLATE_WEEKDAY` (DC-2, NEU-1462).** That setting (default
+  `thursday`, seeded in `docker-compose.prod.yml`) is the product's one slate day: the
+  `digest daily` slot reads it and puts the slate in front of a daily reader's cards on that
+  weekday — and mails a daily reader with an empty queue and a non-empty slate, as the weekly
+  does. The weekly slot always carries the slate whatever day it runs, because the repo cannot
+  see the Coolify schedule, so nothing fails if the two disagree: daily and weekly readers
+  simply get their slates on different days. If the weekly slot is scheduled on another day,
+  move it, or set `SLATE_WEEKDAY` to match in the Coolify UI (the compose value is a seed, per
+  the gotcha below). Keep the day fixed once chosen: the slate's `new` / `moved` markers look
+  back seven days, which is "since the previous slate day" only while the slate runs weekly on
+  one weekday.
 - **Nothing here has a watermark.** The backlog is the `queued` rows, so a failed run leaves
   exactly what did not go out for the next slot, and a first run is not a cold start — it
   mails whatever the notify pass has queued since it was turned on.
 - **`digest_cadence = off` rows accumulate.** The decision pass keeps queueing for a user who
   has turned the digest off, and neither slot reads them; switching back to `weekly` gets
   everything since in one mail. Nothing prunes that backlog.
+- **`API_BASE_URL` must be the API's public origin (DC-10, NEU-1463).** Every digest carries
+  `List-Unsubscribe: <{API_BASE_URL}/digest/unsubscribe/{token}>` plus RFC 8058's one-click
+  `List-Unsubscribe-Post`, and a mailbox provider POSTs to that URL from its own servers. Set
+  it in the Coolify UI (`https://api.backlotter.com`, no trailing slash) and confirm it with
+  `printenv`. Boot validation refuses `MAIL_PROVIDER=resend` on the code default
+  (`http://localhost:8000`), but `docker-compose.prod.yml` seeds the prod origin, so in prod
+  that guard never fires — a wrong Coolify value is caught by nothing. The route is public,
+  answers `404` for an unknown token, and sits on its own `digest_unsubscribe` rate bucket,
+  kept wide (`300/300`) because the one-click POSTs arrive from a mailbox provider's few
+  shared IPs. The send creates a settings row for a reader it is about to mail who has none —
+  the token lives there — so rows appear for weekly readers who never opened their settings.
 
 Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
 

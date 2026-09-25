@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +20,15 @@ Provider = Literal["anthropic", "deepinfra", "deepseek"]
 # because `mail.gateway` reads `Settings` and importing the `mail` package here would be a
 # cycle. A test pins the two together, exactly as it does for `Provider`.
 MailProvider = Literal["resend", "noop"]
+
+# `SLATE_WEEKDAY`'s values, in `date.weekday()` order — `WEEKDAYS.index(name)` is the number a
+# date's `weekday()` returns on that day. Lower case because the value is typed into Coolify.
+Weekday = Literal["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+WEEKDAYS: tuple[Weekday, ...] = get_args(Weekday)
+
+# `API_BASE_URL`'s default: the dev API. Named because `mail.gateway` compares against it — a
+# transmitting provider still on the default would mail a localhost unsubscribe link (DC-10).
+DEFAULT_API_BASE_URL = "http://localhost:8000"
 
 
 class Settings(BaseSettings):
@@ -485,6 +494,12 @@ class Settings(BaseSettings):
     healthcheck_digest_weekly_url: str | None = Field(
         default=None, alias="HEALTHCHECK_DIGEST_WEEKLY_URL"
     )
+    # The product's one slate day (DC-2). The daily slot reads it — on this weekday a daily
+    # reader gets the slate in front of their cards — and it documents the day the weekly
+    # Coolify slot must be scheduled on, which the repo cannot enforce (AGENTS.md). The weekly
+    # send always carries the slate, whatever day it runs; the two must agree or daily and
+    # weekly readers get their slates on different days.
+    slate_weekday: Weekday = Field(default="thursday", alias="SLATE_WEEKDAY")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -492,6 +507,13 @@ class Settings(BaseSettings):
         default="https://app.upmovies.localhost", alias="CORS_ALLOWED_ORIGINS"
     )
     public_base_url: str = Field(default="http://localhost:5173", alias="PUBLIC_BASE_URL")
+    # The API's own public origin, no trailing slash (DC-10). `PUBLIC_BASE_URL` above is the
+    # frontend's, and until the digest's `List-Unsubscribe` header nothing here needed this
+    # one: the only API-origin link a user held (the `.ics` URL) is assembled by the frontend.
+    # A mail header has no frontend to assemble it. Its own setting rather than a path under
+    # the frontend origin, because the production proxy shape is not the backend's to know.
+    # `validate_mail_configuration` refuses a transmitting provider on the default.
+    api_base_url: str = Field(default=DEFAULT_API_BASE_URL, alias="API_BASE_URL")
     # Where TMDB's image CDN serves poster paths from, without a size segment. The frontend
     # builds its own URLs from `VITE_TMDB_IMAGE_BASE` and this is the same value; the backend
     # needs its own because a *mail* carries absolute image URLs — there is no page around the
@@ -540,6 +562,14 @@ class Settings(BaseSettings):
     rate_limit_import: str = Field(default="6/0.1", alias="RATE_LIMIT_IMPORT")
     rate_limit_public: str = Field(default="240/120", alias="RATE_LIMIT_PUBLIC")
     rate_limit_ics: str = Field(default="30/30", alias="RATE_LIMIT_ICS")
+    # The digest's one-click unsubscribe (DC-10). **Wide on purpose**: the RFC 8058 POST comes
+    # from the mailbox provider's own servers, a small shared pool of addresses, so every Gmail
+    # reader who presses Unsubscribe draws on the same few buckets — and a 429 there is an
+    # unsubscribe silently dropped, a reader still mailed, and a spam complaint. The tokens are
+    # 256-bit, so the bucket guards the database against a flood, not against guessing.
+    rate_limit_digest_unsubscribe: str = Field(
+        default="300/300", alias="RATE_LIMIT_DIGEST_UNSUBSCRIBE"
+    )
     # The secret the SSR Worker signs its API calls with (`X-Backlotter-Origin`), which is what
     # lets it name the visitor it is rendering for instead of being metered as one caller.
     # `None` by default — and an unset secret means the header is ignored entirely, never that

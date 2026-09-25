@@ -29,3 +29,13 @@ def new_ical_token() -> str:
     `secrets` is what makes guessing one not worth attempting; rotation (D-34) is what handles a
     URL that leaked rather than one that was guessed."""
     return secrets.token_urlsafe(32)
+
+
+def new_unsubscribe_token() -> str:
+    """The token in a digest's one-click unsubscribe link (DC-10).
+
+    Same generator and width as `new_ical_token` above, for the same reason: it is an
+    unauthenticated bearer credential in a URL — this one in the `List-Unsubscribe` header of
+    every digest — and a mailbox provider POSTs to it with no cookie. It can only ever turn a
+    digest off, which is why it neither expires nor rotates in v1."""
+    return secrets.token_urlsafe(32)

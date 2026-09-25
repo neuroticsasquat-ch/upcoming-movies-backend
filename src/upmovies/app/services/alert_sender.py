@@ -91,6 +91,16 @@ POSTER_SIZE = "w154"
 connection and its images are fetched before the reader has decided they want them, so the
 poster is a thumbnail beside the copy rather than the artwork it is on the film page."""
 
+LEAD_POSTER_SIZE = "w185"
+"""The poster width for a mail's lead card — the digest's lead film and every alert item —
+shown at 92px (DC-14). `w154` is under two device pixels per CSS pixel at that size, so the
+one poster a mail leads with would be the one that renders soft on a phone."""
+
+JUSTWATCH_EVENT_TYPE = "now_available"
+"""The beat whose data is JustWatch's, via TMDB's watch-provider endpoint — the condition on
+that data is a visible credit wherever it is shown, in the alert and the digest alike
+(DC-17)."""
+
 BEAT_LABELS = {
     "release_date": "Release date",
     "now_available": "Now available",
@@ -119,6 +129,7 @@ class AlertItem:
     summary: str
     film_url: str
     poster_url: str | None
+    credits_justwatch: bool
 
     def as_context(self) -> dict[str, object]:
         """The template's view of this item — deliberately without the notification id, which
@@ -129,6 +140,7 @@ class AlertItem:
             "summary": self.summary,
             "film_url": self.film_url,
             "poster_url": self.poster_url,
+            "credits_justwatch": self.credits_justwatch,
         }
 
 
@@ -175,15 +187,16 @@ class AlertSendResult:
     abort_error: str | None = None
 
 
-def poster_url(poster_path: str | None, image_base: str) -> str | None:
-    """The absolute URL for a poster path, or None when the film has no poster.
+def poster_url(poster_path: str | None, image_base: str, *, size: str = POSTER_SIZE) -> str | None:
+    """The absolute URL for a poster path at a TMDB `size`, or None when the film has no
+    poster.
 
     Absolute because a mail has no page to resolve a relative path against. None rather than a
     placeholder image: the template drops the poster cell entirely, which reads better than a
     grey box and costs the reader one fewer image fetch."""
     if not poster_path:
         return None
-    return f"{image_base.rstrip('/')}/{POSTER_SIZE}{poster_path}"
+    return f"{image_base.rstrip('/')}/{size}{poster_path}"
 
 
 def film_url(tmdb_id: int, title: str, base_url: str) -> str:
@@ -264,7 +277,10 @@ async def load_alert_backlog(session: AsyncSession, *, settings: Settings) -> li
                 beat=beat_label(row.event_type),
                 summary=row.summary,
                 film_url=film_url(row.tmdb_id, row.title, settings.public_base_url),
-                poster_url=poster_url(row.poster_path, settings.tmdb_image_base),
+                poster_url=poster_url(
+                    row.poster_path, settings.tmdb_image_base, size=LEAD_POSTER_SIZE
+                ),
+                credits_justwatch=row.event_type == JUSTWATCH_EVENT_TYPE,
             )
         )
     return [

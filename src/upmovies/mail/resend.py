@@ -55,14 +55,21 @@ def _to_wire(envelope: Envelope) -> dict[str, Any]:
     `to` is a list because the API takes one, not because we batch: a send is to one
     recipient, and keeping it that way is what makes a delivery failure attributable to a
     user. Both bodies are always sent — Resend assembles the `multipart/alternative` itself
-    — so a client that cannot render HTML still gets the copy that matters."""
-    return {
+    — so a client that cannot render HTML still gets the copy that matters.
+
+    `headers` is Resend's object of custom message headers, sent only when the envelope has
+    any: a transactional mail's wire body stays exactly what it was before the field existed
+    (DC-10)."""
+    body: dict[str, Any] = {
         "from": envelope.sender,
         "to": [envelope.to],
         "subject": envelope.subject,
         "text": envelope.text,
         "html": envelope.html,
     }
+    if envelope.headers:
+        body["headers"] = dict(envelope.headers)
+    return body
 
 
 def _classify(exc: BaseException) -> Retry | None:

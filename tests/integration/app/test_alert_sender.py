@@ -139,6 +139,8 @@ async def test_a_queued_alert_sends_once_and_the_row_records_it(
     assert (result.mails_sent, result.sent, result.failed, result.suppressed) == (1, 1, 0, 0)
     (envelope,) = mailbox.sent
     assert envelope.to == "sub@example.com"
+    # DC-10: an alert is a follow's consequence, not a subscription — no List-Unsubscribe.
+    assert dict(envelope.headers) == {}
     (row,) = await _rows(session)
     assert row.status == "sent"
     assert row.sent_at is not None
@@ -165,7 +167,9 @@ async def test_the_mail_carries_the_title_poster_summary_film_link_and_settings_
         assert "Now streaming on Max." in part
         assert f"{BASE_URL}/film/{film.tmdb_id}-dune" in part
         assert f"{BASE_URL}/settings" in part
-    assert f"{IMAGE_BASE}/w154/dune.jpg" in envelope.html
+        # DC-17: the event is a `now_available` beat, so the provider data is credited.
+        assert "Availability from JustWatch" in part
+    assert f'<img src="{IMAGE_BASE}/w185/dune.jpg" width="92"' in envelope.html
 
 
 async def test_several_alerts_for_one_user_ride_on_one_mail(

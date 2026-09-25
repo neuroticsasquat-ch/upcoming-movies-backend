@@ -492,6 +492,11 @@ class UserSettings(Base):
         ARRAY(Text), nullable=False, server_default=text("'{stream}'::text[]")
     )
     ical_token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    unsubscribe_token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    """The digest's one-click unsubscribe credential (DC-10): `/digest/unsubscribe/{token}`
+    turns this user's digest off. Unique for `ical_token`'s reason — it is the whole lookup.
+    Unlike that one it never rotates and is never returned by `/me/settings`: all it can do is
+    stop a mail, and it travels in every digest's headers."""
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

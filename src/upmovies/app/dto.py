@@ -181,6 +181,19 @@ class EntitlementGrantRequest(BaseModel):
         return v.replace(tzinfo=UTC) if v.tzinfo is None else v
 
 
+class DigestTestRequest(BaseModel):
+    """Whose digest to mail the calling admin, on which cadence, as of which day (DC-11).
+    `today` defaults to the current UTC date, as the preview's does."""
+
+    user_id: UUID
+    cadence: Literal["daily", "weekly"]
+    today: date | None = None
+
+
+class DigestTestOut(BaseModel):
+    message_id: str
+
+
 class HeadlineReleaseOut(BaseModel):
     """The one date a film row leads with, and enough context to render it honestly.
 

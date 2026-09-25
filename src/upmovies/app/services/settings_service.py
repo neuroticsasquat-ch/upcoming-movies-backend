@@ -1,11 +1,12 @@
-"""A user's delivery settings: the lazily created row, the cadence write, and the token
-rotation (D-33, D-34).
+"""A user's delivery settings: the lazily created row, the cadence write, the token rotation
+(D-33, D-34), and the one-click digest unsubscribe (DC-10).
 
 In a service rather than the routes because the row's *existence* is a rule, not a request
-handler's detail — every entry point below creates it, so a PATCH from a client that never
-issued the GET behaves the same as one that did.
+handler's detail — every `/me/settings` entry point below creates it, so a PATCH from a client
+that never issued the GET behaves the same as one that did. The unsubscribe is the exception:
+its token can only name a row that already exists.
 
-**Everything here writes, and the batch passes must not use it as it stands.** The three
+**Everything here writes, and the batch passes must not use it as it stands.** The first three
 functions are the three things the `/me/settings` routes do, and all of them create-and-commit;
 `get_or_create` is a write on a read path by design (D-33's lazy creation). That is safe for a
 request made by the row's owner, and wrong for a pass that fans out over every user: the digest
@@ -18,7 +19,12 @@ The read-only half the batch passes need is not here and deliberately never has 
 read the row as a **column** in the query that selects their users, `COALESCE`d over an outer
 join to the D-33 and D-44 defaults — the digest pass for `digest_cadence`, the notify pass for
 `alert_stores` (D-44). That is what keeps a pass that merely *considered* a user from leaving
-them a settings row, and an accessor here would be the thing tempting it back."""
+them a settings row, and an accessor here would be the thing tempting it back.
+
+The one row a batch pass does write is the digest's, for a user it is **about to mail**
+(`digest_sender.ensure_unsubscribe_token`): the mail's unsubscribe link needs a token, and the
+token lives on this row. That user is entitled and verified by then, so the row it leaves is
+one a subscriber would have been given on their first visit anyway."""
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,7 +43,10 @@ async def get_or_create(db: AsyncSession, *, user: User) -> UserSettings:
     if existing is not None:
         return existing
     row = await user_settings_repo.create_if_absent(
-        db, user_id=user.id, ical_token=tokens.new_ical_token()
+        db,
+        user_id=user.id,
+        ical_token=tokens.new_ical_token(),
+        unsubscribe_token=tokens.new_unsubscribe_token(),
     )
     await db.commit()
     return row
@@ -79,3 +88,20 @@ async def rotate_ical_token(db: AsyncSession, *, user: User) -> UserSettings:
     await user_settings_repo.set_ical_token(db, row, ical_token=tokens.new_ical_token())
     await db.commit()
     return row
+
+
+async def unsubscribe_digest(db: AsyncSession, *, token: str) -> bool:
+    """Turn off the digest of whoever holds this unsubscribe token, and commit (DC-10). False
+    when the token names nobody.
+
+    No user and no entitlement: the token is the whole credential, and an unentitled user
+    turning the digest off is still turning it off. Idempotent — a mailbox provider may POST
+    more than once, and a reader may click a link they have already used — so a row already
+    `off` is left untouched rather than having its `updated_at` bumped."""
+    row = await user_settings_repo.get_by_unsubscribe_token(db, token=token)
+    if row is None:
+        return False
+    if row.digest_cadence != "off":
+        await user_settings_repo.set_digest_cadence(db, row, digest_cadence="off")
+        await db.commit()
+    return True

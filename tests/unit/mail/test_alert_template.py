@@ -1,9 +1,11 @@
-"""The `alert` template's copy (NEU-1380): what a follow alert actually says, and the two
-shapes it has to render — one film, and several in one mail.
+"""The `alert` template's copy (NEU-1380, NEU-1461): what a follow alert actually says, and the
+two shapes it has to render — one film, and several in one mail — under the digest's wordmark.
 
 Beside `test_templates.py` rather than inside it because that file asserts the *rendering
 rules* (the three strictnesses) against whichever template is handy; this one asserts the
 alert's own copy, which is a product decision and changes for different reasons."""
+
+import re
 
 import pytest
 
@@ -14,7 +16,8 @@ DUNE = {
     "beat": "Release date",
     "summary": "US wide release date slipped from 1 May 2026 to 18 December 2026.",
     "film_url": "https://app.example.com/film/1234-dune-part-three",
-    "poster_url": "https://image.tmdb.org/t/p/w154/dune.jpg",
+    "poster_url": "https://image.tmdb.org/t/p/w185/dune.jpg",
+    "credits_justwatch": False,
 }
 HEAT = {
     "title": "Heat 2",
@@ -22,6 +25,7 @@ HEAT = {
     "summary": "Now streaming on Max.",
     "film_url": "https://app.example.com/film/5678-heat-2",
     "poster_url": None,
+    "credits_justwatch": True,
 }
 SETTINGS_URL = "https://app.example.com/settings"
 
@@ -100,7 +104,41 @@ def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
 def test_display_name_is_optional_the_way_every_other_template_makes_it():
     envelope = _alert([DUNE], display_name="")
 
-    assert envelope.text.startswith("Hi,")
+    assert envelope.text.startswith("Backlotter\n\nHi,")
+
+
+def test_both_parts_open_with_the_digests_wordmark():
+    """DC-14: the alert is restyled to the digest's wordmark so the two mails read as one
+    sender."""
+    envelope = _alert([DUNE])
+
+    assert envelope.text.startswith("Backlotter\n\nHi Ada,")
+    assert envelope.html.index(">Backlotter</p>") < envelope.html.index("Hi Ada")
+
+
+def test_every_poster_renders_at_the_lead_card_width():
+    """An alert item is laid out as the digest's lead card: 92px, attribute and style."""
+    html = _alert([DUNE, {**DUNE, "title": "Dune: Part Four"}]).html
+
+    assert re.findall(r'<img [^>]*width="(\d+)"[^>]*width:(\d+)px', html) == [("92", "92")] * 2
+
+
+def test_a_now_available_item_credits_justwatch_in_both_parts():
+    """DC-17: the provider data is JustWatch's, and the credit sits under the item it
+    describes — not under every item in the mail."""
+    envelope = _alert([DUNE, HEAT])
+
+    for part in (envelope.text, envelope.html):
+        assert part.count("Availability from JustWatch") == 1
+        assert part.index(HEAT["summary"]) < part.index("Availability from JustWatch")
+    assert "Now streaming on Max.\nAvailability from JustWatch\n" in envelope.text
+
+
+def test_no_justwatch_credit_without_a_now_available_item():
+    envelope = _alert([DUNE])
+
+    for part in (envelope.text, envelope.html):
+        assert "JustWatch" not in part
 
 
 def test_a_title_with_markup_in_it_escapes_in_html_and_not_in_text():
