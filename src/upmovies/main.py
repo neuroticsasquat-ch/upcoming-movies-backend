@@ -26,6 +26,7 @@ from upmovies.routers import (
     auth,
     credit_holds_admin,
     digest,
+    digest_admin,
     follows,
     health,
     imports,
@@ -131,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(ingest_admin.router)
     app.include_router(admin_runs.router)
     app.include_router(credit_holds_admin.router)
+    app.include_router(digest_admin.router)
     app.include_router(invites_admin.router)
     app.include_router(moderation_admin.router)
     app.include_router(resolution_admin.router)
