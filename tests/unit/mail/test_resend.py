@@ -1,5 +1,7 @@
 """`ResendClient` against a mocked transport — never the live network (`CLAUDE.md`)."""
 
+from dataclasses import replace
+
 import httpx
 import pytest
 import respx
@@ -56,6 +58,39 @@ async def test_a_send_returns_the_providers_id_and_puts_both_bodies_on_the_wire(
         "text": ENVELOPE.text,
         "html": ENVELOPE.html,
     }
+
+
+@respx.mock
+async def test_envelope_headers_go_on_the_wire_as_resends_headers_object():
+    """DC-10: Resend's `POST /emails` takes custom message headers as a `headers` object —
+    the one-click unsubscribe pair must arrive there verbatim, not as HTTP request headers."""
+    import json
+
+    route = respx.post(EMAILS_URL).mock(return_value=httpx.Response(200, json={"id": "re-1"}))
+    headers = {
+        "List-Unsubscribe": "<https://api.example.com/digest/unsubscribe/tok>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+
+    async with ResendClient(api_key="re_x") as client:
+        await client.send(replace(ENVELOPE, headers=headers))
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["headers"] == headers
+    assert "list-unsubscribe" not in route.calls.last.request.headers
+
+
+@respx.mock
+async def test_an_envelope_without_headers_sends_no_headers_key():
+    """A transactional mail's wire body is exactly what it was before the field existed."""
+    import json
+
+    route = respx.post(EMAILS_URL).mock(return_value=httpx.Response(200, json={"id": "re-1"}))
+
+    async with ResendClient(api_key="re_x") as client:
+        await client.send(ENVELOPE)
+
+    assert "headers" not in json.loads(route.calls.last.request.content)
 
 
 @respx.mock

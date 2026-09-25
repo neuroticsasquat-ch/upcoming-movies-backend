@@ -42,6 +42,7 @@ VERIFIED = datetime(2026, 1, 1, tzinfo=UTC)
 NEWER_DAY = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
 OLDER_DAY = datetime(2026, 9, 15, 9, 0, tzinfo=UTC)
 BASE_URL = "https://app.example.test"
+API_BASE = "https://api.example.test"
 IMAGE_BASE = "https://image.tmdb.test/t/p"
 
 
@@ -54,6 +55,7 @@ def settings():
     return get_settings().model_copy(
         update={
             "public_base_url": BASE_URL,
+            "api_base_url": API_BASE,
             "tmdb_image_base": IMAGE_BASE,
             "product_name": "Backlotter",
         }
@@ -80,7 +82,12 @@ def set_cadence(session):
     async def _set(user_id: UUID, cadence: str) -> None:
         counter["n"] += 1
         session.add(
-            UserSettings(user_id=user_id, digest_cadence=cadence, ical_token=f"tok-{counter['n']}")
+            UserSettings(
+                user_id=user_id,
+                digest_cadence=cadence,
+                ical_token=f"tok-{counter['n']}",
+                unsubscribe_token=f"unsub-{counter['n']}",
+            )
         )
         await session.commit()
 
@@ -822,10 +829,14 @@ async def test_render_digest_is_the_mail_the_send_delivers_and_marks_nothing(
     add_release_date,
     queue_digest,
     watchlist,
+    set_cadence,
     send,
     settings,
 ):
+    """With a settings row, so both carry the same unsubscribe token: a rowless user's preview
+    differs from their send by exactly the header and footer link (see the DC-10 tests)."""
     user = await subscriber()
+    await set_cadence(user.id, "weekly")
     dune = await make_film(slug="dune", title="Dune")
     await watchlist(user_id=user.id, film_id=dune.id)
     await add_release_date(film=dune, release_date=_on(TODAY + timedelta(days=3)))
@@ -838,7 +849,12 @@ async def test_render_digest_is_the_mail_the_send_delivers_and_marks_nothing(
     assert [row.status for row in await _rows(session)] == ["queued"]
     _result, mailbox = await send("weekly")
     (sent,) = mailbox.sent
-    assert (preview.subject, preview.text, preview.html) == (sent.subject, sent.text, sent.html)
+    assert (preview.subject, preview.text, preview.html, preview.headers) == (
+        sent.subject,
+        sent.text,
+        sent.html,
+        sent.headers,
+    )
 
 
 async def test_render_digest_has_nothing_for_a_user_with_nothing(session, subscriber, settings):
@@ -879,6 +895,103 @@ async def test_render_digest_ignores_the_gate_that_the_send_still_applies(
     assert preview.subject == "Dune — casting · your slate"
     assert (result.mails_sent, result.suppressed) == (0, 1)
     assert mailbox.sent == []
+
+
+# --- one-click unsubscribe (DC-10) ---------------------------------------------
+
+
+async def _token(session, user_id: UUID) -> str | None:
+    return await session.scalar(
+        select(UserSettings.unsubscribe_token)
+        .where(UserSettings.user_id == user_id)
+        .execution_options(populate_existing=True)
+    )
+
+
+async def test_the_digest_carries_the_one_click_unsubscribe_headers(
+    session, subscriber, make_film, add_event, queue_digest, set_cadence, send
+):
+    user = await subscriber()
+    await set_cadence(user.id, "weekly")
+    film = await make_film(slug="dune", title="Dune")
+    event = await add_event(film=film, event_type="casting", created_at=NEWER_DAY)
+    await queue_digest(user_id=user.id, event_id=event.id)
+    token = await _token(session, user.id)
+
+    _result, mailbox = await send("weekly")
+
+    (mail,) = mailbox.sent
+    link = f"{API_BASE}/digest/unsubscribe/{token}"
+    assert dict(mail.headers) == {
+        "List-Unsubscribe": f"<{link}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+    assert link in mail.text
+    assert f'href="{link}"' in mail.html
+
+
+async def test_a_rowless_reader_gets_a_settings_row_and_a_token_when_mailed(
+    session, subscriber, make_film, add_event, queue_digest, send
+):
+    """Most weekly readers never opened their settings, so they have no row and no token. The
+    send creates the row the settings page would have — on the default cadence, so nothing
+    they receive changes — and the mail's header names the token it wrote."""
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    event = await add_event(film=film, event_type="casting", created_at=NEWER_DAY)
+    await queue_digest(user_id=user.id, event_id=event.id)
+
+    _result, mailbox = await send("weekly")
+
+    row = await session.scalar(
+        select(UserSettings)
+        .where(UserSettings.user_id == user.id)
+        .execution_options(populate_existing=True)
+    )
+    assert row is not None
+    assert row.digest_cadence == "weekly"
+    (mail,) = mailbox.sent
+    assert mail.headers["List-Unsubscribe"] == (
+        f"<{API_BASE}/digest/unsubscribe/{row.unsubscribe_token}>"
+    )
+
+
+async def test_no_settings_row_is_written_for_a_reader_who_is_not_mailed(
+    session, subscriber, make_film, add_event, add_release_date, queue_digest, watchlist, send
+):
+    """The row is written for a user the pass is *about to mail*, and nobody else: not one the
+    gate refuses, and not one with nothing to say (`settings_service`'s rule)."""
+    refused = await subscriber("lapsed@example.com", entitled_until=LAPSED)
+    quiet = await subscriber("quiet@example.com")
+    film = await make_film(slug="dune", title="Dune")
+    event = await add_event(film=film, event_type="casting", created_at=NEWER_DAY)
+    await queue_digest(user_id=refused.id, event_id=event.id)
+    await watchlist(user_id=quiet.id, film_id=film.id)
+    await add_release_date(film=film, release_date=_on(TODAY + timedelta(days=60)))
+
+    result, mailbox = await send("weekly")
+
+    assert (result.users_considered, result.mails_sent) == (2, 0)
+    assert mailbox.sent == []
+    assert (await session.scalars(select(UserSettings))).all() == []
+
+
+async def test_render_digest_writes_no_row_and_so_carries_no_header_for_a_rowless_reader(
+    session, subscriber, make_film, add_event, queue_digest, settings
+):
+    """The preview marks and writes nothing (M3). A rowless reader's preview is therefore the
+    mail without its unsubscribe header or footer link — the send adds both."""
+    user = await subscriber()
+    film = await make_film(slug="dune", title="Dune")
+    event = await add_event(film=film, event_type="casting", created_at=NEWER_DAY)
+    await queue_digest(user_id=user.id, event_id=event.id)
+
+    preview = await render_digest(session, user.id, "weekly", TODAY, settings)
+
+    assert preview is not None
+    assert dict(preview.headers) == {}
+    assert "/digest/unsubscribe/" not in preview.text
+    assert await _token(session, user.id) is None
 
 
 # --- cadence -------------------------------------------------------------------

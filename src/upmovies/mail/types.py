@@ -13,7 +13,8 @@ Jinja — that is `Transport`. Collapsing them would put template rendering insi
 adapter, which is how you end up with the Resend adapter and the noop one rendering subjects
 slightly differently."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, NewType, Protocol
 
 # The provider's own identifier for an accepted message, opaque to us. A `NewType` rather
@@ -34,13 +35,20 @@ class Envelope:
     `sender` rides on the envelope rather than being read from settings by each transport, so
     that what was sent is fully described by the value the transport was handed. That is what
     lets `NoopTransport` record something a test can assert against without also reaching for
-    the configuration that produced it."""
+    the configuration that produced it.
+
+    `headers` are extra message headers for the provider to set verbatim — today only the
+    digest's `List-Unsubscribe` pair (DC-10). Empty by default: every other mail is
+    transactional and owes no header beyond the ones the provider writes itself. They ride on
+    the envelope for `sender`'s reason — what the transport was handed is the whole
+    description of what was sent."""
 
     sender: str
     to: str
     subject: str
     text: str
     html: str
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 class MailError(RuntimeError):

@@ -195,7 +195,15 @@ def test_every_bucket_has_a_settings_field_and_a_usable_default():
 
 def test_the_documented_buckets_are_the_registered_ones():
     """Spec §2. A route asking for a bucket that is not here fails at import."""
-    assert set(BUCKET_SETTINGS) == {"signup", "login", "auth_request", "import", "public", "ics"}
+    assert set(BUCKET_SETTINGS) == {
+        "signup",
+        "login",
+        "auth_request",
+        "import",
+        "public",
+        "ics",
+        "digest_unsubscribe",
+    }
 
 
 def test_validation_names_every_bad_bucket_at_once():

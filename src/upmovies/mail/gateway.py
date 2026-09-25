@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from typing import Any
 
-from upmovies.config import Settings
+from upmovies.config import DEFAULT_API_BASE_URL, Settings
 from upmovies.llm.retry import RetryPolicy
 from upmovies.mail import templates
 from upmovies.mail.noop import NoopTransport
@@ -70,8 +70,9 @@ def credential_for(settings: Settings, provider: str) -> str | None:
 
 
 def validate_mail_configuration(settings: Settings) -> None:
-    """Assert the configured provider can actually send: a known provider, a credential and a
-    deliverable sender where the provider needs them, and a complete template tree.
+    """Assert the configured provider can actually send: a known provider, a credential, a
+    deliverable sender and a public API origin where the provider needs them, and a complete
+    template tree.
 
     Every fault is collected and reported together rather than raised at the first one — a
     deploy that turns mail on for the first time gets its missing key *and* its missing
@@ -103,6 +104,14 @@ def validate_mail_configuration(settings: Settings) -> None:
             problems.append(
                 f"MAIL_PROVIDER is {provider!r} but MAIL_FROM is {settings.mail_from!r}, "
                 f"which is not an email address"
+            )
+        # The digest's `List-Unsubscribe` link is built on it (DC-10). The default is the dev
+        # API, so a deploy that forgot the variable would mail every reader an unsubscribe
+        # link to localhost — which a mailbox provider's one-click POST cannot reach.
+        if settings.api_base_url == DEFAULT_API_BASE_URL:
+            problems.append(
+                f"MAIL_PROVIDER is {provider!r} but API_BASE_URL is the default "
+                f"{DEFAULT_API_BASE_URL!r}: set it to the API's public origin"
             )
     problems.extend(templates.validate_templates())
     if problems:

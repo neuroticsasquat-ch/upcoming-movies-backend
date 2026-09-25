@@ -570,3 +570,73 @@ async def test_the_backfill_stamps_only_films_that_hold_credits(credits_backfill
             assert history == 0
     finally:
         await engine.dispose()
+
+
+# --- the unsubscribe_token backfill (NEU-1463) ----------------------------------------------
+
+_BEFORE_UNSUBSCRIBE_TOKEN = "61b8dca53f8b"
+"""The revision immediately before `32380c924b81`, which adds `user_settings.unsubscribe_token`
+NOT NULL and fills it for every existing row (DC-10)."""
+
+
+@pytest.fixture
+async def unsubscribe_token_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision short of the token column, on the
+    `credits_backfill_db_url` pattern: the thing under test is the transition."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_unsubscribe_token")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            _alembic(url, "upgrade", _BEFORE_UNSUBSCRIBE_TOKEN)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def test_the_migration_gives_every_existing_settings_row_its_own_unsubscribe_token(
+    unsubscribe_token_db_url: str,
+):
+    """The column is NOT NULL, so a row the backfill missed would fail the migration outright;
+    what this pins is that each row gets a *distinct* token of `new_unsubscribe_token`'s width —
+    one shared value would unsubscribe every reader from one link."""
+    engine = create_async_engine(unsubscribe_token_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO app."user" (id, email, password_hash, display_name) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 'ada@example.com', 'x', 'Ada'),
+                  ('22222222-2222-2222-2222-222222222222', 'bob@example.com', 'x', 'Bob')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.user_settings (user_id, ical_token) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 'ical-ada'),
+                  ('22222222-2222-2222-2222-222222222222', 'ical-bob')
+                """)
+            )
+
+        _alembic(unsubscribe_token_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            tokens = (
+                (await conn.execute(text("SELECT unsubscribe_token FROM app.user_settings")))
+                .scalars()
+                .all()
+            )
+        assert len(tokens) == 2
+        assert len(set(tokens)) == 2
+        # `secrets.token_urlsafe(32)`: 32 bytes, base64url without padding.
+        assert all(len(token) == 43 for token in tokens)
+    finally:
+        await engine.dispose()

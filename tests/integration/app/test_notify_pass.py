@@ -161,7 +161,12 @@ async def _attach_card(add_event, film, *, person_name: str, event_type: str = "
 
 async def _set_alert_stores(session, *, user_id: UUID, alert_stores: list[str]) -> None:
     session.add(
-        UserSettings(user_id=user_id, alert_stores=alert_stores, ical_token=f"tok-{user_id}")
+        UserSettings(
+            user_id=user_id,
+            alert_stores=alert_stores,
+            ical_token=f"tok-{user_id}",
+            unsubscribe_token=f"unsub-{user_id}",
+        )
     )
     await session.commit()
 
