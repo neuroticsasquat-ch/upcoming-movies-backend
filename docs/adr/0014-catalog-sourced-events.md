@@ -256,10 +256,11 @@ this needs no special path.
 > heading is **static**, not a toggle; a section with no items is **not rendered** at all, so
 > "None today" is retired. The film page already rendered only non-empty sections.
 >
-> The demotion is now exactly three things, on **both** surfaces: **order** (within a day, "In
-> the news" leads), the **heading** (the section is named "Not yet reported"), and **type
-> size** (its event text is one step smaller — feed event lines 12px → 11px, film-page
-> summaries 15px → 13px). This supersedes NEU-1207's label-only clause for the film page.
+> The demotion is now exactly two things, on **both** surfaces: **order** (within a day, "In
+> the news" leads) and the **heading** (the section is named "Not yet reported"). The event
+> text itself reads the same in both sections — same size, weight and colour — so NEU-1207's
+> label-only demotion on the film page now describes the feed too. (A smaller type size for
+> "Not yet reported" was specified and then dropped before merge.)
 > NEU-1212's inline beat badges survive only as a **fallback** for a catalog row that arrives
 > with no events, which is what makes deploy order free. NEU-1406's heading text and explainer
 > stand unchanged.
@@ -268,8 +269,7 @@ this needs no special path.
 > section" is no longer true. The ≤N-day flap hold's cost — a briefly stale "attached" card
 > while TMDB says "removed" — is bounded and self-correcting, sits under a heading that names it
 > as not yet reported, carries a `rumored` → `unconfirmed` confidence badge on every such card,
-> and is set one type step smaller than trade news. That is the demotion; hiding is no longer
-> part of it. See the spec at `docs/specs/NEU-1467-not-yet-reported-uncollapsed.md` in
+> and is ordered after trade news. That is the demotion; hiding is no longer part of it. See the spec at `docs/specs/NEU-1467-not-yet-reported-uncollapsed.md` in
 > upcoming-movies-frontend.
 
 ## Considered alternatives
