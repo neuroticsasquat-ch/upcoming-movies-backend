@@ -650,7 +650,7 @@ async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
 
 async def run_digest_stage(run_id: UUID, settings: Settings, cadence: DigestCadence) -> None:
     """The M7 digest slot for one cadence against one run row (D-33): mail every user on that
-    cadence their queued digest rows — and, weekly, their slate.
+    cadence their queued digest rows — and their slate, weekly or on `SLATE_WEEKDAY` (DC-2).
 
     One phase, and no watermark: the backlog is the `queued` rows themselves, so a failed run
     leaves exactly what did not go out for the next slot. The same division of labour as the

@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +20,11 @@ Provider = Literal["anthropic", "deepinfra", "deepseek"]
 # because `mail.gateway` reads `Settings` and importing the `mail` package here would be a
 # cycle. A test pins the two together, exactly as it does for `Provider`.
 MailProvider = Literal["resend", "noop"]
+
+# `SLATE_WEEKDAY`'s values, in `date.weekday()` order — `WEEKDAYS.index(name)` is the number a
+# date's `weekday()` returns on that day. Lower case because the value is typed into Coolify.
+Weekday = Literal["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+WEEKDAYS: tuple[Weekday, ...] = get_args(Weekday)
 
 
 class Settings(BaseSettings):
@@ -485,6 +490,12 @@ class Settings(BaseSettings):
     healthcheck_digest_weekly_url: str | None = Field(
         default=None, alias="HEALTHCHECK_DIGEST_WEEKLY_URL"
     )
+    # The product's one slate day (DC-2). The daily slot reads it — on this weekday a daily
+    # reader gets the slate in front of their cards — and it documents the day the weekly
+    # Coolify slot must be scheduled on, which the repo cannot enforce (AGENTS.md). The weekly
+    # send always carries the slate, whatever day it runs; the two must agree or daily and
+    # weekly readers get their slates on different days.
+    slate_weekday: Weekday = Field(default="thursday", alias="SLATE_WEEKDAY")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
