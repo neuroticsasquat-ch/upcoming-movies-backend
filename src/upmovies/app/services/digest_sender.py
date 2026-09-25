@@ -131,6 +131,7 @@ from upmovies.mail import (
     MailConfigurationError,
     Mailer,
     MailError,
+    MessageId,
     MissingCredentialError,
     render,
 )
@@ -1233,6 +1234,8 @@ async def render_digest(
     cadence: DigestCadence,
     today: date,
     settings: Settings,
+    *,
+    with_unsubscribe: bool = True,
 ) -> Envelope | None:
     """The digest this user would get on `cadence` today, rendered and not sent — what the
     admin preview and test-send call, and nothing else (M3).
@@ -1241,7 +1244,13 @@ async def render_digest(
     alone (`carries_slate`), so a daily preview on the slate day shows the slate: an admin
     looking at a lapsed user's mail wants to see what it would say, and whether it would be
     *sent* is `send_digests`' question, which still answers it. Marks nothing, commits
-    nothing. None when there is nothing to say; `LookupError` for an unknown user."""
+    nothing. None when there is nothing to say; `LookupError` for an unknown user.
+
+    `with_unsubscribe=False` renders the mail as a rowless user's would be — no
+    `List-Unsubscribe` header and no token link in the footer. The test-send needs that: the
+    token turns *this user's* digest off, and a copy of it in the admin's inbox is one
+    link-scanner prefetch away from doing so (the unsubscribe GET writes; see
+    `routers/digest.py`'s module docstring)."""
     user = (
         await session.execute(
             select(User.email, User.display_name, UserSettings.unsubscribe_token)
@@ -1256,7 +1265,7 @@ async def render_digest(
         email=user.email,
         display_name=user.display_name,
         deliverable=True,
-        unsubscribe_token=user.unsubscribe_token,
+        unsubscribe_token=user.unsubscribe_token if with_unsubscribe else None,
     )
     batch = await load_batch(
         session,
@@ -1267,6 +1276,34 @@ async def render_digest(
         include_slate=carries_slate(cadence, today, settings),
     )
     return render_batch(batch, cadence=cadence, today=today, settings=settings)
+
+
+async def send_test_digest(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    cadence: DigestCadence,
+    today: date,
+    to: str,
+    mailer: Mailer,
+    settings: Settings,
+) -> MessageId | None:
+    """Mail this user's digest to `to` instead of to them — the admin test-send (DC-11).
+
+    The same `render_digest` the preview shows, readdressed, with the subject prefixed
+    `[test for <user email>] ` so the copy cannot pass for the admin's own digest in their
+    inbox. Rendered without the unsubscribe token (see `render_digest`), so neither the header
+    nor the footer can turn the user's digest off from the admin's mailbox. Marks nothing,
+    commits nothing. None when there is nothing to send; `LookupError` for an unknown user;
+    the provider's errors propagate."""
+    envelope = await render_digest(
+        session, user_id, cadence, today, settings, with_unsubscribe=False
+    )
+    if envelope is None:
+        return None
+    return await mailer.deliver(
+        replace(envelope, to=to, subject=f"[test for {envelope.to}] {envelope.subject}")
+    )
 
 
 async def send_batch(
