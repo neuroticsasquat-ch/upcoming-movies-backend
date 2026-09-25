@@ -509,7 +509,7 @@ re-attach window is fully observed. The forward gate reads raw `catalog.film_cre
 and so is never carded; it is scoped to the same seed-grade role so a cast→director move is two
 events, not a flap. Like attachments it is keyed on the observation — one `credit_removed` card
 per `(film, changed_at)`, all roles in one body — and it sits beside the attachment card (which
-stays visible) in the collapsed "via TMDB" section, so the later "no longer attached" card *is*
+stays visible) in the "Not yet reported" section, so the later "no longer attached" card *is*
 the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE` (a removal is not
 forward progress and should not headline a day) and excluded from the LLM and story-dedup
 vocabularies: the model cannot emit it, and a trade "X exits" story does not yet attach to it.
@@ -533,10 +533,9 @@ mostly real departures and re-create the stale-attachment bug. A held flap that 
 still cards a real final departure later; one that ends in `added` self-corrects (the re-attachment
 is suppressed by removal-aware suppression during the hold). The transient ≤N-day hold window is
 the one cost — the latest *carded* event is briefly "attached" while TMDB says "removed" — bounded
-and self-correcting. On the feed it is confined to the collapsed **"Not yet reported"**
-section, whose rows render the film title plus a badge for each of the film-day's beats
-(NEU-1208 dropped the event cards, NEU-1212 restored the beat labels), so the summaries are a
-click away; on the film page it is visible inline per NEU-1207.
+and self-correcting. On both the feed and the film page it sits under the **"Not yet
+reported"** heading, carries an `unconfirmed` confidence badge (`rumored`), and is ordered after
+trade news (NEU-1467); it is no longer hidden behind a collapse.
 _Avoid_: flicker, churn (too vague — a credit changing departments is churn but not a flap),
 vandalism (that is the *cause*, not the observable pattern), bounce.
 
@@ -559,7 +558,7 @@ the LLM has no `crew_attached` in its vocabulary, so the story side searches bot
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **Day-grouped events** (of a film page):
-The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is **collapsed by default on the feed** (a publication log, where a TMDB-only day aggregates many films and shows "Not yet reported (N movies)", so it is not visually empty) and its cards are demoted under NEU-1208: the backend no longer ships `events` for `news_backed=false` feed items, so a reader sees the film title plus a badge for each distinct beat of that film-day (the row's `event_types`, labelled under NEU-1212) and clicks through for the summaries. It is **rendered inline on the film page** (NEU-1207): the film-page collapse introduced by NEU-1201 is retired because NEU-1205 dampened the credit-oscillation it was hiding at the source, so a TMDB-only film-day no longer renders as a visually-empty date heading plus a collapsed toggle. The **"Not yet reported"** label (formerly "unconfirmed updates", before that "via TMDB") heads it on both surfaces — the demotion on the film page is by label, not by hiding. The label is a provenance signal; veracity is the card's confidence badge (NEU-1406). The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
+The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is **rendered expanded on both surfaces** (NEU-1467, reversing NEU-1208's collapsed titles-only feed rows): `news_backed=false` feed items ship their catalog events like news items do, with empty `sources`, under a static "Not yet reported (N movies)" heading, and a section with no items is not rendered at all. The row's `event_types` badges (NEU-1212) survive only as a fallback for a row that arrives with no events. The **"Not yet reported"** label (formerly "unconfirmed updates", before that "via TMDB") heads it on both surfaces; the demotion is order (In the news leads) and that heading — the event text reads the same in both sections, and nothing is hidden. The label is a provenance signal; veracity is the card's confidence badge (NEU-1406). The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
 _Avoid_: in-the-news section (that's `news_events`), TMDB section (that's `tmdb_events`), two-timeline display, split events.
 
 **News-backed** (of a film-day):
