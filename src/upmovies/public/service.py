@@ -1553,9 +1553,7 @@ async def get_feed_grouped(
     countries_by_film = await _production_countries_for_films(session, feed_film_ids)
     directors_by_film = await _directors_for_films(session, feed_film_ids)
 
-    def _make_item(
-        row: Any, events: list[EventOut], news_backed: bool, ship_events: bool = True
-    ) -> FeedDayItem:
+    def _make_item(row: Any, events: list[EventOut], news_backed: bool) -> FeedDayItem:
         return FeedDayItem(
             film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
@@ -1569,7 +1567,7 @@ async def get_feed_grouped(
             event_types=ordered_event_types([e.event_type for e in events]),
             event_count=len(events),
             news_backed=news_backed,
-            events=events if ship_events else [],
+            events=events,
         )
 
     items: list[FeedDayItem] = []
@@ -1580,7 +1578,7 @@ async def get_feed_grouped(
         if news_events:
             items.append(_make_item(row, news_events, True))
         if catalog_events:
-            items.append(_make_item(row, catalog_events, False, ship_events=False))
+            items.append(_make_item(row, catalog_events, False))
 
     # Within a day, the bigger beat leads (D-7): a casting burst outranks a status change,
     # and a trailer outranks both. Sorted here rather than in SQL because the ranking is

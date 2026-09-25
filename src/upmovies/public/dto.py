@@ -404,8 +404,9 @@ class FeedDayItem(BaseModel):
     top_event_type: str
     # Every distinct beat this film-day carries, most-significant first — so `event_types[0]`
     # is always `top_event_type`. The feed labels the whole set inline after the title
-    # (NEU-1212), on rows that ship no events; the lead type alone can't express it, since a
-    # day that pairs a trailer with a casting beat reads as trailer-only otherwise.
+    # (NEU-1212) as a fallback on a row that arrives with no events; the lead type alone can't
+    # express it, since a day that pairs a trailer with a casting beat reads as trailer-only
+    # otherwise.
     event_types: list[str]
     event_count: int
     # True when *any* of this film-day's visible events has a linked story — i.e. a news
@@ -418,8 +419,9 @@ class FeedDayItem(BaseModel):
     # over the section this row lands in.
     news_backed: bool
     # The actual events on this (film, day), with their summaries and sources, matching the
-    # EventOut shape used on the film detail page. Empty for catalog-sourced rows on the
-    # grouped feed, which render as title-only links (NEU-1208).
+    # EventOut shape used on the film detail page. A catalog row ships its catalog events
+    # like a news row ships its news events, just with empty `sources` (NEU-1467 reversed
+    # NEU-1208's empty list).
     events: list[EventOut] = []
 
 

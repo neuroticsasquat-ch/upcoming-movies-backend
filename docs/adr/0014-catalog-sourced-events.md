@@ -245,6 +245,32 @@ this needs no special path.
 > argument still holds, for the feed's collapsed "Not yet reported" section. No backend code,
 > DTO schema, or migration change — the behaviour change is frontend-only. See the spec at
 > `docs/specs/NEU-1406-not-yet-reported-heading.md` in upcoming-movies-frontend.
+>
+> **Amendment — 2026-09-25 (NEU-1467).** NEU-1208's **visibility** demotion on the feed is
+> reversed. The arc (NEU-1201 hide → NEU-1207 label-only on the film page → NEU-1208 collapsed
+> titles-only on the feed → NEU-1212 badges back) ended up hiding the beats a reader most wants
+> to scan — release dates, production milestones, `now_available`, trailers — behind a click.
+> The backend ships `events` for `news_backed=false` rows again, exactly as it does for news
+> rows (each with an empty `sources` list); the events were already fetched and summarised, so
+> this costs no query. On the feed the "Not yet reported" section is **uncollapsed** and its
+> heading is **static**, not a toggle; a section with no items is **not rendered** at all, so
+> "None today" is retired. The film page already rendered only non-empty sections.
+>
+> The demotion is now exactly three things, on **both** surfaces: **order** (within a day, "In
+> the news" leads), the **heading** (the section is named "Not yet reported"), and **type
+> size** (its event text is one step smaller — feed event lines 12px → 11px, film-page
+> summaries 15px → 13px). This supersedes NEU-1207's label-only clause for the film page.
+> NEU-1212's inline beat badges survive only as a **fallback** for a catalog row that arrives
+> with no events, which is what makes deploy order free. NEU-1406's heading text and explainer
+> stand unchanged.
+>
+> NEU-1205's transient-invariant argument is **restated**, because "confined to the collapsed
+> section" is no longer true. The ≤N-day flap hold's cost — a briefly stale "attached" card
+> while TMDB says "removed" — is bounded and self-correcting, sits under a heading that names it
+> as not yet reported, carries a `rumored` → `unconfirmed` confidence badge on every such card,
+> and is set one type step smaller than trade news. That is the demotion; hiding is no longer
+> part of it. See the spec at `docs/specs/NEU-1467-not-yet-reported-uncollapsed.md` in
+> upcoming-movies-frontend.
 
 ## Considered alternatives
 

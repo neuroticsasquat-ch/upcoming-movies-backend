@@ -180,9 +180,10 @@ async def test_following_a_director_shows_their_attachment_and_not_the_films_oth
     body = (await entitled_client.get("/me/timeline")).json()
     assert [i["film_ref"] for i in body["items"]] == [ref(theirs)]
     assert [i["event_count"] for i in body["items"]] == [1]
-    # `event_types` rather than `events`: a catalog-sourced row ships its beats as titles only
-    # (NEU-1208), so the row's own aggregate is where the scoped set shows.
+    # The scope reaches the event fetch, not just the aggregate: the catalog row ships only the
+    # attachment's body, never the unscoped trailer's (NEU-1467).
     assert [i["event_types"] for i in body["items"]] == [["crew_attached"]]
+    assert [e["event_type"] for e in body["items"][0]["events"]] == ["crew_attached"]
 
 
 async def test_a_title_follower_sees_both(

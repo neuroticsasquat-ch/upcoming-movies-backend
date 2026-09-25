@@ -612,7 +612,7 @@ async def test_grouped_same_film_day_in_both_sections(client, make_film, add_eve
     assert [e["event_type"] for e in news_item["events"]] == ["casting"]
     assert catalog_item["event_count"] == 1
     assert catalog_item["top_event_type"] == "release_date"
-    assert catalog_item["events"] == []
+    assert [e["event_type"] for e in catalog_item["events"]] == ["release_date"]
 
 
 async def test_grouped_split_event_count_and_types_are_scoped(client, make_film, add_event):
@@ -659,7 +659,7 @@ async def test_grouped_split_event_count_and_types_are_scoped(client, make_film,
     assert catalog_item["event_count"] == 2
     assert catalog_item["top_event_type"] == "trailer"
     assert sorted(catalog_item["event_types"]) == ["release_date", "trailer"]
-    assert catalog_item["events"] == []
+    assert sorted([e["event_type"] for e in catalog_item["events"]]) == ["release_date", "trailer"]
 
 
 async def test_grouped_promoted_then_split(client, make_film, add_event):
@@ -694,14 +694,15 @@ async def test_grouped_promoted_then_split(client, make_film, add_event):
     # The catalog-only trailer
     assert catalog_item["event_count"] == 1
     assert catalog_item["top_event_type"] == "trailer"
-    assert catalog_item["events"] == []
+    assert [e["event_type"] for e in catalog_item["events"]] == ["trailer"]
 
 
-# NEU-1208 — catalog-sourced feed rows ship empty events but keep accurate counts.
+# NEU-1467 — catalog-sourced feed rows ship their events again (reversing NEU-1208's empty
+# list), each with no sources, so "Not yet reported" renders event lines like "In the news".
 
 
-async def test_grouped_catalog_item_ships_empty_events(client, make_film, add_event):
-    """A news_backed=False item has events=[] while event_count reflects the real catalog events."""
+async def test_grouped_catalog_item_ships_its_events(client, make_film, add_event):
+    """A news_backed=False item ships one sourceless EventOut per catalog event."""
     film = await make_film(slug="tmdb-only-2026")
     await add_event(
         film=film,
@@ -721,7 +722,9 @@ async def test_grouped_catalog_item_ships_empty_events(client, make_film, add_ev
     item = (await client.get("/feed/grouped")).json()["items"][0]
     assert item["news_backed"] is False
     assert item["event_count"] == 2
-    assert item["events"] == []
+    assert len(item["events"]) == item["event_count"]
+    assert sorted(e["summary"] for e in item["events"]) == ["TMDB added cast", "TMDB trailer"]
+    assert all(e["sources"] == [] for e in item["events"])
 
 
 async def test_grouped_news_item_still_ships_events(client, make_film, add_event):
@@ -1040,11 +1043,9 @@ async def test_a_news_backed_trailer_row_carries_the_video_key(client, make_film
     """The grouped feed builds its events through a second `EventOut` call site, so the key
     has to be read there too (D-35).
 
-    Through a *news-backed* row because that is the only kind that ships event bodies at all:
-    a TMDB row is section titles only (NEU-1208), so the poll's own card reaches a reader with
-    a `video_key` on the film page rather than here. The row is news-backed as soon as a trade
-    story clusters onto the card the poll raised, which leaves it `provenance='catalog'` — the
-    event was still *born* from the video — and that is the shape pinned here.
+    Through a *news-backed* row: the row is news-backed as soon as a trade story clusters onto
+    the card the poll raised, which leaves it `provenance='catalog'` — the event was still
+    *born* from the video — and that is the shape pinned here.
     """
     film = await make_film(slug="trailer-row-2026", title="A Film")
     await add_event(
