@@ -1,4 +1,4 @@
-"""Per-IP token buckets for the public surface: one dependency, six named buckets (D-19).
+"""Per-IP token buckets for the public surface: one dependency, seven named buckets (D-19).
 
 Open signup (NEU-1343) removed the invite gate, which was the only thing metering account
 creation. Nothing else on the anonymous surface was metered at all — the per-email login
@@ -76,6 +76,7 @@ BUCKET_SETTINGS: dict[str, str] = {
     "import": "rate_limit_import",
     "public": "rate_limit_public",
     "ics": "rate_limit_ics",
+    "digest_unsubscribe": "rate_limit_digest_unsubscribe",
 }
 
 # The buckets `RATE_LIMIT_PUBLIC_ENABLED` gates (spec §5). Only `public` is here: the flag

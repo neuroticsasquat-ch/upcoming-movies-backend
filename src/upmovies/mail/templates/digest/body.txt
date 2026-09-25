@@ -51,5 +51,11 @@ films on {{ product_name }}, and because films you follow have dates coming up. 
 how often it arrives — or stop it — here:
 
 {{ settings_url }}
+{% if unsubscribe_url %}
+
+Or unsubscribe in one click:
+
+{{ unsubscribe_url }}
+{% endif %}
 
 — {{ product_name }}

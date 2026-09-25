@@ -62,6 +62,14 @@ counts toward the abort guard, so a dead provider stops the pass within `failure
 users and fails the run instead of converting the backlog into `failed` rows under a green
 check.
 
+**Every digest carries a one-click unsubscribe (DC-10).** `List-Unsubscribe` names
+`{API_BASE_URL}/digest/unsubscribe/{token}` and `List-Unsubscribe-Post` makes it RFC 8058 one
+click; the footer's "unsubscribe" links the same URL. The token lives on the settings row, which
+a weekly reader who never opened their settings does not have — so a user this pass is about to
+mail gets their row created here (`ensure_unsubscribe_token`), and only that user: the gate has
+passed and there is something to send. `render_digest` writes nothing, and renders a rowless
+user's mail without the header.
+
 **What this pass leaves alone.** A user whose cadence is `off` matches neither slot, so their
 `digest` rows stay `queued` — the decision pass keeps writing them, because "do not mail me"
 is a delivery preference and not a reason to stop deciding (D-40's shape: a preference change
@@ -71,7 +79,7 @@ turns the digest off for a year and back on will get a tall first digest.
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
 from uuid import UUID
@@ -80,6 +88,7 @@ import httpx
 from sqlalchemy import Date, Row, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app import tokens
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.follow_queries import follow_attribution_pairs, title_follow_film_ids
 from upmovies.app.models import (
@@ -89,6 +98,7 @@ from upmovies.app.models import (
     User,
     UserSettings,
 )
+from upmovies.app.repos import user_settings_repo
 from upmovies.app.services.alert_sender import (
     BEAT_LABELS,
     EMAIL_CHANNEL,
@@ -491,6 +501,9 @@ class DigestRecipient:
     display_name: str
     deliverable: bool
     """Verified *and* entitled, re-read at send time — see the module docstring."""
+    unsubscribe_token: str | None = None
+    """The settings row's, or None for a user who has no row yet — `send_batch` creates one
+    before it mails them (DC-10)."""
 
 
 @dataclass(frozen=True)
@@ -606,6 +619,7 @@ async def load_recipients(
             User.email,
             User.display_name,
             and_(entitled_user_clause(), verified_user_clause()).label("deliverable"),
+            UserSettings.unsubscribe_token,
         )
         .outerjoin(UserSettings, UserSettings.user_id == User.id)
         .where(
@@ -620,6 +634,7 @@ async def load_recipients(
             email=row.email,
             display_name=row.display_name,
             deliverable=row.deliverable,
+            unsubscribe_token=row.unsubscribe_token,
         )
         for row in rows
     ]
@@ -1153,7 +1168,44 @@ def digest_context(
             f"and {_plural(batch.overflow, 'more film')} on your timeline" if batch.overflow else ""
         ),
         "timeline_url": f"{settings.public_base_url.rstrip('/')}/",
+        "unsubscribe_url": recipient_unsubscribe_url(batch.recipient, settings),
     }
+
+
+def recipient_unsubscribe_url(recipient: DigestRecipient, settings: Settings) -> str | None:
+    """The recipient's one-click unsubscribe link, or None when they have no token yet — on the
+    API's origin, not the site's, because a mailbox provider POSTs to it directly (DC-10)."""
+    if recipient.unsubscribe_token is None:
+        return None
+    base = settings.api_base_url.rstrip("/")
+    return f"{base}/digest/unsubscribe/{recipient.unsubscribe_token}"
+
+
+def unsubscribe_headers(link: str) -> dict[str, str]:
+    """The RFC 2369 / RFC 8058 pair that puts an Unsubscribe button in the mailbox's own UI and
+    lets it act with one POST. The alert sets neither: it is a follow's consequence, not a
+    subscription, and its footer's settings link stands (DC-10)."""
+    return {
+        "List-Unsubscribe": f"<{link}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+
+
+async def ensure_unsubscribe_token(session: AsyncSession, *, user_id: UUID) -> str:
+    """This user's unsubscribe token, creating their settings row if they have none. The
+    caller commits.
+
+    The one settings row a batch pass writes (see `settings_service`): only `send_batch` calls
+    this, and only for a user it is about to mail. The row is the defaults
+    `settings_service.get_or_create` would write, so the digest cadence it records is the
+    `weekly` default this user was already on — creating it changes nothing they receive."""
+    row = await user_settings_repo.create_if_absent(
+        session,
+        user_id=user_id,
+        ical_token=tokens.new_ical_token(),
+        unsubscribe_token=tokens.new_unsubscribe_token(),
+    )
+    return row.unsubscribe_token
 
 
 def render_batch(
@@ -1163,12 +1215,16 @@ def render_batch(
     render path: `send_batch` delivers this, and `render_digest` returns it (D-1460.1)."""
     if not batch.has_content:
         return None
-    return render(
+    envelope = render(
         DIGEST_TEMPLATE,
         digest_context(batch, cadence=cadence, today=today, settings=settings),
         sender=settings.mail_from,
         to=batch.recipient.email,
     )
+    link = recipient_unsubscribe_url(batch.recipient, settings)
+    if link is None:
+        return envelope
+    return replace(envelope, headers=unsubscribe_headers(link))
 
 
 async def render_digest(
@@ -1187,12 +1243,20 @@ async def render_digest(
     *sent* is `send_digests`' question, which still answers it. Marks nothing, commits
     nothing. None when there is nothing to say; `LookupError` for an unknown user."""
     user = (
-        await session.execute(select(User.email, User.display_name).where(User.id == user_id))
+        await session.execute(
+            select(User.email, User.display_name, UserSettings.unsubscribe_token)
+            .outerjoin(UserSettings, UserSettings.user_id == User.id)
+            .where(User.id == user_id)
+        )
     ).one_or_none()
     if user is None:
         raise LookupError(f"no user {user_id}")
     recipient = DigestRecipient(
-        user_id=user_id, email=user.email, display_name=user.display_name, deliverable=True
+        user_id=user_id,
+        email=user.email,
+        display_name=user.display_name,
+        deliverable=True,
+        unsubscribe_token=user.unsubscribe_token,
     )
     batch = await load_batch(
         session,
@@ -1234,6 +1298,9 @@ async def send_batch(
     for why, row_ids in by_reason.items():
         await mark(session, row_ids, status="failed", error=why)
     failed = len(unsendable_ids)
+    if batch.has_content and batch.recipient.unsubscribe_token is None:
+        token = await ensure_unsubscribe_token(session, user_id=batch.recipient.user_id)
+        batch = replace(batch, recipient=replace(batch.recipient, unsubscribe_token=token))
     try:
         envelope = render_batch(batch, cadence=cadence, today=today, settings=settings)
         if envelope is None:

@@ -138,6 +138,17 @@ frontend `/settings` route) and its `failed`-is-terminal rule. Specific to them:
 - **`digest_cadence = off` rows accumulate.** The decision pass keeps queueing for a user who
   has turned the digest off, and neither slot reads them; switching back to `weekly` gets
   everything since in one mail. Nothing prunes that backlog.
+- **`API_BASE_URL` must be the API's public origin (DC-10, NEU-1463).** Every digest carries
+  `List-Unsubscribe: <{API_BASE_URL}/digest/unsubscribe/{token}>` plus RFC 8058's one-click
+  `List-Unsubscribe-Post`, and a mailbox provider POSTs to that URL from its own servers. Set
+  it in the Coolify UI (`https://api.backlotter.com`, no trailing slash) and confirm it with
+  `printenv`. Boot validation refuses `MAIL_PROVIDER=resend` on the code default
+  (`http://localhost:8000`), but `docker-compose.prod.yml` seeds the prod origin, so in prod
+  that guard never fires — a wrong Coolify value is caught by nothing. The route is public,
+  answers `404` for an unknown token, and sits on its own `digest_unsubscribe` rate bucket,
+  kept wide (`300/300`) because the one-click POSTs arrive from a mailbox provider's few
+  shared IPs. The send creates a settings row for a reader it is about to mail who has none —
+  the token lives there — so rows appear for weekly readers who never opened their settings.
 
 Scripts that need to run in production must be copied into the image. Add `COPY scripts/ scripts/` to the `Dockerfile` for both `dev` and `prod` targets; otherwise the file is only available in local dev via bind-mount.
 

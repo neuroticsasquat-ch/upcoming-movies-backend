@@ -118,7 +118,12 @@
             You are getting this {{ cadence }} digest because you follow people, companies,
             franchises and films on {{ product_name }}, and because films you follow have
             dates coming up.
+            {% if unsubscribe_url %}
+            <a href="{{ settings_url }}" style="color:#1a56db;">Change how often it arrives</a> — or
+            <a href="{{ unsubscribe_url }}" style="color:#1a56db;">unsubscribe</a>.
+            {% else %}
             <a href="{{ settings_url }}" style="color:#1a56db;">Change how often it arrives</a> — or stop it.
+            {% endif %}
           </p>
         </td>
       </tr>

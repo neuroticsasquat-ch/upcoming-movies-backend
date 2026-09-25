@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from upmovies.config import get_settings
+from upmovies.config import DEFAULT_API_BASE_URL, get_settings
 from upmovies.mail import (
     Envelope,
     MailConfigurationError,
@@ -33,6 +33,7 @@ RESEND_CONFIG: dict[str, object] = {
     "mail_provider": "resend",
     "mail_from": "Backlotter <no-reply@example.com>",
     "resend_api_key": "re_test",
+    "api_base_url": "https://api.example.com",
 }
 
 NOOP_CONFIG: dict[str, object] = {
@@ -153,6 +154,20 @@ async def test_deliver_hands_the_envelope_to_the_transport_as_it_stands():
     assert transport.sent == [envelope]
 
 
+async def test_noop_keeps_an_envelopes_headers_for_a_test_to_read():
+    """DC-10: the digest's `List-Unsubscribe` pair rides on the envelope, and the recording
+    transport is where a test asserts it."""
+    headers = {"List-Unsubscribe": "<https://api.example.com/digest/unsubscribe/t>"}
+    envelope = Envelope(
+        sender="s@example.com", to="a@example.com", subject="S", text="T", html="", headers=headers
+    )
+    transport = NoopTransport()
+    async with MailGateway(settings_with(**NOOP_CONFIG), transport=transport) as mail:
+        await mail.deliver(envelope)
+
+    assert transport.sent[0].headers == headers
+
+
 async def test_delivering_through_a_closed_gateway_is_refused():
     transport = NoopTransport()
     mail = MailGateway(settings_with(**NOOP_CONFIG), transport=transport)
@@ -226,6 +241,21 @@ def test_every_fault_is_reported_from_one_failed_boot():
 
     assert "RESEND_API_KEY" in str(exc.value)
     assert "MAIL_FROM" in str(exc.value)
+
+
+def test_resend_on_the_default_api_base_url_fails_the_boot():
+    """The digest's `List-Unsubscribe` link is built on `API_BASE_URL` (DC-10); a deploy that
+    forgot it would mail every reader a one-click link to the dev API."""
+    with pytest.raises(MailConfigurationError, match="API_BASE_URL"):
+        validate_mail_configuration(
+            settings_with(**{**RESEND_CONFIG, "api_base_url": DEFAULT_API_BASE_URL})
+        )
+
+
+def test_noop_on_the_default_api_base_url_boots():
+    """`noop` transmits nothing, so a localhost link in a mail nobody receives is harmless —
+    and it is what every local checkout runs."""
+    validate_mail_configuration(settings_with(**NOOP_CONFIG, api_base_url=DEFAULT_API_BASE_URL))
 
 
 def test_an_unknown_provider_fails_the_boot_even_though_the_literal_should_have_caught_it():

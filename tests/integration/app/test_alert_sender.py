@@ -139,6 +139,8 @@ async def test_a_queued_alert_sends_once_and_the_row_records_it(
     assert (result.mails_sent, result.sent, result.failed, result.suppressed) == (1, 1, 0, 0)
     (envelope,) = mailbox.sent
     assert envelope.to == "sub@example.com"
+    # DC-10: an alert is a follow's consequence, not a subscription — no List-Unsubscribe.
+    assert dict(envelope.headers) == {}
     (row,) = await _rows(session)
     assert row.status == "sent"
     assert row.sent_at is not None

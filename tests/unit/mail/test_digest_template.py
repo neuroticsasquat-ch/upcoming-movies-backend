@@ -16,6 +16,7 @@ from upmovies.mail import MailError, render
 
 SETTINGS_URL = "https://app.example.com/settings"
 TIMELINE_URL = "https://app.example.com/"
+UNSUBSCRIBE_URL = "https://api.example.com/digest/unsubscribe/tok-ada"
 
 SLATE = [
     {
@@ -144,6 +145,7 @@ def _digest(
             else ""
         ),
         "timeline_url": TIMELINE_URL,
+        "unsubscribe_url": UNSUBSCRIBE_URL,
         **overrides,
     }
     return render(
@@ -436,6 +438,28 @@ def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
         assert SETTINGS_URL in part
         assert "films you follow" in part
         assert "weekly digest" in part
+
+
+def test_the_footer_links_unsubscribe_to_the_token_url_and_keeps_the_settings_link():
+    """DC-10: the footer's "unsubscribe" is the one-click link; the settings link stays for
+    changing the cadence rather than stopping it."""
+    envelope = _digest(entries=ENTRIES)
+
+    assert f'<a href="{UNSUBSCRIBE_URL}" style="color:#1a56db;">unsubscribe</a>' in envelope.html
+    assert f"Or unsubscribe in one click:\n\n{UNSUBSCRIBE_URL}\n" in envelope.text
+    for part in (envelope.text, envelope.html):
+        assert SETTINGS_URL in part
+
+
+def test_without_a_token_the_footer_offers_the_settings_link_alone():
+    """`render_digest` previews a user with no settings row without writing one, so there is
+    no token to link — the footer falls back to the settings page's "or stop it"."""
+    envelope = _digest(entries=ENTRIES, unsubscribe_url=None)
+
+    for part in (envelope.text, envelope.html):
+        assert "unsubscribe" not in part
+        assert "or stop it" in part
+        assert SETTINGS_URL in part
 
 
 def test_display_name_is_optional_the_way_every_other_template_makes_it():

@@ -32,7 +32,11 @@ def subscriber(session, make_user):
     async def _make(*, email: str = "sub@example.com", entitled_until=ENTITLED_UNTIL):
         user = await make_user(email=email, entitled_until=entitled_until)
         token = tokens.new_ical_token()
-        session.add(UserSettings(user_id=user.id, ical_token=token))
+        session.add(
+            UserSettings(
+                user_id=user.id, ical_token=token, unsubscribe_token=tokens.new_unsubscribe_token()
+            )
+        )
         await session.commit()
         return user, token
 
