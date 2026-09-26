@@ -68,6 +68,7 @@ async def build(engine: AsyncEngine, n: int, cards_per_film: int) -> uuid.UUID:
             await conn.execute(text(f"CREATE SCHEMA {schema}"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.create_all)
 
     tables = Base.metadata.tables

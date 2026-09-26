@@ -120,6 +120,16 @@ equality, and only for titles of at least six folded characters — short ones w
 unrelated words. It is the whole of retrieval's normalization story beyond tokenization.
 _Avoid_: slug, normalize (too broad — tokenization normalizes too), fuzzy match.
 
+**Search fold**:
+The form public search matches on: a title or name lowercased, with Latin diacritics mapped to
+their base letter and every non-alphanumeric dropped, so `Shōgun` / `Spider-Man` become
+`shogun` / `spiderman`. Stored beside its source column as a generated `<col>_fold` and indexed
+with a `pg_trgm` GIN (NEU-1469, ADR-0020); the query is folded the same way in Python
+(`_normalize_query`) and substring-matched with `LIKE`. Not the **squash-fold**: that is
+retrieval's, keeps accents, and lives in memory per run. The two are different functions on
+purpose and neither should be made to serve the other's caller.
+_Avoid_: normalized title (which fold?), slug, unaccent (the extension is not used).
+
 **Initialism collapse**:
 A run of two or more `<letter><separator>` pairs — `.` or `/`, letters only — read as one word
 before tokenizing, so `F.A.S.T.` yields `fast` and `S/H/V` yields `shv`. Applied to titles and
