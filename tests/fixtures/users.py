@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -29,12 +30,16 @@ async def make_user(session: AsyncSession):
         password: str = "hunter2hunter2",
         display_name: str = "Test User",
         is_admin: bool = False,
+        entitled_until: datetime | None = None,
+        email_verified_at: datetime | None = None,
     ) -> User:
         user = User(
             email=email,
             password_hash=passwords.hash_password(password),
             display_name=display_name,
             is_admin=is_admin,
+            entitled_until=entitled_until,
+            email_verified_at=email_verified_at,
         )
         session.add(user)
         await session.commit()
@@ -75,5 +80,18 @@ async def authed_client(session: AsyncSession, make_user) -> AsyncIterator[Async
 @pytest.fixture
 async def admin_authed_client(session: AsyncSession, make_user) -> AsyncIterator[AsyncClient]:
     user = await make_user(email="admin@example.com", is_admin=True)
+    async with await _build_authed_client(session, user) as c:
+        yield c
+
+
+# A grant that outlives the suite. The subscriber-only routes (D-39) need a signed-in user who
+# holds one, and `authed_client` deliberately does not: an account starts unentitled (D-37), and
+# a fixture that quietly granted every test user access would hide a route that forgot its gate.
+ENTITLED_UNTIL = datetime(2099, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture
+async def entitled_client(session: AsyncSession, make_user) -> AsyncIterator[AsyncClient]:
+    user = await make_user(email="entitled@example.com", entitled_until=ENTITLED_UNTIL)
     async with await _build_authed_client(session, user) as c:
         yield c

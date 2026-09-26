@@ -20,10 +20,12 @@ DEFAULT_ROUTING: dict[str, str] = {
     "cluster_provider": "anthropic",
     "source_judge_provider": "anthropic",
     "summary_provider": "anthropic",
+    "resolve_provider": "anthropic",
     "link_model": "claude-haiku-4-5",
     "cluster_model": "claude-sonnet-4-6",
     "source_judge_model": "claude-haiku-4-5",
     "summary_model": "claude-haiku-4-5",
+    "resolve_model": "claude-sonnet-4-6",
 }
 
 

@@ -95,3 +95,28 @@ async def test_field_changed_at_reflects_a_real_update(session):
     film.title = "B"
     await session.flush()
     assert await field_changed_at(session, film.id, "title") is not None
+
+
+async def test_search_fold_columns_log_nothing(session):
+    """The trigger fires BEFORE UPDATE, when Postgres has not yet computed the stored fold
+    columns (NEU-1469): NEW reads NULL for them, so without their denylist entry every update
+    to a titled film — a popularity refresh included — would log a spurious fold change."""
+    film = Film(tmdb_id=990013, title="Shōgun", original_title="將軍", popularity=1.0)
+    session.add(film)
+    await session.flush()
+
+    film.popularity = 2.0
+    await session.flush()
+    film.title = "Shogun"
+    await session.flush()
+
+    fields = (
+        (
+            await session.execute(
+                select(FilmFieldChange.field).where(FilmFieldChange.film_id == film.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert fields == ["title"]

@@ -52,6 +52,22 @@ def test_crew_attached_ranks_with_announced():
     assert most_significant_event_type(["crew_attached"]) == "crew_attached"
 
 
+def test_canceled_outranks_every_other_beat_on_its_day():
+    """Terminal (EF-6, NEU-1435): a film being called off is the whole of what a day carrying
+    it is about. `now_available` is the highest-ranked type otherwise, so beating it is the
+    property worth pinning."""
+    assert most_significant_event_type(["canceled", "now_available"]) == "canceled"
+    assert most_significant_event_type(["trailer", "canceled", "casting"]) == "canceled"
+    assert most_significant_event_type(["canceled"]) == "canceled"
+
+
+def test_no_film_is_ever_in_the_canceled_arc_stage():
+    """The stage exists to give `_EVENT_STAGE` a rank to point at, not to widen what
+    `arc_stage` can return: `_STATUS_BASELINE` has no `Canceled` entry, so a cancelled film
+    still floors to `announced` and the API's stage vocabulary is unchanged."""
+    assert derive_arc_stage("Canceled") == "announced"
+
+
 def test_crew_attached_does_not_move_the_arc_stage():
     """`derive_arc_stage` stays status-only (NEU-452): a catalog event is not a status, any
     more than a news event is."""
@@ -86,3 +102,11 @@ def test_ordered_event_types_leads_with_the_most_significant_type():
 
 def test_ordered_event_types_empty():
     assert ordered_event_types([]) == []
+
+
+def test_now_available_outranks_the_date_that_promised_it():
+    """A film landing at home is the beat of its day (D-28): a `now_available` card leads over
+    the `release_date` card that announced the date, and over anything else a film past its
+    theatrical run can still raise."""
+    assert most_significant_event_type(["release_date", "now_available"]) == "now_available"
+    assert most_significant_event_type(["trailer", "now_available"]) == "now_available"

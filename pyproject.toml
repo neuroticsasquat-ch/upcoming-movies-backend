@@ -6,15 +6,20 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.1",
-    "sqlalchemy[asyncio]>=2.0.52",
+    # <2.1: its TypeVarTuple Select/Row typing fails pyright across the codebase; lift with that migration.
+    "sqlalchemy[asyncio]>=2.0.52,<2.1",
     "asyncpg>=0.31.0",
     "alembic>=1.19.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "httpx>=0.28.1",
+    "jinja2>=3.1.6",
     "feedparser>=6.0.14",
     "argon2-cffi>=25.1.0",
     "email-validator>=2.3.0",
+    # Multipart form parsing, for the library-import upload (NEU-1356). FastAPI declares it
+    # as an optional extra rather than a dependency, so it has to be named here.
+    "python-multipart>=0.0.20",
     "sentry-sdk[fastapi]>=2.67.1",
     "opentelemetry-distro",
     "opentelemetry-exporter-otlp-proto-http",
@@ -34,6 +39,10 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "respx>=0.23.1",
+    # Third-party RFC 5545 parser, test-only: it validates the hand-rolled writer in
+    # `public/ical.py` (D-34). Deliberately not a runtime dependency — the writer is ~60 lines
+    # and a parser checking its own author's reading of the spec would validate nothing.
+    "icalendar>=6.1.0",
     "ruff>=0.16.2",
     "pyright>=1.1.411",
     "httpx>=0.28.1",

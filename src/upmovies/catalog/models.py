@@ -5,6 +5,7 @@ from sqlalchemy import (
     DDL,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
+    UniqueConstraint,
     event,
     text,
 )
@@ -19,6 +21,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from upmovies.catalog.fold import fold_computed
 from upmovies.db import Base
 
 
@@ -29,6 +32,18 @@ class Film(Base):
     __tablename__ = "film"
     __table_args__ = (
         Index("ix_catalog_film_slug", "slug", unique=True),
+        Index(
+            "ix_catalog_film_title_fold_trgm",
+            "title_fold",
+            postgresql_using="gin",
+            postgresql_ops={"title_fold": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_catalog_film_original_title_fold_trgm",
+            "original_title_fold",
+            postgresql_using="gin",
+            postgresql_ops={"original_title_fold": "gin_trgm_ops"},
+        ),
         {"schema": "catalog"},
     )
 
@@ -40,6 +55,12 @@ class Film(Base):
     imdb_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     original_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_fold: Mapped[str | None] = mapped_column(Text, fold_computed("title"), nullable=True)
+    """The **search fold** of `title` (ADR-0020), written by Postgres; never set it."""
+    original_title_fold: Mapped[str | None] = mapped_column(
+        Text, fold_computed("original_title"), nullable=True
+    )
+    """The **search fold** of `original_title` (ADR-0020), written by Postgres; never set it."""
     release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
     overview: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -73,6 +94,24 @@ class Film(Base):
     run is silently swallowed as a baseline. Ingest bookkeeping, not a fact about the film —
     hence its place in `FILM_FIELD_CHANGE_DENYLIST`.
     """
+    companies_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When the catalog first held an observation of this film's production companies — NULL
+    until it has.
+
+    `credits_observed_at` for the studio half (EF-5, NEU-1433), and load-bearing for the same
+    reason: `film_production_company` is delete-and-rebuilt on every ingest, so "holds no
+    company rows" cannot tell a film nobody has looked at from one TMDB lists no companies for
+    — and the first studio to attach to the second is exactly the beat the company half exists
+    to raise.
+
+    Backfilled to `now()` for every film already in the catalog by this column's own migration,
+    which is what NEU-1436 keys the EF-4 admission exception on: with the marker left NULL,
+    every existing film would read as a first observation on its next refresh and card an
+    attachment for every followed studio in the catalog at once (D-1436.3). Ingest bookkeeping
+    rather than a fact about the film, so it joins `FILM_FIELD_CHANGE_DENYLIST`.
+    """
     release_dates_observed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -82,6 +121,19 @@ class Film(Base):
     inferring "never observed" from "holds nothing" would re-baseline it on every ingest and
     swallow the first date it is ever given — the single most valuable beat this project's
     undated population can produce. Ingest bookkeeping, so it joins the denylist too.
+    """
+    videos_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When the catalog first held an observation of this film's videos — NULL until it has.
+
+    `credits_observed_at` for the promo reel (D-35), and needed for the same reason
+    `release_dates_observed_at` is, at its sharpest: the video poll's scoped set deliberately
+    includes in-play films somebody follows, *because* trailers precede a theatrical date by
+    months — so the ordinary first read of a followed film returns no videos at all. Inferring
+    "never looked" from "holds nothing" would re-baseline that film on every poll and swallow
+    the teaser it eventually gets, which is the single beat the poll exists to catch. Ingest
+    bookkeeping rather than a fact about the film, so it joins `FILM_FIELD_CHANGE_DENYLIST`.
     """
     tmdb_missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     """When TMDB was last confirmed to have no entry at this film's id — NULL while it is live.
@@ -132,10 +184,20 @@ class Genre(Base):
 
 class ProductionCompany(Base):
     __tablename__ = "production_company"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index(
+            "ix_catalog_production_company_name_fold_trgm",
+            "name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"name_fold": "gin_trgm_ops"},
+        ),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    name_fold: Mapped[str | None] = mapped_column(Text, fold_computed("name"), nullable=True)
+    """The **search fold** of `name` (ADR-0020), written by Postgres; never set it."""
     logo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     origin_country: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -159,10 +221,20 @@ class SpokenLanguage(Base):
 
 class Collection(Base):
     __tablename__ = "collection"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index(
+            "ix_catalog_collection_name_fold_trgm",
+            "name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"name_fold": "gin_trgm_ops"},
+        ),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    name_fold: Mapped[str | None] = mapped_column(Text, fold_computed("name"), nullable=True)
+    """The **search fold** of `name` (ADR-0020), written by Postgres; never set it."""
     poster_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     backdrop_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -253,6 +325,12 @@ class FilmAlternativeTitle(Base):
     __tablename__ = "film_alternative_title"
     __table_args__ = (
         Index("ix_catalog_film_alt_title_film", "film_id"),
+        Index(
+            "ix_catalog_film_alternative_title_title_fold_trgm",
+            "title_fold",
+            postgresql_using="gin",
+            postgresql_ops={"title_fold": "gin_trgm_ops"},
+        ),
         {"schema": "catalog"},
     )
 
@@ -264,6 +342,8 @@ class FilmAlternativeTitle(Base):
     )
     iso_3166_1: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_fold: Mapped[str | None] = mapped_column(Text, fold_computed("title"), nullable=True)
+    """The **search fold** of `title` (ADR-0020), written by Postgres; never set it."""
     title_type: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -271,11 +351,31 @@ class Person(Base):
     """TMDB person reference (natural PK = TMDB's stable person id)."""
 
     __tablename__ = "person"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index(
+            "ix_catalog_person_name_fold_trgm",
+            "name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"name_fold": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_catalog_person_original_name_fold_trgm",
+            "original_name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"original_name_fold": "gin_trgm_ops"},
+        ),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     original_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name_fold: Mapped[str | None] = mapped_column(Text, fold_computed("name"), nullable=True)
+    """The **search fold** of `name` (ADR-0020), written by Postgres; never set it."""
+    original_name_fold: Mapped[str | None] = mapped_column(
+        Text, fold_computed("original_name"), nullable=True
+    )
+    """The **search fold** of `original_name` (ADR-0020), written by Postgres; never set it."""
     profile_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     known_for_department: Mapped[str | None] = mapped_column(Text, nullable=True)
     gender: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -293,6 +393,39 @@ class Person(Base):
     any film they are credited on is next read. The handle on the other side is a door someone
     else opens.
     """
+    birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    """TMDB's `birthday`, or NULL when TMDB holds none — which is most people (NEU-1370)."""
+    deathday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    """TMDB's `deathday`, or NULL when the person is living *or* TMDB simply has no date.
+
+    The two are not distinguishable here and must not be read as if they were: a NULL means
+    "no death date known", which is why the sanity check it feeds only ever *holds* on a
+    present date and never clears a credit on an absent one."""
+    details_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """When `/person/{id}` was last read for this person — the three fields above come from
+    there and from nowhere else, and the credits endpoints the sweep otherwise calls do not
+    return them (NEU-1370).
+
+    Its real job is to be the *fetched-ness* flag: the fetch is lazy, once, only for people
+    about to be carded, so a person with a NULL `birthday` and a stamped
+    `details_observed_at` is one TMDB has no birthday for, not one nobody has asked about.
+    Without it the sanity checks would re-request every such person on every pass forever.
+    Never refreshed afterwards — a birthday does not change, and a death is rare enough to be
+    worth missing until someone refreshes by hand."""
+
+
+STATUS_FIELD = "status"
+COLLECTION_FIELD = "collection_id"
+"""The two `catalog.film` columns whose `film_field_change` history is read as a beat.
+
+They live here, beside the table whose `field` column holds them, because both ends of that
+history need them and the two ends sit on opposite sides of the ingest package:
+`ingest.sweep.field_events` and `ingest.sweep.collection_events` read the rows, and
+`ingest.tmdb.collection_history` writes the one row the `BEFORE UPDATE` trigger cannot (EF-4).
+The reader's `TRACKED_FIELDS` composes them and stays where it is.
+"""
 
 
 class FilmFieldChange(Base):
@@ -303,6 +436,7 @@ class FilmFieldChange(Base):
     __tablename__ = "film_field_change"
     __table_args__ = (
         Index("ix_film_field_change_lookup", "film_id", "field", "changed_at"),
+        Index("ix_film_field_change_carded_by", "carded_by_event_id"),
         {"schema": "catalog"},
     )
 
@@ -318,6 +452,26 @@ class FilmFieldChange(Base):
     changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    carded_by_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_film_field_change_carded_by"),
+        nullable=True,
+    )
+    """The event that published this change, when one has — `film_credit_change`'s column and
+    its `ON DELETE SET NULL` rationale, in full (D-1446.2).
+
+    **Only the `collection_id` rows ever carry it.** This table records every tracked column,
+    and a story cannot scoop a `status` change: `_already_carded` in `sweep.field_events` asks
+    "does this film already have one of these cards", which no story card can satisfy because
+    the status vocabulary is not the story vocabulary. The franchise half is the one that
+    needed a stamp, and it gets the same column shape the other two kinds use rather than a
+    time-based carve-out of its own — one stamp shape for all three (D-1446.2).
+
+    Written by `news.attachment_confirm.stamp_prior_story_cards` in the backward direction
+    only, by resolved `news.story_entity.entity_id` (D-1446.6). `sweep.collection_events`'
+    loader drops a stamped row, which is what stops a franchise a trade broke on Monday
+    surfacing as a second card when TMDB files it on Thursday.
+    """
 
 
 class FilmCredit(Base):
@@ -367,6 +521,7 @@ class FilmCreditChange(Base):
     __tablename__ = "film_credit_change"
     __table_args__ = (
         Index("ix_catalog_film_credit_change_lookup", "film_id", "changed_at"),
+        Index("ix_catalog_film_credit_change_carded_by", "carded_by_event_id"),
         {"schema": "catalog"},
     )
 
@@ -387,6 +542,87 @@ class FilmCreditChange(Base):
     changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    carded_by_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_film_credit_change_carded_by"),
+        nullable=True,
+    )
+    """The event that published this attachment, when one has (NEU-1371, D-5). NULL is the
+    ordinary state: most rows are carded by the sweep, which stamps nothing.
+
+    Set only by the Tier-A short-circuit (`news.attachment_confirm`), in both directions — the
+    cluster stage stamps a pending change a new story card names, and the sweep loader stamps
+    a pending change that finds an earlier story card. A stamped row is **published already**
+    and is never carded by the sweep: `load_attachment_backlog` drops it, which is what stops
+    a quarantined credit surfacing days later as a duplicate of the story that broke it
+    (INV-4).
+
+    It also answers *who had it first*, which is why it records the event rather than a bare
+    boolean. A row pointing at a **story**-provenance card is a trade scoop: the trades ran the
+    beat and TMDB caught up. A row pointing at a **catalog**-provenance card — one a story
+    later attached to, via ADR-0014 promotion — is a TMDB scoop: the catalog had it first and
+    the trades corroborated. Neither reading loses the change's own `changed_at`, which stays
+    on this row, so "we had it first" stays provable against the card's `occurred_at`. M4/M7
+    read it this way; nothing displays it yet.
+
+    `ON DELETE SET NULL` rather than CASCADE, for the reason `event.superseded_by` uses it:
+    losing the card must not delete the history of the attachment it published.
+    """
+
+
+class FilmCompanyChange(Base):
+    """Append-only history of production companies attaching to and detaching from a film,
+    written by the join rebuild in `ingest.tmdb.company_history` (EF-5, NEU-1433).
+
+    `catalog.film_production_company` is delete-and-rebuilt on every ingest, exactly as
+    `film_credit` is, so it holds no memory of a studio having joined — only that one is on
+    the film now. This table is that memory, and it is what lets a studio follow deliver an
+    attachment stream (EF-3) rather than every beat on every film the studio ever touched.
+
+    Unlike `film_credit_change` there is **no recorded grade**: a company row is a company row,
+    TMDB publishes no billing order for them, and a film carries a handful rather than a cast
+    of forty. Every company that crosses the set is written down.
+
+    What it *does* inherit, and must earn explicitly for the same reasons, is **first
+    observation is a baseline, never a change** (ADR-0014, spec §5.3), keyed on the durable
+    `film.companies_observed_at` marker rather than on the join table being empty — see
+    `ingest.tmdb.company_history` for why the two are not the same statement.
+    """
+
+    __tablename__ = "film_company_change"
+    __table_args__ = (
+        Index("ix_catalog_film_company_change_lookup", "film_id", "changed_at"),
+        Index("ix_catalog_film_company_change_carded_by", "carded_by_event_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    company_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.production_company.id"), nullable=False
+    )
+    change: Mapped[str] = mapped_column(Text, nullable=False)
+    """`added` or `removed`."""
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    carded_by_event_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("news.event.id", ondelete="SET NULL", name="fk_film_company_change_carded_by"),
+        nullable=True,
+    )
+    """The event that published this change, when one has — `film_credit_change`'s column and
+    its `ON DELETE SET NULL` rationale, in full.
+
+    Nothing writes it yet: the story half that stamps it is EF-12's organisation resolution,
+    which has no extraction schema until M4. It is here now because the sweep's backlog loader
+    already reads `carded_by_event_id IS NULL`, so the seam a trade scoop will arrive on is the
+    filter rather than a later migration.
+    """
 
 
 class FilmReleaseDateChange(Base):
@@ -427,9 +663,10 @@ class FilmReleaseDateChange(Base):
     )
     iso_3166_1: Mapped[str] = mapped_column(Text, nullable=False)
     release_type: Mapped[int] = mapped_column(Integer, nullable=False)
-    """TMDB release `type`; always 2 (limited) or 3 (wide) — `THEATRICAL_RELEASE_TYPES`.
-    Together with `iso_3166_1` this is the *subject*: US limited and US wide are two subjects
-    on one film, and a distributor can move one without the other."""
+    """TMDB release `type`; one of the displayable ones — 2 (limited) or 3 (wide) in US or an
+    origin country, 4 (digital) or 5 (physical) in US only (`release_grade`, D-26).
+    Together with `iso_3166_1` this is the *subject*: US limited, US wide and US digital are
+    three subjects on one film, and a distributor can move one without the others."""
     previous_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     """NULL when the change is `set` — there was no prior date for this subject."""
     new_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -440,12 +677,197 @@ class FilmReleaseDateChange(Base):
     )
 
 
+# --- Watch providers (D-27) --------------------------------------------------
+#
+# Two tables with opposite lifetimes over the same TMDB read. `availability_first_seen` is the
+# *ledger*: one row the first time a film is seen on a provider under a monetization type, never
+# updated, never deleted — it is what `now_available` cards off (D-28), and the reason D-27 says
+# the product never tracks churn. `film_availability_current` is the *snapshot*: what the
+# where-to-watch box renders (D-29), rebuilt wholesale from each poll, so a film leaving a
+# service disappears from the box without disturbing the fact that it was once there.
+#
+# Both are keyed on `(film_id, region, provider_id, monetization_type)`. Region is a column
+# rather than an assumption even though v1 polls `US` only: the ledger is insert-only, so a
+# later region would otherwise have to be told apart from the US rows by inference.
+
+MONETIZATION_TYPES = ("flatrate", "rent", "buy")
+"""The offer kinds D-27 tracks, and the TMDB response keys they are read from. TMDB's `ads` and
+`free` are deliberately not here — see `TMDBWatchProviderRegion`."""
+
+
+def _monetization_in_list() -> str:
+    return ", ".join(f"'{v}'" for v in MONETIZATION_TYPES)
+
+
+class WatchProvider(Base):
+    """A streaming, rental or purchase service, as TMDB (sourcing JustWatch) names it.
+
+    Upserted from whatever the poll observes rather than seeded from
+    `/watch/providers/movie`: the poll can only ever reference a provider it has just been
+    handed, so the list this table needs is exactly the list it sees, and a seeded catalogue
+    would mostly be providers for regions v1 never reads."""
+
+    __tablename__ = "watch_provider"
+    __table_args__ = {"schema": "catalog"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    """TMDB's `provider_id` — JustWatch's id space, not ours, so nothing generates it."""
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    logo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AvailabilityFirstSeen(Base):
+    """The first time this film was observed on this provider, in this region, under this
+    monetization type. Insert-only (D-27, D-28).
+
+    A surrogate key with a unique constraint over the four natural columns rather than a
+    composite primary key: `now_available` (D-28) cards one event per (film, monetization_type)
+    off the rows a poll newly inserted, and an event body that names the rows it was born from
+    wants a single id to name them by."""
+
+    __tablename__ = "availability_first_seen"
+    __table_args__ = (
+        UniqueConstraint(
+            "film_id",
+            "region",
+            "provider_id",
+            "monetization_type",
+            name="uq_availability_first_seen",
+        ),
+        CheckConstraint(
+            f"monetization_type IN ({_monetization_in_list()})",
+            name="ck_availability_first_seen_monetization_type",
+        ),
+        # The carding pass (D-28) reads a film's first-seen rows; the poll checks them per film
+        # before inserting. Both ask by film, which the unique constraint's index leads with —
+        # this is that index under a name the query planner reaches either way.
+        Index("ix_catalog_availability_first_seen_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.watch_provider.id"), nullable=False
+    )
+    monetization_type: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class FilmAvailabilityCurrent(Base):
+    """What a film is available on *now*, as the last poll saw it — the where-to-watch box's
+    table (D-29).
+
+    Delete-and-rebuild per (film, region) on every poll, so it holds no history and needs none:
+    the history that matters is `availability_first_seen`, which this pass writes beside it.
+    `link` is TMDB's JustWatch deep link for the film in that region — the same value on every
+    row of a region, denormalised so the box can render from one query.
+    """
+
+    __tablename__ = "film_availability_current"
+    __table_args__ = (
+        UniqueConstraint(
+            "film_id",
+            "region",
+            "provider_id",
+            "monetization_type",
+            name="uq_film_availability_current",
+        ),
+        CheckConstraint(
+            f"monetization_type IN ({_monetization_in_list()})",
+            name="ck_film_availability_current_monetization_type",
+        ),
+        Index("ix_catalog_film_availability_current_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("catalog.watch_provider.id"), nullable=False
+    )
+    monetization_type: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FilmVideo(Base):
+    """One promo video TMDB holds for a film, as the video poll last saw it (D-35).
+
+    **Insert-only, and the whole dedup rule.** A row means "this film has been observed with
+    this video before", which is what makes a `trailer` card fire once: the poll inserts with
+    `ON CONFLICT DO NOTHING` over (film, site, key) and cards off what the statement actually
+    inserted. Nothing here is ever deleted — unlike `film_availability_current`, this is not a
+    snapshot, and a trailer pulled from YouTube must not read as new when it comes back.
+
+    Keyed on `(film_id, site, key)` rather than on TMDB's own opaque video `id` because `key`
+    is what the embed is built from (NEU-1386) and what the card carries: two TMDB rows for one
+    YouTube key are one video, and a card per TMDB id would run the same trailer twice.
+
+    Every video is stored, not just the trailers that card. The type is TMDB editors' to
+    change, and a teaser relabelled `Trailer` months later is not a new video — storing only
+    trailers would make it look like one.
+    """
+
+    __tablename__ = "film_video"
+    __table_args__ = (
+        UniqueConstraint("film_id", "site", "key", name="uq_film_video"),
+        # The poll reads a film's videos before inserting, and the film page will read them to
+        # render the embed. Both ask by film, which the unique constraint's index leads with —
+        # this is that index under a name the planner reaches either way.
+        Index("ix_catalog_film_video_film", "film_id"),
+        {"schema": "catalog"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    film_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("catalog.film.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    site: Mapped[str] = mapped_column(Text, nullable=False)
+    """The hosting site, verbatim from TMDB (`YouTube`, `Vimeo`, …). Not constrained: TMDB may
+    add one, and a CHECK here would fail a whole film's poll over a video nothing cards off."""
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    """The video's id *on `site`* — a YouTube watch id, not a TMDB one."""
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    """`Trailer`, `Teaser`, `Clip`, `Featurette`, … — TMDB's own vocabulary, stored verbatim
+    for the reason `site` is: only `Trailer` cards, and the rest earn their place by being
+    remembered rather than by being understood."""
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    """TMDB's title for the video ("Official Trailer"). Editor-entered free text, so it is
+    recorded but deliberately not rendered into a card body."""
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When the video went up on the hosting site — the trailer card's `occurred_at`. Nullable
+    because TMDB omits it on older rows; a video without one cannot be dated and so does not
+    card (the poll still records it, so it never cards later either)."""
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    """When *this* poll first saw the video, as against when it was published. The two differ
+    by the age of the backlog on a film's baseline read, and by up to a day after that."""
+
+
 # --- Film column-change history trigger -------------------------------------
 # Volatile columns TMDB churns on nearly every ingest — excluded so the history
 # table records only semantic changes (release_date, status, title, runtime, ...).
 # `credits_observed_at` is excluded for the other reason: it is ingest bookkeeping
 # rather than a property of the film, and a history row for it would make a film
-# look active to `dormant_film_clause` on the day it was admitted.
+# look active to `dormant_film_clause` on the day it was admitted. The search folds
+# (NEU-1469) are excluded because the trigger runs BEFORE UPDATE, when Postgres has not
+# yet computed stored generated columns: NEW reads NULL for them, so every update would
+# log a fold change — and a real one is already recorded as its source column's.
 FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "popularity",
     "vote_average",
@@ -454,8 +876,12 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "tmdb_raw",
     "updated_at",
     "credits_observed_at",
+    "companies_observed_at",
     "release_dates_observed_at",
+    "videos_observed_at",
     "tmdb_missing_at",
+    "title_fold",
+    "original_title_fold",
 )
 
 

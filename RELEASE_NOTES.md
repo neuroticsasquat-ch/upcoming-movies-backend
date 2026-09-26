@@ -1,5 +1,202 @@
 # Release notes
 
+## 1.1.1 — 2026-09-26
+
+### Feed
+
+- Catalog rows ship their events again ([NEU-1467](https://linear.app/neuroticsasquatch/issue/NEU-1467)) ([#384](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/384))
+
+### Notify
+
+- The digest is the only delivery ([NEU-1470](https://linear.app/neuroticsasquatch/issue/NEU-1470)) ([#386](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/386))
+
+### Search
+
+- Read a stored, trigram-indexed search fold ([NEU-1469](https://linear.app/neuroticsasquatch/issue/NEU-1469)) ([#385](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/385))
+
+## 1.1.0 — 2026-09-25
+
+### Digest
+
+- Film entries — ranked, attributed, dated, sourced, capped ([NEU-1460](https://linear.app/neuroticsasquatch/issue/NEU-1460)) ([#376](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/376))
+- Slate day for the daily cadence and new/moved slate markers ([NEU-1462](https://linear.app/neuroticsasquatch/issue/NEU-1462)) ([#379](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/379))
+- One-click unsubscribe — Envelope headers, token and routes ([NEU-1463](https://linear.app/neuroticsasquatch/issue/NEU-1463)) ([#380](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/380))
+- Admin digest preview and test-send routes ([NEU-1464](https://linear.app/neuroticsasquatch/issue/NEU-1464)) ([#381](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/381))
+
+### Follows
+
+- Follow_attribution_pairs — which follow reached which event ([NEU-1459](https://linear.app/neuroticsasquatch/issue/NEU-1459)) ([#375](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/375))
+
+### Mail
+
+- Digest and alert visual pass — wordmark, lead card, compact rows ([NEU-1461](https://linear.app/neuroticsasquatch/issue/NEU-1461)) ([#378](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/378))
+
+## 1.0.0 — 2026-09-23
+
+### Api
+
+- Split film detail events into day_groups with news/tmdb subgroups ([NEU-1201](https://linear.app/neuroticsasquatch/issue/NEU-1201))
+
+### Auth
+
+- Email verification with request/consume routes and signup mail ([NEU-1339](https://linear.app/neuroticsasquatch/issue/NEU-1339)) ([#298](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/298))
+- Password reset request and consume routes with expiring tokens ([NEU-1340](https://linear.app/neuroticsasquatch/issue/NEU-1340)) ([#299](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/299))
+- Email change confirmed from the new address ([NEU-1341](https://linear.app/neuroticsasquatch/issue/NEU-1341)) ([#300](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/300))
+- Open signup behind Turnstile, invite optional ([NEU-1343](https://linear.app/neuroticsasquatch/issue/NEU-1343)) ([#302](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/302))
+- Per-IP rate limiter on auth and public routes ([NEU-1344](https://linear.app/neuroticsasquatch/issue/NEU-1344)) ([#303](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/303))
+- Add the entitlement seam and admin grant routes ([NEU-1391](https://linear.app/neuroticsasquatch/issue/NEU-1391)) ([#304](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/304))
+
+### Calendar
+
+- Serve a tokenised iCal feed of watchlist release dates ([NEU-1383](https://linear.app/neuroticsasquatch/issue/NEU-1383)) ([#342](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/342))
+- Serve the watchlist release calendar as JSON at /me/calendar ([NEU-1411](https://linear.app/neuroticsasquatch/issue/NEU-1411)) ([#346](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/346))
+
+### Catalog
+
+- Widen the displayable release cut to the US home release ([NEU-1373](https://linear.app/neuroticsasquatch/issue/NEU-1373)) ([#333](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/333))
+
+### Cluster
+
+- Extract person mention tuples into news.story_person ([NEU-1360](https://linear.app/neuroticsasquatch/issue/NEU-1360)) ([#319](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/319))
+
+### Digest
+
+- Send the daily and weekly digest with the slate section ([NEU-1381](https://linear.app/neuroticsasquatch/issue/NEU-1381)) ([#341](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/341))
+
+### Feed
+
+- Split grouped feed by source category ([NEU-1199](https://linear.app/neuroticsasquatch/issue/NEU-1199))
+- Expose the where-to-watch box on FilmDetail ([NEU-1376](https://linear.app/neuroticsasquatch/issue/NEU-1376)) ([#336](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/336))
+
+### Follows
+
+- Follow, watchlist_item and watchlist_dismissal with /me/follows and /me/watchlist CRUD ([NEU-1349](https://linear.app/neuroticsasquatch/issue/NEU-1349)) ([#309](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/309))
+- Return entity names on GET /me/follows ([NEU-1396](https://linear.app/neuroticsasquatch/issue/NEU-1396)) ([#314](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/314))
+- Follows carry coverage; the watchlist is a query ([NEU-1414](https://linear.app/neuroticsasquatch/issue/NEU-1414)) ([#348](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/348))
+- The alert window ends at Canceled, not at Released ([NEU-1417](https://linear.app/neuroticsasquatch/issue/NEU-1417)) ([#349](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/349))
+- Coverage tier `any` — timeline, credit history, sweep tranche, person page ([NEU-1418](https://linear.app/neuroticsasquatch/issue/NEU-1418)) ([#350](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/350))
+- Studio and franchise pages over the person page's shape ([NEU-1428](https://linear.app/neuroticsasquatch/issue/NEU-1428)) ([#353](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/353))
+- Follows are binary and reach every credit ([NEU-1432](https://linear.app/neuroticsasquatch/issue/NEU-1432)) ([#354](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/354))
+- The timeline reads title films or entity attachments ([NEU-1437](https://linear.app/neuroticsasquatch/issue/NEU-1437)) ([#359](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/359))
+- Remove the watchlist; every film surface reads title follows ([NEU-1439](https://linear.app/neuroticsasquatch/issue/NEU-1439)) ([#361](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/361))
+- Last activity per follow, and each entity's own card stream ([NEU-1440](https://linear.app/neuroticsasquatch/issue/NEU-1440)) ([#362](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/362))
+- First association for studios and franchises, and the confirmation flip ([NEU-1446](https://linear.app/neuroticsasquatch/issue/NEU-1446)) ([#364](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/364))
+- Gzip responses and warn past the measured /me/follows ceiling ([NEU-1451](https://linear.app/neuroticsasquatch/issue/NEU-1451)) ([#368](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/368))
+
+### General
+
+- Pin anthropic<1.0.0 — 1.0.0 depends on httpx2, breaking respx mock
+- Adapt test_anthropic.py to httpx2  (anthropic 1.0.0 migration)
+- Lint errors in test files (unused imports, long lines)
+- Formatting and pyright — use route.calls[-1] instead of .last
+- Fall back to primary release_date when no displayable theatrical dates
+- Card credit detachments as credit_removed events ([NEU-1200](https://linear.app/neuroticsasquatch/issue/NEU-1200))
+- Ship title-parenthetical parts on the feed and film read models ([NEU-1215](https://linear.app/neuroticsasquatch/issue/NEU-1215))
+
+### Import
+
+- Letterboxd import with /search/movie resolution and unmatched report ([NEU-1356](https://linear.app/neuroticsasquatch/issue/NEU-1356)) ([#316](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/316))
+- TMDB account import via the v3 approve flow ([NEU-1357](https://linear.app/neuroticsasquatch/issue/NEU-1357)) ([#318](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/318))
+
+### Imports
+
+- Title follows only, inside the alert window ([NEU-1448](https://linear.app/neuroticsasquatch/issue/NEU-1448)) ([#365](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/365))
+- Two-phase import job with a review list and confirm ([NEU-1449](https://linear.app/neuroticsasquatch/issue/NEU-1449)) ([#366](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/366))
+- GET /me/import/active returns the caller's open import, or 204 ([NEU-1453](https://linear.app/neuroticsasquatch/issue/NEU-1453)) ([#367](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/367))
+
+### Ingest
+
+- Dampen TMDB credit oscillation via forward-dwell gate ([NEU-1205](https://linear.app/neuroticsasquatch/issue/NEU-1205))
+- Observe studio attachments and detachments ([NEU-1433](https://linear.app/neuroticsasquatch/issue/NEU-1433)) ([#355](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/355))
+- Observe franchise attachments and detachments ([NEU-1434](https://linear.app/neuroticsasquatch/issue/NEU-1434)) ([#356](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/356))
+- Card a film being called off ([NEU-1435](https://linear.app/neuroticsasquatch/issue/NEU-1435)) ([#357](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/357))
+- Admission is an attachment for followed entities ([NEU-1436](https://linear.app/neuroticsasquatch/issue/NEU-1436)) ([#358](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/358))
+
+### Invites
+
+- Session-auth /admin/invites and expose the consumer's email ([NEU-1408](https://linear.app/neuroticsasquatch/issue/NEU-1408)) ([#345](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/345))
+
+### Mail
+
+- Mail gateway with Resend adapter, templates, and startup validation ([NEU-1338](https://linear.app/neuroticsasquatch/issue/NEU-1338)) ([#297](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/297))
+- Send queued watchlist alerts at the end of the notify run ([NEU-1380](https://linear.app/neuroticsasquatch/issue/NEU-1380)) ([#339](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/339))
+
+### News
+
+- Add event status and superseded_by ([NEU-1346](https://linear.app/neuroticsasquatch/issue/NEU-1346)) ([#305](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/305))
+
+### Notify
+
+- Decision pass queueing alerts and digests over published events ([NEU-1379](https://linear.app/neuroticsasquatch/issue/NEU-1379)) ([#338](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/338))
+- Push per follow reach, with the provenance rule ([NEU-1438](https://linear.app/neuroticsasquatch/issue/NEU-1438)) ([#360](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/360))
+
+### Providers
+
+- Poll watch providers on the scoped set ([NEU-1374](https://linear.app/neuroticsasquatch/issue/NEU-1374)) ([#334](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/334))
+- Card now_available on a film's first home availability ([NEU-1375](https://linear.app/neuroticsasquatch/issue/NEU-1375)) ([#335](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/335))
+
+### Public
+
+- Group film timeline by occurred_at and order within-day by occurred_at ([NEU-1204](https://linear.app/neuroticsasquatch/issue/NEU-1204))
+- Ship empty events for catalog feed rows and update docs ([NEU-1208](https://linear.app/neuroticsasquatch/issue/NEU-1208))
+- Entity search and popular-people endpoints ([NEU-1350](https://linear.app/neuroticsasquatch/issue/NEU-1350)) ([#310](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/310))
+
+### Public,ingest
+
+- Only show earliest release date per category per country ([NEU-1206](https://linear.app/neuroticsasquatch/issue/NEU-1206))
+
+### Push
+
+- Web push subscriptions, VAPID keys and the push channel sender ([NEU-1387](https://linear.app/neuroticsasquatch/issue/NEU-1387)) ([#344](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/344))
+
+### Resolve
+
+- Candidate generation for a person mention on a linked film ([NEU-1362](https://linear.app/neuroticsasquatch/issue/NEU-1362)) ([#321](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/321))
+- Score person mentions and route accept/tiebreak/unlinked ([NEU-1363](https://linear.app/neuroticsasquatch/issue/NEU-1363)) ([#322](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/322))
+- Closed-set tiebreak stage on the gateway ([NEU-1364](https://linear.app/neuroticsasquatch/issue/NEU-1364)) ([#323](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/323))
+- Read-only /admin/resolution decision queue ([NEU-1366](https://linear.app/neuroticsasquatch/issue/NEU-1366)) ([#325](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/325))
+- Score age/alive plausibility ([NEU-1400](https://linear.app/neuroticsasquatch/issue/NEU-1400)) ([#329](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/329))
+- Resolve studios and franchises named in trade stories ([NEU-1445](https://linear.app/neuroticsasquatch/issue/NEU-1445)) ([#363](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/363))
+
+### Settings
+
+- User_settings and notification tables with /me/settings ([NEU-1378](https://linear.app/neuroticsasquatch/issue/NEU-1378)) ([#337](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/337))
+
+### Sweep
+
+- A credit_removed card supersedes the prior attachment card ([NEU-1347](https://linear.app/neuroticsasquatch/issue/NEU-1347)) ([#308](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/308))
+- Quarantine credit attachments before carding ([NEU-1368](https://linear.app/neuroticsasquatch/issue/NEU-1368)) ([#326](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/326))
+- Collapse credit bursts and order the feed day by significance ([NEU-1369](https://linear.app/neuroticsasquatch/issue/NEU-1369)) ([#327](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/327))
+- Hold implausible credit attachments in ingest.credit_hold ([NEU-1370](https://linear.app/neuroticsasquatch/issue/NEU-1370)) ([#328](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/328))
+- Publish quarantined credits through the story that broke them ([NEU-1371](https://linear.app/neuroticsasquatch/issue/NEU-1371)) ([#330](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/330))
+- Guard the effective hold, not the nominal quarantine window ([NEU-1401](https://linear.app/neuroticsasquatch/issue/NEU-1401)) ([#332](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/332))
+
+### Synthesize
+
+- Flag a release-date slip in the deterministic body ([NEU-1403](https://linear.app/neuroticsasquatch/issue/NEU-1403)) ([#340](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/340))
+
+### Test
+
+- Hash passwords at argon2's minimum cost under test ([NEU-1393](https://linear.app/neuroticsasquatch/issue/NEU-1393)) ([#306](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/306))
+
+### Timeline
+
+- /me/timeline, the grouped feed filtered by the user's follows ([NEU-1351](https://linear.app/neuroticsasquatch/issue/NEU-1351)) ([#311](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/311))
+- Match events naming a resolved followed person ([NEU-1365](https://linear.app/neuroticsasquatch/issue/NEU-1365)) ([#324](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/324))
+
+### Tmdb
+
+- Add /search/person to the TMDB client and its person upsert path ([NEU-1361](https://linear.app/neuroticsasquatch/issue/NEU-1361)) ([#320](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/320))
+
+### Videos
+
+- Poll /videos and card new trailers ([NEU-1385](https://linear.app/neuroticsasquatch/issue/NEU-1385)) ([#343](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/343))
+
+### Watchlist
+
+- Derive watchlist items from follows, on follow create and each sweep ([NEU-1352](https://linear.app/neuroticsasquatch/issue/NEU-1352)) ([#312](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/312))
+- Return the film's headline release on /me/watchlist ([NEU-1397](https://linear.app/neuroticsasquatch/issue/NEU-1397)) ([#315](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/315))
+
 ## 0.3.2 — 2026-08-13
 
 ### General

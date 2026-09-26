@@ -203,13 +203,7 @@ async def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args(argv)
     settings = get_settings()
-    async with TMDBClient(
-        base_url=settings.tmdb_base_url,
-        api_key=settings.tmdb_api_key,
-        rate_calls=settings.tmdb_rate_limit_requests,
-        rate_window=settings.tmdb_rate_limit_window_seconds,
-        retry_max_attempts=settings.tmdb_retry_max_attempts,
-    ) as client:
+    async with TMDBClient.from_settings(settings) as client:
         summary = await run_probe(
             session_factory=SessionLocal,
             client=client,

@@ -1,0 +1,13 @@
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+Confirm this address to finish setting up your {{ product_name }} account:
+
+{{ verify_url }}
+
+The link is good for {{ expires_in_hours }} hours. If it expires, ask for a new one from
+the sign-in page.
+
+If you did not create a {{ product_name }} account, you can ignore this email — nothing
+will happen until the link above is used.
+
+— {{ product_name }}

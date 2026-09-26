@@ -1,8 +1,9 @@
 """The sweep's release-date phase end to end (NEU-1121).
 
 Two families of rule live here. The first is what makes this phase exist at all: the card is
-about a **displayable** date — US or origin country, theatrical — so it names something the
-film page actually lists, and several markets moving in one observation share one card.
+about a **displayable** date — the theatrical arc in US or an origin country, plus the US home
+release (D-26) — so it names something the film page actually lists, and several subjects
+moving in one observation share one card.
 
 The second moved here wholesale from `field_events` when release dates did: the ADR-0002
 anti-double-card rule. A story-triggered release-date event and a catalog-triggered one can
@@ -123,7 +124,7 @@ async def test_a_moved_date_names_both_dates_and_the_market(session, session_fac
     (event,) = await _events(session, film)
     summary = await _summary(session, event)
     assert summary.summary == (
-        "US limited release date moved from 14 August 2026 to 4 December 2026."
+        "US limited release date slipped from 14 August 2026 to 4 December 2026."
     )
     assert event.subject_key == ["US:limited"]
 
@@ -144,6 +145,42 @@ async def test_two_markets_in_one_observation_share_one_card(session, session_fa
     summary = await _summary(session, event)
     assert "wide release date set to 15 January 2028." in summary.summary
     assert "limited release date set to 8 January 2028." in summary.summary
+
+
+async def test_a_us_digital_date_cards_with_a_home_release_subject(
+    session, session_factory, run_id
+):
+    """D-26: the home release is a `release_date` event like any other — same type, same
+    `confirmed` confidence, same template — distinguished only by its subject token."""
+    film = await add_film(session, 1, title="Runner")
+    await _change(session, film, release_type=4, new=date(2026, 10, 14))
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert result.events_created == 1
+    (event,) = await _events(session, film)
+    assert event.event_type == "release_date"
+    assert event.confidence == "confirmed"
+    assert event.region == "US"
+    assert event.subject_key == ["US:digital"]
+    summary = await _summary(session, event)
+    assert summary.summary == "US digital release date set to 14 October 2026."
+
+
+async def test_a_theatrical_and_a_home_date_in_one_observation_share_one_card(
+    session, session_factory, run_id
+):
+    film = await add_film(session, 1)
+    await _change(session, film, release_type=3, new=date(2026, 8, 14))
+    await _change(session, film, release_type=5, new=date(2026, 12, 1))
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert result.events_created == 1
+    (event,) = await _events(session, film)
+    assert sorted(event.subject_key) == ["US:physical", "US:wide"]
 
 
 async def test_separate_observations_stay_separate_cards(session, session_factory, run_id):

@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy import func, select, text
 
-from tests.fixtures.tmdb import make_details
+from tests.fixtures.tmdb import make_details, make_person_search_hit
 from upmovies.catalog.models import (
     Collection,
     Film,
@@ -13,8 +13,8 @@ from upmovies.catalog.models import (
     FilmReleaseDate,
     Person,
 )
-from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
-from upmovies.ingest.tmdb.upsert import upsert_film
+from upmovies.ingest.tmdb.schemas import TMDBMovieDetails, TMDBPersonSearchHit
+from upmovies.ingest.tmdb.upsert import mark_person_missing, upsert_film, upsert_people
 
 
 async def _films(session) -> list[Film]:
@@ -840,3 +840,72 @@ async def test_upsert_credits_none_is_noop(session):
     film = (await _films(session))[0]
     credits = await _film_credits(session, film.id)
     assert credits == []
+
+
+# upsert_people from a `/search/person` hit — the write person resolution makes for the
+# candidate it accepts (NEU-1361, D-21).
+
+
+async def test_upsert_people_writes_a_person_search_hit(session):
+    hit = TMDBPersonSearchHit.model_validate(
+        make_person_search_hit(
+            2037,
+            name="Cillian Murphy",
+            known_for_department="Acting",
+            gender=2,
+            popularity=41.2,
+            profile_path="/cillian.jpg",
+        )
+    )
+    await upsert_people(session, [hit])
+    await session.commit()
+
+    persons = await _persons(session)
+    assert len(persons) == 1
+    person = persons[0]
+    assert person.id == 2037
+    assert person.name == "Cillian Murphy"
+    assert person.known_for_department == "Acting"
+    assert person.gender == 2
+    assert person.popularity == 41.2
+    assert person.profile_path == "/cillian.jpg"
+
+
+async def test_upsert_people_from_search_updates_an_existing_person(session):
+    """A hit for someone already in the catalog refreshes their row rather than colliding —
+    the resolver runs against people film ingest has usually already written."""
+    await upsert_people(
+        session,
+        [TMDBPersonSearchHit.model_validate(make_person_search_hit(2037, name="C. Murphy"))],
+    )
+    await session.commit()
+
+    await upsert_people(
+        session,
+        [
+            TMDBPersonSearchHit.model_validate(
+                make_person_search_hit(2037, name="Cillian Murphy", popularity=99.0)
+            )
+        ],
+    )
+    await session.commit()
+
+    persons = await _persons(session)
+    assert len(persons) == 1
+    assert persons[0].name == "Cillian Murphy"
+    assert persons[0].popularity == 99.0
+
+
+async def test_upsert_people_from_search_clears_the_tombstone(session):
+    """TMDB answering a search with this id is proof it is live, so a person tombstoned by a
+    404 during the seed pass is revived here too — not only by a film ingest (NEU-1124)."""
+    hit = TMDBPersonSearchHit.model_validate(make_person_search_hit(2037))
+    await upsert_people(session, [hit])
+    await mark_person_missing(session, 2037)
+    await session.commit()
+    assert (await _persons(session))[0].tmdb_missing_at is not None
+
+    await upsert_people(session, [hit])
+    await session.commit()
+
+    assert (await _persons(session))[0].tmdb_missing_at is None

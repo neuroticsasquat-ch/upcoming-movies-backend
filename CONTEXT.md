@@ -120,6 +120,16 @@ equality, and only for titles of at least six folded characters — short ones w
 unrelated words. It is the whole of retrieval's normalization story beyond tokenization.
 _Avoid_: slug, normalize (too broad — tokenization normalizes too), fuzzy match.
 
+**Search fold**:
+The form public search matches on: a title or name lowercased, with Latin diacritics mapped to
+their base letter and every non-alphanumeric dropped, so `Shōgun` / `Spider-Man` become
+`shogun` / `spiderman`. Stored beside its source column as a generated `<col>_fold` and indexed
+with a `pg_trgm` GIN (NEU-1469, ADR-0020); the query is folded the same way in Python
+(`_normalize_query`) and substring-matched with `LIKE`. Not the **squash-fold**: that is
+retrieval's, keeps accents, and lives in memory per run. The two are different functions on
+purpose and neither should be made to serve the other's caller.
+_Avoid_: normalized title (which fold?), slug, unaccent (the extension is not used).
+
 **Initialism collapse**:
 A run of two or more `<letter><separator>` pairs — `.` or `/`, letters only — read as one word
 before tokenizing, so `F.A.S.T.` yields `fast` and `S/H/V` yields `shv`. Applied to titles and
@@ -273,7 +283,8 @@ _Avoid_: development, item, happening.
 **Attach**:
 Adding a newly linked story to an event that *already exists*, rather than forming a new one
 — a beat already logged gaining another report of itself. The counterpart to forming an
-event. A story attaches to exactly one event.
+event. A story attaches to exactly one event, and attaching never re-alerts: a second outlet
+reporting the same casting is the same card, so an entity follower hears it once (EF-13).
 _Avoid_: merge (that's the defect below), append, link (that's the story→film step).
 
 **Split beat**:
@@ -335,6 +346,29 @@ through to a later date. It is the per-subject analogue of the **primary release
 is country- and type-agnostic; the two must not be conflated.
 _Avoid_: primary release date (TMDB's scalar, country-agnostic), earliest release (too vague).
 
+**Headline release**:
+The one release a film *row* leads with when a surface has room for a single date. It is a
+choice among the film's **governing release dates**, not a new date: the earliest *upcoming* one
+across the film's displayable subjects; failing that, the most recent *past* one (the film is
+out); failing that, the **primary release date**, carried with a marker so the reader knows it is
+unconfirmed rather than a date this site would list. It names its **kind** (upcoming / released /
+primary) and, for the two displayable kinds, the subject (country, bucket) it came from. The
+follows page and entity-page rows show it today (NEU-1397); timeline and iCal rows are expected
+to. A film with no displayable row and no primary date has none.
+_Avoid_: next release date (wrong for a released film), release date (ambiguous between the
+primary scalar and the per-row TMDB value), US date (origin-country dates qualify too).
+
+**Slip**:
+A release-date move whose new date is strictly later than the previous one, judged per
+`(region, bucket)` clause — never per card, since one observation can slip US wide while
+moving US digital earlier. It is the standout beat of a **digest** and it is flagged
+in the deterministic body itself ("release date slipped from … to …" against "moved from … to
+…" for an earlier date), because the mail renders that body verbatim and a second
+derivation in the mail would drift from the card (NEU-1403). A first date for a market is
+never a slip: it has nothing to be later than.
+_Avoid_: delay (fine in prose, not the term), pushed back, postponed, moved (that is the
+direction-neutral verb the copy reserves for an earlier date).
+
 **Title parenthetical**:
 The bracketed run after a film's title on a public surface. Composed of up to three elements —
 **production countries**, director (prefixed `Dir: `), and release year — in that order, joined
@@ -387,7 +421,9 @@ _Avoid_: soft delete, archive, blacklist, dead flag.
 
 **Seed person**:
 Someone whose credits the sweep enumerates: anyone holding a **seed-grade** credit — director,
-writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film. 7,519
+writer (`Writer`/`Screenplay`), or top-5 billed cast — on an **active, non-dormant** film, plus
+every live person some user follows (D-50 as widened by EF-2), whose non-seed credits reach
+candidates under the `followed` **tranche**. 7,519
 of them at a 1,435-film catalog. Producers are deliberately not seed-grade: an EP credit travels
 far and says little about whether a project is real. The set is *self-expanding* — admitting a
 film contributes its own credits back as seeds — and **dormancy** is what bounds it, so a
@@ -395,8 +431,9 @@ project that goes nowhere stops paying for its own people.
 _Avoid_: tracked person, watched person, followed talent.
 
 **Tranche**:
-One seed grade's admission flag — `SWEEP_ADMIT_DIRECTORS`, `SWEEP_ADMIT_WRITERS`,
-`SWEEP_ADMIT_CAST` — opened one at a time so a precision drop names the grade that caused it
+One admission flag per way a candidate can be reached — `SWEEP_ADMIT_DIRECTORS`,
+`SWEEP_ADMIT_WRITERS`, `SWEEP_ADMIT_CAST`, and `SWEEP_ADMIT_FOLLOWED` for a non-seed credit
+held by a person somebody follows (D-50, EF-2) — opened one at a time so a precision drop names the grade that caused it
 rather than arriving as one undifferentiated jump. They sit under the master `SWEEP_ENABLED`,
 which is kept separate on purpose: the master is the rollback, the tranches are the ramp, and a
 sweep that enumerates and reports while admitting nothing is the state where all four are off.
@@ -414,6 +451,15 @@ with the **corroboration window**, which is about release-date stories agreeing 
 change history — same word, unrelated mechanism.
 _Avoid_: confidence threshold, minimum seeds, corroboration window (that's the other one).
 
+**Recorded grade**:
+Which credit changes the credit history writes down (D-49, EF-2): every **seed-grade** credit,
+plus every credit of a person somebody follows, and — the one exception to "first observation
+is a baseline" — the credits, studio rows and collection a followed entity already holds on a
+film the moment it is first observed (EF-4). Seed grade is a property of the credit; recorded
+grade is seed grade *or* a property of who is watching. Both sides of a film's diff are judged
+by the same rule at the same moment, so a new follow never fabricates an attachment.
+_Avoid_: followed grade, tracked credit, widened seed grade (seed grade does not widen).
+
 **Seed grade**:
 The role classes that both qualify a person as a seed *and* qualify a candidate film for
 admission. It is checked twice, on purpose: once on the person (do we follow them at all) and
@@ -425,9 +471,11 @@ _Avoid_: role tier, credit weight, billing.
 An event created by a change in TMDB's own data — a release date assigned or moved, a status
 transition, a credit attached — with **no story behind it**. It carries a deterministic
 `EventSummary` (a template, never a model call: `model` is the sentinel `"deterministic"`).
-On the grouped feed and film page it is filed under the **"unconfirmed updates"** heading
-(formerly "via TMDB"); the per-card "via TMDB" attribution line has been removed, so the
-section heading is the sole veracity signal. Confidence follows the field: a release-date or
+On the grouped feed and film page it is filed under the **"Not yet reported"** heading
+(formerly "unconfirmed updates", before that "via TMDB"); the per-card "via TMDB" attribution line
+has been removed. The section heading is the *provenance* signal — no trade outlet has covered the
+beat yet — and the card's confidence badge (D-9) is the *veracity* signal; the two are independent,
+so a `confirmed` badge under "Not yet reported" is normal (NEU-1406). Confidence follows the field: a release-date or
 status change is `confirmed`, because ADR-0002 already makes TMDB the system of record for its
 own scalar fields, while a credit — which any editor can add — sits below a trade-sourced beat.
 When a trade story later clusters onto it, the LLM summary supersedes the deterministic one and
@@ -447,7 +495,10 @@ wherever the vocabulary is enumerated (`ck_event_type`, the arc's `_EVENT_STAGE`
 because a director attaching to a film no trade has written about is the beat the whole expansion
 exists for. A re-attachment after a **credit detachment event** is carded rather than suppressed
 — the suppression check is removal-aware, so a person whose latest card is a removal re-enters
-the timeline on the next attachment.
+the timeline on the next attachment. It is held by **quarantine** before it cards at all
+(`SWEEP_CREDIT_QUARANTINE_HOURS`, NEU-1368): the attachment-side mirror of the forward-dwell
+gate on the detachment event, and the reason a reverted edit now publishes nothing rather than
+publishing and being superseded.
 _Avoid_: casting event (that is one of the two types, not the pair), crew change, credit diff
 (that is the history row it reads).
 
@@ -468,13 +519,13 @@ re-attach window is fully observed. The forward gate reads raw `catalog.film_cre
 and so is never carded; it is scoped to the same seed-grade role so a cast→director move is two
 events, not a flap. Like attachments it is keyed on the observation — one `credit_removed` card
 per `(film, changed_at)`, all roles in one body — and it sits beside the attachment card (which
-stays visible) in the collapsed "via TMDB" section, so the later "no longer attached" card *is*
+stays visible) in the "Not yet reported" section, so the later "no longer attached" card *is*
 the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE` (a removal is not
 forward progress and should not headline a day) and excluded from the LLM and story-dedup
 vocabularies: the model cannot emit it, and a trade "X exits" story does not yet attach to it.
 Reverses the original ADR-0014 decision that detachments were "recorded as history but never
-carded" — NEU-1201's collapsed "unconfirmed updates" section (which did not exist when that
-decision was made) made the clutter concern moot.
+carded" — NEU-1201's collapsed catalog section (now headed "Not yet reported"; it did not exist
+when that decision was made) made the clutter concern moot.
 _Avoid_: crew detached, cast departed (those imply the old split that only existed because
 `casting` pre-existed), credit removal (too generic — a release date disappearing is also a
 removal, and is out of scope), retraction, cancellation (those are about the *film*, not a
@@ -492,10 +543,9 @@ mostly real departures and re-create the stale-attachment bug. A held flap that 
 still cards a real final departure later; one that ends in `added` self-corrects (the re-attachment
 is suppressed by removal-aware suppression during the hold). The transient ≤N-day hold window is
 the one cost — the latest *carded* event is briefly "attached" while TMDB says "removed" — bounded
-and self-correcting. On the feed it is confined to the collapsed **"unconfirmed updates"**
-section, whose rows render the film title plus a badge for each of the film-day's beats
-(NEU-1208 dropped the event cards, NEU-1212 restored the beat labels), so the summaries are a
-click away; on the film page it is visible inline per NEU-1207.
+and self-correcting. On both the feed and the film page it sits under the **"Not yet
+reported"** heading, carries an `unconfirmed` confidence badge (`rumored`), and is ordered after
+trade news (NEU-1467); it is no longer hidden behind a collapse.
 _Avoid_: flicker, churn (too vague — a credit changing departments is churn but not a flap),
 vandalism (that is the *cause*, not the observable pattern), bounce.
 
@@ -518,7 +568,7 @@ the LLM has no `crew_attached` in its vocabulary, so the story side searches bot
 _Avoid_: duplicate event (too generic — a dedup within one path is also that), double-posting.
 
 **Day-grouped events** (of a film page):
-The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is **collapsed by default on the feed** (a publication log, where a TMDB-only day aggregates many films and shows "unconfirmed updates (N movies)", so it is not visually empty) and its cards are demoted under NEU-1208: the backend no longer ships `events` for `news_backed=false` feed items, so a reader sees the film title plus a badge for each distinct beat of that film-day (the row's `event_types`, labelled under NEU-1212) and clicks through for the summaries. It is **rendered inline on the film page** (NEU-1207): the film-page collapse introduced by NEU-1201 is retired because NEU-1205 dampened the credit-oscillation it was hiding at the source, so a TMDB-only film-day no longer renders as a visually-empty date heading plus a collapsed toggle. The **"unconfirmed updates"** label (formerly "via TMDB") is the veracity signal on both surfaces — the demotion on the film page is now by label, not by hiding. The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
+The film detail response groups a film's events into per-day `DayGroup` entries, each with `news_events` and `tmdb_events` — split by the same `EXISTS(event_story)` predicate the grouped feed uses (`_has_story()`). A `catalog`-provenance event that later gains a linked story migrates to `news_events`; this is the same contract as `news_backed` on `FeedDayItem`. The TMDB section is **rendered expanded on both surfaces** (NEU-1467, reversing NEU-1208's collapsed titles-only feed rows): `news_backed=false` feed items ship their catalog events like news items do, with empty `sources`, under a static "Not yet reported (N movies)" heading, and a section with no items is not rendered at all. The row's `event_types` badges (NEU-1212) survive only as a fallback for a row that arrives with no events. The **"Not yet reported"** label (formerly "unconfirmed updates", before that "via TMDB") heads it on both surfaces; the demotion is order (In the news leads) and that heading — the event text reads the same in both sections, and nothing is hidden. The label is a provenance signal; veracity is the card's confidence badge (NEU-1406). The film page is an **event log**, not a publication log: day groups are keyed by `Event.occurred_at` (when the change happened), and within each day events order by `occurred_at ASC, created_at ASC, id ASC` (NEU-1204). This diverges from the grouped feed, which keys day groups on `created_at` because the feed is a publication log (ADR-0016); the same event can therefore appear under different day headings on the two surfaces, by design.
 _Avoid_: in-the-news section (that's `news_events`), TMDB section (that's `tmdb_events`), two-timeline display, split events.
 
 **News-backed** (of a film-day):
@@ -537,10 +587,14 @@ _Avoid_: story-sourced (that is one event's provenance, not a day's rollup), sou
 **First observation**:
 The first time the sweep reads a newly admitted film's credits. It is recorded as a **baseline
 and emits no events** — a hard rule of the credit-history contract rather than something left to
-fall out of the implementation. `catalog.film_field_change` gets the same protection by accident
-(it is a `BEFORE UPDATE` trigger, so inserts write no history), and the credit history is being
-built from scratch, where the accident does not repeat. Without the rule, admitting 3,000 films
-would emit tens of thousands of false "attached to direct" events on day one.
+fall out of the implementation — **except for entities somebody follows at that moment** (EF-4,
+NEU-1436), whose credits, production-company rows and collection are recorded as
+**attachments**. `catalog.film_field_change` gets the same protection by accident (it is a
+`BEFORE UPDATE` trigger, so inserts write no history), and the credit history is being built
+from scratch, where the accident does not repeat — which is also why the followed-franchise
+exception has to write that trigger's row for itself. Without the rule, admitting 3,000 films
+would emit tens of thousands of false "attached to direct" events on day one; without the
+exception, the one attachment a follow was made for would be the one that never cards.
 _Avoid_: initial sync, backfill, seeding (that's the person set).
 
 **Dormant**:
@@ -580,3 +634,277 @@ watermark that selected it. Pinned to the last *success*, a `tmdb` stage that st
 freezes the watermark, one sweep pass carries the whole catalog over it, and every later pass
 selects nothing at all.
 _Avoid_: cutoff, high-water mark, last sync, refresh cursor.
+
+### Claims and publication
+
+**Quarantine**:
+The hold between a credit change being *observed* in TMDB and the beat being *published* as an
+event. A credit that is added and reverted inside the window was never true, and publishes
+nothing; one that survives the window cards once, at the end of it. It generalises the
+**forward-dwell gate** (which holds removals) to attachments, and it exists to suppress edits
+that were never true — vandalism, misfiles — **not** real-world churn: an actor genuinely joining
+in March and leaving in June is two beats and both publish. It is keyed in time, from the
+observation, and its length is set from the survival curve of real changes, not guessed. The
+live cast list is never held: **state mirrors TMDB immediately**; only *events* wait.
+Implemented for attachments as `SWEEP_CREDIT_QUARANTINE_HOURS` (default 72, 0 disables) in the
+sweep's credit phase (NEU-1368): an `added` row is eligible only once the window has passed
+**and** the credit is still in `catalog.film_credit` under the same seed-grade role. Nothing is
+written while a row is held — there is no `pending` state anywhere, the rolling
+`SWEEP_EVENT_LOOKBACK_DAYS` window *is* the queue, which is why the hold must fit inside it *with
+room for the pass that observes it* (refused at boot by `validate_sweep_configuration`, NEU-1401).
+The configured number is the **nominal window**; the **effective hold** is how long a row is
+actually held, up to 48h longer, because eligibility is only ever checked at a sweep pass and a row
+that becomes eligible just after one waits for the next. The ceiling is therefore the window minus 48h
+— 120h at the default 7 days. Held rows are counted as **held** on the
+sweep detail line, apart from carded and already-carded. It is followed by the **sanity
+holds** (NEU-1370), which judge the person rather than the clock and do leave a row.
+
+It is also **the wait before a story card confirms** (EF-10). A card a trade broke ahead of the
+catalog publishes at once and is a rumor; the change row TMDB later writes is stamped with it
+immediately, and only once that row has cleared this same window — and the attachment is still
+standing — does the card become `confirmed`. One setting, one meaning, for all three kinds: the
+question is always "has this survived long enough to be believed".
+_Avoid_: delay, embargo, dwell (that is the removal-specific gate), review (nobody reviews it),
+moderation.
+
+**Sanity hold**:
+A credit attachment the sweep withholds from carding because of something about the *person*
+rather than the clock — the check **quarantine** cannot make. Three reasons, and they are the
+closed set `ingest.credit_hold.reason` enforces: `burst` (this person has ≥
+`SWEEP_SANITY_MAX_FILMS_PER_DAY` still-attached seed-grade credits observed on one UTC day),
+`deceased` (the credit lands more than `SWEEP_SANITY_POSTHUMOUS_YEARS` after a recorded
+`deathday`), and `implausible_age` (the person is under `SWEEP_SANITY_MIN_AGE_YEARS` at the
+observation). It **holds, never discards**: a hold that turns out to be real still publishes.
+A row is *open* while `released_at IS NULL` and the backlog reads past it; it ends `cleared`
+(the condition lifted — only `burst` can, and its survivors card on that same pass),
+`manual` (an admin released it, and no check may hold that change again), or `expired` (the
+change aged out of `SWEEP_EVENT_LOOKBACK_DAYS`, so nothing cards). Birth and death dates are
+fetched from `/person/{id}` **lazily, once per person**, and
+`catalog.person.details_observed_at` is what makes it once. This hold was the first consumer
+and asks only for people about to be carded; **resolution** is the second (NEU-1400), and asks
+for the candidates whose name a story matched, whether they ever card or not.
+**The `burst` hold reason is not the glossary's Burst below.** They are different concepts
+that the spec gives the same word: a *burst hold* is one person across many films in a day
+(vandalism), while a **Burst** is many credits on *one* film collapsed into one card (D-7).
+The first withholds cards; the second shapes them. Say "burst hold" when you mean the reason.
+_Avoid_: quarantine (that is the time-keyed gate this sits after), block, reject, flag,
+suppress (that is per-person removal-aware suppression), ban.
+
+**Burst**:
+Every credit attachment for one film and one event type that a single **sweep** pass cards
+together. **Quarantine** releases a film's credits when their holds expire, not when they were
+observed, so a whole top-billed cast that arrived over four days comes off hold in one pass and
+is *one* beat: one card naming everyone, dated at the latest change it names, its people read in
+billing order (`credit_order`). The grouping key is `(film, event type, pass)` — the pass, not
+the observation, which is what makes it a burst rather than a day's worth of cards. Crew and cast
+never share one: `casting` and `crew_attached` are separate beats. Detachments are never
+collapsed this way — they pass through no quarantine, so they stay one card per observation.
+_Avoid_: batch (nothing is queued), digest (that is a delivery format), roll-up, merge.
+
+**Publication** (of an event):
+The moment an event becomes visible in the app — `created_at`, the axis every feed surface and
+every notification keys on (ADR-0016). Distinct from when the change *occurred*
+(`occurred_at`, the first-detection time), which is stored on every event and shown on detail
+views but never orders a feed: an event released from quarantine and sorted by its occurrence
+would land below a returning reader's watermark and never be seen.
+_Avoid_: detection (that's the other axis), creation (the row may predate visibility).
+
+**Superseded** (of an event):
+A published event whose beat a later published event has corrected — a casting card after the
+credit's removal has carded. It stays exactly where it was published, marked, and linked to its
+correction; it is never hidden and never deleted, because a silent deletion is
+indistinguishable to the reader from nothing having happened. Supersession is a status on the
+*original*; the correction is an ordinary event in its own right.
+_Avoid_: retracted (the world retracted the credit; the event is superseded), hidden, deleted,
+withdrawn, cancelled.
+
+**Tier-A source**:
+A **trade feed** — Deadline, Variety, THR, TheWrap, Screen Daily, studio PR. The only sources
+whose story may card a beat on its own, and then only when the story's person **resolution**
+cleared threshold. A TMDB-only change never cards one: it may publish to the feed after quarantine,
+as unconfirmed, but it is evidence, not confirmation. A Tier-A story matching a credit in
+quarantine releases it immediately and merges into the news event rather than surfacing later
+as a stale duplicate.
+_Avoid_: trusted (that is the source-quality gate's effective tier for *any* domain), verified
+source, primary source.
+
+### Person resolution
+
+**Resolution**:
+Linking a name as written in a story to a `catalog.person` — or deciding that it cannot be. Three
+stages, and only the first is probabilistic: **extraction** (the model emits names and relations,
+never ids — any id a model emits is a plausible, well-formed, wrong integer), **candidate
+generation** (deterministic: search, the film's current credits, the film's recent change
+stream), and **scoring** (deterministic features, with a closed-set model tiebreak only inside the
+narrow ambiguous band). A resolved person's confidence can never exceed the confidence of the
+story→film link it was derived within.
+_Avoid_: entity linking (that is the story→film **link** stage), matching, disambiguation (that
+is only the tiebreak).
+
+**Unlinked** (of a person mention):
+A resolution outcome: no candidate cleared threshold. An unlinked mention may still appear in
+the general feed, but it **never** reaches a follower's timeline or digest — the failure mode is pinging
+someone about the wrong Chris Evans. Distinct from **not in TMDB**: a first-time director or
+unknown actor legitimately has no person record, and the resolver may say so rather than being
+forced into a wrong match.
+_Avoid_: unresolved (ambiguous with "not yet run"), unknown, rejected.
+
+**Resolution cache**:
+The remembered answer for `(source domain, name as written)`. Trades recycle phrasing, so most
+lookups after the first month are hits; it is what keeps resolution's model spend flat.
+_Avoid_: alias table, name index.
+
+### Follows, timeline and delivery
+
+**Follow**:
+A user's standing interest in an entity — a **person**, a **studio**, a **franchise**, or a
+**title** — and the only thing a user maintains. It is binary: on or off, no tiers (EF-1,
+ADR-0019). What it delivers depends on the kind. A **title** follow delivers every published
+beat on that film. A person, studio or franchise follow delivers that entity's **attachment**
+stream — the cards in which it joins or leaves a film — and the film's cancellation, and
+nothing else about those films (EF-3). Its point is still that the user hears about a film
+they had never heard of, because someone they follow just signed on to it; from there they
+follow the film.
+_Avoid_: subscription (that is billing), watchlist item, coverage (retired), track, favorite.
+
+**Attachment** (of an entity to a film):
+A person holding a credit, a studio holding a production-company row, or a film sitting in a
+collection. An entity *attaches* when the row appears and *detaches* when it goes; both are
+observed by diffing consecutive ingests (the credit history, `film_company_change`, the
+`collection_id` field change) and both card after **quarantine**. A film's *admission* counts
+as an attachment for every entity somebody follows at that moment (EF-4); for everyone else
+the first observation is the baseline. Not to be confused with **Attach** above, which is a
+story joining an existing event.
+
+**A trade story can report an attachment before the catalog observes it**, for all three kinds
+(EF-13). The card publishes immediately and is a **rumor** until the catalog agrees: the change
+row TMDB later writes is stamped `carded_by_event_id` with the card that broke the beat, so it
+never cards twice, and once that row clears quarantine the card is upgraded in place to
+`confirmed` (EF-10; since ADR-0021 nothing waits on that flip to deliver — the digest carried
+the rumor already). A story-formed *detachment* that confirms
+supersedes the attachment card it contradicts, exactly as a catalog detachment would (D-2); as
+a rumor it supersedes nothing.
+_Avoid_: link (that is story→film), credit (only one of the three kinds), join (the SQL word).
+
+**Studio**:
+What the product calls a TMDB production company (`entity_type = company`). Following one
+delivers the studio's attachments: the films it joins or leaves, by the rebuilt
+`film_production_company` rows (EF-5). On screen always "studio"; in code always `company`.
+_Avoid_: distributor (TMDB does not distinguish), label, producer (that is a person's job).
+
+**Franchise**:
+A TMDB collection, and nothing more for now (`entity_type = franchise`). Following one
+delivers the collection's attachments: a film filed under it, or moved out of it, by the
+`collection_id` field change (EF-5). A sequel TMDB has not yet filed under its collection is
+missed until it is.
+_Avoid_: series, universe, saga, collection (on screen; fine in code).
+
+**Timeline**:
+The signed-in home surface: the publication log filtered to the user's follows. Same axis as
+the feed (**publication**), same day grouping, same "what's new since I last looked" reading —
+it is the feed with a where-clause, not a different kind of surface. The where-clause is
+`film IN (titles you follow) OR event IN (attachments of entities you follow)` (EF-3); it is
+the same clause the digest and the notify pass read. A story mention reaches an entity
+follower only as the entity's first association with, or first detachment from, the film
+(EF-13, `first_association_clause`); every other mention is nothing to them. Anonymous readers
+see the global feed in its place.
+_Avoid_: personalized feed, my feed, stream, dashboard, watchlist (retired: the set of films
+you follow is just the Films filter of the follows page).
+
+**Last activity** (of a follow):
+The publication time of the newest card that would reach this user through this follow — any
+beat on a followed film, an attachment or detachment or cancellation for a followed entity —
+and the third sort on the follows page (EF-15). NULL when nothing has reached them yet.
+_Avoid_: updated_at (that is the row), recent, latest event.
+
+**Alert window**:
+How long a film stays *interesting* after release: from announcement until
+`PROVIDER_POLL_MAX_AGE_DAYS` after its primary release date, in any TMDB status but
+`Canceled` (D-46; `catalog.queries.ALERT_WINDOW_DEAD_STATUSES`). It no longer governs what an
+entity follow covers — nothing does, an entity follow covers events, not films (EF-3). It
+still bounds the provider poll, an entity page's "recently released" list and which films an
+**import** may propose (EF-21). A **title** follow ignores it entirely — the user asked for
+that film, in any state, at any age. The name outlived the alerts it once bounded (ADR-0021):
+it is kept because the poll, the entity page and the import all key on it.
+_Avoid_: in play (the working set's term, ending on release day), coverage window (retired
+with coverage), active, upcoming.
+
+**Import**:
+A user's one-off request to bring a library in — a Letterboxd export or a TMDB account's
+watchlist — tracked as a job. It reads the watchlist only, proposes the films inside the
+**alert window** as a review list, and writes one **title** follow per film the user confirms
+(EF-20 to EF-22). It follows no people. An import that is not confirmed follows nothing, and
+the user's next import discards it.
+_Avoid_: sync, link (nothing stays connected; the TMDB session is dropped when the job ends),
+migration.
+
+**Open import**:
+The user's import that is still going — queued, running, or waiting on the user to confirm its
+review list. A user has at most one; starting another discards it. A list waiting to be
+confirmed is still an open import: the work is done, but the user's part is not.
+_Avoid_: active (the code's name for the status set, not the reader's), pending, unfinished,
+in progress (that is one of its states, not the whole).
+
+**My films calendar**:
+The release calendar narrowed to the films the reader follows — what a subscriber sees when
+they ask "what of mine is coming out?". It is the calendar with a where-clause, not a
+different kind of surface: same governing-date rule, same buckets, same upcoming-only window,
+same date-paged shape as the all-releases calendar, and none of the popularity/runtime cuts
+that keep noise off the public listing. Following a director puts nothing on it (EF-14): only
+title follows do. The **iCal feed** is its subscribed form and holds the same films and dates;
+the only thing the feed adds is a bounded reach into the past, because a subscribed client
+drops whatever a feed stops publishing.
+_Avoid_: watchlist calendar (the old name), my calendar (the nav item is "Calendar"), follow
+calendar, personal feed (that is the timeline), subscription calendar (that is the iCal feed).
+
+**Digest**:
+The one delivery of a user's timeline by mail — daily or weekly, their choice, never both, and
+nothing arrives outside it (ADR-0021). It carries every card the timeline carries, `rumored`
+ones included (EF-7; NEU-1437), each as a dated line under its film. A digest reads by
+**film entry**, not by day: one entry per film, its beats in the order they were published,
+entries ranked by their most significant beat — the day grouping is the feed's, not the mail's.
+On the **slate day** either cadence carries the **slate** in front. How soon a reader hears
+about a beat is the cadence they chose; there is no faster channel.
+_Avoid_: newsletter, summary email, notification, "the weekly slate mail" (the slate is a
+section, not a cadence), alert (retired: the per-beat interrupt mail D-32 whitelisted, removed
+by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody).
+
+**Slate**:
+The upcoming US dates — theatrical, digital and physical — for the films a user follows by
+title, over the next 30 days, soonest first. The same set the my-films calendar and the `.ics`
+feed list (EF-14): a slate cannot name a date the calendar would not. A date set or moved since
+the previous slate day is marked as such.
+_Avoid_: calendar (that is the surface), upcoming releases (that is the public page), watchlist.
+
+**Slate day**:
+The one weekday, product-wide, on which a digest carries the slate: the weekly cadence's
+send day, and the daily cadence's one slate-bearing morning. Thursday.
+_Avoid_: digest day, send day.
+
+**Lead film** (of a digest):
+The film entry ranked first — the most significant beat in the mail, by the feed's beat
+significance, title breaking ties. It names the subject line and renders as the mail's lead
+card; every other entry is compact.
+_Avoid_: hero, headline (that is a release date), top story.
+
+**Film entry** (in a digest):
+One film's block in a digest: the film's header (title, parenthetical, headline release),
+which follows put it in the mail, and its beat lines. A digest shows at most a fixed number of
+entries and links to the timeline for the rest; the cut is presentation, the queue is still
+sent.
+_Avoid_: card (that is one beat on screen), item, row.
+
+**Home-release date**:
+A US digital (TMDB type 4) or physical (type 5) release date. Part of the displayable set beside
+the theatrical arc: listed on the film page and the calendar, and carded as a `release_date`
+event when set or moved. It is the forward-looking half of home-release tracking — the only
+source that says "arrives October 14" *before* it happens.
+_Avoid_: streaming date (streaming is observed, not announced), VOD date.
+
+**Now-available event**:
+The catalog-sourced event raised the first time a title is observed on any provider for a
+monetization type (`flatrate` / `rent` / `buy`), from the watch-providers poll. Insert-only: the
+first observation cards it; the title then goes quiet for that type forever, so a move
+between services produces nothing. That silence is deliberate — service-to-service churn is a
+non-goal, and the upstream data cannot give advance warning of a title *leaving*.
+_Avoid_: availability change, provider change, streaming update.

@@ -112,3 +112,123 @@ def make_credit_entry(tmdb_id: int, **overrides: Any) -> dict[str, Any]:
     }
     row.update(overrides)
     return row
+
+
+def make_person_search_hit(person_id: int, **overrides: Any) -> dict[str, Any]:
+    """One `/search/person` result row, with the `known_for` block TMDB attaches."""
+    row: dict[str, Any] = {
+        "id": person_id,
+        "name": f"Person {person_id}",
+        "original_name": f"Person {person_id}",
+        "profile_path": f"/profile{person_id}.jpg",
+        "known_for_department": "Acting",
+        "gender": 2,
+        "popularity": 12.5,
+        "adult": False,  # extra field we don't consume
+        "known_for": [
+            {
+                "id": 1000 + person_id,
+                "media_type": "movie",
+                "title": f"Known For {person_id}",
+                "original_title": f"Known For {person_id}",
+            }
+        ],
+    }
+    row.update(overrides)
+    return row
+
+
+def make_person_details(person_id: int, **overrides: Any) -> dict[str, Any]:
+    """A `/person/{id}` body — the only endpoint carrying `birthday` and `deathday`.
+
+    Both default to None, which is what TMDB holds for most people: the sanity holds (D-8)
+    and the resolver's age/alive feature (D-21) both read an absent date as saying nothing.
+    """
+    row: dict[str, Any] = {
+        "id": person_id,
+        "name": f"Person {person_id}",
+        "birthday": None,
+        "deathday": None,
+        "popularity": 12.5,
+        "profile_path": f"/profile{person_id}.jpg",
+        "known_for_department": "Acting",
+    }
+    row.update(overrides)
+    return row
+
+
+def make_person_search_page(
+    *, results: list[dict[str, Any]], page: int = 1, total_pages: int = 1
+) -> dict[str, Any]:
+    """A `/search/person` envelope — discover's four fields around person hits."""
+    return {
+        "page": page,
+        "total_pages": total_pages,
+        "total_results": len(results),
+        "results": results,
+    }
+
+
+def make_provider(provider_id: int, **overrides: Any) -> dict[str, Any]:
+    """One entry in a `/movie/{id}/watch/providers` offer list."""
+    row: dict[str, Any] = {
+        "provider_id": provider_id,
+        "provider_name": f"Provider {provider_id}",
+        "logo_path": f"/provider{provider_id}.jpg",
+        "display_priority": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def make_watch_providers(
+    tmdb_id: int,
+    *,
+    region: str = "US",
+    flatrate: list[int] | None = None,
+    rent: list[int] | None = None,
+    buy: list[int] | None = None,
+    link: str | None = None,
+    regions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A `/movie/{id}/watch/providers` payload, given provider ids per monetization type.
+
+    Passing no ids at all yields `{"id": ..., "results": {}}` — TMDB's answer for a film
+    nobody carries anywhere, which is a 200 and not a 404. Pass ``regions`` to build the
+    region map directly when a test needs more than one region or an unusual shape.
+    """
+    if regions is not None:
+        return {"id": tmdb_id, "results": regions}
+    if flatrate is None and rent is None and buy is None:
+        return {"id": tmdb_id, "results": {}}
+    block: dict[str, Any] = {
+        "link": link if link is not None else f"https://www.themoviedb.org/movie/{tmdb_id}/watch"
+    }
+    for field, ids in (("flatrate", flatrate), ("rent", rent), ("buy", buy)):
+        if ids:
+            block[field] = [make_provider(pid) for pid in ids]
+    return {"id": tmdb_id, "results": {region: block}}
+
+
+def make_video(key: str, **overrides: Any) -> dict[str, Any]:
+    """One entry in a `/movie/{id}/videos` result list — a YouTube trailer by default."""
+    row: dict[str, Any] = {
+        "id": f"tmdb-{key}",
+        "iso_639_1": "en",
+        "iso_3166_1": "US",
+        "key": key,
+        "name": "Official Trailer",
+        "site": "YouTube",
+        "size": 1080,
+        "type": "Trailer",
+        "official": True,
+        "published_at": "2026-09-01T15:00:00.000Z",
+    }
+    row.update(overrides)
+    return row
+
+
+def make_videos(tmdb_id: int, videos: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """A `/movie/{id}/videos` payload. No videos yields an empty `results` — TMDB's 200 for a
+    film with nothing to watch yet, which is the ordinary answer for an unreleased title."""
+    return {"id": tmdb_id, "results": videos or []}

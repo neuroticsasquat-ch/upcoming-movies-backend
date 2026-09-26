@@ -21,6 +21,7 @@ from upmovies.ingest.runs import (
     record_progress,
     total_failure_error,
 )
+from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.link.cluster import cluster_film_events
 from upmovies.link.linker import (
     StoryCandidates,
@@ -28,6 +29,14 @@ from upmovies.link.linker import (
     reject_zero_candidate_stories,
     story_dek,
 )
+from upmovies.link.resolve.org_pipeline import run_org_resolution
+from upmovies.link.resolve.pipeline import (
+    DEFAULT_MENTIONS_PER_RUN,
+    DEFAULT_RESOLVE_MODEL,
+    ResolutionResult,
+    run_resolution,
+)
+from upmovies.link.resolve.scoring import Thresholds
 from upmovies.link.retrieval.health import (
     MAX_ZERO_CANDIDATE_RATE,
     MIN_STORIES_FOR_BREACH,
@@ -205,6 +214,7 @@ async def _cluster_stage_sequential(
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
+    story_confirm_days: int = 14,
     run_date: date,
 ) -> tuple[int, int, int, Usage, StageCounts]:
     # `cluster`, not `link` — the same run_link_ingest call that resolved the link stage above
@@ -229,6 +239,7 @@ async def _cluster_stage_sequential(
                     unresolved_tier=unresolved_tier,
                     dedup_days=dedup_days,
                     release_change_window_days=release_change_window_days,
+                    story_confirm_days=story_confirm_days,
                     run_date=run_date,
                     calls=calls,
                 )
@@ -285,10 +296,11 @@ async def run_link_ingest(
     attach_limit: int = 25,
     batch_size: int,
     floor: float,
-    cluster_max_tokens: int = 4096,
+    cluster_max_tokens: int = 8192,  # see `link_cluster_max_tokens` (config.py) for why 8192
     unresolved_tier: str = "acceptable",
     dedup_days: int = 14,
     release_change_window_days: int = 14,
+    story_confirm_days: int = 14,
     source_gate_enabled: bool = False,
     source_judge_model: str = "claude-haiku-4-5",
     retrieval_threshold: float = DEFAULT_SCORE_THRESHOLD,
@@ -296,6 +308,10 @@ async def run_link_ingest(
     retrieval_max_zero_candidate_rate: float = MAX_ZERO_CANDIDATE_RATE,
     retrieval_health_min_stories: int = MIN_STORIES_FOR_BREACH,
     retrieval_saturation_warn_rate: float = SATURATION_WARN_RATE,
+    tmdb_client: TMDBClient | None = None,
+    resolve_thresholds: Thresholds | None = None,
+    resolve_mentions_per_run: int = DEFAULT_MENTIONS_PER_RUN,
+    resolve_model: str = DEFAULT_RESOLVE_MODEL,
 ) -> LinkIngestResult:
     run_date = datetime.now(UTC).date()
     cutoff = datetime.now(UTC) - timedelta(days=recency_days)
@@ -428,6 +444,7 @@ async def run_link_ingest(
         unresolved_tier=unresolved_tier,
         dedup_days=dedup_days,
         release_change_window_days=release_change_window_days,
+        story_confirm_days=story_confirm_days,
         run_date=run_date,
     )
     async with _owned_session(session_factory) as s:
@@ -440,6 +457,47 @@ async def run_link_ingest(
             usage=cluster_usage,
         )
         await s.commit()
+
+    # --- Stage 3: resolve the person mentions clustering just extracted (D-21) ---
+    # Inside the link run rather than beside it: the mentions are written by the stage above,
+    # so the ordering is a data dependency and not a scheduling choice, and a `resolve` run
+    # kind would put a second row on `/admin/runs` for one pass of one daily stage. Skipped
+    # entirely without a TMDB client — every caller that resolves passes one, and the ones
+    # that exercise the LLM stages alone are not made to open a client they never call.
+    resolution = ResolutionResult()
+    org_resolution = ResolutionResult()
+    if tmdb_client is not None:
+        resolution = await run_resolution(
+            session_factory=session_factory,
+            client=tmdb_client,
+            run_id=run_id,
+            thresholds=resolve_thresholds,
+            limit=resolve_mentions_per_run,
+            # The fourth stage this run may resolve a provider for (D-22), and the only one
+            # it may never call: the band the closed-set tiebreak answers is empty on a run
+            # whose names all separated on the arithmetic, and the pass resolves the stage
+            # where the band is rather than here.
+            gateway=gateway,
+            resolve_model=resolve_model,
+        )
+        # --- Stage 3b: the same pass over the studios and franchises (EF-12) ---
+        # A second backlog rather than a second stage: same run row, same `resolve` gateway
+        # stage, same thresholds, one more clause on the detail line. After the person arm
+        # rather than before it because the two are independent and the person arm is the one
+        # with a production history — a TMDB outage that exhausts the budget should exhaust it
+        # on the mentions that have been resolving since M4 shipped.
+        org_resolution = await run_org_resolution(
+            session_factory=session_factory,
+            client=tmdb_client,
+            run_id=run_id,
+            thresholds=resolve_thresholds,
+            limit=resolve_mentions_per_run,
+            gateway=gateway,
+            resolve_model=resolve_model,
+            # What the person arm already wrote to this run's one `resolve` usage row, so
+            # this arm writes the total rather than replacing it (`run_mention_pass`).
+            carried_usage=resolution.usage,
+        )
 
     # Two independent guards, joined only here. `total_failure_error` watches model
     # availability on its narrow "produced nothing at all" rule; the breach watches the rate
@@ -469,6 +527,8 @@ async def run_link_ingest(
                         f"linked {linked}, rejected {rejected}",
                         f"{events_created} events from {stories_clustered} stories "
                         f"({stories_rejected} stale-stage rejected)",
+                        resolution.detail(),
+                        org_resolution.detail("organisations"),
                         saturation_note,
                     ),
                 )

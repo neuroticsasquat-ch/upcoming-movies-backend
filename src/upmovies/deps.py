@@ -3,10 +3,12 @@ from collections.abc import AsyncIterator
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app import turnstile
 from upmovies.app.models import User
 from upmovies.app.services import account_service
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
+from upmovies.mail import Mailer
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
@@ -53,3 +55,44 @@ async def require_current_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_required")
     return user
+
+
+def get_turnstile(settings: Settings = Depends(get_settings)) -> turnstile.Verifier:
+    """The Turnstile verifier this deployment is configured for (D-18, NEU-1343).
+
+    Built per request rather than hung off `app.state` like the mailer: it holds no
+    connection pool and no template tree, so there is nothing to keep alive between signups
+    — the whole object is a secret and a URL.
+
+    An unconfigured `TURNSTILE_SECRET` is a 503 here rather than an unverified signup one
+    layer down. It is the same shape as `get_mailer`'s `mail_unavailable` and the same
+    reasoning: the fix is a deployment change, not something the caller can do anything
+    about, so it is neither their fault (4xx) nor worth letting through. `app/turnstile.py`
+    argues why the unconfigured direction is *refuse* rather than *allow*."""
+    verifier = turnstile.verifier_for(settings.turnstile_secret)
+    if verifier is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="turnstile_unconfigured",
+        )
+    return verifier
+
+
+def get_mailer(request: Request) -> Mailer:
+    """The process-wide `Mailer`, put on `app.state` by the lifespan.
+
+    Typed as the `Mailer` Protocol rather than as `MailGateway` so a route declares what it
+    needs — a template send — and not which implementation provides it; a test overrides this
+    dependency with a `NoopTransport`-backed gateway or its own stub and the route is none the
+    wiser.
+
+    A route reached through a TestClient that bypasses the lifespan has no mailer, and a
+    `500` naming the reason beats an `AttributeError` on `app.state`: the fix is to run the
+    lifespan or override this dependency, and neither is guessable from the raw traceback."""
+    mailer: Mailer | None = getattr(request.app.state, "mailer", None)
+    if mailer is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="mail_unavailable",
+        )
+    return mailer

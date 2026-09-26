@@ -11,16 +11,56 @@ the system of record for its own scalar fields, so a `release_date` move *is* th
 — but a credit is community-edited, and one added by an anonymous editor is not a studio
 announcement. A removal is even less authoritative.
 
+This phase is **one of three carders that share the same short-circuit and the same flip**
+(EF-13, D-1446.3). Each calls `news.attachment_confirm.stamp_prior_story_cards` for its own
+kind before reading its backlog, so a change a trade already carded never enters it; and
+`sweep.confirm_events` runs after all three, turning a stamped story card from a rumor into
+fact once its change has cleared quarantine. The person half is this module's; the studio and
+franchise halves are `company_events`' and `collection_events`'.
+
 **First observation is a baseline** (§5.3) is inherited, not re-implemented: `film_credit_change`
 holds no rows at all for a film whose credits the catalog had never observed, so there is
 nothing here to read. The integration tests assert it anyway — it is the failure that would be
 most visible in production, and this phase is where it would surface.
 
-**One observation is one card.** TMDB routinely gains a whole top-billed cast between two
-ingests. The grouping below is the difference between one `casting` card naming three people
-and three cards about one beat, and `uq_event_catalog_change` enforces the same thing
-structurally: one catalog event per film, type and timestamp. Detachments share the same
-grouping discipline — one `credit_removed` card per (film, changed_at).
+**One burst is one card** (ADR-0017, D-7). TMDB routinely gains a whole top-billed cast
+between two ingests, and quarantine then releases those credits together however many
+observations they arrived over. Attachments are therefore grouped per **(film, event type,
+sweep pass)**, not per observation: six cast members whose holds expire in the same pass are
+one `casting` card naming all six, dated at the latest `changed_at` among them.
+`uq_event_catalog_change` — one catalog event per film, type and timestamp — still holds,
+because the group carries exactly one timestamp. Detachments are *not* collapsed this way:
+they never pass through quarantine, so they keep the per-observation discipline of one
+`credit_removed` card per (film, changed_at).
+
+**An attachment is quarantined before it cards** (ADR-0017, D-3). A `change='added'` row is
+eligible only once it has survived `SWEEP_CREDIT_QUARANTINE_HOURS` *and* the credit is still
+in `catalog.film_credit` under the same **recorded** role (D-49 — seed grade, or any credit of
+a person somebody follows). TMDB is community-edited, and the
+edit this suppresses is the one that was never true — vandalism reverted within the hour,
+a misfiled credit — which under immediate carding published a beat and then needed a
+correction card to take it back. Nothing is written while a row is held: the rolling window
+*is* the queue, re-read and re-judged on every pass, which is why the hold has to stay inside
+it. The live cast list is never held — state mirrors TMDB immediately, only events wait.
+
+**Sanity checks hold what quarantine cannot** (ADR-0017, D-8). Two shapes of defacement
+survive a time window: a vandal attaching one person to dozens of films in a day, each
+attachment ordinary on its own, and a credit impossible on its face — someone dead for years,
+or an infant billed as a lead. Those are judged on the *person*, not the clock, and they hold
+rather than discard: a hold that turns out to be real (a prolific documentary producer, a
+posthumous release) still publishes once the condition clears or an admin releases it. Unlike
+quarantine, these leave a row — `ingest.credit_hold` — because "one of twenty-five" and "died
+in 2011" are not re-derivable from the attachment alone, and because a `deceased` hold is
+exactly the kind a human has to be able to point at and override. Birth and death dates are
+fetched lazily from `/person/{id}`, once, only for people a card is about to name.
+
+**A removal card supersedes the attachment card it corrects** (ADR-0017, D-2). Carding a
+`credit_removed` event marks, for each person it names, their most recent published
+attachment card (`crew_attached`/`casting`, any provenance, occurred before the removal)
+`superseded` and points its `superseded_by` at the removal. The original stays on every
+surface; the marker is the only change. A re-attachment after that is a fresh `published`
+card — removal-aware suppression already lets it through — so attach → remove → re-attach
+reads superseded, published, published.
 
 Contract with the pipeline conventions, matching the other phases: one session per item
 so a failure never rolls back the others, `record_progress` against the run id, abort after N
@@ -28,31 +68,50 @@ consecutive failures, and **no `finalize_run`** — all phases share one `ingest
 """
 
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from collections.abc import Collection
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, time, timedelta
 from uuid import UUID
 
+import httpx
 from sqlalchemy import exists, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from upmovies.app.follow_queries import followed_people
 from upmovies.catalog.models import FilmCreditChange, Person
-from upmovies.catalog.seed_grade import crew_role
+from upmovies.catalog.person_dates import date_contradiction
+from upmovies.catalog.queries import present_recorded_credits
+from upmovies.catalog.seed_grade import recorded_credit_key, recorded_role, role_match_key
+from upmovies.ingest.credit_holds import open_hold_keys
+from upmovies.ingest.models import (
+    HOLD_BURST,
+    RELEASE_CLEARED,
+    RELEASE_EXPIRED,
+    RELEASE_MANUAL,
+    CreditHold,
+)
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
+from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.credit_history import CREDIT_ADDED, CREDIT_REMOVED
+from upmovies.ingest.tmdb.upsert import ensure_person_details
+from upmovies.news.attachment_confirm import stamp_prior_story_cards
 from upmovies.news.catalog_events import (
+    CREDIT_EVENT_TYPES,
     CREDIT_REMOVED_EVENT_TYPE,
     CREDIT_ROLE_EVENT_TYPES,
 )
-from upmovies.news.models import Event
+from upmovies.news.models import PERSON_KIND, Event
 from upmovies.news.subject_key import normalize_name
 from upmovies.synthesize.deterministic import (
     CreditAttached,
     CreditDetached,
     CreditsAttached,
     CreditsDetached,
+    credit_order_key,
     write_deterministic_summary,
 )
 
@@ -68,16 +127,52 @@ class AttachedCredit:
     name: str
     role: str
     changed_at: datetime
+    credit_order: int | None = None
+    """TMDB's billing position for this credit *right now*, stamped by the quarantine gate
+    from the live `catalog.film_credit` row it already reads. None for crew, which has no
+    billing position, and None whenever the gate is disabled — see `quarantine_attachments`."""
+    job: str | None = None
+    """The `catalog.film_credit_change` job this row was recorded under, carried because the
+    `crew` role does not name it (D-49). Only `match_key` reads it: the role is what the card
+    is built from, and a body that sometimes named the job would be two templates."""
+
+    @property
+    def match_key(self) -> tuple[UUID, int, str, str | None]:
+        """What `present_recorded_credits` is looked up by — the credit's identity, with the
+        job for a `crew` credit and without it for every other role
+        (`catalog.seed_grade.role_match_key`)."""
+        return (self.film_id, self.person_id, *role_match_key(self.role, self.job))
 
 
 @dataclass(frozen=True)
 class CreditGroup:
-    """The credits one observation of one film attached, and the single event they card as."""
+    """The attachments one sweep pass collapsed for one film and one event type, and the
+    single event they card as."""
 
     film_id: UUID
     event_type: str
-    changed_at: datetime
-    credits: tuple[CreditAttached, ...]
+    attachments: tuple[AttachedCredit, ...]
+    """In canonical order (`credit_order_key`) — strongest role first, then billing order.
+
+    The group holds the source rows rather than the rendered credits because `occurred_at`
+    has to be derived from *whichever of them the card ends up naming*: per-person
+    suppression runs after grouping, and a card dated by someone it does not name would be
+    both wrong on its face and able to consume a timestamp a later genuine burst needs.
+    """
+
+    @property
+    def changed_at(self) -> datetime:
+        """The *latest* `changed_at` in the group, which the event stores as `occurred_at`
+        (D-7). The latest rather than the earliest because a burst is news when its last
+        member landed, and because a pass that collapses a strictly larger burst then lands
+        on a strictly later timestamp — never colliding with the card the smaller burst
+        already wrote under `uq_event_catalog_change`."""
+        return max(a.changed_at for a in self.attachments)
+
+    @property
+    def credits(self) -> tuple[CreditAttached, ...]:
+        """The group as the renderer wants it, in the same canonical order."""
+        return tuple(as_credit(a) for a in self.attachments)
 
 
 @dataclass
@@ -89,6 +184,38 @@ class CreditEventResult:
     skipped: int = 0
     """Groups that were already carded — by an earlier pass over the same rolling window, or
     by a trade story that reported the attachment first. The steady state, not a problem."""
+    held: int = 0
+    """Attachments the quarantine gate withheld this pass (D-3): still inside the window, or
+    already gone from `catalog.film_credit` and so never true. Not a failure and not a skip —
+    a held row is re-read on every pass until it either cards or falls out of the rolling
+    window.
+
+    The two reasons are deliberately one number, and it is therefore not a health signal: a
+    reverted row is withheld on every pass until it ages out, so in steady state it dominates
+    the count, and a high `held` reads as quarantine doing its job rather than as a window set
+    too long. Splitting them is `ingest.credit_hold`'s job (D-8), which logs a reason per held
+    item and is where a per-reason count belongs."""
+    holds_new: int = 0
+    """Attachments a sanity check opened an `ingest.credit_hold` row for this pass (D-8).
+
+    Apart from `held` above, which is quarantine's, because the two answer different
+    questions: quarantine's number is dominated by rows that will never card and is not a
+    health signal, while every row counted here is a specific claim — a burst, a death, an
+    age — that a named person can go and look at."""
+    holds_cleared: int = 0
+    """Open holds whose condition lifted, released this pass. They card on this same pass."""
+    holds_expired: int = 0
+    """Open holds whose change aged out of the rolling window before anything released them.
+    Nothing cards: the change is past `SWEEP_EVENT_LOOKBACK_DAYS` and is no longer read."""
+    story_published: int = 0
+    """Pending attachments this pass retired because a trade story had already carded them
+    (NEU-1371, D-5) — the backward half of the Tier-A short-circuit.
+
+    Its own number rather than part of `skipped`, which counts *groups* this pass declined to
+    card. These rows never reach a group: they are stamped before the backlog is read and
+    drop out of it, so without a count of their own they would leave no trace at all —
+    `attachments_read` would simply be smaller than the window holds, which is exactly how a
+    short-circuit that started matching too eagerly would hide."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -103,6 +230,9 @@ class DetachedCredit:
     name: str
     role: str
     changed_at: datetime
+    job: str | None = None
+    """`AttachedCredit.job`, for the same reason: the flap gate below asks whether this person
+    came back *to this credit*, and for a `crew` departure only the job says which one."""
 
 
 @dataclass(frozen=True)
@@ -126,48 +256,90 @@ class CreditDetachmentResult:
     abort_error: str | None = None
 
 
-def credit_role(credit_type: str, job: str | None) -> str | None:
-    """The seed-grade role one credit-change row carries, or None when it carries none.
-
-    Reads the same predicate the history was written against (`catalog.seed_grade`), so a
-    role this returns is always one the summary templates have a clause for.
-    """
-    if credit_type == "cast":
-        return "cast"
-    if credit_type == "crew":
-        return crew_role(job)
-    return None
+def as_credit(attached: AttachedCredit) -> CreditAttached:
+    """The renderer's view of one attachment. `character` is never set: `film_credit_change`
+    does not record it."""
+    return CreditAttached(
+        role=attached.role, name=attached.name, credit_order=attached.credit_order
+    )
 
 
 def group_attachments(attachments: list[AttachedCredit]) -> list[CreditGroup]:
-    """One group — and so one event — per (film, observation, event type). Pure.
+    """One group — and so one event — per (film, event type) in this pass. Pure.
 
-    Keyed on `changed_at` rather than on the run: the timestamp is what `occurred_at` records
-    and what `uq_event_catalog_change` keys on, so two observations stay two cards however
-    close together the sweep reads them.
+    Burst collapsing (D-7). The caller passes exactly the attachments this pass will card, so
+    "the pass" needs no key of its own: everything handed in is by construction one pass's
+    worth. `changed_at` is therefore no longer part of the key — credits that landed over
+    four days and came off hold together are one beat, and carding them as four is the burst
+    the quarantine window created.
 
-    Cast and crew split even within one observation: `casting` is an existing type with its
-    own meaning on the feed, and one body naming the director and the third-billed performer
-    is neither beat.
+    With the gate disabled (`quarantine_hours=0`) "this pass" is the whole rolling window
+    rather than a quarantine release, so a first pass over a backlog collapses it into one
+    card. That follows from the key being the pass, which is what the M5 contract specifies;
+    it is not a second rule. Steady state is unaffected — each later pass carries one new
+    observation, and per-person suppression drops the rest.
+
+    The group's `changed_at` is the **latest** in it, which is what the event stores as
+    `occurred_at`. That keeps `uq_event_catalog_change` satisfiable (one timestamp per group)
+    and keeps the re-read idempotent: the next pass over the same rolling window regroups the
+    same rows to the same latest timestamp and finds the card already there.
+
+    Cast and crew split even within one pass: `casting` is an existing type with its own
+    meaning on the feed, and one body naming the director and the third-billed performer is
+    neither beat.
+
+    Credits are ordered canonically (`credit_order_key`) — strongest role first, then billing
+    order within the role — so the body reads and the `subject_key` stores top-billed first
+    rather than in whichever order the history diff emitted.
+
+    **One person appears at most once per role per observation.** Before D-49 that was free:
+    a recorded credit is identified by `(person, credit_type, job)`, so nobody could hold two
+    `director` rows at one `changed_at`. `crew` folds every non-seed job into one role, and
+    somebody who picks up `Gaffer` and `Best Boy` in a single edit holds two — which would
+    render as "X and X join the crew." The job is kept on the row for matching (`match_key`)
+    and dropped for naming, so the dedupe belongs here, after the canonical sort so the
+    survivor is the strongest-billed of the duplicates.
+
+    Keyed on the observation, **not** on the person and role alone, because two attachments a
+    person holds at two different `changed_at` are two beats and not a duplicate: attach,
+    remove, re-attach puts both in one pass's backlog, and collapsing them would date the
+    group at the *first* of them and find that card already written (NEU-1200). Whether a
+    re-attachment shares a body with the attachment it repeats is `_uncarded_attachments`'
+    question, asked later and per person, and this does not answer it.
     """
-    groups: dict[tuple[UUID, datetime, str], list[CreditAttached]] = {}
+    groups: dict[tuple[UUID, str], list[AttachedCredit]] = {}
     for attached in attachments:
-        event_type = CREDIT_ROLE_EVENT_TYPES[attached.role]
-        groups.setdefault((attached.film_id, attached.changed_at, event_type), []).append(
-            CreditAttached(role=attached.role, name=attached.name)
-        )
+        key = (attached.film_id, CREDIT_ROLE_EVENT_TYPES[attached.role])
+        groups.setdefault(key, []).append(attached)
     return [
         CreditGroup(
-            film_id=film_id, event_type=event_type, changed_at=changed_at, credits=tuple(credits)
+            film_id=film_id,
+            event_type=event_type,
+            attachments=_one_per_person_per_observation(sorted(grouped, key=credit_order_key)),
         )
-        for (film_id, changed_at, event_type), credits in groups.items()
+        for (film_id, event_type), grouped in groups.items()
     ]
+
+
+def _one_per_person_per_observation(
+    attachments: list[AttachedCredit],
+) -> tuple[AttachedCredit, ...]:
+    """The first attachment per `(person, role, changed_at)`, order preserved — see
+    `group_attachments`."""
+    seen: set[tuple[int, str, datetime]] = set()
+    kept: list[AttachedCredit] = []
+    for attached in attachments:
+        key = (attached.person_id, attached.role, attached.changed_at)
+        if key not in seen:
+            seen.add(key)
+            kept.append(attached)
+    return tuple(kept)
 
 
 async def load_attachment_backlog(
     session: AsyncSession, *, since: datetime
 ) -> list[AttachedCredit]:
-    """Every seed-grade credit *attachment* recorded at or after `since`, oldest first.
+    """Every recorded credit *attachment* recorded at or after `since`, oldest first.
 
     Detachments are read past. A credit leaving a film is real history — it is what makes a
     later re-attachment a change again — but "X is no longer attached" is not a beat, and a
@@ -176,7 +348,22 @@ async def load_attachment_backlog(
     A fixed rolling window rather than a watermark, for the reason the field-change phase
     documents: a watermark would advance past attachments a *failed* sweep never carded,
     losing them permanently, and the re-read is free because a carded group is skipped.
+
+    Attachments a story already published are read past (NEU-1371, D-5): a `carded_by_event_id`
+    is a card, so the row has nothing left to card. Dropping them *here*, rather than teaching
+    the suppression check about them, is what keeps `_uncarded_credits` on its own-type rule —
+    a story about a director attaching is carded `casting` and would never be found by a
+    `crew_attached` group's lookup, so the only reliable place to know is the row itself.
+
+    Attachments under an **open** sanity hold are read past (D-8). They are still in the
+    window and are still re-judged every pass — by `reconcile_holds`, which runs before this
+    and releases what has stopped applying — but a held row must reach neither the quarantine
+    gate nor a group, because being in a group is what cards it. A released row is back in the
+    backlog on the pass that released it, which is what makes a cleared burst card the same
+    day; an `expired` one is not, and needs no filtering, because its change is older than
+    `since`.
     """
+    excluded = await open_hold_keys(session, since=since)
     stmt = (
         select(
             FilmCreditChange.film_id,
@@ -187,13 +374,25 @@ async def load_attachment_backlog(
             Person.name,
         )
         .join(Person, Person.id == FilmCreditChange.person_id)
-        .where(FilmCreditChange.change == CREDIT_ADDED, FilmCreditChange.changed_at >= since)
+        .where(
+            FilmCreditChange.change == CREDIT_ADDED,
+            FilmCreditChange.changed_at >= since,
+            FilmCreditChange.carded_by_event_id.is_(None),
+        )
         .order_by(FilmCreditChange.changed_at, FilmCreditChange.id)
     )
     attached: list[AttachedCredit] = []
     for row in await session.execute(stmt):
-        role = credit_role(row.credit_type, row.job)
-        if role is None:
+        # `recorded_role`, not `credit_role`: since D-49 a row here may be a followed person's
+        # non-seed credit, which carries no seed grade at all, and the seed-grade answer for it
+        # is None — the value this loop used to skip on. Every row in the table was recorded
+        # because something asked for it, so every row has a role and none is skipped.
+        role = recorded_role(row.credit_type, row.job)
+        # Filtered here rather than in the query: the hold is keyed on the *role*, which only
+        # `recorded_role` knows, so a SQL anti-join could only match on (film, person, time) —
+        # and would then withhold an actor-director's directing credit because their casting
+        # credit is held.
+        if (row.film_id, row.person_id, role, row.changed_at) in excluded:
             continue
         attached.append(
             AttachedCredit(
@@ -202,9 +401,467 @@ async def load_attachment_backlog(
                 name=row.name,
                 role=role,
                 changed_at=row.changed_at,
+                job=row.job,
             )
         )
     return attached
+
+
+async def quarantine_attachments(
+    session: AsyncSession,
+    *,
+    attachments: list[AttachedCredit],
+    now: datetime,
+    quarantine_hours: int,
+    followed: Collection[int] = (),
+) -> tuple[list[AttachedCredit], list[AttachedCredit]]:
+    """Split the backlog into the attachments eligible to card and the ones still held
+    (ADR-0017, D-3). Returns `(eligible, held)`.
+
+    Two conditions, both required. An attachment is eligible only once
+    `changed_at + quarantine_hours <= now` — the window is fully observed — **and** the credit
+    is still in `catalog.film_credit` under the same recorded role. The second is what makes
+    this a quarantine rather than a delay: an edit reverted inside the window is not a beat
+    that happened late, it is a beat that never happened, and it must publish nothing at all.
+
+    Both conditions are re-evaluated from scratch on every pass, because both are properties
+    of *now* rather than of the row. No `pending` state is written anywhere: the rolling
+    window is the queue, which is why the hold must fit inside it with room for the pass that
+    observes it — eligibility is only ever checked at a pass, so the effective hold rounds up
+    to the next one (`validate_sweep_configuration`, NEU-1401).
+
+    This is the attachment-side generalisation of NEU-1205's forward-dwell gate, and the two
+    are deliberately not one function. The removal gate asks whether the person came *back*
+    within the window, reading raw history because a flap's re-attachment is never carded;
+    this one asks whether they are *still here*, reading live state. Same shape, opposite
+    sources.
+
+    `0` disables both conditions together, reverting to immediate carding — the setting is one
+    switch, and holding a credit for no time while still requiring it to be present would be a
+    third behaviour nobody asked for.
+
+    A reverted attachment counts as held rather than as its own outcome. It will be re-read
+    and re-held on every pass until it falls out of the rolling window, which is the correct
+    end state — there is no card to write and nothing to remember.
+
+    Every eligible attachment comes back stamped with its live `credit_order`, which D-7's
+    body ordering needs and only `film_credit` has. Disabling the gate disables the stamp
+    with it: `0` reads no live state at all, by design, so a cast body written under it falls
+    back to the order the history diff produced. That is the pre-D-3 behaviour the `0` path
+    exists to preserve, not a second ordering rule.
+    """
+    if quarantine_hours <= 0 or not attachments:
+        return attachments, []
+    hold = timedelta(hours=quarantine_hours)
+    aged: list[AttachedCredit] = []
+    held: list[AttachedCredit] = []
+    for attached in attachments:
+        # `<=`, so an attachment lands the pass it turns eligible rather than the one after.
+        (aged if attached.changed_at + hold <= now else held).append(attached)
+    if not aged:
+        return [], held
+    present = await present_recorded_credits(
+        session, film_ids={a.film_id for a in aged}, followed=followed
+    )
+    eligible: list[AttachedCredit] = []
+    for attached in aged:
+        key = attached.match_key
+        if key in present:
+            eligible.append(replace(attached, credit_order=present[key]))
+        else:
+            held.append(attached)
+    return eligible, held
+
+
+# ── Sanity holds (ADR-0017, D-8) ─────────────────────────────────────────────
+
+
+@dataclass
+class SanityHoldCounts:
+    """What one pass did to `ingest.credit_hold`: rows it opened, rows whose condition lifted,
+    and rows whose change aged out of the rolling window before either happened."""
+
+    new: int = 0
+    cleared: int = 0
+    expired: int = 0
+
+
+def observation_day(changed_at: datetime) -> date:
+    """The UTC day an attachment was observed on — the burst check's bucket.
+
+    UTC rather than any local day, because `changed_at` is the time *we* recorded the diff at
+    and TMDB's editors are everywhere; a local boundary would split one editor's evening
+    across two buckets and merge two others' into one.
+    """
+    return changed_at.astimezone(UTC).date()
+
+
+@dataclass(frozen=True)
+class BurstCount:
+    """How many distinct films one `(person, UTC day)` reached, counted the two ways the burst
+    rule needs.
+
+    `recorded` decides whether to **hold**: the person's same-day recorded `added` rows,
+    whatever became of them since. A vandalism run is what it was even after TMDB has reverted
+    part of it, and detecting on live state would let a partial revert walk the survivors
+    straight past the check.
+
+    `present` decides whether to **release**: the subset `catalog.film_credit` still backs,
+    which is the same live-state read the quarantine gate makes. It is the only one of the two
+    that can fall, because history is append-only — so it is the only one that can ever lift a
+    hold.
+
+    The two disagree exactly when TMDB has reverted part of a burst, which is why a released
+    hold is never re-held: `recorded` would hold it again on the next pass forever.
+    """
+
+    recorded: int
+    present: int
+
+
+async def _burst_counts(
+    session: AsyncSession,
+    *,
+    person_days: set[tuple[int, date]],
+    followed: Collection[int] = (),
+) -> dict[tuple[int, date], BurstCount]:
+    """The recorded and still-present film counts for each `(person, UTC day)`. Two queries for
+    the whole set, whichever count the caller is about to read."""
+    if not person_days:
+        return {}
+    days = {day for _, day in person_days}
+    lower = datetime.combine(min(days), time.min, tzinfo=UTC)
+    upper = datetime.combine(max(days) + timedelta(days=1), time.min, tzinfo=UTC)
+    stmt = select(
+        FilmCreditChange.film_id,
+        FilmCreditChange.person_id,
+        FilmCreditChange.credit_type,
+        FilmCreditChange.job,
+        FilmCreditChange.changed_at,
+    ).where(
+        FilmCreditChange.change == CREDIT_ADDED,
+        FilmCreditChange.person_id.in_({person_id for person_id, _ in person_days}),
+        FilmCreditChange.changed_at >= lower,
+        FilmCreditChange.changed_at < upper,
+    )
+    candidates: dict[tuple[int, date], set[tuple[UUID, str, str | None]]] = {}
+    film_ids: set[UUID] = set()
+    for row in await session.execute(stmt):
+        match = recorded_credit_key(row.credit_type, row.job)
+        key = (row.person_id, observation_day(row.changed_at))
+        # The date range above is a bounding box over every day asked about, so it also
+        # returns the days between them — which belong to nobody's question.
+        if key not in person_days:
+            continue
+        candidates.setdefault(key, set()).add((row.film_id, *match))
+        film_ids.add(row.film_id)
+    present = await present_recorded_credits(session, film_ids=film_ids, followed=followed)
+    return {
+        key: BurstCount(
+            recorded=len({film_id for film_id, _role, _job in pairs}),
+            present=len(
+                {film_id for film_id, role, job in pairs if (film_id, key[0], role, job) in present}
+            ),
+        )
+        for key, pairs in candidates.items()
+    }
+
+
+async def _released_keys(
+    session: AsyncSession, *, attachments: list[AttachedCredit]
+) -> set[tuple[UUID, int, str, datetime]]:
+    """The attachments a hold has already let go of, which no check may hold again.
+
+    A release has to be final for the observation it names, or it lasts exactly one pass. Both
+    reasons that re-admit a change need this, for the same reason and against different rules:
+
+    - `manual` — an admin overrode a `deceased` hold on Monday; the person is still dead on
+      Tuesday, and without this the check re-holds it every pass forever.
+    - `cleared` — a burst whose live count has fallen below the threshold. Detection reads the
+      *recorded* count, which is append-only and therefore still above it, so re-holding is
+      exactly what would happen. This is the seam between the two counts in `BurstCount`.
+
+    `expired` is absent deliberately: an expired hold's change is older than the lookback and
+    never reaches a backlog again, so it needs no immunity and granting it one would keep a
+    row's decision alive past the window that justified it.
+    """
+    if not attachments:
+        return set()
+    stmt = select(
+        CreditHold.film_id, CreditHold.person_id, CreditHold.credit_type, CreditHold.changed_at
+    ).where(
+        CreditHold.release_reason.in_((RELEASE_MANUAL, RELEASE_CLEARED)),
+        CreditHold.film_id.in_({a.film_id for a in attachments}),
+    )
+    return {
+        (film_id, person_id, role, changed_at)
+        for film_id, person_id, role, changed_at in await session.execute(stmt)
+    }
+
+
+def _hold_key(attached: AttachedCredit) -> tuple[UUID, int, str, datetime]:
+    """`uq_credit_hold_change` as the phase holds it — the role, not TMDB's cast/crew split."""
+    return (attached.film_id, attached.person_id, attached.role, attached.changed_at)
+
+
+async def reconcile_holds(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    since: datetime,
+    max_films_per_day: int,
+    followed: Collection[int] = (),
+) -> SanityHoldCounts:
+    """Release every open hold that has stopped applying, before the backlog is read. Caller
+    commits.
+
+    Two endings, and they are not symmetric:
+
+    - **cleared** — the condition lifted. Only `burst` can: it is a claim about a *set* of
+      rows, and TMDB reverting most of a vandalism run makes it false. Re-running
+      `_burst_counts` is the whole test, so detection and release cannot drift apart — which
+      is also why `followed` is threaded in here: reading the live side under seed grade alone
+      would count a followed person's surviving non-seed credits as gone and release a burst
+      hold that still applies. That set is read live, so a follow narrowed between two passes
+      can move an open hold's *present* count and with it the clear/hold decision for the
+      whole burst; the alternative is a stale set disagreeing with the writer, which is worse
+      for the reason `present_recorded_credits` gives. The
+      survivors card on this same pass, which is why this runs before the backlog is loaded.
+    - **expired** — the change fell out of `SWEEP_EVENT_LOOKBACK_DAYS`. Nothing reads it any
+      more, so nothing will card it; the row is closed to say the hold ended rather than left
+      open forever to say nothing. Applies to every reason, including the two that never
+      clear: `deceased` and `implausible_age` are claims about the person, and a person does
+      not stop having died.
+
+    Clearing reads `BurstCount.present` while detection reads `BurstCount.recorded`, which is
+    the only way both halves of §3 can hold at once: history is append-only, so a rule that
+    detected on the same count it releases on could never release anything. `_released_keys`
+    is the other half of that seam — a cleared row is never re-held.
+
+    A `max_films_per_day` of 0 turns the burst check off, and turning a check off releases
+    what it is holding outright: the condition it stated can no longer be evaluated, so
+    continuing to withhold on it would be a hold nothing can ever lift.
+    """
+    counts = SanityHoldCounts()
+    open_holds = (
+        (await session.execute(select(CreditHold).where(CreditHold.released_at.is_(None))))
+        .scalars()
+        .all()
+    )
+    live: list[CreditHold] = []
+    for hold in open_holds:
+        if hold.changed_at < since:
+            _release(hold, now=now, reason=RELEASE_EXPIRED)
+            counts.expired += 1
+        else:
+            live.append(hold)
+
+    bursts = [hold for hold in live if hold.reason == HOLD_BURST]
+    if bursts:
+        by_day = (
+            await _burst_counts(
+                session,
+                person_days={(h.person_id, observation_day(h.changed_at)) for h in bursts},
+                followed=followed,
+            )
+            if max_films_per_day > 0
+            else {}
+        )
+        for hold in bursts:
+            key = (hold.person_id, observation_day(hold.changed_at))
+            count = by_day.get(key)
+            # `is None` covers both "the check is off" and "this person has no same-day rows
+            # left at all", which are the same answer: nothing is holding this any more.
+            if max_films_per_day <= 0 or count is None or count.present < max_films_per_day:
+                _release(hold, now=now, reason=RELEASE_CLEARED)
+                counts.cleared += 1
+    await session.flush()
+    return counts
+
+
+def _release(hold: CreditHold, *, now: datetime, reason: str) -> None:
+    hold.released_at = now
+    hold.release_reason = reason
+    log.info(
+        "credit hold released: film %s person %s (%s), held as %s, released %s",
+        hold.film_id,
+        hold.person_id,
+        hold.credit_type,
+        hold.reason,
+        reason,
+    )
+
+
+def _date_hold(
+    person: Person, *, changed_on: date, posthumous_years: int, min_age_years: int
+) -> str | None:
+    """The reason this person's dates disqualify a credit observed on `changed_on`, or None.
+
+    The rule itself is `catalog.person_dates`, which person resolution scores the same
+    candidate facts against (D-21, NEU-1400); this side only names the hold reasons it
+    returns. `ingest.models`' `HOLD_*` values and that module's are the same two strings, and
+    `tests/unit/catalog/test_person_dates.py` pins them together.
+    """
+    return date_contradiction(
+        birthday=person.birthday,
+        deathday=person.deathday,
+        on=changed_on,
+        posthumous_years=posthumous_years,
+        min_age_years=min_age_years,
+    )
+
+
+async def _person_dates(session: AsyncSession, client: TMDBClient, person_id: int) -> Person | None:
+    """`ensure_person_details`, with a TMDB outage demoted to "no dates known".
+
+    The date checks are a *filter over what would otherwise card*, so failing to reach TMDB
+    must cost the pass nothing more than the holds it would have placed. Raising here would
+    cost the whole credits phase — this runs before the per-group loop that has the failure
+    guard — over an endpoint that decides nothing for the overwhelming majority of people.
+    Nothing is stamped on a failure, so the next pass asks again.
+    """
+    try:
+        return await ensure_person_details(session, client, person_id)
+    except httpx.HTTPError:
+        log.warning("person %s details unavailable; sanity dates not checked", person_id)
+        return None
+
+
+async def _write_holds(
+    session: AsyncSession, *, holds: list[tuple[AttachedCredit, str]], now: datetime
+) -> int:
+    """Open (or re-open) one hold row per held attachment. Caller commits.
+
+    Re-opening rather than inserting beside: the grain is the observation, so a change that
+    was held, cleared, and then tripped a check again is one row that has been held twice, not
+    two rows. Manually released rows never reach here — `_manual_release_keys` filters them
+    out upstream, which is where the override has to be honoured anyway so the attachment
+    stays eligible to card.
+    """
+    if not holds:
+        return 0
+    rows: dict[tuple[UUID, int, str, datetime], dict] = {}
+    for attached, reason in holds:
+        rows.setdefault(
+            _hold_key(attached),
+            {
+                "film_id": attached.film_id,
+                "person_id": attached.person_id,
+                "credit_type": attached.role,
+                "changed_at": attached.changed_at,
+                "reason": reason,
+                "held_at": now,
+            },
+        )
+        log.info(
+            "credit hold: film %s person %s (%s) held as %s",
+            attached.film_id,
+            attached.person_id,
+            attached.role,
+            reason,
+        )
+    stmt = insert(CreditHold).values(list(rows.values()))
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_credit_hold_change",
+        set_={
+            "reason": stmt.excluded.reason,
+            "held_at": stmt.excluded.held_at,
+            "released_at": None,
+            "release_reason": None,
+        },
+    )
+    await session.execute(stmt)
+    return len(rows)
+
+
+async def sanity_holds(
+    session: AsyncSession,
+    *,
+    client: TMDBClient | None,
+    attachments: list[AttachedCredit],
+    now: datetime,
+    max_films_per_day: int,
+    posthumous_years: int,
+    min_age_years: int,
+    followed: Collection[int] = (),
+) -> tuple[list[AttachedCredit], SanityHoldCounts]:
+    """Split the quarantine's survivors into the ones that may card and the ones a sanity
+    check withholds (D-8). Returns `(eligible, counts)`. Caller commits.
+
+    Three checks, in this order and for a cost reason: **burst** is a claim about rows we
+    already hold and is answered in two queries for the whole backlog, while **deceased** and
+    **implausible age** each need `/person/{id}` for a person we have never fetched. Running
+    burst first means a twenty-five-film vandalism run costs no TMDB requests at all — the
+    people in it are no longer about to be carded, which is the only condition under which
+    the spec permits the fetch.
+
+    Where quarantine asks *did this edit survive*, these ask *is this edit possible*. Both
+    hold rather than discard, but only these leave a row behind: quarantine's two conditions
+    are re-derivable from the rolling window on every pass, while "one of twenty-five" and
+    "died in 2011" are not answerable from the attachment alone.
+
+    Each check is disabled by a threshold of 0, and a `client` of None disables the two that
+    need TMDB — the same shape as `quarantine_hours=0` above, so a caller without a `Settings`
+    gets the pre-D-8 behaviour it was written against.
+
+    **What "about to be carded" means here.** The spec places these after the quarantine gate
+    and before `_card_group`, and that is where they are — which means a person whose group
+    `_card_group` will then find already carded is fetched too, because per-person suppression
+    and the already-carded check both need the group and run inside it. What bounds the cost is
+    `details_observed_at`, not the placement: a person is fetched once ever, so this is a
+    one-off at deploy over whatever is in the first rolling window, not a per-pass charge.
+    """
+    counts = SanityHoldCounts()
+    if not attachments:
+        return [], counts
+    immune = await _released_keys(session, attachments=attachments)
+    holds: list[tuple[AttachedCredit, str]] = []
+
+    survivors: list[AttachedCredit] = []
+    if max_films_per_day > 0:
+        by_day = await _burst_counts(
+            session,
+            person_days={(a.person_id, observation_day(a.changed_at)) for a in attachments},
+            followed=followed,
+        )
+        for attached in attachments:
+            count = by_day.get((attached.person_id, observation_day(attached.changed_at)))
+            recorded = count.recorded if count is not None else 0
+            if recorded >= max_films_per_day and _hold_key(attached) not in immune:
+                holds.append((attached, HOLD_BURST))
+            else:
+                survivors.append(attached)
+    else:
+        survivors = list(attachments)
+
+    eligible: list[AttachedCredit] = []
+    if client is not None and (posthumous_years > 0 or min_age_years > 0):
+        people: dict[int, Person | None] = {}
+        for attached in survivors:
+            if attached.person_id not in people:
+                people[attached.person_id] = await _person_dates(
+                    session, client, attached.person_id
+                )
+            person = people[attached.person_id]
+            reason = (
+                None
+                if person is None
+                else _date_hold(
+                    person,
+                    changed_on=observation_day(attached.changed_at),
+                    posthumous_years=posthumous_years,
+                    min_age_years=min_age_years,
+                )
+            )
+            if reason is not None and _hold_key(attached) not in immune:
+                holds.append((attached, reason))
+            else:
+                eligible.append(attached)
+    else:
+        eligible = survivors
+
+    counts.new = await _write_holds(session, holds=holds, now=now)
+    return eligible, counts
 
 
 async def _already_carded(
@@ -245,10 +902,14 @@ async def _latest_credit_event_types(
     return latest
 
 
-async def _uncarded_credits(
-    session: AsyncSession, *, film_id: UUID, event_type: str, credits: tuple[CreditAttached, ...]
-) -> tuple[CreditAttached, ...]:
-    """The credits in a group that should still be carded for this beat.
+async def _uncarded_attachments(
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    event_type: str,
+    attachments: tuple[AttachedCredit, ...],
+) -> tuple[AttachedCredit, ...]:
+    """The attachments in a group that should still be carded for this beat.
 
     Removal-aware (NEU-1200): for each person, look up the most recent event among
     their own attachment type and `credit_removed`. Suppress only if it's an attachment —
@@ -264,33 +925,45 @@ async def _uncarded_credits(
     already carded still cards the other two.
     """
     latest_types = await _latest_credit_event_types(session, film_id=film_id, event_type=event_type)
-    kept: list[CreditAttached] = []
-    for c in credits:
-        latest = latest_types.get(normalize_name(c.name))
+    kept: list[AttachedCredit] = []
+    for a in attachments:
+        latest = latest_types.get(normalize_name(a.name))
         if latest is None or latest == CREDIT_REMOVED_EVENT_TYPE:
-            kept.append(c)
+            kept.append(a)
     return tuple(kept)
 
 
 async def _card_group(session: AsyncSession, *, group: CreditGroup) -> bool:
     """Create the event and its deterministic summary for one group, or report that it was
     already carded. One transaction covers both writes, so an event can never reach the feed
-    without the summary row every read path inner-joins. Caller owns the commit."""
+    without the summary row every read path inner-joins. Caller owns the commit.
+
+    Per-person suppression runs **before** the already-carded check, and the card is dated by
+    what survives it. Under burst collapsing the group's latest `changed_at` usually belongs
+    to someone the card will not name — they were carded on an earlier pass, or by a trade
+    story — and dating the card by the whole group would both misdate it and let it collide
+    with a card that already holds that timestamp, silently dropping everyone still owed one.
+    """
+    attachments = await _uncarded_attachments(
+        session,
+        film_id=group.film_id,
+        event_type=group.event_type,
+        attachments=group.attachments,
+    )
+    if not attachments:
+        return False
+    occurred_at = max(a.changed_at for a in attachments)
     if await _already_carded(
-        session, film_id=group.film_id, event_type=group.event_type, changed_at=group.changed_at
+        session, film_id=group.film_id, event_type=group.event_type, changed_at=occurred_at
     ):
         return False
-    credits = await _uncarded_credits(
-        session, film_id=group.film_id, event_type=group.event_type, credits=group.credits
-    )
-    if not credits:
-        return False
+    credits = tuple(as_credit(a) for a in attachments)
     event = Event(
         film_id=group.film_id,
         event_type=group.event_type,
         confidence="rumored",
         provenance="catalog",
-        occurred_at=group.changed_at,
+        occurred_at=occurred_at,
         region=None,
         subject_key=[normalize_name(c.name) for c in credits],
     )
@@ -311,23 +984,109 @@ async def run_credit_attachment_events(
     run_id: UUID,
     now: datetime,
     lookback_days: int,
+    quarantine_hours: int = 0,
+    story_confirm_days: int = 0,
+    client: TMDBClient | None = None,
+    max_films_per_day: int = 0,
+    posthumous_years: int = 0,
+    min_age_years: int = 0,
     failure_threshold: int = 10,
 ) -> CreditEventResult:
-    """Card every seed-grade credit attachment TMDB recorded in the window."""
+    """Card every recorded credit attachment TMDB recorded in the window, less the ones
+    quarantine and the sanity checks are still holding.
+
+    The followed people are read once, at the top, and handed to every live
+    `catalog.film_credit` read below (D-49). Their non-seed credits are in the backlog because
+    `credit_history` recorded them, so a gate asking "is this credit still there" under seed
+    grade alone would hold every one of them forever.
+
+    Every gate defaults to off — `quarantine_hours` to 0 rather than the setting's 72, the
+    three sanity thresholds likewise, and `client` to None — the same way the detachment
+    phase's `dwell_days` does: the caller that has a `Settings` passes the tuned values, and
+    every other caller gets the behaviour it was written against. `client` is separate from
+    the thresholds because the two date checks need a TMDB request and the burst check does
+    not, so a caller with no client still gets the whole of D-8 that costs nothing.
+    """
     result = CreditEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
     heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
+    # Before the backlog is read, so a hold released here is back in it on this pass: a burst
+    # TMDB has reverted cards its survivors today rather than tomorrow. Its own session and
+    # its own commit, because the releases must stand even if the carding below fails.
     async with owned_session(session_factory) as s:
-        attachments = await load_attachment_backlog(s, since=since)
-    result.attachments_read = len(attachments)
+        reconciled = await reconcile_holds(
+            s,
+            now=now,
+            since=since,
+            max_films_per_day=max_films_per_day,
+            followed=set((await s.execute(followed_people())).scalars().all()),
+        )
+        await s.commit()
+    result.holds_cleared = reconciled.cleared
+    result.holds_expired = reconciled.expired
+
+    async with owned_session(session_factory) as s:
+        # Before the backlog is read, because stamping is what takes a row *out* of it
+        # (NEU-1371, D-5). The trades routinely scoop TMDB, so the story card for a credit
+        # commonly exists days before the credit does — and by then the cluster stage has
+        # finished with that story and will never look at this film again, which is why the
+        # backward direction has to live here rather than there.
+        result.story_published = await stamp_prior_story_cards(
+            s, since=since, within_days=story_confirm_days, kinds=(PERSON_KIND,)
+        )
+        followed = set((await s.execute(followed_people())).scalars().all())
+        backlog = await load_attachment_backlog(s, since=since)
+        # Same session as the load: the quarantine gate reads live `film_credit` state
+        # against the backlog it just read, and a second session could straddle a refresh
+        # that rebuilt those rows mid-check. The sanity checks read the same live state, and
+        # join the same session for the same reason.
+        attachments, held = await quarantine_attachments(
+            s,
+            attachments=backlog,
+            now=now,
+            quarantine_hours=quarantine_hours,
+            followed=followed,
+        )
+        attachments, sane = await sanity_holds(
+            s,
+            client=client,
+            attachments=attachments,
+            now=now,
+            max_films_per_day=max_films_per_day,
+            posthumous_years=posthumous_years,
+            min_age_years=min_age_years,
+            followed=followed,
+        )
+        await s.commit()
+    # The whole backlog, not what survived the *quarantine* gate: "read 40, carded 2, held 37"
+    # is the shape that says the phase is working, and netting those rows out of the read count
+    # would make a quarantine that holds everything look like an empty window.
+    #
+    # Rows under an open sanity hold are the one thing it does not include, because
+    # `load_attachment_backlog` never returns them (D-8). That is deliberate rather than an
+    # omission: a held row is not a row this pass declined to card, it is one an earlier pass
+    # already decided about, and the `holds:` counts are where it is accounted for. Reading a
+    # burst as a *shrinking* window is the cost, and it is why those counts are on the detail
+    # line beside this one rather than folded into it.
+    result.attachments_read = len(backlog)
+    result.held = len(held)
+    result.holds_new = sane.new
     groups = group_attachments(attachments)
     log.info(
-        "credit events: %d attachments in %d groups since %s",
+        "credit events: %d attachments in %d groups since %s "
+        "(%d held, quarantine %dh; holds %d new, %d cleared, %d expired; "
+        "%d already carded by a story)",
         result.attachments_read,
         len(groups),
         since.isoformat(),
+        result.held,
+        quarantine_hours,
+        result.holds_new,
+        result.holds_cleared,
+        result.holds_expired,
+        result.story_published,
     )
 
     for group in groups:
@@ -364,9 +1123,13 @@ async def run_credit_attachment_events(
             result.skipped += 1
 
     log.info(
-        "credit events: %d created, %d already carded, %d failed",
+        "credit events: %d created, %d already carded, %d held, %d newly on hold, "
+        "%d published by a story, %d failed",
         result.events_created,
         result.skipped,
+        result.held,
+        result.holds_new,
+        result.story_published,
         result.failures,
     )
     return result
@@ -378,9 +1141,13 @@ async def run_credit_attachment_events(
 async def load_detachment_backlog(
     session: AsyncSession, *, since: datetime | None = None
 ) -> list[DetachedCredit]:
-    """Every seed-grade credit *detachment* recorded at or after `since`, oldest first.
+    """Every recorded credit *detachment* recorded at or after `since`, oldest first.
 
     When `since` is None (the backfill), reads all history.
+
+    A followed person's non-seed credit disappearing is a detachment like any other (D-49):
+    the row is in `film_credit_change` because something recorded it, so it is read under
+    `recorded_role` and cards and supersedes on exactly the terms a director's does.
     """
     where = FilmCreditChange.change == CREDIT_REMOVED
     if since is not None:
@@ -401,9 +1168,7 @@ async def load_detachment_backlog(
     )
     detached: list[DetachedCredit] = []
     for row in await session.execute(stmt):
-        role = credit_role(row.credit_type, row.job)
-        if role is None:
-            continue
+        role = recorded_role(row.credit_type, row.job)
         detached.append(
             DetachedCredit(
                 film_id=row.film_id,
@@ -411,6 +1176,7 @@ async def load_detachment_backlog(
                 name=row.name,
                 role=role,
                 changed_at=row.changed_at,
+                job=row.job,
             )
         )
     return detached
@@ -438,11 +1204,56 @@ async def _has_prior_attachment_card(
     norm = normalize_name(person_name)
     carded = exists().where(
         Event.film_id == film_id,
-        Event.event_type.in_(("crew_attached", "casting")),
+        Event.event_type.in_(CREDIT_EVENT_TYPES),
         Event.subject_key.any(norm),  # pyright: ignore[reportArgumentType]
         Event.occurred_at < before,
     )
     return bool((await session.execute(select(carded))).scalar())
+
+
+async def supersede_prior_attachment_cards(session: AsyncSession, *, removal: Event) -> int:
+    """Mark the attachment card each person named on `removal` was current on (D-2).
+
+    Per name on the removal's `subject_key`: the most recent *published* attachment card
+    (`crew_attached`/`casting`, any provenance) that occurred before the removal is set
+    `superseded` with `superseded_by` pointing at the removal. Only the most recent one — an
+    older card the same person is on (a trade-story casting card before the catalog carded
+    them, say) was already the earlier claim, not the one this removal corrects. Nothing is
+    hidden or deleted; the card keeps its place on every surface.
+
+    The card, not the name, is the unit of supersession: `status` lives on the event row, so
+    a casting card naming three people is marked when any one of them departs.
+
+    Returns the number of cards marked. Caller owns the commit; `removal` must be flushed so
+    its id exists for the FK.
+    """
+    # Resolve every target before marking any. Marking inside the loop would autoflush the
+    # first UPDATE ahead of the next name's query, and a card two departing people share
+    # would then fail the `published` filter for the second — handing back an *older* card
+    # that person is on, which is not the one this removal corrects.
+    targets: dict[UUID, Event] = {}
+    for name in removal.subject_key or []:
+        stmt = (
+            select(Event)
+            .where(
+                Event.film_id == removal.film_id,
+                Event.event_type.in_(CREDIT_EVENT_TYPES),
+                Event.subject_key.any(name),  # pyright: ignore[reportArgumentType]
+                Event.status == "published",
+                Event.occurred_at < removal.occurred_at,
+            )
+            .order_by(Event.occurred_at.desc(), Event.created_at.desc())
+            .limit(1)
+        )
+        card = (await session.execute(stmt)).scalar_one_or_none()
+        if card is not None:
+            targets[card.id] = card
+    for card in targets.values():
+        card.status = "superseded"
+        card.superseded_by = removal.id
+    marked = len(targets)
+    await session.flush()
+    return marked
 
 
 async def _has_forward_reattachment(
@@ -451,14 +1262,17 @@ async def _has_forward_reattachment(
     film_id: UUID,
     person_id: int,
     role: str,
+    job: str | None,
     after: datetime,
     until: datetime,
 ) -> bool:
-    """Whether the person re-attached to the same seed-grade role in `[after, until)`.
+    """Whether the person re-attached to the same recorded credit in `[after, until)`.
 
     Reads raw `catalog.film_credit_change` (not `news.event`), because a flap's
     re-attachment is suppressed by removal-aware suppression and is never carded.
-    Role-scoped: a cast departure followed by a director arrival is two real events.
+    Scoped by `role_match_key`: a cast departure followed by a director arrival is two real
+    events, and so — since D-49 folded every other crew job into one `crew` role — is a
+    `Gaffer` departure followed by a `Cinematographer` arrival.
     """
     stmt = select(FilmCreditChange.credit_type, FilmCreditChange.job).where(
         FilmCreditChange.film_id == film_id,
@@ -467,9 +1281,10 @@ async def _has_forward_reattachment(
         FilmCreditChange.changed_at >= after,
         FilmCreditChange.changed_at < until,
     )
+    wanted = role_match_key(role, job)
     rows = await session.execute(stmt)
     for row in rows:
-        if credit_role(row.credit_type, row.job) == role:
+        if recorded_credit_key(row.credit_type, row.job) == wanted:
             return True
     return False
 
@@ -482,7 +1297,9 @@ async def _card_detachment_group(
     dwell_days: int,
 ) -> bool:
     """Create the event and its deterministic summary for one detachment group, or report that
-    it was already carded. One transaction covers both writes. Caller owns the commit."""
+    it was already carded. One transaction covers both writes and the supersession marks on
+    the attachment cards it corrects, so a removal can never reach the feed with its
+    original still reading `published`. Caller owns the commit."""
     if await _already_carded(
         session,
         film_id=group.film_id,
@@ -513,6 +1330,7 @@ async def _card_detachment_group(
                 film_id=group.film_id,
                 person_id=c.person_id,
                 role=c.role,
+                job=c.job,
                 after=group.changed_at,
                 until=eligible_at,
             )
@@ -542,6 +1360,7 @@ async def _card_detachment_group(
         ),
         source_updated_at=event.updated_at,
     )
+    await supersede_prior_attachment_cards(session, removal=event)
     return True
 
 

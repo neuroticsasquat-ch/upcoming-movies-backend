@@ -2,8 +2,8 @@
 
 The free half of catalog-sourced events. `catalog.film_field_change` already records every
 semantic change to a `catalog.film` row, so a status crossing into production or
-post-production needs no new history infrastructure — only a reader, and the deterministic
-summary writer NEU-1080 built.
+post-production — or being called off altogether (EF-6) — needs no new history
+infrastructure: only a reader, and the deterministic summary writer NEU-1080 built.
 
 **Release dates are not read here** (NEU-1121). They were, from `film.release_date`, and that
 was free and wrong: the primary date is the earliest release in any country of any type, while
@@ -25,7 +25,15 @@ half (NEU-1082) has to build that protection deliberately.
 
 **Confidence is `confirmed`.** Unlike a credit — which any TMDB editor can add — `status` is a
 field ADR-0002 already made TMDB the system of record for. A change to it is not a claim to be
-corroborated; it *is* the corroboration.
+corroborated; it *is* the corroboration. This is what keeps the cancellation card out of the
+credit half's 72-hour quarantine (EF-6): quarantine is protection against an attachment
+somebody invented, and `status` is not a claim anybody makes.
+
+**A cancellation raises no detachment cards** (EF-6). TMDB rarely strips a dead title's
+credits, and if it ever did, a run of "no longer attached" cards for a film that has already
+been called off would mislead — the beat is that the film stopped, not that its crew left.
+Nothing here suppresses them: the credit and company halves diff observed rows, and a status
+flip changes none, so there is nothing to suppress. The integration suite pins it.
 
 Contract with the pipeline conventions, matching the other two phases: one session per item so
 a failure never rolls back the others, `record_progress` against the run id, abort after N
@@ -42,7 +50,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import FilmFieldChange
+from upmovies.catalog.models import COLLECTION_FIELD, STATUS_FIELD, FilmFieldChange
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
@@ -56,8 +64,8 @@ from upmovies.synthesize.deterministic import (
 
 log = logging.getLogger(__name__)
 
-# The one `catalog.film` column in scope. Everything else the trigger records (title, runtime,
-# overview, …) is metadata drift, not a beat.
+# The `catalog.film` columns whose history the sweep reads at all. Everything else the trigger
+# records (title, runtime, overview, …) is metadata drift, not a beat.
 #
 # `release_date` was here until NEU-1121 and is deliberately gone. That column is TMDB's
 # *primary* date — the earliest release in any country of any type — while the film page shows
@@ -65,7 +73,15 @@ log = logging.getLogger(__name__)
 # displayed. Its whole surface is now the year parenthetical after the title, and displayable
 # release dates card from `catalog.film_release_date_change` instead (`sweep.release_events`).
 # The consequence is accepted: the header year can change with nothing carding it.
-TRACKED_FIELDS: tuple[str, ...] = ("status",)
+#
+# **Two columns, two phases** (EF-5, NEU-1434). `status` cards here. `collection_id` cards in
+# `sweep.collection_events`, which reads these same rows through `load_change_backlog` and is
+# its own phase because almost nothing this one does fits it: a franchise attachment is
+# `rumored` rather than `confirmed`, waits out the credit quarantine with a live-state check at
+# publication, can happen to one film repeatedly rather than once, and a *move* is the one
+# transition that is two beats from one row. This tuple stays the single list of columns in
+# scope so the two phases cannot disagree about it; each passes `fields` for its own half.
+TRACKED_FIELDS: tuple[str, ...] = (STATUS_FIELD, COLLECTION_FIELD)
 
 
 @dataclass(frozen=True)
@@ -116,7 +132,7 @@ def classify_field_change(
     quantity the page shows, so it raises no events. Displayable release dates card from
     `catalog.film_release_date_change` via `sweep.release_events`.
     """
-    if field == "status":
+    if field == STATUS_FIELD:
         if not isinstance(new_value, str):
             return None
         event_type = STATUS_EVENT_TYPES.get(new_value)
@@ -126,8 +142,13 @@ def classify_field_change(
     return None
 
 
-async def load_change_backlog(session: AsyncSession, *, since: datetime) -> list[TrackedChange]:
-    """Every tracked-field change recorded at or after `since`, oldest first.
+async def load_change_backlog(
+    session: AsyncSession, *, since: datetime, fields: tuple[str, ...] = TRACKED_FIELDS
+) -> list[TrackedChange]:
+    """Every change to `fields` recorded at or after `since`, oldest first.
+
+    `fields` defaults to every column in scope; each phase passes its own half, so neither
+    reads a backlog of rows it will only discard (`TRACKED_FIELDS`).
 
     Deliberately a fixed rolling window rather than a watermark off the last run. A watermark
     would advance past changes a *failed* sweep never got to, losing them permanently, and it
@@ -137,6 +158,13 @@ async def load_change_backlog(session: AsyncSession, *, since: datetime) -> list
     Plain dataclasses rather than ORM rows, as in the refresh phase: the backlog is read in
     one session and then worked through in a session per item, and a detached instance whose
     attributes happen to still be loaded is not a contract worth relying on.
+
+    **Rows a story already published are read past** (`carded_by_event_id`, D-5, D-1446.2), the
+    same term `sweep.credit_events.load_attachment_backlog` and `company_events`' loader carry.
+    Unconditional rather than per-field, because a stamped row is published already whatever
+    column it records — but in practice only the `collection_id` rows can ever carry one: the
+    status vocabulary is not the story vocabulary, so no story card can name a status change,
+    and `_already_carded` remains the whole of that half's suppression.
     """
     stmt = (
         select(
@@ -147,7 +175,11 @@ async def load_change_backlog(session: AsyncSession, *, since: datetime) -> list
             FilmFieldChange.new_value,
             FilmFieldChange.changed_at,
         )
-        .where(FilmFieldChange.field.in_(TRACKED_FIELDS), FilmFieldChange.changed_at >= since)
+        .where(
+            FilmFieldChange.field.in_(fields),
+            FilmFieldChange.changed_at >= since,
+            FilmFieldChange.carded_by_event_id.is_(None),
+        )
         .order_by(FilmFieldChange.changed_at, FilmFieldChange.id)
     )
     return [
@@ -171,10 +203,16 @@ async def _already_carded(
 ) -> bool:
     """Whether this film already carries the event this change would card.
 
-    Every type this phase still raises is a production milestone, so the whole rule is "does
-    this film already have one", whatever raised it: a film enters production once, and any
-    existing `production_start` is the card this change would duplicate. No window, no
-    timestamp comparison, on either side (`ONCE_PER_FILM_EVENT_TYPES`).
+    Every type this phase raises happens to a film once, so the whole rule is "does this film
+    already have one", whatever raised it: a film enters production once, and any existing
+    `production_start` is the card this change would duplicate. No window, no timestamp
+    comparison, on either side (`ONCE_PER_FILM_EVENT_TYPES`).
+
+    This is also the whole of what makes a cancellation reversal free (EF-6). A film TMDB
+    marks `Canceled`, then `Planned`, then `Canceled` again writes three `film_field_change`
+    rows; the middle one classifies as nothing, and the third finds the card the first
+    raised. The uncancellation is TMDB correcting itself rather than a second beat, and it
+    cards neither way.
 
     Release dates were the one type that needed more — matched on *when*, against both
     provenances, to honour the anti-double-card rule ADR-0014 owes ADR-0002. That logic moved
@@ -208,8 +246,9 @@ async def _card_change(
         # The change's own timestamp, not now: the card is dated when TMDB moved, so a
         # backlog worked through after an outage does not all land on the same day.
         occurred_at=change.changed_at,
-        # Scope is the primary scalar `release_date` (ADR-0002); per-country dates have no
-        # change history to read, so there is never a region to record.
+        # A production status is a fact about the film, not about a market: there is no
+        # region a film is in production — or called off — *in*. Displayable release dates are
+        # the only regional catalog beat, and they card elsewhere (NEU-1121).
         region=None,
     )
     session.add(event)
@@ -231,14 +270,15 @@ async def run_field_change_events(
     lookback_days: int,
     failure_threshold: int = 10,
 ) -> FieldEventResult:
-    """Card every release-date and production-status change TMDB recorded in the window."""
+    """Card every production-status change TMDB recorded in the window — the two production
+    milestones and, since EF-6, a cancellation."""
     result = FieldEventResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
     heartbeat = Heartbeat(session_factory, run_id)
     since = now - timedelta(days=lookback_days)
 
     async with owned_session(session_factory) as s:
-        changes = await load_change_backlog(s, since=since)
+        changes = await load_change_backlog(s, since=since, fields=(STATUS_FIELD,))
     result.changes_read = len(changes)
     log.info("field events: %d tracked changes since %s", result.changes_read, since.isoformat())
 

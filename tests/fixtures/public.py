@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -10,6 +11,7 @@ from upmovies.catalog.models import (
     Collection,
     Film,
     FilmAlternativeTitle,
+    FilmAvailabilityCurrent,
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
@@ -18,6 +20,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
     ProductionCountry,
+    WatchProvider,
 )
 from upmovies.catalog.ref import film_ref
 from upmovies.main import app
@@ -162,13 +165,22 @@ def add_event(session: AsyncSession):
         confidence: str = "confirmed",
         occurred_at: datetime = datetime(2025, 3, 1, tzinfo=UTC),
         created_at: datetime | None = None,
+        updated_at: datetime | None = None,
         summary: str | None = "A neutral summary.",
         sources: tuple[dict, ...] = (),
         region: str | None = None,
         edited_at: datetime | None = None,
         provenance: str = "story",
         summary_model: str = "claude-haiku-4-5",
+        status: str = "published",
+        superseded_by: UUID | None = None,
+        subject_key: list[str] | None = None,
     ) -> Event:
+        """`updated_at` defaults to `created_at`, as it does in production: the column carries a
+        `server_default` and no `onupdate`, so a freshly written card has the two equal and only
+        an in-place edit (`link.cluster`'s attach paths) moves them apart. Leaving it at `now()`
+        while back-dating `created_at` would make every historical fixture card look like one
+        edited moments ago. Pass it explicitly to model that edit."""
         event = Event(
             film_id=film.id,
             event_type=event_type,
@@ -176,9 +188,16 @@ def add_event(session: AsyncSession):
             occurred_at=occurred_at,
             region=region,
             provenance=provenance,
+            status=status,
+            superseded_by=superseded_by,
+            subject_key=subject_key,
         )
         if created_at is not None:
             event.created_at = created_at
+        if updated_at is not None:
+            event.updated_at = updated_at
+        elif created_at is not None:
+            event.updated_at = created_at
         session.add(event)
         await session.flush()  # populate event.id
         if summary is not None:
@@ -311,3 +330,93 @@ def attach_credits(session: AsyncSession):
         await session.commit()
 
     return _attach
+
+
+@pytest.fixture
+def make_person(session: AsyncSession):
+    async def _make(
+        *,
+        id: int,
+        name: str,
+        original_name: str | None = None,
+        profile_path: str | None = "/p.jpg",
+        known_for_department: str | None = "Acting",
+        popularity: float | None = None,
+        tmdb_missing_at: datetime | None = None,
+    ) -> Person:
+        person = Person(
+            id=id,
+            name=name,
+            original_name=original_name,
+            profile_path=profile_path,
+            known_for_department=known_for_department,
+            popularity=popularity,
+            tmdb_missing_at=tmdb_missing_at,
+        )
+        session.add(person)
+        await session.commit()
+        return person
+
+    return _make
+
+
+@pytest.fixture
+def make_company(session: AsyncSession):
+    async def _make(
+        *,
+        id: int,
+        name: str,
+        logo_path: str | None = None,
+        origin_country: str | None = None,
+    ) -> ProductionCompany:
+        company = ProductionCompany(
+            id=id, name=name, logo_path=logo_path, origin_country=origin_country
+        )
+        session.add(company)
+        await session.commit()
+        return company
+
+    return _make
+
+
+@pytest.fixture
+def add_availability(session: AsyncSession):
+    """Write one film's current where-to-watch rows, as a provider poll would have left them.
+
+    Takes `offers` as `(provider_id, provider_name, monetization_type)` triples and inserts them
+    in the order given, because that order is the one the box renders in: `_rebuild_current`
+    deletes and re-inserts a region wholesale in the order TMDB listed the services, so the
+    surrogate key carries JustWatch's own ranking. A test that wants to prove the ordering has
+    to be able to write rows out of alphabetical order.
+    """
+
+    async def _add(
+        *,
+        film: Film,
+        offers: list[tuple[int, str, str]],
+        region: str = "US",
+        link: str | None = "https://www.themoviedb.org/movie/1/watch",
+    ) -> None:
+        known = set((await session.execute(select(WatchProvider.id))).scalars().all())
+        for provider_id, name, _kind in offers:
+            if provider_id not in known:
+                session.add(
+                    WatchProvider(
+                        id=provider_id, name=name, logo_path=f"/provider{provider_id}.jpg"
+                    )
+                )
+                known.add(provider_id)
+        await session.flush()
+        for provider_id, _name, kind in offers:
+            session.add(
+                FilmAvailabilityCurrent(
+                    film_id=film.id,
+                    region=region,
+                    provider_id=provider_id,
+                    monetization_type=kind,
+                    link=link,
+                )
+            )
+        await session.commit()
+
+    return _add

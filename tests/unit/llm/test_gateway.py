@@ -1,7 +1,7 @@
 """`Gateway` — per-stage provider resolution (NEU-980, design §5.3, §8).
 
-The seam these tests defend: one gateway lifecycle backs four stages that may each be on a
-different provider, and resolving the wrong one is not a crash — it is an eval run that
+The seam these tests defend: one gateway lifecycle backs every stage, each of which may be on
+a different provider, and resolving the wrong one is not a crash — it is an eval run that
 attributes a provider's latency, cost and coverage to a different provider entirely.
 """
 
@@ -41,10 +41,12 @@ _GATEWAY_ENV = (
     "CLUSTER_PROVIDER",
     "SOURCE_JUDGE_PROVIDER",
     "SUMMARY_PROVIDER",
+    "RESOLVE_PROVIDER",
     "LINK_MODEL",
     "CLUSTER_MODEL",
     "SOURCE_JUDGE_MODEL",
     "SUMMARY_MODEL",
+    "RESOLVE_MODEL",
 )
 
 
@@ -57,12 +59,12 @@ def _settings(monkeypatch, **env: str) -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
-# --- the default: four stages, one provider, today's behaviour ------------------
+# --- the default: every stage, one provider, today's behaviour ------------------
 
 
 async def test_every_stage_defaults_to_anthropic(monkeypatch):
     """The exit criterion is capability, not migration (spec §1): with nothing configured,
-    all four stages must still be served by the same adapter they were before the gateway."""
+    every stage must still be served by the same adapter it was before the gateway."""
     async with Gateway(_settings(monkeypatch)) as gw:
         for stage in STAGES:
             assert gw.provider_for(stage) == "anthropic"
@@ -248,10 +250,11 @@ async def test_the_shared_retry_policy_reaches_both_adapters(monkeypatch):
     assert cluster._policy is policy
 
 
-def test_stages_are_the_four_the_schema_allows():
-    """The set is closed and enforced in the schema (`ck_run_llm_usage_stage`, CONTEXT.md);
-    a fifth stage here would resolve a provider for a stage no telemetry row can name."""
-    assert STAGES == ("link", "cluster", "source_judge", "summarize")
+def test_stages_are_the_ones_the_schema_allows():
+    """The set is closed and enforced in the schema (`ck_run_llm_usage_stage`, CONTEXT.md); a
+    stage added here and not there would resolve a provider for calls no telemetry row can
+    name. `resolve` is the closed-set person tiebreak (D-22, NEU-1364)."""
+    assert STAGES == ("link", "cluster", "source_judge", "summarize", "resolve")
 
 
 # --- boot-time validation (NEU-981, spec §7) ------------------------------------
@@ -264,7 +267,7 @@ def test_stages_are_the_four_the_schema_allows():
 
 def test_the_stage_maps_cover_every_stage(monkeypatch):
     """Both maps are written out by hand (`SUMMARY_PROVIDER` serves the `summarize` stage,
-    so there is no name to compute), which is exactly the shape a fifth stage gets missed
+    so there is no name to compute), which is exactly the shape a new stage gets missed
     in — silently unvalidated rather than loudly absent."""
     settings = _settings(monkeypatch)
     assert set(stage_providers(settings)) == set(STAGES)
@@ -272,9 +275,29 @@ def test_the_stage_maps_cover_every_stage(monkeypatch):
 
 
 def test_the_default_configuration_boots(monkeypatch):
-    """All four stages on Anthropic at their default models — today's production config, and
-    the one that must never be what this check rejects."""
+    """Every stage on Anthropic at its default model — today's production config, and the one
+    that must never be what this check rejects. `RESOLVE_MODEL` defaults to Sonnet rather than
+    the Haiku the other stages take, so this is also what pins that pair as priced."""
     validate_stage_configuration(_settings(monkeypatch))
+
+
+async def test_the_resolve_stage_resolves_its_own_provider(monkeypatch):
+    """`resolve` is the closed-set person tiebreak (D-22): it answers ≤10% of mentions, which
+    is exactly the volume that makes routing it separately worth having — and exactly the
+    volume that would hide a misrouting from every aggregate."""
+    settings = _settings(monkeypatch, RESOLVE_PROVIDER="deepseek", DEEPSEEK_API_KEY="ds-xxx")
+    async with Gateway(settings) as gw:
+        assert gw.provider_for("resolve") == "deepseek"
+        assert isinstance(gw.for_stage("resolve"), OpenAICompatClient)
+        assert isinstance(gw.for_stage("link"), AnthropicClient)
+
+
+def test_a_resolve_stage_with_no_pricing_for_its_model_fails_the_boot(monkeypatch):
+    """The tiebreak is the one stage an operator is most likely to retune — it is the
+    expensive judgement call — so the unpriced pair must fail the boot rather than the band."""
+    settings = _settings(monkeypatch, RESOLVE_MODEL="claude-opus-4-8")
+    with pytest.raises(StageConfigurationError, match="resolve"):
+        validate_stage_configuration(settings)
 
 
 def test_a_model_with_no_rates_entry_fails_the_boot(monkeypatch):

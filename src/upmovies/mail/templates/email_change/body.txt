@@ -1,0 +1,15 @@
+Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
+
+Someone asked to move the {{ product_name }} account currently using {{ current_email }}
+to this address. If that was you, confirm it here:
+
+{{ email_change_url }}
+
+The link is good for {{ expires_in_hours }} hour{{ '' if expires_in_hours == 1 else 's' }}
+and can only be used once. Nothing changes until you use it — until then the account
+keeps its old address.
+
+If you were not expecting this, ignore this email. Whoever asked cannot move the account
+here without this link, and we have told {{ current_email }} that the request was made.
+
+— {{ product_name }}

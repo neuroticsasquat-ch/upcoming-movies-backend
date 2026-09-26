@@ -1,12 +1,30 @@
+import json
 import time
-from datetime import date
+from datetime import UTC, date, datetime
+from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from tests.fixtures.tmdb import make_credit_entry, make_details, make_person_movie_credits
-from upmovies.ingest.tmdb.client import RateLimiter, TMDBClient, TMDBNotFound
+from tests.fixtures.tmdb import (
+    make_credit_entry,
+    make_details,
+    make_person_movie_credits,
+    make_person_search_hit,
+    make_person_search_page,
+    make_video,
+    make_videos,
+    make_watch_providers,
+)
+from upmovies.config import Settings
+from upmovies.ingest.tmdb.client import (
+    RateLimiter,
+    TMDBAuthRejected,
+    TMDBClient,
+    TMDBNotFound,
+    reset_shared_limiters,
+)
 from upmovies.ingest.tmdb.schemas import (
     TMDBCredits,
     TMDBDiscoverResponse,
@@ -448,3 +466,491 @@ async def test_5xx_message_does_not_leak_the_api_key():
             await c.movie_details(500)
     assert "test-key" not in str(excinfo.value)
     assert "api_key=REDACTED" in str(excinfo.value)
+
+
+@respx.mock
+async def test_search_movie_sends_the_query_and_the_primary_release_year():
+    route = respx.get(f"{BASE_URL}/search/movie").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "page": 1,
+                "total_pages": 1,
+                "total_results": 1,
+                "results": [{"id": 438631, "title": "Dune", "release_date": "2021-09-15"}],
+            },
+        )
+    )
+    async with _client() as c:
+        hits = await c.search_movie("Dune", 2021)
+
+    assert [(h.id, h.title, h.release_date) for h in hits] == [(438631, "Dune", date(2021, 9, 15))]
+    params = route.calls.last.request.url.params
+    assert params.get("query") == "Dune"
+    assert params.get("primary_release_year") == "2021"
+    assert params.get("page") == "1"
+    # `year` matches a release in any country, which would let an import place a 1977 title on
+    # a modern restoration; `primary_release_year` is the narrower filter and the one used.
+    assert params.get("year") is None
+
+
+@respx.mock
+async def test_search_movie_omits_the_year_when_there_is_none():
+    route = respx.get(f"{BASE_URL}/search/movie").mock(
+        return_value=httpx.Response(
+            200, json={"page": 1, "total_pages": 1, "total_results": 0, "results": []}
+        )
+    )
+    async with _client() as c:
+        assert await c.search_movie("Untitled Project") == []
+    assert route.calls.last.request.url.params.get("primary_release_year") is None
+
+
+def _shared_settings() -> Settings:
+    """Settings at a window small enough to prove sharing in about a second.
+
+    The rest comes from the environment as everywhere else; only the TMDB capacity and window
+    move, and `TMDB_RATE_LIMIT_REQUESTS` has to be overridden explicitly because
+    `tests/conftest.py` sets it to 100000 to keep the shared window inert for the rest of the
+    suite.
+    """
+    return Settings(  # type: ignore[call-arg]
+        TMDB_RATE_LIMIT_REQUESTS="2",
+        TMDB_RATE_LIMIT_WINDOW_SECONDS="1",
+        TMDB_BASE_URL=BASE_URL,
+    )
+
+
+@respx.mock
+async def test_clients_from_settings_share_one_rate_limit_window():
+    """Three requests across two `from_settings` clients spend one 2-per-second budget.
+
+    Asserts the wait rather than the wiring, on the real clock, the way
+    `test_rate_limiter_enforces_rate` does — the point of NEU-1399 is the behaviour, and an
+    identity check on `_limiter` would still pass if `_request` stopped consulting it.
+    """
+    reset_shared_limiters()
+    respx.get(f"{BASE_URL}/movie/1").mock(
+        return_value=httpx.Response(200, json=make_details(tmdb_id=1))
+    )
+    settings = _shared_settings()
+
+    start = time.monotonic()
+    async with TMDBClient.from_settings(settings) as a, TMDBClient.from_settings(settings) as b:
+        await a.movie_details(1)
+        await a.movie_details(1)
+        await b.movie_details(1)
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 1.0, (
+        f"3 requests across two shared clients at 2/s should wait, took {elapsed:.3f}s"
+    )
+
+
+@respx.mock
+async def test_directly_constructed_clients_keep_independent_windows():
+    """The raw constructor is still a budget of its own — no existing caller changed behaviour."""
+    reset_shared_limiters()
+    respx.get(f"{BASE_URL}/movie/1").mock(
+        return_value=httpx.Response(200, json=make_details(tmdb_id=1))
+    )
+
+    def independent() -> TMDBClient:
+        return TMDBClient(base_url=BASE_URL, api_key="test-key", rate_calls=2, rate_window=1)
+
+    start = time.monotonic()
+    async with independent() as a, independent() as b:
+        await a.movie_details(1)
+        await a.movie_details(1)
+        await b.movie_details(1)
+    elapsed = time.monotonic() - start
+
+    # Loose on purpose. The only thing this has to separate is "no wait" from "waited out a
+    # 1 s window", so anything under a second discriminates; the headroom above three mocked
+    # requests goes to a loaded CI box, not to precision this assertion does not need.
+    assert elapsed < 0.9, f"two independent 2/s windows should not wait, took {elapsed:.3f}s"
+
+
+def test_production_call_sites_build_clients_through_from_settings():
+    """Sharing only happens through `from_settings`, so nothing but a structural check stops a
+    future consumer from constructing a client the old way and silently reintroducing the
+    doubling — no behavioural test would fail (NEU-1399, D-6)."""
+    root = Path(__file__).resolve().parents[4]
+    offenders = [
+        f"{path.relative_to(root)}:{n}"
+        for d in ("src/upmovies", "scripts")
+        for path in sorted((root / d).rglob("*.py"))
+        if path != root / "src/upmovies/ingest/tmdb/client.py"
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if "TMDBClient(" in line
+    ]
+    assert not offenders, (
+        "build TMDB clients with `TMDBClient.from_settings(settings)` so they share the "
+        f"process-wide rate limiter: {', '.join(offenders)}"
+    )
+
+
+# --- v3 user authorization (D-16) ------------------------------------------------------------
+
+
+def _movie_page(page: int, total_pages: int, ids: list[int]) -> dict:
+    return {
+        "page": page,
+        "total_pages": total_pages,
+        "total_results": total_pages * len(ids),
+        "results": [
+            {"id": i, "title": f"Film {i}", "release_date": "2021-01-01", "popularity": 1.0}
+            for i in ids
+        ],
+    }
+
+
+@respx.mock
+async def test_create_request_token_returns_the_token():
+    route = respx.get(f"{BASE_URL}/authentication/token/new").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "success": True,
+                "expires_at": "2026-09-17 20:00:00 UTC",
+                "request_token": "tok-abc",
+            },
+        )
+    )
+    async with _client() as client:
+        assert await client.create_request_token() == "tok-abc"
+    assert route.called
+
+
+@respx.mock
+async def test_create_session_posts_the_request_token_and_returns_the_session_id():
+    route = respx.post(f"{BASE_URL}/authentication/session/new").mock(
+        return_value=httpx.Response(200, json={"success": True, "session_id": "sess-1"})
+    )
+    async with _client() as client:
+        assert await client.create_session("tok-abc") == "sess-1"
+
+    assert json.loads(route.calls.last.request.content) == {"request_token": "tok-abc"}
+
+
+@respx.mock
+async def test_an_unapproved_request_token_is_a_rejection_not_a_bare_http_error():
+    # TMDB answers 401 with its own status_code 3 when the user never approved the token.
+    respx.post(f"{BASE_URL}/authentication/session/new").mock(
+        return_value=httpx.Response(
+            401,
+            json={"success": False, "status_code": 3, "status_message": "Authentication failed"},
+        )
+    )
+    async with _client(retry_max_attempts=1) as client:
+        with pytest.raises(TMDBAuthRejected):
+            await client.create_session("tok-abc")
+
+
+@respx.mock
+async def test_a_dead_api_key_is_not_reported_as_a_rejected_token():
+    # Status code 7 is *our* credential, not the user's approval. Reporting it as a rejection
+    # would send the user back to the approve screen forever against a broken deployment.
+    respx.post(f"{BASE_URL}/authentication/session/new").mock(
+        return_value=httpx.Response(
+            401, json={"success": False, "status_code": 7, "status_message": "Invalid API key"}
+        )
+    )
+    async with _client(retry_max_attempts=1) as client:
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await client.create_session("tok-abc")
+    assert not isinstance(excinfo.value, TMDBAuthRejected)
+
+
+@respx.mock
+async def test_account_reads_the_id_and_username_under_the_session():
+    route = respx.get(f"{BASE_URL}/account").mock(
+        return_value=httpx.Response(200, json={"id": 42, "username": "cinephile", "name": "X"})
+    )
+    async with _client() as client:
+        account = await client.account("sess-1")
+
+    assert (account.id, account.username) == (42, "cinephile")
+    assert route.calls.last.request.url.params["session_id"] == "sess-1"
+
+
+@respx.mock
+async def test_account_watchlist_movies_pages_until_total_pages():
+    route = respx.get(f"{BASE_URL}/account/42/watchlist/movies").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json=_movie_page(
+                int(request.url.params["page"]), 3, [int(request.url.params["page"]) * 10]
+            ),
+        )
+    )
+    async with _client() as client:
+        movies = await client.account_watchlist_movies(42, "sess-1")
+
+    assert [m.id for m in movies] == [10, 20, 30]
+    assert [c.request.url.params["page"] for c in route.calls] == ["1", "2", "3"]
+    assert route.calls.last.request.url.params["session_id"] == "sess-1"
+
+
+@respx.mock
+async def test_account_favorite_movies_pages_the_favorites_endpoint():
+    respx.get(f"{BASE_URL}/account/42/favorite/movies").mock(
+        return_value=httpx.Response(200, json=_movie_page(1, 1, [7, 8]))
+    )
+    async with _client() as client:
+        movies = await client.account_favorite_movies(42, "sess-1")
+
+    assert [m.id for m in movies] == [7, 8]
+    assert [m.title for m in movies] == ["Film 7", "Film 8"]
+
+
+@respx.mock
+async def test_the_row_cap_stops_the_paging_rather_than_slicing_the_result():
+    # The cap reaches into the paging: an account with a five-figure watchlist costs the pages
+    # the import will use, not every page and then a slice.
+    route = respx.get(f"{BASE_URL}/account/42/watchlist/movies").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json=_movie_page(int(request.url.params["page"]), 50, [1, 2])
+        )
+    )
+    async with _client() as client:
+        movies = await client.account_watchlist_movies(42, "sess-1", limit=3)
+
+    assert len(movies) == 3
+    assert len(route.calls) == 2
+
+
+@respx.mock
+async def test_an_empty_page_ends_the_paging():
+    # A total_pages TMDB overstates must not become an unbounded loop.
+    respx.get(f"{BASE_URL}/account/42/favorite/movies").mock(
+        return_value=httpx.Response(200, json=_movie_page(1, 9, []))
+    )
+    async with _client() as client:
+        assert await client.account_favorite_movies(42, "sess-1") == []
+
+
+@respx.mock
+async def test_delete_session_sends_the_session_id():
+    route = respx.delete(f"{BASE_URL}/authentication/session").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    async with _client() as client:
+        await client.delete_session("sess-1")
+
+    assert json.loads(route.calls.last.request.content) == {"session_id": "sess-1"}
+
+
+@respx.mock
+async def test_search_person_sends_the_query_and_parses_the_scoring_fields():
+    route = respx.get(f"{BASE_URL}/search/person").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_person_search_page(
+                results=[
+                    make_person_search_hit(
+                        2037,
+                        name="Cillian Murphy",
+                        known_for_department="Acting",
+                        popularity=41.2,
+                        known_for=[
+                            {"id": 872585, "media_type": "movie", "title": "Oppenheimer"},
+                            {"id": 63247, "media_type": "tv", "name": "Peaky Blinders"},
+                        ],
+                    )
+                ]
+            ),
+        )
+    )
+    async with _client() as c:
+        hits = await c.search_person("Cillian Murphy")
+
+    assert [h.id for h in hits] == [2037]
+    hit = hits[0]
+    assert hit.name == "Cillian Murphy"
+    # The three fields D-21's scorer reads off the hit itself: department vs the role the
+    # article gives them, popularity as a tiebreak, and the known-for overlap.
+    assert hit.known_for_department == "Acting"
+    assert hit.popularity == 41.2
+    assert [k.display_title for k in hit.known_for] == ["Oppenheimer", "Peaky Blinders"]
+
+    params = route.calls.last.request.url.params
+    assert params.get("query") == "Cillian Murphy"
+    assert params.get("page") == "1"
+
+
+@respx.mock
+async def test_search_person_returns_empty_for_a_name_tmdb_does_not_know():
+    respx.get(f"{BASE_URL}/search/person").mock(
+        return_value=httpx.Response(200, json=make_person_search_page(results=[]))
+    )
+    async with _client() as c:
+        assert await c.search_person("Nobody At All") == []
+
+
+@respx.mock
+async def test_search_person_goes_through_the_rate_limiter():
+    """Three searches on a 2-per-second client wait, the way every other endpoint does.
+
+    Asserted on the clock rather than by inspecting `_limiter`, matching
+    `test_rate_limiter_enforces_rate`: what NEU-1361 owes is that the one external call
+    person resolution makes spends the shared TMDB budget, and an identity check would
+    still pass if `search_person` bypassed `_request`.
+    """
+    respx.get(f"{BASE_URL}/search/person").mock(
+        return_value=httpx.Response(200, json=make_person_search_page(results=[]))
+    )
+    client = TMDBClient(
+        base_url=BASE_URL,
+        api_key="test-key",
+        rate_calls=2,
+        rate_window=1,
+        retry_base_delay=0.01,
+    )
+    start = time.monotonic()
+    async with client as c:
+        await c.search_person("One")
+        await c.search_person("Two")
+        await c.search_person("Three")
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 1.0, f"3 searches at 2/s should wait, took {elapsed:.3f}s"
+
+
+@respx.mock
+async def test_search_person_retries_a_server_error():
+    route = respx.get(f"{BASE_URL}/search/person").mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(200, json=make_person_search_page(results=[make_person_search_hit(1)])),
+        ]
+    )
+    async with _client() as c:
+        hits = await c.search_person("Retry Me")
+
+    assert [h.id for h in hits] == [1]
+    assert route.call_count == 2
+
+
+# --- /movie/{id}/watch/providers (D-27) ----------------------------------------
+
+
+@respx.mock
+async def test_watch_providers_parses_every_monetization_type():
+    respx.get(f"{BASE_URL}/movie/550/watch/providers").mock(
+        return_value=httpx.Response(
+            200, json=make_watch_providers(550, flatrate=[8], rent=[2], buy=[3])
+        )
+    )
+    async with _client() as c:
+        payload = await c.watch_providers(550)
+
+    us = payload.results["US"]
+    assert ([p.provider_id for p in us.flatrate], [p.provider_id for p in us.rent]) == ([8], [2])
+    assert [p.provider_id for p in us.buy] == [3]
+    assert us.link is not None
+
+
+@respx.mock
+async def test_watch_providers_reads_a_film_nobody_carries_as_empty_results():
+    """TMDB answers 200 with an empty `results` for a film no provider holds — the ordinary
+    case for anything unreleased. It must not be mistaken for a 404."""
+    respx.get(f"{BASE_URL}/movie/551/watch/providers").mock(
+        return_value=httpx.Response(200, json=make_watch_providers(551))
+    )
+    async with _client() as c:
+        payload = await c.watch_providers(551)
+
+    assert payload.results == {}
+
+
+@respx.mock
+async def test_watch_providers_drops_ad_supported_and_free_tiers():
+    """`ads` and `free` are deliberately not modelled (D-27): folding them into `flatrate`
+    would card a `now_available` beat the product does not mean."""
+    respx.get(f"{BASE_URL}/movie/552/watch/providers").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_watch_providers(
+                552,
+                regions={
+                    "US": {
+                        "link": "https://example.test/watch",
+                        "flatrate": [{"provider_id": 8, "provider_name": "Eight"}],
+                        "ads": [{"provider_id": 613, "provider_name": "Freevee"}],
+                        "free": [{"provider_id": 300, "provider_name": "Gratis"}],
+                    }
+                },
+            ),
+        )
+    )
+    async with _client() as c:
+        payload = await c.watch_providers(552)
+
+    assert [p.provider_id for p in payload.results["US"].flatrate] == [8]
+    assert not hasattr(payload.results["US"], "ads")
+
+
+@respx.mock
+async def test_watch_providers_raises_tmdb_not_found_on_404():
+    """The poll disposes of a deleted film rather than counting it as an outage, which needs
+    the 404 told apart from a transport failure."""
+    respx.get(f"{BASE_URL}/movie/9999/watch/providers").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.watch_providers(9999)
+
+
+# --- /movie/{id}/videos (D-35) -------------------------------------------------
+
+
+@respx.mock
+async def test_movie_videos_parses_the_fields_the_ledger_stores():
+    respx.get(f"{BASE_URL}/movie/560/videos").mock(
+        return_value=httpx.Response(200, json=make_videos(560, [make_video("abc123")]))
+    )
+    async with _client() as c:
+        payload = await c.movie_videos(560)
+
+    (video,) = payload.results
+    assert (video.key, video.site, video.type) == ("abc123", "YouTube", "Trailer")
+    assert video.published_at == datetime(2026, 9, 1, 15, 0, tzinfo=UTC)
+
+
+@respx.mock
+async def test_movie_videos_reads_a_film_with_nothing_to_watch_as_empty_results():
+    """A 200 with an empty list — the ordinary answer for an unannounced title, and the reason
+    the poll's scoped set can include films years from release without erroring."""
+    respx.get(f"{BASE_URL}/movie/561/videos").mock(
+        return_value=httpx.Response(200, json=make_videos(561))
+    )
+    async with _client() as c:
+        payload = await c.movie_videos(561)
+
+    assert payload.results == []
+
+
+@respx.mock
+async def test_movie_videos_keeps_types_it_does_not_card():
+    """The cut down to YouTube trailers is the caller's rule, not the wire format's: the ledger
+    stores every video so a relabelled teaser is not mistaken for a new one."""
+    respx.get(f"{BASE_URL}/movie/562/videos").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_videos(562, [make_video("t", type="Teaser"), make_video("c", type="Clip")]),
+        )
+    )
+    async with _client() as c:
+        payload = await c.movie_videos(562)
+
+    assert [v.type for v in payload.results] == ["Teaser", "Clip"]
+
+
+@respx.mock
+async def test_movie_videos_raises_tmdb_not_found_on_404():
+    """Same contract as every other id-addressed method: the poll tombstones a deleted film
+    rather than counting it as an outage."""
+    respx.get(f"{BASE_URL}/movie/9998/videos").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.movie_videos(9998)

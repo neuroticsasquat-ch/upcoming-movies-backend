@@ -30,8 +30,10 @@ hit (ADR-0008).
 **Scale.** At a 20x catalog (~24k films) this is a larger read, but it is still once per
 run, not per story, and scoring stays proportional to the tokens in a headline rather than
 to catalog size. The build logs its duration and row count on purpose: that measurement is
-the trigger for reconsidering the Postgres route, which is closed today only because
-pgvector is unavailable and `pg_trgm` is not installed on the shared instance.
+the trigger for reconsidering the Postgres route. `pg_trgm` is installed now (public search's
+fold indexes, ADR-0020), so that is no longer a reason; the route stays closed because pgvector
+is unavailable and a pure in-memory function already does the job once per run (ADR-0008).
+Reopening it is its own decision.
 """
 
 import logging

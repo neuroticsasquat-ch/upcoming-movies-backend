@@ -15,7 +15,9 @@ which is why this half looks like the credit half rather than the field half.
 event per (film, type, timestamp), and the rebuild finds every change in one observation, so US
 limited and US wide moving in one distributor announcement share a card. They usually do move
 together — two cards would be two beats where the world had one. Which markets moved is carried
-in `subject_key` as `US:wide`-style tokens and named in the body.
+in `subject_key` as `US:wide`-style tokens and named in the body. Since D-26 the same holds
+across the theatrical/home line: a US wide date and a US digital date landing in one
+observation are one card carrying `US:wide` and `US:digital`, not two.
 
 **Confidence is `confirmed`**, matching what the field phase gives `status` and unlike the
 credit half's `rumored`: a release date is the field ADR-0002 already makes TMDB the system of

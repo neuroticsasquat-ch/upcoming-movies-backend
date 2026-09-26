@@ -5,7 +5,8 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-from upmovies.config import Provider, Settings
+from upmovies.config import MailProvider, Provider, Settings
+from upmovies.link.resolve.scoring import ACCEPT_FLOOR, ACCEPT_MARGIN
 from upmovies.link.retrieval import (
     DEFAULT_CANDIDATE_LIMIT,
     DEFAULT_SCORE_THRESHOLD,
@@ -14,6 +15,7 @@ from upmovies.link.retrieval import (
     SATURATION_WARN_RATE,
 )
 from upmovies.llm.registry import PROVIDERS
+from upmovies.mail.registry import MAIL_PROVIDERS
 
 _REQUIRED_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://a:b@c:5432/d",
@@ -175,6 +177,69 @@ def test_provider_literal_matches_the_registry():
     package — `llm.gateway` reads `Settings`, so the import would be circular. Same bind as
     the retrieval constants, same pinning test."""
     assert set(get_args(Provider)) == set(PROVIDERS)
+
+
+def test_mail_provider_literal_matches_the_mail_registry():
+    """Same bind, same reason, same pinning test: `mail.gateway` reads `Settings`, so `config`
+    restates the provider names rather than importing the `mail` package."""
+    assert set(get_args(MailProvider)) == set(MAIL_PROVIDERS)
+
+
+def test_mail_defaults_keep_todays_deploys_booting(monkeypatch):
+    """No deploy has a Resend account yet. Defaulting `MAIL_PROVIDER` to `resend` would fail
+    every one of their boots the moment the mail gateway merges."""
+    _set_required(monkeypatch)
+    for key in ("MAIL_PROVIDER", "MAIL_FROM", "RESEND_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mail_provider == "noop"
+    assert s.mail_from == ""
+    assert s.resend_api_key is None
+
+
+def test_settings_reads_the_mail_configuration_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MAIL_PROVIDER", "resend")
+    monkeypatch.setenv("MAIL_FROM", "Backlotter <no-reply@example.com>")
+    monkeypatch.setenv("RESEND_API_KEY", "re_x")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mail_provider == "resend"
+    assert s.mail_from == "Backlotter <no-reply@example.com>"
+    assert s.resend_api_key == "re_x"
+
+
+def test_an_unknown_mail_provider_fails_the_container_at_boot(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MAIL_PROVIDER", "postmark")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_the_slate_weekday_defaults_to_thursday_and_reads_from_env(monkeypatch):
+    """DC-2: the product's slate day is Thursday unless Coolify says otherwise."""
+    _set_required(monkeypatch)
+    monkeypatch.delenv("SLATE_WEEKDAY", raising=False)
+    assert Settings().slate_weekday == "thursday"  # type: ignore[call-arg]
+    monkeypatch.setenv("SLATE_WEEKDAY", "monday")
+    assert Settings().slate_weekday == "monday"  # type: ignore[call-arg]
+
+
+def test_an_unknown_slate_weekday_fails_the_container_at_boot(monkeypatch):
+    """A misspelled day must not boot into a daily slot that never carries the slate."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SLATE_WEEKDAY", "Thursday")
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_weekdays_are_in_date_weekday_order():
+    """`carries_slate` indexes `WEEKDAYS` by `date.weekday()`; 2026-09-21 is a Monday."""
+    from datetime import date, timedelta
+
+    from upmovies.config import WEEKDAYS
+
+    for n, name in enumerate(WEEKDAYS):
+        assert f"{date(2026, 9, 21) + timedelta(days=n):%A}".lower() == name
 
 
 def test_settings_provider_credentials_are_optional(monkeypatch):
@@ -341,6 +406,54 @@ def test_settings_link_retrieval_defaults_match_the_selector(monkeypatch):
     assert s.link_retrieval_max_candidates == DEFAULT_CANDIDATE_LIMIT
 
 
+_RESOLVE_ENV = (
+    "RESOLVE_ACCEPT_FLOOR",
+    "RESOLVE_ACCEPT_MARGIN",
+    "RESOLVE_MENTIONS_PER_RUN",
+    "RESOLVE_ENABLED",
+)
+
+
+def _clear_resolve(monkeypatch):
+    for key in _RESOLVE_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_settings_resolve_defaults_match_the_scorer(monkeypatch):
+    """The two thresholds must not drift from `link.resolve.scoring`'s own, which carry the
+    derivation. Same duplication and same pinning as the retrieval pair above."""
+    _set_required(monkeypatch)
+    _clear_resolve(monkeypatch)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.resolve_accept_floor == ACCEPT_FLOOR
+    assert s.resolve_accept_margin == ACCEPT_MARGIN
+    assert s.resolve_mentions_per_run == 500
+    assert s.resolve_enabled is True
+
+
+def test_settings_resolve_thresholds_move_from_env(monkeypatch):
+    """The band widens by config, not by deploy — M4 ships before there is a corpus of
+    resolved mentions to tune it against."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("RESOLVE_ACCEPT_FLOOR", "0.62")
+    monkeypatch.setenv("RESOLVE_ACCEPT_MARGIN", "0.2")
+    monkeypatch.setenv("RESOLVE_ENABLED", "false")
+    s = Settings()  # type: ignore[call-arg]
+    assert (s.resolve_accept_floor, s.resolve_accept_margin) == (0.62, 0.2)
+    assert s.resolve_enabled is False
+
+
+@pytest.mark.parametrize("floor", ["-0.1", "1.5"])
+def test_settings_resolve_accept_floor_rejects_out_of_range(monkeypatch, floor):
+    """Scores are bounded 0..1 by construction, so a floor outside that range can only mean a
+    mistake — above 1.0 nothing ever accepts and every mention becomes an unlinked queue
+    entry."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv("RESOLVE_ACCEPT_FLOOR", floor)
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
 def test_settings_link_retrieval_tuning_overrides_from_env(monkeypatch):
     """T and K move by config, not by deploy — which is what made NEU-1001 a config change,
     and what lets the next catalog expansion be answered the same way."""
@@ -467,6 +580,30 @@ _PINNED_PROD_FALLBACKS = (
     ("LINK_RETRIEVAL_MAX_ZERO_CANDIDATE_RATE", "link_retrieval_max_zero_candidate_rate"),
     ("LINK_RETRIEVAL_HEALTH_MIN_STORIES", "link_retrieval_health_min_stories"),
     ("LINK_RETRIEVAL_SATURATION_WARN_RATE", "link_retrieval_saturation_warn_rate"),
+    # Not a tuning constant, but the same failure: the day the code default moves to `resend`,
+    # a fallback left at `noop` is a production that goes on sending nothing while the deploy
+    # reports success.
+    ("MAIL_PROVIDER", "mail_provider"),
+    # The rate-limit buckets (NEU-1344), for the same reason: a bucket is only as good as the
+    # value production actually boots with, and a fallback left behind here wins over the code
+    # silently. Only the string buckets are pinned — `RATE_LIMIT_ENABLED` and
+    # `RATE_LIMIT_PUBLIC_ENABLED` are bools, and the comparison below reads the compose value
+    # through the field's own type, where `bool("false")` is True.
+    ("RATE_LIMIT_SIGNUP", "rate_limit_signup"),
+    ("RATE_LIMIT_LOGIN", "rate_limit_login"),
+    ("RATE_LIMIT_AUTH_REQUEST", "rate_limit_auth_request"),
+    ("RATE_LIMIT_IMPORT", "rate_limit_import"),
+    ("RATE_LIMIT_PUBLIC", "rate_limit_public"),
+    ("RATE_LIMIT_ICS", "rate_limit_ics"),
+    ("RATE_LIMIT_DIGEST_UNSUBSCRIBE", "rate_limit_digest_unsubscribe"),
+    # The watch-provider poll's age window (NEU-1374). Tuning constants in the §4.5 sense —
+    # they set what the poll costs and how quickly a home release is noticed — so they fail the
+    # same way a stale K does: silently, with a green deploy.
+    ("PROVIDER_POLL_MIN_AGE_DAYS", "provider_poll_min_age_days"),
+    ("PROVIDER_POLL_MAX_AGE_DAYS", "provider_poll_max_age_days"),
+    # The slate day (NEU-1462). Not a tuning constant either, but a stale fallback would move
+    # every daily reader's slate off the day the weekly slot is scheduled on, silently.
+    ("SLATE_WEEKDAY", "slate_weekday"),
 )
 
 
@@ -528,3 +665,31 @@ def test_prod_compose_fallbacks_match_the_code_defaults(monkeypatch, env_name, f
     # Compared as the *field's* type, not as text: "0.10" and "0.1" are the same threshold,
     # and a test that insisted on the spelling would fail on a harmless reformat.
     assert type(expected)(_compose_fallback(env_name)) == expected
+
+
+def test_settings_has_sanity_hold_defaults(monkeypatch):
+    """The shipped D-8 thresholds. They live in code rather than only in Coolify because a
+    variable absent from the first deploy is one somebody has to add by hand."""
+    _set_required(monkeypatch)
+    settings = Settings()  # pyright: ignore[reportCallIssue]
+    assert settings.sweep_sanity_max_films_per_day == 20
+    assert settings.sweep_sanity_posthumous_years == 2
+    assert settings.sweep_sanity_min_age_years == 3
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "SWEEP_SANITY_MAX_FILMS_PER_DAY",
+        "SWEEP_SANITY_POSTHUMOUS_YEARS",
+        "SWEEP_SANITY_MIN_AGE_YEARS",
+    ],
+)
+def test_a_zero_sanity_threshold_fails_the_container_at_boot(monkeypatch, key):
+    """None of the three has a coherent zero — a burst bar of 0 holds every attachment ever
+    made, and a zero-year date bar holds every credit of everyone TMDB has a date for. Turning
+    one off is a code change, which is the right cost for removing a defacement check."""
+    _set_required(monkeypatch)
+    monkeypatch.setenv(key, "0")
+    with pytest.raises(ValidationError):
+        Settings()  # pyright: ignore[reportCallIssue]

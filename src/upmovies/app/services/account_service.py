@@ -4,9 +4,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.errors import EmailInUse, InvalidCredentials, InvalidInvite
-from upmovies.app.models import User
+from upmovies.app.models import Invite, User
 from upmovies.app.passwords import hash_password, verify_password
-from upmovies.app.repos import invite_repo, login_attempt_repo, session_repo, user_repo
+from upmovies.app.repos import login_attempt_repo, session_repo, user_repo
+from upmovies.app.services import email_change_service, invite_service
 from upmovies.app.tokens import new_csrf_token, new_session_id
 
 
@@ -16,20 +17,27 @@ async def signup(
     email: str,
     password: str,
     display_name: str,
-    invite_code: str,
+    invite_code: str | None,
+    require_invite: bool,
     ttl_days: int,
     user_agent: str | None,
     ip: str | None,
 ) -> tuple[User, str, str]:
     """Create a new user, open a session, and return (user, session_id, csrf_token).
-    Requires a valid unconsumed invite code; raises InvalidInvite otherwise.
-    Raises EmailInUse on duplicate email."""
-    invite = await invite_repo.get(db, invite_code)
-    if invite is None or invite.consumed_at is not None:
-        # Don't differentiate between "unknown" and "consumed" — keeps the
-        # signup endpoint from leaking which codes were ever issued.
-        raise InvalidInvite()
-    if invite.email_hint is not None and invite.email_hint.lower() != email.lower():
+
+    Since NEU-1343 an invite is optional (D-18): a code that is supplied is validated up
+    front and consumed in the same transaction as the user, and one that is absent is simply
+    not a factor — unless `require_invite`, which is `SIGNUP_OPEN` turned off and restores
+    the old requirement. Raises InvalidInvite for a code that does not grant this signup, and
+    for a missing one while the requirement stands. Raises EmailInUse on duplicate email.
+
+    The bot check is deliberately *not* here: it is an outbound HTTP call about the request,
+    not about the account, and it has already happened by the time this is reached
+    (`routers/auth.py`)."""
+    invite: Invite | None = None
+    if invite_code is not None:
+        invite = await invite_service.redeem(db, code=invite_code, email=email)
+    elif require_invite:
         raise InvalidInvite()
 
     password_hash = hash_password(password)
@@ -41,7 +49,8 @@ async def signup(
         await db.rollback()
         raise EmailInUse() from err
 
-    await invite_repo.consume(db, invite=invite, user_id=user.id, consumed_at=datetime.now(UTC))
+    if invite is not None:
+        await invite_service.consume(db, invite=invite, user_id=user.id, now=datetime.now(UTC))
 
     sess_id = new_session_id()
     csrf = new_csrf_token()
@@ -125,6 +134,11 @@ async def change_password(
 
     await user_repo.update_password_hash(db, user, hash_password(new_password))
     await session_repo.delete_all_for_user(db, user.id)
+    # And revoke any pending address change (NEU-1341). The notice mailed to the old address
+    # tells its owner that changing the password is how they stop a move they did not ask for,
+    # and a token already sitting in the requester's inbox would otherwise outlive the password
+    # it was authorised with.
+    await email_change_service.retire_pending(db, user_id=user.id, now=datetime.now(UTC))
 
     sess_id = new_session_id()
     csrf = new_csrf_token()

@@ -2,19 +2,75 @@
 dated `/discover/movie` roster cannot reach (spec §3, §6)."""
 
 from upmovies.ingest.sweep.admission import AdmissionTranches as AdmissionTranches
+from upmovies.ingest.sweep.collection_events import (
+    CollectionEventResult as CollectionEventResult,
+)
+from upmovies.ingest.sweep.collection_events import CollectionGroup as CollectionGroup
+from upmovies.ingest.sweep.collection_events import (
+    collection_field_events as collection_field_events,
+)
+from upmovies.ingest.sweep.collection_events import (
+    group_collection_changes as group_collection_changes,
+)
+from upmovies.ingest.sweep.collection_events import (
+    mark_window_reverts as mark_window_reverts,
+)
+from upmovies.ingest.sweep.collection_events import (
+    quarantine_collection_changes as quarantine_collection_changes,
+)
+from upmovies.ingest.sweep.collection_events import (
+    run_collection_events as run_collection_events,
+)
+from upmovies.ingest.sweep.company_events import CompanyEventResult as CompanyEventResult
+from upmovies.ingest.sweep.company_events import CompanyGroup as CompanyGroup
+from upmovies.ingest.sweep.company_events import (
+    group_company_changes as group_company_changes,
+)
+from upmovies.ingest.sweep.company_events import (
+    mark_window_attachments as mark_window_attachments,
+)
+from upmovies.ingest.sweep.company_events import (
+    quarantine_company_changes as quarantine_company_changes,
+)
+from upmovies.ingest.sweep.company_events import run_company_events as run_company_events
+from upmovies.ingest.sweep.configuration import (
+    SweepConfigurationError as SweepConfigurationError,
+)
+from upmovies.ingest.sweep.configuration import (
+    validate_sweep_configuration as validate_sweep_configuration,
+)
+from upmovies.ingest.sweep.confirm_events import ConfirmEventResult as ConfirmEventResult
+from upmovies.ingest.sweep.confirm_events import (
+    confirm_stamped_cards as confirm_stamped_cards,
+)
+from upmovies.ingest.sweep.confirm_events import (
+    run_confirmation_events as run_confirmation_events,
+)
 from upmovies.ingest.sweep.credit_events import AttachedCredit as AttachedCredit
 from upmovies.ingest.sweep.credit_events import (
     CreditDetachmentResult as CreditDetachmentResult,
 )
 from upmovies.ingest.sweep.credit_events import CreditEventResult as CreditEventResult
 from upmovies.ingest.sweep.credit_events import CreditGroup as CreditGroup
-from upmovies.ingest.sweep.credit_events import credit_role as credit_role
+from upmovies.ingest.sweep.credit_events import (
+    SanityHoldCounts as SanityHoldCounts,
+)
 from upmovies.ingest.sweep.credit_events import group_attachments as group_attachments
+from upmovies.ingest.sweep.credit_events import (
+    quarantine_attachments as quarantine_attachments,
+)
+from upmovies.ingest.sweep.credit_events import (
+    reconcile_holds as reconcile_holds,
+)
+from upmovies.ingest.sweep.credit_events import recorded_role as recorded_role
 from upmovies.ingest.sweep.credit_events import (
     run_credit_attachment_events as run_credit_attachment_events,
 )
 from upmovies.ingest.sweep.credit_events import (
     run_credit_detachment_events as run_credit_detachment_events,
+)
+from upmovies.ingest.sweep.credit_events import (
+    sanity_holds as sanity_holds,
 )
 from upmovies.ingest.sweep.enumerate_phase import EnumerateResult as EnumerateResult
 from upmovies.ingest.sweep.enumerate_phase import run_sweep_enumerate as run_sweep_enumerate
