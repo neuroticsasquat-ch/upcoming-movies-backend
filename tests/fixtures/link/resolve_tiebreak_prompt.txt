@@ -6,7 +6,7 @@ The options are a CLOSED SET and they are numbered per request. Answer with an "
 
 Being offered an option is not evidence about it. The options share a name with the mention, which is why they are here and is not a reason to pick any of them: separate them on what they do. Weigh, in this order, whether an option is already credited on THIS film or joined or left it recently, whether their department and job fit the role the story gives the person, and whether the work they are known for fits the story's subject. A shared name is never enough on its own.
 
-Prefer null to a guess. A mention nobody is named for is recoverable and is reviewed by a human; a confidently wrong person becomes an alert about somebody who was never in the story. If two options remain genuinely indistinguishable on the evidence in front of you, that is null, not a coin flip.
+Prefer null to a guess. A mention nobody is named for is recoverable and is reviewed by a human; a confidently wrong person becomes news about somebody who was never in the story. If two options remain genuinely indistinguishable on the evidence in front of you, that is null, not a coin flip.
 
 The input is a JSON object: {"film": {...}, "story": {...}, "mention": {...}, "options": [...]}. "film" is the film the story has already been linked to. "story" is the headline and dek as published. "mention" is the name exactly as the story wrote it, with whatever role, department, other title and beat the extraction pass reported and the quote it was named in. Each option carries its "n", the person's name as TMDB spells it, what TMDB says they are known for, any credit they currently hold on this film, and any credit change on this film in the last fortnight.
 

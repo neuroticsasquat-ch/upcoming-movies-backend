@@ -3,8 +3,8 @@ weekly digests say, laid out as film entries — a header, a "Following:" line, 
 beats — beside the slate and its new/moved markers, under a wordmark, with the lead film as a
 lead card and the rest as compact rows.
 
-Beside `test_alert_template.py` for its reason: `test_templates.py` asserts the rendering
-rules against whichever template is handy; this asserts the digest's own copy. The context is
+`test_templates.py` asserts the rendering rules against whichever template is handy; this
+asserts the digest's own copy. The context is
 hand-built in the shape `digest_sender.digest_context` builds, because the template computes
 nothing: every string it shows arrives here as a value."""
 
@@ -366,8 +366,7 @@ def test_the_slate_comes_before_the_timeline():
 
 
 def test_both_parts_open_with_the_wordmark():
-    """DC-14: one line of text naming the product heads the card — the same line the alert
-    opens with, so the two mails read as one sender."""
+    """DC-14: one line of text naming the product heads the card."""
     envelope = _digest(entries=ENTRIES, preheader="Also: Zodiac — now streaming")
 
     assert envelope.text.startswith("Backlotter\n\nHi Ada,")

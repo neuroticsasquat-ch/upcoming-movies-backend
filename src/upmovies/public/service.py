@@ -548,8 +548,8 @@ def _ordered_credits(credits: list[PersonCreditOut]) -> list[PersonCreditOut]:
     and it did not say this: `lead` folded the director in with the top-3 billed, so a
     director who was also 2nd-billed rendered "<character> · Director" while one who was
     4th-billed rendered "Director · <character>". That was an accident of a cut built to
-    decide what alerts, and EF-1 deleted the cut. Ranking the director outright is what the
-    page was always trying to say — it is the credit a film is attributed to — so the
+    decide what a follow delivered, and EF-1 deleted the cut. Ranking the director outright is
+    what the page was always trying to say — it is the credit a film is attributed to — so the
     inconsistency goes with the tier rather than being preserved.
 
     This is presentation only. It borrows `seed_grade`'s primitives because they already name

@@ -41,17 +41,18 @@ def _notification(user: User, event: Event, **overrides) -> Notification:
     values = {
         "user_id": user.id,
         "event_id": event.id,
-        "kind": "alert",
+        "kind": "digest",
         "channel": "email",
         "status": "queued",
     }
     return Notification(**(values | overrides))
 
 
-async def test_one_decision_per_user_event_kind_and_channel(session, user, event):
+async def test_one_row_per_user_and_event(session, user, event):
     """The key that makes the decision pass re-runnable: a pass whose window overlaps a
     previous one reconsiders events it has already decided, and the second decision must be a
-    conflict rather than a second mail."""
+    conflict rather than a second mail. With one kind and one channel left (ADR-0021), a second
+    `digest`/`email` row for the same `(user, event)` is the only duplicate there is."""
     session.add(_notification(user, event))
     await session.commit()
 
@@ -61,21 +62,15 @@ async def test_one_decision_per_user_event_kind_and_channel(session, user, event
     await session.rollback()
 
 
-async def test_the_same_event_may_alert_and_digest_on_each_channel(session, user, event):
-    """Four rows, not four duplicates: an alert and a digest line about one event, by mail and
-    by push (D-36), are different deliveries of the same news."""
-    for kind in ("alert", "digest"):
-        for channel in ("email", "push"):
-            session.add(_notification(user, event, kind=kind, channel=channel))
-    await session.commit()
-
-    rows = (await session.execute(select(Notification))).scalars().all()
-    assert len(rows) == 4
-
-
 @pytest.mark.parametrize(
     ("column", "value"),
-    [("kind", "newsletter"), ("channel", "sms"), ("status", "pending")],
+    [
+        ("kind", "newsletter"),
+        ("kind", "alert"),
+        ("channel", "sms"),
+        ("channel", "push"),
+        ("status", "pending"),
+    ],
 )
 async def test_the_closed_vocabularies_are_enforced_in_the_database(
     session, user, event, column, value

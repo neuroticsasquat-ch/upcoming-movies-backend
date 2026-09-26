@@ -88,7 +88,7 @@ class Mailer(Protocol):
     without either importing the application's configuration.
 
     Two ways in, for two kinds of caller. The transactional mails (verify, reset, email
-    change, the alert) render inside `send`: nothing else ever needs their `Envelope`. The
+    change) render inside `send`: nothing else ever needs their `Envelope`. The
     digest renders first, through `digest_sender.render_batch`, and hands the result to
     `deliver` — because an admin preview and a test-send need that same `Envelope` without a
     send, and a second render path for them would be a second answer to "what does the mail

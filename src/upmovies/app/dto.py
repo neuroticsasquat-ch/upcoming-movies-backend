@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime
-from typing import Literal, cast
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -230,7 +230,6 @@ def headline_release_out(headline: HeadlineRelease | None) -> HeadlineReleaseOut
 # --- follows (M3, D-10, EF-1) ------------------------------------------------------------------
 
 FollowEntityType = Literal["person", "company", "franchise", "title"]
-AlertStore = Literal["buy", "rent", "stream"]
 
 
 def normalise_entity_id(entity_type: str, entity_id: str) -> str:
@@ -302,12 +301,6 @@ class FollowOut(BaseModel):
 
 class FollowListResponse(BaseModel):
     items: list[FollowOut]
-
-
-def normalise_alert_stores(stores: list[str]) -> list[str]:
-    """Canonical order, no duplicates, so two store lists that mean the same thing compare
-    equal and the row reads the same however the client spelled it."""
-    return [s for s in ("buy", "rent", "stream") if s in stores]
 
 
 # The imports (D-15, D-16). The job row as the owner polls it — every field of `app.import_job`
@@ -447,80 +440,14 @@ class UserSettingsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     digest_cadence: DigestCadence
-    alert_stores: list[str]
-    """Which availability beats this user is alerted on, product-wide (D-44). `[]` is a real
-    answer — no store alerts — and is not the same as the default `["stream"]`."""
     ical_token: str
     created_at: datetime
     updated_at: datetime
 
 
 class UserSettingsUpdateRequest(BaseModel):
-    """A PATCH of the settings: either field, or both.
+    """A PATCH of the settings. The digest cadence is the one preference there is (ADR-0021),
+    so it is required: an empty body stays a `422`, because it is a client bug and pydantic
+    saying so is cheaper than a route that quietly does nothing."""
 
-    Both are optional and at least one is required, which is the shape a two-field PATCH wants
-    — the settings screen writes the control the user touched, not the whole row, and a
-    required `digest_cadence` would make changing the stores restate the cadence. An empty body
-    stays a `422`: it is a client bug, and pydantic saying so is cheaper than a route that
-    quietly does nothing. D-36's push preferences land beside them on the same terms."""
-
-    digest_cadence: DigestCadence | None = None
-    alert_stores: list[AlertStore] | None = None
-
-    @model_validator(mode="after")
-    def _normalise(self) -> "UserSettingsUpdateRequest":
-        if self.digest_cadence is None and self.alert_stores is None:
-            raise ValueError("no_settings_given")
-        if self.alert_stores is not None:
-            self.alert_stores = cast(
-                list[AlertStore], normalise_alert_stores(list(self.alert_stores))
-            )
-        return self
-
-
-# --- web push (M7, D-36) ----------------------------------------------------------------------
-
-
-class PushSubscriptionKeys(BaseModel):
-    """The encryption material the browser generated for one subscription.
-
-    Nested rather than flattened because this is the shape `PushSubscription.toJSON()` produces
-    in the browser: the client posts what the Push API handed it, unmodified, and a route that
-    demanded a re-shaped body would be asking every caller to do the same rearranging."""
-
-    p256dh: str = Field(min_length=1, max_length=256)
-    auth: str = Field(min_length=1, max_length=256)
-
-
-class PushSubscribeRequest(BaseModel):
-    """`POST /me/push` — one browser registering for notifications (D-36).
-
-    `expirationTime`, the third member of the browser's JSON, is deliberately not modelled and
-    not stored: it is null in every current implementation, and a column nothing writes is a
-    field the sender would eventually be tempted to trust."""
-
-    # Bounded, because it is stored: a push endpoint is a URL the *service* mints, around 200
-    # characters today, and nothing legitimate approaches this ceiling.
-    endpoint: str = Field(min_length=1, max_length=2048)
-    keys: PushSubscriptionKeys
-
-
-class PushUnsubscribeRequest(BaseModel):
-    """`DELETE /me/push` — the endpoint the browser has just torn down.
-
-    A body rather than a query string, for the same reason the subscribe route takes one: the
-    endpoint is the browser's, it is long, and it has no business in a URL an access log keeps.
-    """
-
-    endpoint: str = Field(min_length=1, max_length=2048)
-
-
-class VapidPublicKeyOut(BaseModel):
-    """`GET /me/push/vapid-public-key` — what the browser passes to
-    `pushManager.subscribe({applicationServerKey})` (D-36).
-
-    Served rather than built into the frontend bundle because it is a property of the
-    deployment: staging and production hold different keypairs, and a bundle carrying one of
-    them would subscribe every staging browser to production's endpoints."""
-
-    public_key: str
+    digest_cadence: DigestCadence

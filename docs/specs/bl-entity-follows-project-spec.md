@@ -175,6 +175,11 @@ Numbered `EF-n` so tickets can cite them. Each names the accepted decision it co
 
 ### Delivery
 
+> **Superseded in part, 2026-09-26 (ADR-0021, NEU-1470):** the push halves of EF-7 and the whole
+> of EF-8 to EF-11 decided *when a push fires*; there is no push and no alert mail any more.
+> EF-7's digest clause — the digest carries everything the timeline carries, no per-type
+> narrowing — is the rule that stands.
+
 - **EF-7 The push whitelist is per follow type.** `notify_service` decides per `(user, event)`
   from *why* the event reaches the user:
   - via a **title follow**: `release_date`, `trailer`, `now_available` (per

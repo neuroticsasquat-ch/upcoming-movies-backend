@@ -338,7 +338,7 @@ def _render_release_date(change: ReleaseDateChanged) -> str:
 
     A move whose new date is *strictly later* is a **slip** and swaps the verb (D-32,
     NEU-1403): "slipped from … to …" against the direction-neutral "moved from … to …" for an
-    earlier date. Decided here, per clause, and nowhere else — the alert mail renders this
+    earlier date. Decided here, per clause, and nowhere else — the digest renders this
     body verbatim, so a second derivation of direction in the sender would be free to drift
     from the card. An equal pair should never arrive (the sweep only sets `previous_date` on a
     `moved` row) and renders as "moved" rather than raising: the renderer stays total."""
@@ -581,7 +581,7 @@ def _render_now_available(change: NowAvailable) -> str:
 
 
 # The trailer card's whole body (D-35). "A new trailer" rather than "the trailer": a film
-# trailers more than once, the poll cannot tell the first from the third, and `alert_sender`
+# trailers more than once, the poll cannot tell the first from the third, and `digest_sender`
 # already labels the beat "New trailer" — one phrasing, in the two places it renders.
 _TRAILER_BODY = "A new trailer is out."
 

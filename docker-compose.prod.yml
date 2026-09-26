@@ -30,7 +30,7 @@ services:
       SUMMARY_MODEL: "${SUMMARY_MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
       # `resolve` is the second stage on the Pro tier, for the same asymmetry as `cluster`:
       # it is only asked about mentions the deterministic scorer could not separate — two
-      # people TMDB knows by one name (D-22) — and getting that wrong is an alert about
+      # people TMDB knows by one name (D-22) — and getting that wrong is news about
       # somebody who was never in the story. It answers ≤10% of mentions, so the tier costs
       # little; routed here explicitly rather than left on the code default so the whole
       # deployment stays on one provider and one credential.
@@ -195,23 +195,6 @@ services:
       MAIL_PROVIDER: "${MAIL_PROVIDER:-noop}"
       MAIL_FROM: "${MAIL_FROM:-}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
-      # Web Push (D-36, NEU-1387). All three seeded **empty**, like TURNSTILE_SECRET below and
-      # unlike the tuned constants above: without them `/me/push` answers `push_unavailable`
-      # and nobody can subscribe, which is the right state for a deployment that has not
-      # generated a keypair yet. Generate one *once* per deployment, in the container:
-      # `vapid --gen` writes `private_key.pem` / `public_key.pem`, and `vapid
-      # --applicationServerKey` prints the base64url public key the browser subscribes with —
-      # that string is VAPID_PUBLIC_KEY, and VAPID_PRIVATE_KEY is the matching base64url
-      # private key (`pywebpush` also accepts a path to the PEM, which a container that
-      # redeploys from an image does not have). Changing either afterwards invalidates every
-      # subscription taken out under the old pair, so this is not a value to rotate casually.
-      # VAPID_SUBJECT is a `mailto:` or `https:` URL a push service can use to reach whoever
-      # runs this deployment. Once a browser has registered, the `notify` slot refuses to
-      # start without all three (`pipeline_run.assert_push_sendable`) — the lines are here now
-      # for the Coolify gotcha above.
-      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY:-}"
-      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY:-}"
-      VAPID_SUBJECT: "${VAPID_SUBJECT:-}"
       # Email verification (NEU-1339). Both repeat the code default rather than being left
       # out, for the Coolify reason above: a variable absent from the file at first deploy is
       # one somebody has to add by hand later, and these are the two a non-production

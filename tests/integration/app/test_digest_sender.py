@@ -2,8 +2,8 @@
 the slate carries and on which day the daily carries it, how the film entries read, and what
 every row's status says afterwards.
 
-The decision pass is `test_notify_pass.py`'s subject, so the backlog here is seeded directly,
-as `test_alert_sender.py` does: a `queued` digest row is the contract between the two passes.
+The decision pass is `test_notify_pass.py`'s subject, so the backlog here is seeded directly: a
+`queued` digest row is the contract between the two passes.
 Every run takes a fixed `today`, so the slate window is a fact of the fixture rather than of
 the wall clock.
 """
@@ -96,11 +96,9 @@ def set_cadence(session):
 
 @pytest.fixture
 def queue_digest(session):
-    async def _queue(
-        *, user_id: UUID, event_id: UUID, kind: str = "digest", channel: str = "email"
-    ):
+    async def _queue(*, user_id: UUID, event_id: UUID):
         row = Notification(
-            user_id=user_id, event_id=event_id, kind=kind, channel=channel, status="queued"
+            user_id=user_id, event_id=event_id, kind="digest", channel="email", status="queued"
         )
         session.add(row)
         await session.commit()
@@ -1069,22 +1067,6 @@ async def test_a_second_run_sends_nothing_because_the_rows_are_sent(
 
     assert (result.users_considered, result.mails_sent) == (0, 0)
     assert mailbox.sent == []
-
-
-async def test_alert_rows_and_push_rows_are_not_this_pass_s_work(
-    session, subscriber, make_film, add_event, queue_digest, send
-):
-    user = await subscriber()
-    film = await make_film(slug="dune", title="Dune")
-    event = await add_event(film=film, event_type="release_date", created_at=NEWER_DAY)
-    await queue_digest(user_id=user.id, event_id=event.id, kind="alert")
-    await queue_digest(user_id=user.id, event_id=event.id, channel="push")
-
-    result, mailbox = await send("weekly")
-
-    assert (result.users_considered, result.mails_sent) == (0, 0)
-    assert mailbox.sent == []
-    assert {row.status for row in await _rows(session)} == {"queued"}
 
 
 # --- the slate window ----------------------------------------------------------

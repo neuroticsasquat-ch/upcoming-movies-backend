@@ -2,7 +2,7 @@
 `User.entitled_until`.
 
 Beside `app/verification.py` and for the same reason: the callers are not here yet. The follow
-graph, timeline, imports, settings, push and the calendar feed all land in M3 and M7, and each
+graph, timeline, imports, settings and the calendar feed all land in M3 and M7, and each
 should import a named rule rather than re-deriving `entitled_until > now()`. Unlike verification,
 this one *is* an access gate (D-37) — hence the dependency.
 

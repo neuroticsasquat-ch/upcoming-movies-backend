@@ -3,7 +3,7 @@ decision pass wrote for them and — weekly, and daily on the slate day — thei
 DC-2).
 
 `python -m upmovies.pipeline_run digest {daily|weekly}` runs this on two Coolify slots, one per
-cadence. It is the digest counterpart of `alert_sender`: the decision pass
+cadence. It is the product's only delivery (ADR-0021): the decision pass
 (`notify_service`) has already written a `digest` row per (user, event) for everything a
 user's follows reach, so this pass never decides *whether* a user hears about an event — only
 when, which is what `user_settings.digest_cadence` answers. A user with no settings row has
@@ -55,12 +55,14 @@ nothing queued would still receive a slate mail every week. The gate is one answ
 `entitled_user_clause()` AND `verified_user_clause()`, the two named rules every other pass
 uses — and a user it refuses has their queued rows marked `suppressed` and gets no slate.
 
-**Everything else follows `alert_sender`**: the copy is the summary the ledger holds now; a
-row whose event was superseded or lost its summary is marked `failed` with the reason rather
-than left to stall in the backlog; a provider refusal fails every row the mail carried and
-counts toward the abort guard, so a dead provider stops the pass within `failure_threshold`
-users and fails the run instead of converting the backlog into `failed` rows under a green
-check.
+**The queue outlives the run that wrote it, and everything else follows from that**: the copy
+is the summary the ledger holds now; a row whose event was superseded or lost its summary is
+marked `failed` with the reason rather than left to stall in the backlog; a provider refusal
+fails every row the mail carried and counts toward the abort guard, so a dead provider stops
+the pass within `failure_threshold` users and fails the run instead of converting the backlog
+into `failed` rows under a green check. `failed` is terminal — neither this pass nor the
+decision pass's `ON CONFLICT DO NOTHING` reconsiders one, so recovering a row means an operator
+re-queuing it by hand.
 
 **Every digest carries a one-click unsubscribe (DC-10).** `List-Unsubscribe` names
 `{API_BASE_URL}/digest/unsubscribe/{token}` and `List-Unsubscribe-Post` makes it RFC 8058 one
@@ -85,7 +87,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import httpx
-from sqlalchemy import Date, Row, and_, cast, exists, func, or_, select
+from sqlalchemy import Date, Row, and_, cast, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app import tokens
@@ -99,16 +101,7 @@ from upmovies.app.models import (
     UserSettings,
 )
 from upmovies.app.repos import user_settings_repo
-from upmovies.app.services.alert_sender import (
-    BEAT_LABELS,
-    EMAIL_CHANNEL,
-    JUSTWATCH_EVENT_TYPE,
-    LEAD_POSTER_SIZE,
-    film_url,
-    mark,
-    poster_url,
-    settings_url,
-)
+from upmovies.app.services.notify_service import EMAIL_CHANNEL
 from upmovies.app.verification import verified_user_clause
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
@@ -119,7 +112,7 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
 )
-from upmovies.catalog.ref import collection_ref, company_ref, person_ref
+from upmovies.catalog.ref import collection_ref, company_ref, film_ref, person_ref
 from upmovies.catalog.release_grade import PRIMARY_REGION, RELEASE_TYPE_BUCKETS
 from upmovies.config import WEEKDAYS, Settings
 from upmovies.ingest.runs import record_progress
@@ -159,6 +152,20 @@ the slate is a section the weekly cadence turns on, not a second message."""
 
 DIGEST_KIND = "digest"
 
+POSTER_SIZE = "w154"
+"""TMDB's small poster width, and a deliberate floor. A mail is read on a phone over a mobile
+connection and its images are fetched before the reader has decided they want them, so the
+poster is a thumbnail beside the copy rather than the artwork it is on the film page."""
+
+LEAD_POSTER_SIZE = "w185"
+"""The poster width for the lead film's card, shown at 92px (DC-14). `w154` is under two
+device pixels per CSS pixel at that size, so the one poster a mail leads with would be the one
+that renders soft on a phone."""
+
+JUSTWATCH_EVENT_TYPE = "now_available"
+"""The beat whose data is JustWatch's, via TMDB's watch-provider endpoint — the condition on
+that data is a visible credit wherever it is shown (DC-17)."""
+
 DigestCadence = Literal["daily", "weekly"]
 SEND_CADENCES: tuple[DigestCadence, ...] = ("daily", "weekly")
 """The cadences a slot can run. `off` is a `digest_cadence` value but not a slot: nothing is
@@ -195,7 +202,9 @@ _SLATE_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical"
 happens — the calendar's rule (`public.service._CALENDAR_BUCKET_ORDER`)."""
 
 DIGEST_BEAT_LABELS: dict[str, str] = {
-    **BEAT_LABELS,
+    "release_date": "Release date",
+    "now_available": "Now available",
+    "trailer": "New trailer",
     "announced": "Announced",
     "casting": "Casting",
     "crew_attached": "Crew attached",
@@ -210,10 +219,9 @@ DIGEST_BEAT_LABELS: dict[str, str] = {
     "first_look": "First look",
 }
 """What to call each event type in the digest. Every type the timeline shows, because the
-digest is the timeline: the decision pass queues a digest line for every visible type, not just
-D-32's three. The alert labels are spread in rather than restated so the two mails cannot name
-one beat two ways. `digest_beat_label` falls back rather than raising for the reason
-`alert_sender.beat_label` does: a new type must read plainly in one mail, not fail the batch."""
+digest is the timeline: the decision pass queues a digest line for every visible type.
+`digest_beat_label` falls back rather than raising, for the reason `_render_status` does in
+`synthesize.deterministic`: a new type must read plainly in one mail, not fail the batch."""
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _MONTHS = (
@@ -235,6 +243,54 @@ _MONTHS = (
 def digest_beat_label(event_type: str) -> str:
     """The digest's name for an event type. Never raises — see `DIGEST_BEAT_LABELS`."""
     return DIGEST_BEAT_LABELS.get(event_type, "Update")
+
+
+def poster_url(poster_path: str | None, image_base: str, *, size: str = POSTER_SIZE) -> str | None:
+    """The absolute URL for a poster path at a TMDB `size`, or None when the film has no
+    poster.
+
+    Absolute because a mail has no page to resolve a relative path against. None rather than a
+    placeholder image: the template drops the poster cell entirely, which reads better than a
+    grey box and costs the reader one fewer image fetch."""
+    if not poster_path:
+        return None
+    return f"{image_base.rstrip('/')}/{size}{poster_path}"
+
+
+def film_url(tmdb_id: int, title: str, base_url: str) -> str:
+    """The film's public page — the same `/film/{ref}` the sitemap emits, built from the same
+    `film_ref`, so a link in a mail cannot address a film differently from a link on the site
+    (and cannot land on the 301 a bare id would)."""
+    return f"{base_url.rstrip('/')}/film/{film_ref(tmdb_id, title)}"
+
+
+def settings_url(base_url: str) -> str:
+    """Where the mail's settings link points: the reader's own settings page, which is where
+    `digest_cadence` lives (D-33). The one-click unsubscribe (DC-10) sits beside it rather than
+    replacing it — a reader who wants a different cadence is not asking to leave."""
+    return f"{base_url.rstrip('/')}/settings"
+
+
+async def mark(
+    session: AsyncSession,
+    ids: Sequence[UUID],
+    *,
+    status: str,
+    sent_at: datetime | None = None,
+    error: str | None = None,
+) -> None:
+    """Record one outcome against a set of notification rows.
+
+    `sent_at` and `error` are always written, including as NULL: a row an operator re-queued
+    after a failure must not keep yesterday's error beside today's `sent_at`. (Re-queuing is
+    the only route back — see the module docstring.)"""
+    if not ids:
+        return
+    await session.execute(
+        update(Notification)
+        .where(Notification.id.in_(ids))
+        .values(status=status, sent_at=sent_at, error=error)
+    )
 
 
 def day_heading(d: date) -> str:
@@ -517,8 +573,8 @@ class DigestBatch:
     and only the rendering stops at `DIGEST_MAX_ENTRIES`."""
     unsendable: tuple[tuple[UUID, str], ...]
     """`(notification id, why)` for rows this pass can never send — the event lost its summary
-    or is no longer the published card — marked `failed` with the reason, as the alert sender
-    does, so a permanently un-sendable row cannot stall silently in a backlog read nightly."""
+    or is no longer the published card — marked `failed` with the reason, so a permanently
+    un-sendable row cannot stall silently in a backlog read nightly."""
     slate: tuple[SlateDay, ...] = ()
 
     @property
@@ -566,8 +622,11 @@ class DigestSendResult:
     slate_dates: int = 0
     """Slate entries — (film, release type) dates — across every mail sent."""
     failures: int = 0
-    """Batches lost to a crash around the send, as opposed to a provider refusing a mail. Their
-    rows stay `queued`; see `alert_sender.AlertSendResult.failures`."""
+    """Batches lost to a crash *around* the send — the session, the bookkeeping write — as
+    opposed to a provider refusing a mail, which is a `failed` row. Counted separately and
+    reported on the detail line because their rows stay `queued` and say nothing themselves:
+    without this number a pass that lost forty batches to a database having a bad minute
+    reads as `0 failed` on `/admin/runs`."""
     aborted: bool = False
     abort_error: str | None = None
 
@@ -596,8 +655,8 @@ async def load_recipients(
     holds the default, and an inner join would silently drop every one of them from the weekly
     digest — which is the digest most users get.
 
-    The gate is read as a column rather than a filter, for the reason the alert sender gives:
-    a user it refuses is owed `suppressed` rows, not silence. The `EXISTS` terms keep the pass
+    The gate is read as a column rather than a filter, because a user it refuses is owed
+    `suppressed` rows, not silence (D-39). The `EXISTS` terms keep the pass
     proportional to what is owed rather than to signups: without the slate only a queued row
     puts a user in the set; `with_slate` — the weekly, and the daily on the slate day
     (`carries_slate`) — adds anyone with a **follow**, because the slate is computed from the
@@ -648,7 +707,7 @@ async def load_entries(
     be sent.
 
     The join is the mail's beat half — the film, the event's type, confidence, provenance and
-    summary — and, as in the alert sender, the event's status and summary are re-read rather
+    summary — and the event's status and summary are re-read rather
     than trusted from the queue, because the queue outlives the run that wrote it.
     `EventSummary` is the one outer join so a missing summary comes back as a row to fail
     rather than a row that quietly disappears.
@@ -1184,8 +1243,7 @@ def recipient_unsubscribe_url(recipient: DigestRecipient, settings: Settings) ->
 
 def unsubscribe_headers(link: str) -> dict[str, str]:
     """The RFC 2369 / RFC 8058 pair that puts an Unsubscribe button in the mailbox's own UI and
-    lets it act with one POST. The alert sets neither: it is a follow's consequence, not a
-    subscription, and its footer's settings link stands (DC-10)."""
+    lets it act with one POST (DC-10)."""
     return {
         "List-Unsubscribe": f"<{link}>",
         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
@@ -1322,8 +1380,11 @@ async def send_batch(
     `load_batch` — is not sent. Then the un-sendable rows are failed by reason, and only then is
     there a mail to send, and only if there is something to put in it. The render sits inside
     the provider's `except` so a template fault fails the rows rather than stalling them, as it
-    did when `Mailer.send` rendered; the errors are the set `alert_sender.send_batch` catches,
-    for its reasons. Every row is marked `sent`, the ones past the cap included (DC-8)."""
+    did when `Mailer.send` rendered. The errors caught are the set `verification_service.send`
+    catches, for the same reason: the two `RuntimeError`s are raised when the gateway *builds*
+    its transport, on the first send of the process, and an unlikely configuration fault should
+    mark a batch `failed` with a reason rather than crash the run that would have reported it.
+    Every row is marked `sent`, the ones past the cap included (DC-8)."""
     unsendable_ids = [row_id for row_id, _ in batch.unsendable]
     item_ids = batch.item_ids
     if not batch.recipient.deliverable:
@@ -1368,9 +1429,10 @@ async def send_digests(
     The pipeline conventions the other passes state: one session per user so a failure never
     rolls back the others, `record_progress` against the run id, abort after N consecutive
     failures, and **no** `finalize_run` — the status and detail line belong to
-    `pipeline_run.run_digest_stage`. The abort guard counts provider refusals for the reason
-    `alert_sender.send_queued_alerts` gives: a provider is one shared dependency, and a run of
-    refusals is one outage that must fail the run rather than convert the backlog.
+    `pipeline_run.run_digest_stage`. The abort guard counts provider refusals because a provider
+    is one shared dependency — ten consecutive refusals are one outage (a rotated key, a
+    suspended account), not ten unrelated faults — and a run of them must fail the run, putting
+    the deadman red, rather than convert the backlog into `failed` rows under a green check.
     """
     if cadence not in SEND_CADENCES:
         raise ValueError(f"digest cadence must be one of {SEND_CADENCES}, not {cadence!r}")
@@ -1398,8 +1460,10 @@ async def send_digests(
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
         except Exception:
-            # A crash around the send leaves the rows `queued` for the next slot — with the
-            # duplicate-over-silence caveat `alert_sender.send_queued_alerts` states.
+            # A crash around the send leaves the rows `queued` for the next slot — with one
+            # honest caveat. If the crash landed between the provider accepting the message and
+            # this commit, the reader gets it again next time. Marking `sent` before sending
+            # turns that window into a mail nobody gets; a duplicate is the better failure.
             log.exception("sending the %s digest to user %s failed", cadence, recipient.user_id)
             result.failures += 1
             if await guard.failed():

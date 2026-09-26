@@ -17,9 +17,9 @@ live `ical_token` on accounts that never held a grant (D-39, D-40).
 
 The read-only half the batch passes need is not here and deliberately never has been: they
 read the row as a **column** in the query that selects their users, `COALESCE`d over an outer
-join to the D-33 and D-44 defaults — the digest pass for `digest_cadence`, the notify pass for
-`alert_stores` (D-44). That is what keeps a pass that merely *considered* a user from leaving
-them a settings row, and an accessor here would be the thing tempting it back.
+join to the D-33 default — the digest pass for `digest_cadence`. That is what keeps a pass
+that merely *considered* a user from leaving them a settings row, and an accessor here would be
+the thing tempting it back.
 
 The one row a batch pass does write is the digest's, for a user it is **about to mail**
 (`digest_sender.ensure_unsubscribe_token`): the mail's unsubscribe link needs a token, and the
@@ -56,23 +56,15 @@ async def update(
     db: AsyncSession,
     *,
     user: User,
-    digest_cadence: str | None = None,
-    alert_stores: list[str] | None = None,
+    digest_cadence: str,
 ) -> UserSettings:
-    """Write the settings the caller named — either, or both — and commit.
-
-    `None` means "not in this PATCH", not "clear it": an empty `alert_stores` list is a real
-    answer (no availability alerts at all, D-44) and is written as one. The request model is
-    what refuses a PATCH that names neither.
+    """Write the digest cadence and commit.
 
     Creates the row if this is the first thing the user ever did with it — a PATCH from a
     client that never issued the GET is a perfectly ordinary first touch, and refusing it would
     make the settings screen's order load-bearing."""
     row = await get_or_create(db, user=user)
-    if digest_cadence is not None:
-        await user_settings_repo.set_digest_cadence(db, row, digest_cadence=digest_cadence)
-    if alert_stores is not None:
-        await user_settings_repo.set_alert_stores(db, row, alert_stores=alert_stores)
+    await user_settings_repo.set_digest_cadence(db, row, digest_cadence=digest_cadence)
     await db.commit()
     return row
 

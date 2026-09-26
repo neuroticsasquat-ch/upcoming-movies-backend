@@ -52,12 +52,6 @@ async def set_digest_cadence(db: AsyncSession, row: UserSettings, *, digest_cade
     row.updated_at = datetime.now(UTC)
 
 
-async def set_alert_stores(db: AsyncSession, row: UserSettings, *, alert_stores: list[str]) -> None:
-    """Replace the alert stores on the loaded model. Caller commits."""
-    row.alert_stores = alert_stores
-    row.updated_at = datetime.now(UTC)
-
-
 async def set_ical_token(db: AsyncSession, row: UserSettings, *, ical_token: str) -> None:
     """Replace the calendar token on the loaded model. Caller commits."""
     row.ical_token = ical_token

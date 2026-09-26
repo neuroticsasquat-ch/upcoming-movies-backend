@@ -51,7 +51,7 @@ The narrower option D-21's ticket costed — buying dates only inside the `ACCEP
 was **not** taken, and the difference is deliberate: the band is by definition two candidates
 who already tie, so it would never catch the *lone* long-dead candidate who has no rival to
 tie with, and accepting that person is the more expensive failure (a wrong `person_id` on a
-story, alerting the followers of somebody who died in 1998). Paying on the accepts is what
+story, reaching the followers of somebody who died in 1998). Paying on the accepts is what
 buys that.
 
 A candidate the catalog has *never* held — the wrong namesake TMDB's search turned up — has

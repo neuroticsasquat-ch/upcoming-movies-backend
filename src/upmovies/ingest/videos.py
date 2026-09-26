@@ -315,7 +315,7 @@ async def _card_trailer(session: AsyncSession, *, film_id: UUID, trailer: Traile
         event_type=TRAILER_EVENT_TYPE,
         # A trailer is not a claim awaiting corroboration — the video is on YouTube and anyone
         # can watch it — so it is `confirmed`, the same standing a status change gets (ADR-0014
-        # as refined by NEU-1081), and it is on the push whitelist (D-32) on those terms.
+        # as refined by NEU-1081).
         confidence="confirmed",
         provenance="catalog",
         # When the trailer went up, not when the poll ran: a pass catching up after an outage

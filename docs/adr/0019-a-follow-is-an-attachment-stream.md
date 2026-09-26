@@ -35,11 +35,11 @@ and leaves films.
    question and there is no coverage.
 2. **An entity follow delivers the entity's attachment stream and nothing else** (EF-3): the
    cards in which the entity joins or leaves a film, and the film's cancellation. On the
-   timeline, in the digest, on push and email. No other beat on those films reaches the user
+   timeline, in the digest, on push and email *(push and the alert mail removed by ADR-0021)*. No other beat on those films reaches the user
    through that follow.
 3. **A title follow delivers everything** about the film on the timeline and in the digest,
    and pushes on D-32's beats, on cancellation, and on seed-grade cast and crew joining or
-   leaving (EF-7, EF-9).
+   leaving (EF-7, EF-9) *(the push clause is superseded by ADR-0021)*.
 4. **Admission is an attachment for a followed entity** (EF-4). ADR-0014's "first
    observation is a baseline, never a change" gains its one exception: a credit, company row
    or collection held by an entity somebody follows *at the moment the film is first
@@ -52,7 +52,8 @@ and leaves films.
 6. **A story mention counts once**, as the first association or the first detachment of the
    entity with the film (EF-13). Rumored associations wait for confirmation before pushing
    (EF-10); a confirmed trade story pushes immediately (EF-11); a catalog attachment that has
-   cleared quarantine is confirmed for the push decision by construction (EF-8).
+   cleared quarantine is confirmed for the push decision by construction (EF-8) *(all three
+   superseded by ADR-0021: nothing pushes)*.
 7. **The watchlist and the mute are gone** (EF-14). With nothing indirect covering films, the
    computed set is exactly "title follows", a mute is an unfollow, and the two pages ADR-0018
    kept collapse into one: the follows page, with Films as a filter (EF-15). The calendar, the

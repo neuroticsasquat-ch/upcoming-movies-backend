@@ -263,7 +263,7 @@ Numbered so tickets can cite them (`D-n`).
   Written by a decision pass over newly published events (`created_at` since last pass), never
   by ingest. Alerts only for watchlist items on push-whitelist beats; everything else queues for
   the digest. Unverified users: `suppressed`.
-- **D-32 Push whitelist:** `release_date` (assigned or moved, US theatrical or home-release —
+- **D-32 Push whitelist** *(superseded 2026-09-26 by ADR-0021: no beat interrupts; the digest is the only delivery)*: `release_date` (assigned or moved, US theatrical or home-release —
   slips flagged in copy), `now_available` (per prefs), `trailer`. Nothing `unconfirmed`.
 - **D-33 Digest:** per-user `digest_cadence ∈ daily|weekly|off`, default **weekly**; the weekly
   send *is* the "your slate" mail (timeline highlights + upcoming dates for watchlist items).
@@ -272,8 +272,8 @@ Numbered so tickets can cite them (`D-n`).
   in place. Token rotatable from settings.
 - **D-35 Trailers:** poll `/movie/{id}/videos` on the same scoped set as D-27; a new
   YouTube video of type `Trailer` cards a `trailer` event (type exists; `confirmed`), which is
-  on the push whitelist.
-- **D-36 Web Push** ships last: service worker, VAPID keys, `app.push_subscription`, same queue
+  on the push whitelist *(removed by ADR-0021)*.
+- **D-36 Web Push** *(superseded 2026-09-26 by ADR-0021: removed with the alert mail)* ships last: service worker, VAPID keys, `app.push_subscription`, same queue
   as email with `channel=push`. iOS requires home-screen install; documented, not worked around.
 
 ### Access and entitlement
@@ -305,7 +305,7 @@ lands.
   Setting `entitled_until` to a past timestamp is how a grant is ended; rows are never deleted.
 - **D-39 The gate has two kinds of checkpoint, and the batch half is the one that gets missed.**
   *Request-time:* `Depends(require_entitled())` on `/me/follows`, `/me/watchlist`,
-  `/me/timeline`, `/me/import/*`, `/me/settings`, `/me/push`. `/calendar/{token}.ics` answers
+  `/me/timeline`, `/me/import/*`, `/me/settings`, `/me/push` *(removed by ADR-0021)*. `/calendar/{token}.ics` answers
   404 rather than 403 — the token is unauthenticated and must not confirm that it is valid.
   *Batch-time:* the `notify` and `digest` passes filter unentitled users in exactly the place
   they already filter unverified ones (D-31), recording `status = suppressed`; derived-watchlist
@@ -334,7 +334,7 @@ lands.
   which is what keeps a prolific actor from becoming a push firehose), `all` = every
   seed-grade credit (D-11's cut). Company, franchise and title follows cover every matching
   film. Timeline coverage stays D-11 for every follow; coverage narrows alerts only.
-- **D-44 One store setting per user.** `app.user_settings.alert_stores` (subset of
+- **D-44 One store setting per user** *(superseded 2026-09-26 by ADR-0021: the column and the setting are removed)*. `app.user_settings.alert_stores` (subset of
   `buy|rent|stream`, default `{stream}`) replaces per-item `alert_prefs`. No per-film
   preferences exist. The always-on push whitelist beats (D-32) are unchanged.
 - **D-45 Mute, not dismissal.** Taking a film off the watchlist is a **mute**: it leaves
@@ -502,12 +502,12 @@ digest; the product lives in the user's calendar.
 
 **Shared contracts**
 - `app.notification` (D-31), `app.user_settings (digest_cadence, ical_token)`,
-  `app.push_subscription`.
+  `app.push_subscription` *(removed by ADR-0021)*.
 - Decision pass entrypoint `python -m upmovies.pipeline_run notify` (Coolify slot after the
   daily chain) + `digest {daily|weekly}`.
-- Email templates: `alert`, `digest`, `slate`.
+- Email templates: `alert` *(removed by ADR-0021)*, `digest`, `slate`.
 - `GET /calendar/{token}.ics` (404 for an unentitled owner, D-39); `GET/PATCH /me/settings`;
-  `POST/DELETE /me/push` — both `require_entitled()`.
+  `POST/DELETE /me/push` *(removed by ADR-0021)* — both `require_entitled()`.
 - The notify and digest passes suppress unentitled users beside unverified ones (D-39): one
   predicate, `status = suppressed`, asserted by a test per pass.
 - `/movie/{id}/videos` polling shares the D-27 scoped set; `trailer` event body carries the
@@ -583,7 +583,7 @@ Spec: `docs/specs/NEU-1416-follow-any-credit-depth.md`.
 
 ## 7. Prerequisites and deploy notes
 
-- `RESEND_API_KEY`, `TURNSTILE_SECRET`, `VAPID_*`, `TMDB_*` user-auth redirect URL, and
+- `RESEND_API_KEY`, `TURNSTILE_SECRET`, `VAPID_*` *(removed by ADR-0021)*, `TMDB_*` user-auth redirect URL, and
   `RESOLVE_PROVIDER`/`RESOLVE_MODEL` are new Coolify variables — set in the UI after first deploy
   (compose fallbacks are seeds, not defaults).
 - The sweep gains phases (`quarantine`, `providers`, `videos`); watch the sweep runtime and

@@ -9,7 +9,7 @@ resolution stays in each runner.
 **There is one treatment now** (EF-20). `apply_film_people` — the director and top-2 billing of
 a rated or favorited film, as person follows — is gone, with the `ratings.csv` path and the
 favorites list that fed it. A follow is binary (EF-1), so a follow inferred from a four-star
-rating in 2019 would push on every credit change of somebody the user once enjoyed; nobody
+rating in 2019 would deliver every credit change of somebody the user once enjoyed; nobody
 asked for that, and NEU-1432's migration has already deleted the rows the path wrote.
 
 **It proposes; it does not follow** (EF-22). Each matched film becomes an
@@ -68,7 +68,7 @@ CREDITS_FRESH = timedelta(days=7)
 """How recently a watchlisted film's credits must have been read for an import to reuse them
 instead of re-fetching (NEU-1356 §3).
 
-A film the user is about to be alerted on should carry a current cast, poster and release
+A film the user is about to follow should carry a current cast, poster and release
 table. **Note what this bound does not buy**: inside it the window (EF-21) is read off the
 stored row, so a film TMDB called off in the last seven days is still followed. That is the
 trade the bound was always making, and it is a small one here — the 365-day date half of the
