@@ -1,5 +1,19 @@
 # Release notes
 
+## 1.1.1 — 2026-09-26
+
+### Feed
+
+- Catalog rows ship their events again ([NEU-1467](https://linear.app/neuroticsasquatch/issue/NEU-1467)) ([#384](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/384))
+
+### Notify
+
+- The digest is the only delivery ([NEU-1470](https://linear.app/neuroticsasquatch/issue/NEU-1470)) ([#386](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/386))
+
+### Search
+
+- Read a stored, trigram-indexed search fold ([NEU-1469](https://linear.app/neuroticsasquatch/issue/NEU-1469)) ([#385](https://github.com/neuroticsasquat-ch/upcoming-movies-backend/pull/385))
+
 ## 1.1.0 — 2026-09-25
 
 ### Digest
