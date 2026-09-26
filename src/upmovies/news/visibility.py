@@ -7,8 +7,8 @@ implicit contract between them — add a type to `HIDDEN_EVENT_TYPES`, or change
 visible market, and every side follows.
 
 That last point is why `region_visible` moved here from `public.service` rather than being
-re-derived: a decision pass that queued an alert about a release date no surface will show it on
-would be mailing news the product denies (NEU-1379).
+re-derived: a decision pass that queued a digest line about a release date no surface will show
+it on would be mailing news the product denies (NEU-1379).
 """
 
 from sqlalchemy import ColumnElement, any_, or_

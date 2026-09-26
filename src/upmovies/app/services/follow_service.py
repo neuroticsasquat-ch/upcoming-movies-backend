@@ -1,7 +1,7 @@
 """Following and unfollowing (D-10). A follow is binary — there is nothing else to set (EF-1).
 
 A follow is the only thing a user keeps (M8, ADR-0018, EF-14): it feeds the timeline, the
-alerts, the calendar and the iCal feed, and nothing is derived from it — creating a follow
+digest, the calendar and the iCal feed, and nothing is derived from it — creating a follow
 writes one row, and every surface recomputes what that follow reaches on read.
 
 The rules live in a service rather than the router because the imports (D-15, D-16) create

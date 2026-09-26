@@ -31,11 +31,6 @@ dependencies = [
     "anthropic>=0.121.0",
     "python-slugify>=8.0.4",
     "tldextract>=5.3.1",
-    # Web Push payload encryption and VAPID signing (D-36, NEU-1387). Synchronous and
-    # `requests`-based, which is why `push/gateway.py` calls it in a worker thread rather than
-    # on the event loop — the encryption is the part worth having, and re-implementing RFC 8291
-    # by hand to get an async transport would be a cryptographic rewrite for an I/O preference.
-    "pywebpush>=2.0.0",
 ]
 
 [project.optional-dependencies]

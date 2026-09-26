@@ -43,7 +43,8 @@ and a way to *look* at a digest without sending one.
 - Both digest cadences' content: structure, ranking, per-entry and per-beat fields, subject,
   preheader, cap, the slate's scope and markers, and the slate day rule for the daily cadence.
 - The follow-attribution query the "Following:" line needs.
-- The HTML/text templates for `digest`, and the `alert` template restyled to match.
+- The HTML/text templates for `digest`, and the `alert` template restyled to match *(the
+  `alert` template is removed by ADR-0021)*.
 - `Envelope` headers, the one-click unsubscribe endpoint, and the unsubscribe token.
 - An admin preview and test-send facility (backend routes + a small admin page).
 - The settings page copy for the cadence control.
@@ -58,7 +59,8 @@ and a way to *look* at a digest without sending one.
 - The slate's film set (EF-14: title follows only) and window (30 days).
 - Per-user time zones. Everything stays UTC, and the mail renders dates only (DC-12).
 - Section toggles or per-beat filters in settings (DC-15). Trailer thumbnails (DC-16).
-- Push and the alert mail's *content* — the alert is restyled, not redesigned.
+- Push and the alert mail's *content* — the alert is restyled, not redesigned *(both removed
+  by ADR-0021)*.
 
 ## 3. Goals and acceptance (project level)
 
@@ -84,7 +86,8 @@ and a way to *look* at a digest without sending one.
   its *delivery* behaviour stays; its *content* model (`DigestDay → DigestFilm → DigestEvent`)
   is replaced by §5's film entries.
 - `app/services/alert_sender.py` — `film_url`, `poster_url` (`w154`), `settings_url`,
-  `BEAT_LABELS`, `mark`. Shared by the digest; extend, do not fork.
+  `BEAT_LABELS`, `mark`. Shared by the digest; extend, do not fork. *(Removed by ADR-0021: the
+  helpers moved into `digest_sender.py`.)*
 - `mail/` — `Mailer.send(to, template, context)`, `Envelope(sender, to, subject, text, html)`,
   the Jinja loader with `StrictUndefined`, `validate_templates()` at boot, `NoopTransport`
   (`MAIL_PROVIDER=noop`, the default), the Resend transport with `Idempotency-Key`.
@@ -264,7 +267,8 @@ and a way to *look* at a digest without sending one.
 - **DC-15 Copy only.** No section toggles, no per-beat filters. New help strings:
   - Daily — "Every morning there is news on your follows, plus your slate on Thursdays."
   - Weekly — "Your slate and the week's news, in one mail every Thursday. The default."
-  - Off — "No digest. Alerts for the films you follow still arrive." (unchanged)
+  - Off — "No digest. Alerts for the films you follow still arrive." (unchanged) *(reworded
+    by ADR-0021: "No mail. Everything is still on your timeline.")*
   Section intro becomes: "What happened to the films, people, studios and franchises you
   follow, one entry per film — and on Thursdays, the dates coming up for the films among
   them." The weekday is spelled from a frontend constant that mirrors `SLATE_WEEKDAY`'s
@@ -365,7 +369,7 @@ label; tickets carry `loop-ready` + `repo:<name>`.
 
 ## 8. Open items (not blocking)
 
-- **Alert mail content** was not redesigned; only restyled (DC-14) and credited (DC-17). If
+- **Alert mail content** *(moot: removed by ADR-0021)* was not redesigned; only restyled (DC-14) and credited (DC-17). If
   the alert should also carry the parenthetical and the "Following:" line, that is a
   follow-up ticket reading M1's helpers.
 - **Time zones** (DC-12): a per-user zone would need the feed to follow. Revisit if readers

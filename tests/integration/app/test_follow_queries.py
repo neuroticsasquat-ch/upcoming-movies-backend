@@ -1393,7 +1393,7 @@ async def test_the_kinds_do_not_cross(session, user, make_film, story_card):
 
 async def test_the_one_builder_is_what_the_timeline_and_the_notify_pass_reach(monkeypatch):
     """The ticket's own assertion (D-1446.6): `entity_attachment_event_ids` — and so the
-    timeline, the digest and the alert branch, which all compose it — reaches the organisation
+    timeline and the digest, which both compose it — reaches the organisation
     arms through `first_association_clause` and not through a second spelling beside it.
 
     Observed by monkeypatching the builder and reading the narrowing it is called with, because
@@ -1418,10 +1418,9 @@ async def test_the_one_builder_is_what_the_timeline_and_the_notify_pass_reach(mo
 
 
 async def test_the_notify_pass_reads_the_same_builder(monkeypatch):
-    """One step further out. The notify pass reaches the graph through `follow_reach` (the
-    alert branch, which needs the two halves apart) and `follow_scope` (the digest branch,
-    which wants them OR-ed), and both compose `entity_attachment_event_ids` — so the clause
-    they read is this one, organisation arms included."""
+    """One step further out. The notify pass reaches the graph through `follow_scope`, which
+    composes `entity_attachment_event_ids` by way of `follow_reach` — so the clause it reads is
+    this one, organisation arms included."""
     import upmovies.app.follow_queries as fq
 
     calls: list[tuple[str, str] | None] = []
@@ -1434,10 +1433,9 @@ async def test_the_notify_pass_reads_the_same_builder(monkeypatch):
     monkeypatch.setattr(fq, "first_association_clause", spy)
     user_id = uuid4()
 
-    fq.follow_reach(user_id)
     fq.follow_scope(user_id)
 
-    assert calls == [None, None]
+    assert calls == [None]
 
 
 # --- title_followed_by_any_user_clause: the poll set's rule 2 (D-1414.3, EF-14) --------------

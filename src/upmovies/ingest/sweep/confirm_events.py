@@ -2,16 +2,17 @@
 rumor (EF-10, D-1446.4).
 
 A story-formed attach card publishes the day the trades run the beat, at `rumored` — "in
-talks". It is a claim, not an observation, and EF-10 is that it earns a **push** only once the
-catalog confirms it. `news.attachment_confirm` already links the two: when TMDB observes the
+talks". It is a claim, not an observation, and it stays marked Unconfirmed — on the timeline
+and in the digest (DC-5) — until the catalog confirms it. `news.attachment_confirm` already
+links the two: when TMDB observes the
 change the story predicted, the change row is stamped `carded_by_event_id` with the card that
 published it. Nothing until this phase read that stamp back the other way.
 
 **The flip happens here rather than at stamp time**, and the difference is quarantine. The
 backward stamp runs the moment the change is observed, *before* `SWEEP_CREDIT_QUARANTINE_HOURS`
 has passed, because stamping is what takes the row out of the carding backlog and the loader
-runs first. Confirming there would publish a push for a change that may still be reverted —
-which is the entire thing quarantine exists to prevent. So the stamp is early and unconditional,
+runs first. Confirming there would vouch for a change that may still be reverted — which is
+the entire thing quarantine exists to prevent. So the stamp is early and unconditional,
 and this phase comes back for the aged rows and re-checks live state:
 
 - an `added` row confirms when the attachment is **still there**;
@@ -25,11 +26,11 @@ supersedes nothing — a wrong trade would hide a true attachment — but a deta
 has confirmed is a detachment, and the attach card it corrects is marked exactly as a catalog
 detach would have marked it (D-2).
 
-**What the flip is for.** The notify pass reads a window that reopens on `updated_at` for
-`attachment type AND provenance = 'story' AND confidence = 'confirmed'` (NEU-1438). That arm
-was armed and caught nothing, because nothing wrote the flip. This is the writer. One push
-follows, not two: `queue_decisions` keys on `(user, event, kind, channel)`, so the card that
-already alerted somebody earns nothing the second time.
+**What the flip is for.** It is a state change on the card, not a delivery trigger: the
+timeline and the digest's Unconfirmed pill read `confidence`, so the card stops saying "in
+talks" wherever it is next shown. It was once also the trigger for a push (EF-10); ADR-0021
+retired the push, and a reader who already has the card in a digest gets no second line for
+it — the notify pass windows on `created_at` alone.
 
 Contract with the pipeline conventions, matching the other phases: one session per item so a
 failure never rolls back the others, `record_progress` against the run id, abort after N

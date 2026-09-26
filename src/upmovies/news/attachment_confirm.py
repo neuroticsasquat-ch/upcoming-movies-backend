@@ -49,7 +49,7 @@ carries all three kinds and `stamp_story_confirmed_changes` stays person-only. N
 the sweep's loader runs before its carder, so a change TMDB had first is stamped on the pass
 that would otherwise have carded it, and waits no longer than it was waiting anyway.
 
-**Confirmation is the other half of the stamp** (D-1446.4, EF-10). A story-formed attach card
+**Confirmation is the other half of the stamp** (D-1446.4). A story-formed attach card
 publishes `rumored` — "in talks" — and is owed a `confirmed` upgrade when the catalog observes
 the change it predicted. `confirm_stamped_cards` is that flip, in `ingest.sweep.confirm_events`
 rather than here: it supersedes cards and runs as a sweep phase, both of which are the sweep's

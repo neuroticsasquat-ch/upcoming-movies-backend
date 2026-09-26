@@ -35,7 +35,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
 | `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
-| `notify` | daily, **after** `daily` | the M7 decision pass, then the mail and push sends (D-31, NEU-1379/1380/1387) |
+| `notify` | daily, **after** `daily` | the M7 decision pass: queues digest rows, sends nothing (D-31, NEU-1379, ADR-0021) |
 | `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user, with the slate on `SLATE_WEEKDAY` (D-33, DC-2, NEU-1381/1462) |
 | `digest weekly` | weekly on `SLATE_WEEKDAY`, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
 
@@ -64,60 +64,41 @@ carries a `videos:` clause beside the `providers:` one. Two consequences worth k
   deliberately never reset.
 
 **`notify` is a new slot and must be added in the Coolify UI**, on the same terms as
-`providers` above and with `HEALTHCHECK_NOTIFY_URL` set in the same edit. Two things are specific
-to it:
+`providers` above and with `HEALTHCHECK_NOTIFY_URL` set in the same edit. Three things are
+specific to it:
 
 - **Order matters.** It reads the events the daily chain publishes, so it has to run *after* that
   chain, not beside it. It is deliberately not a fifth stage of the chain: the chain is fail-fast,
   and a link-stage outage must not mean nobody hears about the release dates the tmdb stage did
   card.
-- **The first run mails nobody, by design.** The window is "published since the last *successful*
-  notify run", and on a cold start there is no such run — so the first one establishes the
-  watermark and queues nothing rather than alerting on the entire back catalogue. Schedule it
-  before announcing anything to users, and expect the slot's first green tick to report
-  `cold start`.
-- **This slot is the one that sends mail** (NEU-1380). It decides, then mails every `queued`
-  alert in the same run, so `MAIL_PROVIDER=resend` plus its key and `MAIL_FROM` have to be real
-  before the slot is turned on — with the default `noop` provider the pass runs green and
-  transmits nothing, which is exactly what a staging environment wants and exactly what
-  production must not be left on. `PUBLIC_BASE_URL` and `TMDB_IMAGE_BASE` are load-bearing here
-  too: a mail carries absolute links and absolute image URLs, with no page around them to
-  resolve a relative path against.
-- **Do not turn the slot on before the frontend `/settings` page is mounted (NEU-1382).** Every
-  alert mail carries a settings link as its unsubscribe control, and until that route exists the
-  link is a 404 — an opt-out a reader cannot take is worse than one that is not offered. The
-  slot's other prerequisites are code; this one is another repo's.
-- **The slot also sends the push half (NEU-1387, D-36), and that needs `VAPID_*`.** The
-  decision pass queues a second `alert` row with `channel = 'push'` for every user who has
-  registered a browser, and the push sender delivers them at the end of the same run — so
-  `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT` have to be real before the first
-  subscriber exists. Generate the pair **once** (`vapid --gen` plus `vapid
-  --applicationServerKey` in the container) and put it in the Coolify UI: changing either key
-  invalidates every subscription taken out under the old one, and the browsers will not know
-  until they stop receiving anything. Until the keys are set, `/me/push` answers 503
-  `push_unavailable` and nobody can subscribe, which is the state to be in.
-  - **Once one subscription exists, a run with the keys missing skips the push send and
-    fails** (`pipeline_run.push_configuration_problem`): the night's mail still goes out, the
-    push rows stay `queued` for the run after the fix, and the detail line reads `push: not
-    sent — …` with the deadman red. The API is deliberately *not* subject to this check, on
-    the same grounds as `validate_sweep_configuration`: it never sends a push, so refusing its
-    boot would trade the website for a setting it does not read. It refuses to take new
-    subscriptions instead (503 `push_unavailable`).
-  - **The mail and push halves are independent, in both directions.** Resend refusing mail
-    does not stop the pushes and a broken keypair does not stop the mail; either failing
-    fails the run.
+- **The first run queues nothing, by design.** The window is "published since the last
+  *successful* notify run", and on a cold start there is no such run — so the first one
+  establishes the watermark and queues nothing rather than queueing the entire back catalogue.
+  Schedule it before announcing anything to users, and expect the slot's first green tick to
+  report `cold start`.
+- **This slot sends no mail** (ADR-0021, NEU-1470). It decides and writes `queued` digest rows;
+  the digest slots below mail them. So it needs no `MAIL_*` configuration and is exempt from
+  the mail guard (`_NO_MODEL_CALL_MODES`), like the sweep and the poll. There is no alert mail
+  and no Web Push any more: the digest is the only delivery.
+
+**`digest daily` and `digest weekly` are two more slots to add in the Coolify UI** (NEU-1381),
+with `HEALTHCHECK_DIGEST_DAILY_URL` and `HEALTHCHECK_DIGEST_WEEKLY_URL` set in the same edit —
+two checks, because a healthchecks.io check has one schedule. They are the slots that send
+mail, so they carry the mail prerequisites:
+
+- **`MAIL_PROVIDER=resend` plus its key and `MAIL_FROM` have to be real** before the slots are
+  turned on — with the default `noop` provider a run goes green and transmits nothing, which is
+  exactly what a staging environment wants and exactly what production must not be left on.
+  `PUBLIC_BASE_URL` and `TMDB_IMAGE_BASE` are load-bearing too: a mail carries absolute links
+  and absolute image URLs, with no page around them to resolve a relative path against.
 - **A `failed` notification row is terminal.** The sender reads only `queued` rows and the
-  decision pass will not re-queue them, so alerts lost to a provider refusal need a hand-written
+  decision pass will not re-queue them, so rows lost to a provider refusal need a hand-written
   re-queue (`UPDATE app.notification SET status = 'queued' WHERE …`) to go out. The blast radius
   is bounded by `INGEST_CONSECUTIVE_FAILURE_THRESHOLD`: that many consecutive refusals abort the
   send and fail the run, so a dead provider costs that many users rather than the whole backlog,
   and the deadman goes red instead of green.
 
-**`digest daily` and `digest weekly` are two more slots to add in the Coolify UI** (NEU-1381),
-with `HEALTHCHECK_DIGEST_DAILY_URL` and `HEALTHCHECK_DIGEST_WEEKLY_URL` set in the same edit —
-two checks, because a healthchecks.io check has one schedule. They share the `notify` slot's
-mail prerequisites (`MAIL_PROVIDER`, `MAIL_FROM`, `PUBLIC_BASE_URL`, `TMDB_IMAGE_BASE`, the
-frontend `/settings` route) and its `failed`-is-terminal rule. Specific to them:
+And specific to their schedule and contents:
 
 - **Run them after `notify`, on the same day.** The digest mails the `digest` rows the
   decision pass queued; a slot that runs before it mails yesterday's.

@@ -406,7 +406,7 @@ async def test_a_tiebreak_accept_is_never_cached(session_factory, session):
 @respx.mock
 async def test_the_model_answering_none_unlinks_the_mention(session_factory, session):
     """The answer the prompt asks for most often, and the safe one: an unlinked mention never
-    alerts, which is the failure mode this whole milestone exists to make impossible."""
+    reaches a follower, which is the failure mode this whole milestone exists to make impossible."""
     _, _, mention = await _two_namesakes(session, 22, "tiebreak-none")
     _tiebreak_answer('{"option": null, "reason": "neither is on this film"}')
 

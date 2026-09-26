@@ -361,9 +361,9 @@ primary scalar and the per-row TMDB value), US date (origin-country dates qualif
 **Slip**:
 A release-date move whose new date is strictly later than the previous one, judged per
 `(region, bucket)` clause — never per card, since one observation can slip US wide while
-moving US digital earlier. It is the standout beat of the **push whitelist** and it is flagged
+moving US digital earlier. It is the standout beat of a **digest** and it is flagged
 in the deterministic body itself ("release date slipped from … to …" against "moved from … to
-…" for an earlier date), because the alert mail renders that body verbatim and a second
+…" for an earlier date), because the mail renders that body verbatim and a second
 derivation in the mail would drift from the card (NEU-1403). A first date for a market is
 never a slip: it has nothing to be later than.
 _Avoid_: delay (fine in prose, not the term), pushed back, postponed, moved (that is the
@@ -720,8 +720,8 @@ withdrawn, cancelled.
 
 **Tier-A source**:
 A **trade feed** — Deadline, Variety, THR, TheWrap, Screen Daily, studio PR. The only sources
-whose story may cause an alert on its own, and then only when the story's person **resolution**
-cleared threshold. A TMDB-only change never alerts: it may publish to the feed after quarantine,
+whose story may card a beat on its own, and then only when the story's person **resolution**
+cleared threshold. A TMDB-only change never cards one: it may publish to the feed after quarantine,
 as unconfirmed, but it is evidence, not confirmation. A Tier-A story matching a credit in
 quarantine releases it immediately and merges into the news event rather than surfacing later
 as a stale duplicate.
@@ -743,7 +743,7 @@ is only the tiebreak).
 
 **Unlinked** (of a person mention):
 A resolution outcome: no candidate cleared threshold. An unlinked mention may still appear in
-the general feed, but it **never** produces a personalized alert — the failure mode is pinging
+the general feed, but it **never** reaches a follower's timeline or digest — the failure mode is pinging
 someone about the wrong Chris Evans. Distinct from **not in TMDB**: a first-time director or
 unknown actor legitimately has no person record, and the resolver may say so rather than being
 forced into a wrong match.
@@ -780,7 +780,8 @@ story joining an existing event.
 (EF-13). The card publishes immediately and is a **rumor** until the catalog agrees: the change
 row TMDB later writes is stamped `carded_by_event_id` with the card that broke the beat, so it
 never cards twice, and once that row clears quarantine the card is upgraded in place to
-`confirmed` — which is what a push waits for (EF-10). A story-formed *detachment* that confirms
+`confirmed` (EF-10; since ADR-0021 nothing waits on that flip to deliver — the digest carried
+the rumor already). A story-formed *detachment* that confirms
 supersedes the attachment card it contradicts, exactly as a catalog detachment would (D-2); as
 a rumor it supersedes nothing.
 _Avoid_: link (that is story→film), credit (only one of the three kinds), join (the SQL word).
@@ -823,7 +824,8 @@ How long a film stays *interesting* after release: from announcement until
 entity follow covers — nothing does, an entity follow covers events, not films (EF-3). It
 still bounds the provider poll, an entity page's "recently released" list and which films an
 **import** may propose (EF-21). A **title** follow ignores it entirely — the user asked for
-that film, in any state, at any age.
+that film, in any state, at any age. The name outlived the alerts it once bounded (ADR-0021):
+it is kept because the poll, the entity page and the import all key on it.
 _Avoid_: in play (the working set's term, ending on release day), coverage window (retired
 with coverage), active, upcoming.
 
@@ -855,28 +857,17 @@ drops whatever a feed stops publishing.
 _Avoid_: watchlist calendar (the old name), my calendar (the nav item is "Calendar"), follow
 calendar, personal feed (that is the timeline), subscription calendar (that is the iCal feed).
 
-**Push whitelist**:
-The closed set of beats allowed to interrupt a user, decided per *why the card reaches them*
-(EF-7). Through a **title** follow: a date assigned or moved (a **slip** especially), a
-home-release date, **now available** per the user's one store setting, a trailer, a
-cancellation, and a seed-grade cast or crew attachment or detachment. Through a person, studio
-or franchise follow: that entity's attachment or detachment, and the cancellation of a film
-it is attached to. Everything else waits for the **digest**. Nothing unconfirmed pushes: a
-story-sourced `rumored` card ("in talks") waits for its confirmation, while a catalog
-attachment that has cleared **quarantine** is confirmed for this purpose by construction
-(EF-8, EF-10).
-_Avoid_: alert types, notification settings (those are the user's prefs *over* the list),
-coverage (retired).
-
 **Digest**:
-The batched delivery of a user's timeline — daily or weekly, their choice, never both — for
-everything the push whitelist does not cover. It carries every card the timeline carries,
-`rumored` ones included (EF-7, EF-10; NEU-1437): confirmation is what a *push* waits for, not a
-digest line. A digest reads by **film entry**, not by day: one entry per film, its beats in the
-order they were published, entries ranked by their most significant beat — the day grouping is
-the feed's, not the mail's. On the **slate day** either cadence carries the **slate** in front.
+The one delivery of a user's timeline by mail — daily or weekly, their choice, never both, and
+nothing arrives outside it (ADR-0021). It carries every card the timeline carries, `rumored`
+ones included (EF-7; NEU-1437), each as a dated line under its film. A digest reads by
+**film entry**, not by day: one entry per film, its beats in the order they were published,
+entries ranked by their most significant beat — the day grouping is the feed's, not the mail's.
+On the **slate day** either cadence carries the **slate** in front. How soon a reader hears
+about a beat is the cadence they chose; there is no faster channel.
 _Avoid_: newsletter, summary email, notification, "the weekly slate mail" (the slate is a
-section, not a cadence).
+section, not a cadence), alert (retired: the per-beat interrupt mail D-32 whitelisted, removed
+by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody).
 
 **Slate**:
 The upcoming US dates — theatrical, digital and physical — for the films a user follows by
@@ -913,7 +904,7 @@ _Avoid_: streaming date (streaming is observed, not announced), VOD date.
 **Now-available event**:
 The catalog-sourced event raised the first time a title is observed on any provider for a
 monetization type (`flatrate` / `rent` / `buy`), from the watch-providers poll. Insert-only: the
-first observation cards and alerts; the title then goes quiet for that type forever, so a move
+first observation cards it; the title then goes quiet for that type forever, so a move
 between services produces nothing. That silence is deliberate — service-to-service churn is a
 non-goal, and the upstream data cannot give advance warning of a title *leaving*.
 _Avoid_: availability change, provider change, streaming update.

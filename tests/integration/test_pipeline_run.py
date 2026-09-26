@@ -8,11 +8,8 @@ from sqlalchemy import select
 
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
 from upmovies import pipeline_run
-from upmovies.app.models import PushSubscription
-from upmovies.app.services.alert_sender import AlertSendResult
 from upmovies.app.services.digest_sender import DigestSendResult
 from upmovies.app.services.notify_service import NotifyResult
-from upmovies.app.services.push_sender import PushSendResult
 from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
@@ -932,8 +929,8 @@ def test_main_runs_the_sweep_on_an_unroutable_llm_configuration(monkeypatch):
 
 def test_main_validates_the_mail_configuration_before_running_anything(monkeypatch):
     """A scheduled task is its own process and holds the env it was created with, so the app
-    having booted proves nothing about this one. No mode sends mail today; the guard is here
-    for M7's notify and digest passes, which are `pipeline_run` modes."""
+    having booted proves nothing about this one. The guard is here for M7's digest passes,
+    which are `pipeline_run` modes."""
     settings = get_settings().model_copy(
         update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
     )
@@ -1189,35 +1186,10 @@ def _stub_notify(monkeypatch, result: NotifyResult | None = None) -> dict:
     return captured
 
 
-def _stub_alert_send(monkeypatch, result: AlertSendResult | None = None) -> dict:
-    """Replace the send pass. Same division as `_stub_notify`: this file owns the run row."""
-    captured: dict = {}
-
-    async def fake_send(**kwargs):
-        captured.update(kwargs)
-        return result if result is not None else AlertSendResult()
-
-    monkeypatch.setattr("upmovies.pipeline_run.send_queued_alerts", fake_send)
-    return captured
-
-
-def _stub_push_send(monkeypatch, result: PushSendResult | None = None) -> dict:
-    """Replace the push half of the send (NEU-1387). Same division again: what the
-    notifications say is `tests/integration/app/test_push_sender.py`'s subject."""
-    captured: dict = {}
-
-    async def fake_push(**kwargs):
-        captured.update(kwargs)
-        return result if result is not None else PushSendResult()
-
-    monkeypatch.setattr("upmovies.pipeline_run.send_queued_pushes", fake_push)
-    return captured
-
-
 async def test_notify_stage_finalizes_the_run_with_its_detail_line(session, monkeypatch):
     _stub_notify(
         monkeypatch,
-        NotifyResult(users_considered=3, events_considered=7, alerts_queued=2, digests_queued=4),
+        NotifyResult(users_considered=3, events_considered=7, digests_queued=4),
     )
     run_id = await create_run(session, kind="notify")
     await session.commit()
@@ -1227,11 +1199,7 @@ async def test_notify_stage_finalizes_the_run_with_its_detail_line(session, monk
     row = await _run_row(session, run_id)
     assert row.status == "succeeded"
     assert row.error is None
-    assert row.detail == (
-        "notify: 7 events, 3 users, 2 alerts, 0 push, 4 digests, 0 suppressed, 0 failed; "
-        "alerts: 0 mails to 0 users, 0 sent, 0 failed, 0 suppressed, 0 lost; "
-        "push: 0 notifications to 0 users, 0 delivered, 0 failed, 0 suppressed, 0 pruned, 0 lost"
-    )
+    assert row.detail == "notify: 7 events, 3 users, 4 digests, 0 suppressed, 0 failed"
 
 
 async def test_notify_stage_fails_the_run_when_the_pass_aborted(session, monkeypatch):
@@ -1246,214 +1214,6 @@ async def test_notify_stage_fails_the_run_when_the_pass_aborted(session, monkeyp
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error == "aborted after 10"
-
-
-async def test_notify_stage_sends_the_alerts_the_decision_pass_queued(session, monkeypatch):
-    """The two phases under one run row (NEU-1380). What is asserted here is the *sequencing* —
-    that the send pass runs, with the run id and a gateway — not what it mails, which is
-    `tests/integration/app/test_alert_sender.py`'s subject."""
-    _stub_notify(monkeypatch, NotifyResult(alerts_queued=2))
-    captured = _stub_alert_send(
-        monkeypatch, AlertSendResult(users_considered=1, mails_sent=1, sent=2)
-    )
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    assert captured["run_id"] == run_id
-    assert captured["mailer"] is not None
-    row = await _run_row(session, run_id)
-    assert row.status == "succeeded"
-    assert row.detail is not None
-    assert "alerts: 1 mails to 1 users, 2 sent, 0 failed, 0 suppressed, 0 lost" in row.detail
-
-
-async def test_notify_stage_sends_nothing_when_the_decision_pass_aborted(session, monkeypatch):
-    """Consecutive failures deciding is not a state to start mailing out of; the rows already
-    written stay `queued` for the next run."""
-    _stub_notify(monkeypatch, NotifyResult(aborted=True, abort_error="aborted after 10"))
-
-    async def must_not_run(**kwargs):
-        raise AssertionError("an aborted decision pass must not reach the sender")
-
-    monkeypatch.setattr("upmovies.pipeline_run.send_queued_alerts", must_not_run)
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    row = await _run_row(session, run_id)
-    assert row.status == "failed"
-
-
-async def test_notify_stage_fails_the_run_when_the_send_pass_aborted(session, monkeypatch):
-    """A mail provider that is down fails the run — `send_queued_alerts` aborts on consecutive
-    provider refusals — so the watermark does not advance past a window whose alerts never went
-    out, and the deadman says so. That the refusals really do reach the guard is
-    `tests/integration/app/test_alert_sender.py`'s subject; this asserts the run row."""
-    _stub_notify(monkeypatch)
-    _stub_alert_send(
-        monkeypatch, AlertSendResult(aborted=True, abort_error="alert send aborted after 10")
-    )
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    row = await _run_row(session, run_id)
-    assert row.status == "failed"
-    assert row.error == "alert send aborted after 10"
-
-
-async def test_notify_stage_pushes_the_alerts_the_decision_pass_queued(session, monkeypatch):
-    """The third phase under the same run row (NEU-1387, D-36). Sequencing again, not content:
-    the push sender runs with the run id and a pusher, and its clause lands on the detail
-    line."""
-    _stub_notify(monkeypatch, NotifyResult(alerts_queued=2, push_alerts_queued=2))
-    _stub_alert_send(monkeypatch)
-    captured = _stub_push_send(
-        monkeypatch, PushSendResult(users_considered=1, notifications_sent=2, pushes_delivered=3)
-    )
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    assert captured["run_id"] == run_id
-    assert captured["pusher"] is not None
-    row = await _run_row(session, run_id)
-    assert row.status == "succeeded"
-    assert row.detail is not None
-    assert row.detail.endswith(
-        "push: 2 notifications to 1 users, 3 delivered, 0 failed, 0 suppressed, 0 pruned, 0 lost"
-    )
-
-
-async def test_notify_stage_pushes_nothing_when_the_decision_pass_aborted(session, monkeypatch):
-    _stub_notify(monkeypatch, NotifyResult(aborted=True, abort_error="aborted after 10"))
-
-    async def must_not_run(**kwargs):
-        raise AssertionError("an aborted decision pass must not reach the push sender")
-
-    monkeypatch.setattr("upmovies.pipeline_run.send_queued_pushes", must_not_run)
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    assert (await _run_row(session, run_id)).status == "failed"
-
-
-async def test_a_broken_mail_provider_still_lets_the_pushes_go_out(session, monkeypatch):
-    """The two senders read disjoint halves of the queue and fail for unrelated reasons, so a
-    night where Resend is refusing mail should still put the alerts on people's phones. The run
-    is `failed` either way, because an aborted send is an operator's problem."""
-    _stub_notify(monkeypatch)
-    _stub_alert_send(
-        monkeypatch, AlertSendResult(aborted=True, abort_error="alert send aborted after 10")
-    )
-    captured = _stub_push_send(monkeypatch, PushSendResult(notifications_sent=1))
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    assert captured["run_id"] == run_id
-    assert (await _run_row(session, run_id)).status == "failed"
-
-
-async def test_notify_stage_fails_the_run_when_the_push_send_aborted(session, monkeypatch):
-    """A push service that is refusing everything fails the run on the same terms the mail
-    provider does, so the watermark does not advance past a window nobody was notified about."""
-    _stub_notify(monkeypatch)
-    _stub_alert_send(monkeypatch)
-    _stub_push_send(
-        monkeypatch, PushSendResult(aborted=True, abort_error="push send aborted after 10")
-    )
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(run_id, get_settings())
-
-    row = await _run_row(session, run_id)
-    assert row.status == "failed"
-    assert row.error == "push send aborted after 10"
-
-
-# --- the VAPID configuration check (D-36) ---
-
-
-async def _register_browser(session, make_user, email: str = "pushy@example.com") -> None:
-    user = await make_user(email=email)
-    session.add(
-        PushSubscription(user_id=user.id, endpoint="https://push.test/ep", p256dh="k", auth="a")
-    )
-    await session.commit()
-
-
-async def test_an_unusable_vapid_config_skips_the_push_send_and_fails_the_run(
-    session, monkeypatch, make_user
-):
-    """A subscription exists and `VAPID_*` does not. The phase is skipped and the run fails, so
-    the deadman goes red within the day rather than the slot running green while every
-    subscriber hears nothing."""
-    await _register_browser(session, make_user)
-    _stub_notify(monkeypatch)
-    _stub_alert_send(monkeypatch)
-
-    async def must_not_run(**kwargs):
-        raise AssertionError("the push send must not run on an unusable VAPID config")
-
-    monkeypatch.setattr("upmovies.pipeline_run.send_queued_pushes", must_not_run)
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(
-        run_id, get_settings().model_copy(update={"vapid_private_key": ""})
-    )
-
-    row = await _run_row(session, run_id)
-    assert row.status == "failed"
-    assert row.error and "VAPID_PRIVATE_KEY" in row.error
-    assert row.detail and "push: not sent" in row.detail
-
-
-async def test_an_unusable_vapid_config_still_sends_the_mail(session, monkeypatch, make_user):
-    """The independence rule in the other direction (NEU-1387): a VAPID typo must not cost the
-    night's mail, or the decisions, which are committed before the push phase is even
-    considered."""
-    await _register_browser(session, make_user)
-    _stub_notify(monkeypatch, NotifyResult(alerts_queued=2, push_alerts_queued=2))
-    captured = _stub_alert_send(monkeypatch, AlertSendResult(mails_sent=1, sent=2))
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(
-        run_id, get_settings().model_copy(update={"vapid_subject": "not-a-url"})
-    )
-
-    assert captured["run_id"] == run_id
-    row = await _run_row(session, run_id)
-    assert row.detail and "2 sent" in row.detail
-
-
-async def test_the_push_send_runs_without_vapid_when_nobody_has_subscribed(session, monkeypatch):
-    """Before the first browser registers the keys are genuinely optional, and failing the slot
-    that also sends the night's mail over a capability nobody uses yet would be the shared
-    failure mode the slots are kept apart to avoid."""
-    _stub_notify(monkeypatch)
-    _stub_alert_send(monkeypatch)
-    captured = _stub_push_send(monkeypatch)
-    run_id = await create_run(session, kind="notify")
-    await session.commit()
-
-    await pipeline_run.run_notify_stage(
-        run_id, get_settings().model_copy(update={"vapid_private_key": ""})
-    )
-
-    assert captured["run_id"] == run_id
-    assert (await _run_row(session, run_id)).status == "succeeded"
 
 
 async def test_notify_stage_marks_run_failed_on_crash(session, monkeypatch):
@@ -1517,22 +1277,17 @@ def test_main_runs_the_notify_arm(monkeypatch):
     assert pipeline_run.main(["notify"]) == 1
 
 
-def test_main_refuses_the_notify_arm_without_mail_configuration(monkeypatch):
-    """Deliberately *not* exempt, unlike the sweep and the poll. The queue this pass fills is
-    mail, and discovering a missing `RESEND_API_KEY` in the sender is discovering it one slot
-    too late."""
+def test_main_runs_the_notify_arm_without_mail_configuration(monkeypatch):
+    """Exempt now, beside the sweep and the poll: the pass only decides and queues (ADR-0021),
+    so failing it on a mail setting it never reads would put it back inside the shared failure
+    modes it is kept out of. The digest slots, which do mail, keep the guard."""
     settings = get_settings().model_copy(
         update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
     )
     monkeypatch.setattr("upmovies.pipeline_run.get_settings", lambda: settings)
+    monkeypatch.setattr("upmovies.pipeline_run.run_notify", _stub_daily(ok=True))
 
-    def must_not_run(*args, **kwargs):
-        raise AssertionError("the notify arm must not start on an unusable mail configuration")
-
-    monkeypatch.setattr("upmovies.pipeline_run.run_notify", must_not_run)
-
-    with pytest.raises(MailConfigurationError):
-        pipeline_run.main(["notify"])
+    assert pipeline_run.main(["notify"]) == 0
 
 
 # --- digest: M7's digest sender, one slot per cadence (NEU-1381, D-33) ---
@@ -1710,7 +1465,7 @@ def test_main_refuses_a_digest_without_a_real_cadence(monkeypatch, capsys, argv)
 
 
 def test_main_refuses_the_digest_arm_without_mail_configuration(monkeypatch):
-    """Not exempt, for the notify slot's reason: this slot exists to send mail."""
+    """Not exempt, unlike the notify slot since ADR-0021: this slot is the one that sends mail."""
     settings = get_settings().model_copy(
         update={**DEFAULT_ROUTING, "mail_provider": "resend", "resend_api_key": None}
     )

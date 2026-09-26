@@ -49,7 +49,7 @@ async def test_first_read_creates_the_row_with_the_documented_defaults(entitled_
     assert r.status_code == 200
     body = r.json()
     assert body["digest_cadence"] == "weekly"  # D-33
-    assert body["alert_stores"] == ["stream"]  # D-44
+    assert "alert_stores" not in body  # ADR-0021: no per-beat preference
     assert body["ical_token"]
 
     rows = (await session.execute(select(UserSettings))).scalars().all()
@@ -100,55 +100,24 @@ async def test_an_unknown_cadence_is_refused(entitled_client):
     assert r.status_code == 422
 
 
-# --- the alert stores (D-44) ---------------------------------------------------------------
-
-
-async def test_patch_sets_the_stores_without_restating_the_cadence(entitled_client):
-    """Both fields are optional so the settings screen can write the one control the user
-    touched; changing the stores must not make them resend a cadence they did not change."""
-    await entitled_client.patch("/me/settings", json={"digest_cadence": "daily"})
-
-    r = await entitled_client.patch("/me/settings", json={"alert_stores": ["buy", "rent"]})
-    assert r.status_code == 200
-    assert r.json() == {
-        **r.json(),
-        "digest_cadence": "daily",
-        "alert_stores": ["buy", "rent"],
-    }
-    assert (await entitled_client.get("/me/settings")).json()["alert_stores"] == ["buy", "rent"]
-
-
-async def test_the_stores_are_stored_in_canonical_order_without_duplicates(entitled_client):
-    r = await entitled_client.patch(
-        "/me/settings", json={"alert_stores": ["stream", "buy", "stream"]}
-    )
-    assert r.status_code == 200
-    assert r.json()["alert_stores"] == ["buy", "stream"]
-
-
-async def test_an_empty_store_list_is_a_real_answer(entitled_client):
-    """`[]` means no availability alerts at all — a different thing from the default, and the
-    way a user turns them off without unfollowing anything."""
-    r = await entitled_client.patch("/me/settings", json={"alert_stores": []})
-    assert r.status_code == 200
-    assert r.json()["alert_stores"] == []
-    assert (await entitled_client.get("/me/settings")).json()["alert_stores"] == []
-
-
-async def test_both_fields_can_be_written_at_once(entitled_client):
-    r = await entitled_client.patch(
-        "/me/settings", json={"digest_cadence": "off", "alert_stores": ["rent"]}
-    )
-    assert r.status_code == 200
-    assert (r.json()["digest_cadence"], r.json()["alert_stores"]) == ("off", ["rent"])
-
-
-@pytest.mark.parametrize("payload", [{}, {"alert_stores": ["cinema"]}, {"alert_stores": "stream"}])
-async def test_a_malformed_patch_is_422(entitled_client, payload):
-    """An empty body included: a PATCH that names neither field is a client bug, and pydantic
-    saying so is cheaper than a route that quietly does nothing."""
+@pytest.mark.parametrize("payload", [{}, {"alert_stores": ["stream"]}])
+async def test_a_patch_without_a_cadence_is_422(entitled_client, payload):
+    """The cadence is the one setting there is, so it is required. An empty body is a client
+    bug, and a body carrying only the retired `alert_stores` (ADR-0021) is a body without a
+    cadence — refused the same way, with no special case for the old key."""
     r = await entitled_client.patch("/me/settings", json=payload)
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/me/push/vapid-public-key"), ("POST", "/me/push"), ("DELETE", "/me/push")],
+)
+async def test_the_push_routes_are_gone(entitled_client, method, path):
+    """ADR-0021 retired Web Push, so its routes are absent from the router table — a 404, not
+    the 503 `push_unavailable` an unconfigured deployment used to answer."""
+    r = await entitled_client.request(method, path)
+    assert r.status_code == 404
 
 
 async def test_patching_the_cadence_leaves_the_token_alone(entitled_client):

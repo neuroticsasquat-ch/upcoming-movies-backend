@@ -197,16 +197,16 @@ class Settings(BaseSettings):
     # this still moves both, so it is still one number to reason about — but the second half of
     # it is a catalog cut, not a delivery rule.
     #
-    # The ceiling is 365 and is **no longer a placeholder** (D-1417.2, NEU-1417). The default
-    # alert store is `stream`, so the window has to reach the streaming debut rather than the
-    # digital one: studio pay-1 windows run from about 45 days to about 240 days past
+    # The ceiling is 365 and is **no longer a placeholder** (D-1417.2, NEU-1417). The streaming
+    # debut is the availability beat most readers wait for, so the window has to reach it rather
+    # than the digital one: studio pay-1 windows run from about 45 days to about 240 days past
     # theatrical, and a foreign title reaches US streaming later still. A year covers them with
     # margin, and it costs the poll nothing measurable — admission skips `Released` films
-    # (`ingest.tmdb.filters.classify_skip`), so the catalog holds no back catalogue for the
-    # ceiling to let in, and the rule-1 set measured the same size at 365 as at 200 (97 vs 98
-    # films, 2026-09-20). The floor stays 14 and stays a placeholder in the §4.5 sense —
-    # nothing has measured it, and erring narrow there costs requests during the theatrical
-    # window where a home release is not yet plausible.
+    # (`ingest.tmdb.filters.classify_skip`), so the catalog holds no back catalogue for the ceiling
+    # to let in, and the rule-1 set measured the same size at 365 as at 200 (97 vs 98 films,
+    # 2026-09-20). The floor stays 14 and stays a placeholder in the §4.5 sense — nothing has
+    # measured it, and erring narrow there costs requests during the theatrical window where a home
+    # release is not yet plausible.
     provider_poll_min_age_days: int = Field(default=14, ge=0, alias="PROVIDER_POLL_MIN_AGE_DAYS")
     provider_poll_max_age_days: int = Field(default=365, ge=1, alias="PROVIDER_POLL_MAX_AGE_DAYS")
 
@@ -641,24 +641,6 @@ class Settings(BaseSettings):
     # window costs a legitimate user one more click and denies a mistyped address a standing
     # key. Mail copy as well as policy, so `email_change_service` passes it into the context.
     email_change_token_ttl_hours: int = Field(default=1, ge=1, alias="EMAIL_CHANGE_TOKEN_TTL_HOURS")
-
-    # Web Push (D-36). The VAPID keypair identifies *this deployment* to every push service —
-    # the public key is handed to the browser at subscribe time and baked into the endpoint it
-    # gets back, and the private key signs each send. Changing either invalidates every
-    # subscription taken out under the old pair, so these are generated once per deployment and
-    # kept: rotating them is a re-subscribe for every user, not a config edit.
-    #
-    # All three optional and empty by default, like the mail credential above and for the same
-    # reason — a deploy that is not doing push must still boot. What makes optional safe here
-    # is `push.validate_push_configuration`, which refuses the boot only once a
-    # `push_subscription` row exists: by then a browser is waiting for notifications that an
-    # unconfigured process cannot send, and silence is the failure nobody reports.
-    vapid_public_key: str = Field(default="", alias="VAPID_PUBLIC_KEY")
-    vapid_private_key: str = Field(default="", alias="VAPID_PRIVATE_KEY")
-    # Who to contact about this deployment's pushes, as a `mailto:` or `https:` URL. Part of
-    # the VAPID claim rather than decoration: a push service with a misbehaving sender uses it
-    # before it starts rejecting, and some of them refuse a claim without it outright.
-    vapid_subject: str = Field(default="", alias="VAPID_SUBJECT")
 
     @property
     def cors_allowed_origins(self) -> list[str]:

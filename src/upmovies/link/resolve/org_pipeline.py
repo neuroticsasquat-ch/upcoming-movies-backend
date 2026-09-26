@@ -27,7 +27,7 @@ TMDB blip, and a tiebreak *answer* that arrived and could not be used leaves the
 route standing rather than buying another call every run.
 
 **This pass cards nothing and stamps nothing.** A resolved mention is a fact about a story;
-turning it into an alert a studio's followers receive is EF-13's first-association builder
+turning it into a card a studio's followers receive is EF-13's first-association builder
 (`app.follow_queries.first_association_clause`), and turning it into the stamp that stops a
 catalog change raising a second card is the sweep's backward pass
 (`news.attachment_confirm`). Both read these rows; neither runs here.
@@ -290,8 +290,8 @@ async def _supersede_for_confirmed_detachment(session: AsyncSession, row: StoryE
     D-6 promotion — a confirmed story attaching to a card that published `rumored` — would be a
     third route to the same supersession. There is no hook for it here because **nothing
     performs that promotion yet**: `link.cluster`'s attach paths bump `updated_at` and never
-    touch `Event.confidence` (`app.services.notify_service.deliverable_events` says so at
-    length). Whoever lands it owns adding the call; until then these two routes are exhaustive.
+    touch `Event.confidence`. Whoever lands it owns adding the call; until then these two
+    routes are exhaustive.
     """
     if row.entity_id is None or row.path not in RESOLVED_MENTION_PATHS:
         return 0
