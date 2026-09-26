@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from upmovies.catalog.fold import fold_computed
 from upmovies.db import Base
 
 
@@ -31,6 +32,18 @@ class Film(Base):
     __tablename__ = "film"
     __table_args__ = (
         Index("ix_catalog_film_slug", "slug", unique=True),
+        Index(
+            "ix_catalog_film_title_fold_trgm",
+            "title_fold",
+            postgresql_using="gin",
+            postgresql_ops={"title_fold": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_catalog_film_original_title_fold_trgm",
+            "original_title_fold",
+            postgresql_using="gin",
+            postgresql_ops={"original_title_fold": "gin_trgm_ops"},
+        ),
         {"schema": "catalog"},
     )
 
@@ -42,6 +55,12 @@ class Film(Base):
     imdb_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     original_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_fold: Mapped[str | None] = mapped_column(Text, fold_computed("title"), nullable=True)
+    """The **search fold** of `title` (ADR-0020), written by Postgres; never set it."""
+    original_title_fold: Mapped[str | None] = mapped_column(
+        Text, fold_computed("original_title"), nullable=True
+    )
+    """The **search fold** of `original_title` (ADR-0020), written by Postgres; never set it."""
     release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
     overview: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -165,10 +184,20 @@ class Genre(Base):
 
 class ProductionCompany(Base):
     __tablename__ = "production_company"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index(
+            "ix_catalog_production_company_name_fold_trgm",
+            "name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"name_fold": "gin_trgm_ops"},
+        ),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    name_fold: Mapped[str | None] = mapped_column(Text, fold_computed("name"), nullable=True)
+    """The **search fold** of `name` (ADR-0020), written by Postgres; never set it."""
     logo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     origin_country: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -192,10 +221,20 @@ class SpokenLanguage(Base):
 
 class Collection(Base):
     __tablename__ = "collection"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index(
+            "ix_catalog_collection_name_fold_trgm",
+            "name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"name_fold": "gin_trgm_ops"},
+        ),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    name_fold: Mapped[str | None] = mapped_column(Text, fold_computed("name"), nullable=True)
+    """The **search fold** of `name` (ADR-0020), written by Postgres; never set it."""
     poster_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     backdrop_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -286,6 +325,12 @@ class FilmAlternativeTitle(Base):
     __tablename__ = "film_alternative_title"
     __table_args__ = (
         Index("ix_catalog_film_alt_title_film", "film_id"),
+        Index(
+            "ix_catalog_film_alternative_title_title_fold_trgm",
+            "title_fold",
+            postgresql_using="gin",
+            postgresql_ops={"title_fold": "gin_trgm_ops"},
+        ),
         {"schema": "catalog"},
     )
 
@@ -297,6 +342,8 @@ class FilmAlternativeTitle(Base):
     )
     iso_3166_1: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_fold: Mapped[str | None] = mapped_column(Text, fold_computed("title"), nullable=True)
+    """The **search fold** of `title` (ADR-0020), written by Postgres; never set it."""
     title_type: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -304,11 +351,31 @@ class Person(Base):
     """TMDB person reference (natural PK = TMDB's stable person id)."""
 
     __tablename__ = "person"
-    __table_args__ = {"schema": "catalog"}
+    __table_args__ = (
+        Index(
+            "ix_catalog_person_name_fold_trgm",
+            "name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"name_fold": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_catalog_person_original_name_fold_trgm",
+            "original_name_fold",
+            postgresql_using="gin",
+            postgresql_ops={"original_name_fold": "gin_trgm_ops"},
+        ),
+        {"schema": "catalog"},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     original_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name_fold: Mapped[str | None] = mapped_column(Text, fold_computed("name"), nullable=True)
+    """The **search fold** of `name` (ADR-0020), written by Postgres; never set it."""
+    original_name_fold: Mapped[str | None] = mapped_column(
+        Text, fold_computed("original_name"), nullable=True
+    )
+    """The **search fold** of `original_name` (ADR-0020), written by Postgres; never set it."""
     profile_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     known_for_department: Mapped[str | None] = mapped_column(Text, nullable=True)
     gender: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -797,7 +864,10 @@ class FilmVideo(Base):
 # table records only semantic changes (release_date, status, title, runtime, ...).
 # `credits_observed_at` is excluded for the other reason: it is ingest bookkeeping
 # rather than a property of the film, and a history row for it would make a film
-# look active to `dormant_film_clause` on the day it was admitted.
+# look active to `dormant_film_clause` on the day it was admitted. The search folds
+# (NEU-1469) are excluded because the trigger runs BEFORE UPDATE, when Postgres has not
+# yet computed stored generated columns: NEW reads NULL for them, so every update would
+# log a fold change — and a real one is already recorded as its source column's.
 FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "popularity",
     "vote_average",
@@ -810,6 +880,8 @@ FILM_FIELD_CHANGE_DENYLIST: tuple[str, ...] = (
     "release_dates_observed_at",
     "videos_observed_at",
     "tmdb_missing_at",
+    "title_fold",
+    "original_title_fold",
 )
 
 

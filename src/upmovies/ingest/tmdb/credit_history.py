@@ -10,14 +10,14 @@ in hand, and writes it to `catalog.film_credit_change` for NEU-1083 to card.
 seed grade — director, Writer/Screenplay, top-5 billed — or when its person is somebody a user
 follows. Seed grade is a property of the credit; recorded grade is that, or a property of who
 is watching. The catalog already holds every credit of every film it has, so a new follow
-reaches existing minor credits through the timeline and the alert query the moment it is made;
+reaches existing minor credits through the timeline and the digest the moment it is made;
 what this adds is the *future* changes, and only for people somebody asked for.
 
 **Both sides of the diff are judged by the same followed set at the same moment.** The set is
 loaded once per `upsert_film` and passed to both `load_recorded_credits` and
 `recorded_credits_from_details`. Judging the stored side by yesterday's rule and the incoming
 side by today's would turn a credit that was present all along into a phantom `added` row the
-first time somebody followed its person — a fabricated beat, carded and pushed, about nothing
+first time somebody followed its person — a fabricated beat, carded and delivered, about nothing
 that happened.
 
 **First observation is a baseline, never a change** (ADR-0014, spec §5.3). This is the

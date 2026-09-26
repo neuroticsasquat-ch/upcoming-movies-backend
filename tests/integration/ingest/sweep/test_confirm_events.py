@@ -1,10 +1,10 @@
-"""The sweep's confirmation phase (EF-10, D-1446.4): a story card the catalog has caught up
-with stops being a rumor.
+"""The sweep's confirmation phase (D-1446.4): a story card the catalog has caught up with stops
+being a rumor.
 
-The flip is the writer NEU-1438's push window has been waiting on — the `updated_at` arm it
-spelled and armed against nothing — so these tests assert both halves of it: `confidence` moves
-to `confirmed`, and `updated_at` moves to the pass's own `now`. A card whose change TMDB has
-since reverted must do neither, and must still be a candidate on the pass after that.
+The flip is an in-place upgrade of the card, so these tests assert both halves of it:
+`confidence` moves to `confirmed`, and `updated_at` moves to the pass's own `now`. A card whose
+change TMDB has since reverted must do neither, and must still be a candidate on the pass after
+that.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -188,7 +188,7 @@ async def test_an_aged_attachment_the_catalog_still_holds_confirms_its_card(
 @pytest.mark.parametrize(("kind", "entity_id"), ORG_ARMS)
 async def test_a_row_still_inside_the_window_is_not_a_candidate(session, kind, entity_id):
     """The stamp runs the moment the change is observed, before the window — confirming there
-    would publish a push for something quarantine exists to let TMDB take back."""
+    would vouch for something quarantine exists to let TMDB take back."""
     film = await add_film(session, 1)
     await _entity(session, kind, entity_id)
     card = await _card(session, film, event_type=_attach_type(kind))
@@ -253,8 +253,8 @@ async def test_an_already_confirmed_card_is_never_selected(session, kind, entity
 
 @pytest.mark.parametrize(("kind", "entity_id"), ORG_ARMS)
 async def test_a_catalog_card_is_never_selected(session, kind, entity_id):
-    """A catalog attach card published only after quarantine and is confirmed by construction
-    for the push decision (EF-8). This phase is for the other provenance."""
+    """A catalog attach card published only after quarantine, which is its confirmation. This
+    phase is for the other provenance."""
     film = await add_film(session, 1)
     await _entity(session, kind, entity_id)
     card = await _card(

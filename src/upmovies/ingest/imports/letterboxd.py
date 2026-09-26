@@ -5,7 +5,7 @@ before a job row exists and answered to the uploader as a 422 they can act on, r
 surfacing minutes later as a failed job they have to poll to discover (spec §1).
 
 **Only `watchlist.csv` is read** (EF-20). The ratings path is deleted: a follow is binary now
-(EF-1), so a four-star rating in 2019 would buy a follow that pushes on every credit change of
+(EF-1), so a four-star rating in 2019 would buy a follow that delivers every credit change of
 somebody the user once enjoyed, which is not what rating a film says. The export also carries
 diary entries, reviews, lists, likes and comments; those were always out of scope, and a member
 of the zip we do not name is not an error — a Letterboxd export that grew a file is not a

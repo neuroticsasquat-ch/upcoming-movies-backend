@@ -49,6 +49,7 @@ def _ensure_schemas(connection: Connection) -> None:
         connection.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
     connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS citext")
     connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+    connection.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS pg_trgm")
 
 
 def do_run_migrations(connection: Connection) -> None:

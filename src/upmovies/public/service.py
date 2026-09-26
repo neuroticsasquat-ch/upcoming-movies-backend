@@ -1,4 +1,3 @@
-import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -18,6 +17,7 @@ from sqlalchemy import (
     or_,
     select,
     tuple_,
+    union_all,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,7 @@ from upmovies.app.follow_queries import (
     title_follow_film_ids,
 )
 from upmovies.app.models import User, UserSettings
+from upmovies.catalog.fold import DIACRITIC_FROM, DIACRITIC_TO
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
     MONETIZATION_TYPES,
@@ -239,49 +240,13 @@ def _film_index_items(films: list[Film]) -> list[FilmIndexItem]:
     return items
 
 
-def _build_diacritic_maps() -> tuple[str, str]:
-    """Build translate() from/to strings mapping each lowercase Latin letter that carries a
-    diacritic to its base ASCII letter (é→e, ō→o, ñ→n, …). Covers the precomposed singles in
-    Latin-1 Supplement + Latin Extended-A/B; multi-char folds (æ, ß) are left untouched."""
-    frm: list[str] = []
-    to: list[str] = []
-    seen: set[str] = set()
-    for cp in range(0x00C0, 0x0250):
-        ch = chr(cp)
-        if not ch.isalpha():
-            continue
-        base = unicodedata.normalize("NFD", ch)[0]
-        if not (base.isascii() and base.isalpha()) or base == ch:
-            continue
-        low = ch.lower()
-        if len(low) != 1 or low in seen:
-            continue
-        seen.add(low)
-        frm.append(low)
-        to.append(base.lower())
-    return "".join(frm), "".join(to)
-
-
-_DIACRITIC_FROM, _DIACRITIC_TO = _build_diacritic_maps()
-_PY_DIACRITIC = str.maketrans(_DIACRITIC_FROM, _DIACRITIC_TO)
-
-
-def _normalized_col(col: Any) -> ColumnElement[str]:
-    """SQL-side fold for fuzzy title matching: lowercase, strip diacritics, then drop every
-    non-alphanumeric character — so 'Spider-Man' / 'Shōgun' compare as 'spiderman' / 'shogun'.
-    `[:alnum:]` is Unicode-aware in the UTF-8 DB, so non-Latin titles (e.g. '기생충') survive."""
-    return func.regexp_replace(
-        func.translate(func.lower(col), _DIACRITIC_FROM, _DIACRITIC_TO),
-        "[^[:alnum:]]",
-        "",
-        "g",
-    )
+_PY_DIACRITIC = str.maketrans(DIACRITIC_FROM, DIACRITIC_TO)
 
 
 def _normalize_query(q: str) -> str:
-    """Python-side counterpart of _normalized_col, applied to the user's query. Mirrors the
-    SQL fold exactly (same diacritic map + keep-alphanumerics) so both sides agree across
-    scripts."""
+    """Python-side counterpart of the stored **search fold** (`catalog.fold.fold_sql`), applied
+    to the user's query. Mirrors the SQL fold exactly (same diacritic map + keep-alphanumerics)
+    so the query and the `<col>_fold` columns agree across scripts."""
     folded = q.lower().translate(_PY_DIACRITIC)
     return "".join(c for c in folded if c.isalnum())
 
@@ -290,28 +255,26 @@ def _primary_title_match(nq: str) -> ColumnElement[bool]:
     """Match the normalized query against the film's primary title or original_title."""
     pattern = f"%{nq}%"
     return or_(
-        _normalized_col(Film.title).like(pattern),
-        _normalized_col(Film.original_title).like(pattern),
+        Film.title_fold.like(pattern),
+        Film.original_title_fold.like(pattern),
     )
 
 
 def _title_match(nq: str) -> ColumnElement[bool]:
     """Boolean clause matching the normalized query against title/original_title/alt-titles.
 
-    Alt-title matching uses a correlated EXISTS subquery so each film appears at most once
-    (no DISTINCT needed). The fold (lowercase + de-accent + strip non-alphanumerics) is
-    applied to both the query and each column so 'spiderman' / 'spider man' find 'Spider-Man'.
-    FUTURE: the fold is non-sargable; a functional pg_trgm index on _normalized_col would let
-    this skip the sequential scan if search gets hot.
+    Every column is matched through its stored **search fold** (lowercase + de-accent + strip
+    non-alphanumerics, ADR-0020), which the query shares, so 'spiderman' / 'spider man' find
+    'Spider-Man'; each fold carries a pg_trgm GIN index, so a three-character query is an index
+    probe rather than a scan. The match is one uncorrelated IN over the union of matching ids:
+    each film still appears at most once, and every fold's index is probed once. An OR of the
+    primary match with an alt-title subquery, correlated or not, leaves `film` on a seq scan.
     """
-    pattern = f"%{nq}%"
-    alt_title_match = exists(
-        select(1).where(
-            FilmAlternativeTitle.film_id == Film.id,
-            _normalized_col(FilmAlternativeTitle.title).like(pattern),
-        )
+    matching_ids = union_all(
+        select(Film.id).where(_primary_title_match(nq)),
+        select(FilmAlternativeTitle.film_id).where(FilmAlternativeTitle.title_fold.like(f"%{nq}%")),
     )
-    return or_(_primary_title_match(nq), alt_title_match)
+    return Film.id.in_(matching_ids)
 
 
 async def get_film_search(
@@ -364,10 +327,10 @@ def _searchable_query(q: str) -> str | None:
     return _normalize_query(term)
 
 
-def _name_match(nq: str, *cols: Any) -> ColumnElement[bool]:
-    """Fold each column the way `_normalize_query` folded the query and substring-match."""
+def _name_match(nq: str, *fold_cols: Any) -> ColumnElement[bool]:
+    """Substring-match the folded query against each stored `<col>_fold` column."""
     pattern = f"%{nq}%"
-    return or_(*(_normalized_col(col).like(pattern) for col in cols))
+    return or_(*(col.like(pattern) for col in fold_cols))
 
 
 # A person TMDB has since deleted (`tmdb_missing_at` set) is not a follow target: nothing
@@ -398,7 +361,7 @@ async def get_person_search(
     nq = _searchable_query(q)
     if nq is None:
         return PersonSearchResponse(items=[], total=0, limit=limit, offset=offset)
-    where = (_LIVE_PERSON, _name_match(nq, Person.name, Person.original_name))
+    where = (_LIVE_PERSON, _name_match(nq, Person.name_fold, Person.original_name_fold))
     total = await session.scalar(select(func.count()).select_from(Person).where(*where))
     people = (
         (
@@ -585,8 +548,8 @@ def _ordered_credits(credits: list[PersonCreditOut]) -> list[PersonCreditOut]:
     and it did not say this: `lead` folded the director in with the top-3 billed, so a
     director who was also 2nd-billed rendered "<character> · Director" while one who was
     4th-billed rendered "Director · <character>". That was an accident of a cut built to
-    decide what alerts, and EF-1 deleted the cut. Ranking the director outright is what the
-    page was always trying to say — it is the credit a film is attributed to — so the
+    decide what a follow delivered, and EF-1 deleted the cut. Ranking the director outright is
+    what the page was always trying to say — it is the credit a film is attributed to — so the
     inconsistency goes with the tier rather than being preserved.
 
     This is presentation only. It borrows `seed_grade`'s primitives because they already name
@@ -816,14 +779,14 @@ async def get_company_search(
     nq = _searchable_query(q)
     if nq is None:
         return CompanySearchResponse(items=[], total=0, limit=limit, offset=offset)
-    where = _name_match(nq, ProductionCompany.name)
+    where = _name_match(nq, ProductionCompany.name_fold)
     total = await session.scalar(select(func.count()).select_from(ProductionCompany).where(where))
     companies = (
         (
             await session.execute(
                 select(ProductionCompany)
                 .where(where)
-                .order_by(_normalized_col(ProductionCompany.name).asc(), ProductionCompany.id.asc())
+                .order_by(ProductionCompany.name_fold.asc(), ProductionCompany.id.asc())
                 .limit(limit)
                 .offset(offset)
             )
@@ -847,14 +810,14 @@ async def get_collection_search(
     nq = _searchable_query(q)
     if nq is None:
         return CollectionSearchResponse(items=[], total=0, limit=limit, offset=offset)
-    where = _name_match(nq, Collection.name)
+    where = _name_match(nq, Collection.name_fold)
     total = await session.scalar(select(func.count()).select_from(Collection).where(where))
     collections = (
         (
             await session.execute(
                 select(Collection)
                 .where(where)
-                .order_by(_normalized_col(Collection.name).asc(), Collection.id.asc())
+                .order_by(Collection.name_fold.asc(), Collection.id.asc())
                 .limit(limit)
                 .offset(offset)
             )
@@ -1553,9 +1516,7 @@ async def get_feed_grouped(
     countries_by_film = await _production_countries_for_films(session, feed_film_ids)
     directors_by_film = await _directors_for_films(session, feed_film_ids)
 
-    def _make_item(
-        row: Any, events: list[EventOut], news_backed: bool, ship_events: bool = True
-    ) -> FeedDayItem:
+    def _make_item(row: Any, events: list[EventOut], news_backed: bool) -> FeedDayItem:
         return FeedDayItem(
             film_ref=film_ref(row.tmdb_id, row.title),
             film_title=row.title,
@@ -1569,7 +1530,7 @@ async def get_feed_grouped(
             event_types=ordered_event_types([e.event_type for e in events]),
             event_count=len(events),
             news_backed=news_backed,
-            events=events if ship_events else [],
+            events=events,
         )
 
     items: list[FeedDayItem] = []
@@ -1580,7 +1541,7 @@ async def get_feed_grouped(
         if news_events:
             items.append(_make_item(row, news_events, True))
         if catalog_events:
-            items.append(_make_item(row, catalog_events, False, ship_events=False))
+            items.append(_make_item(row, catalog_events, False))
 
     # Within a day, the bigger beat leads (D-7): a casting burst outranks a status change,
     # and a trailer outranks both. Sorted here rather than in SQL because the ranking is

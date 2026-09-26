@@ -180,8 +180,7 @@ def add_event(session: AsyncSession):
         `server_default` and no `onupdate`, so a freshly written card has the two equal and only
         an in-place edit (`link.cluster`'s attach paths) moves them apart. Leaving it at `now()`
         while back-dating `created_at` would make every historical fixture card look like one
-        edited moments ago — which the notify pass's alert window reads as a confidence upgrade
-        (EF-10, `notify_service.deliverable_events`). Pass it explicitly to model that edit."""
+        edited moments ago. Pass it explicitly to model that edit."""
         event = Event(
             film_id=film.id,
             event_type=event_type,

@@ -29,10 +29,9 @@ a second run kind for it would open a second row saying the same thing about the
 `run_notify` is the fifth slot: M7's decision pass (D-31), scheduled after the daily chain
 rather than inside it. It reads the events that chain published and writes `app.notification`;
 running it as a fifth stage would tie it to the chain's fail-fast rule, so a link-stage outage
-would mean nobody hears about the release dates the tmdb stage did card. Deciding and sending
-are separate passes under one run row: the decision pass writes `queued` rows, then the alert
-sender mails the `email` half (NEU-1380) and the push sender notifies the `push` half
-(NEU-1387, D-36). It carries its own deadman.
+would mean nobody hears about the release dates the tmdb stage did card. It only decides: it
+writes `queued` digest rows and sends nothing, because the digest is the only delivery
+(ADR-0021) and the digest slots do the sending. It carries its own deadman.
 
 `run_digest` is the sixth and seventh: M7's digest sender (D-33), on one slot per cadence.
 It reads the `queued` digest rows the notify pass wrote for every user on that cadence and
@@ -55,8 +54,6 @@ from uuid import UUID
 import httpx
 from sqlalchemy import select
 
-from upmovies.app.repos import push_subscription_repo
-from upmovies.app.services.alert_sender import alert_send_detail, send_queued_alerts
 from upmovies.app.services.digest_sender import (
     DIGEST_RUN_KIND,
     SEND_CADENCES,
@@ -65,7 +62,6 @@ from upmovies.app.services.digest_sender import (
     send_digests,
 )
 from upmovies.app.services.notify_service import notify_detail, run_notify_pass
-from upmovies.app.services.push_sender import push_send_detail, send_queued_pushes
 from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun
@@ -103,11 +99,6 @@ from upmovies.llm import Gateway, validate_stage_configuration
 from upmovies.logging_config import configure_logging
 from upmovies.mail import MailGateway, validate_mail_configuration
 from upmovies.news.fetcher import run_feeds_ingest
-from upmovies.push import (
-    PushConfigurationError,
-    WebPushGateway,
-    validate_push_configuration,
-)
 from upmovies.synthesize.pipeline import run_synthesize_ingest
 
 log = logging.getLogger(__name__)
@@ -378,7 +369,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
         )
         # Last of all, and after every carder, because it reads what they stamped (D-1446.4).
         # A story card the catalog has now caught up with stops being a rumor here — which is
-        # the flip NEU-1438's push window waits on, and the only writer of it.
+        # a state change the timeline and the digest's Unconfirmed pill reflect.
         confirmed = await run_confirmation_events(
             session_factory=_session_factory,
             run_id=run_id,
@@ -519,59 +510,14 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
         await _finalize_failed(run_id, str(e))
 
 
-async def push_configuration_problem(settings: Settings) -> str | None:
-    """Why this process cannot send a push, or None when it can — or when nothing has asked.
-
-    **Conditional on a subscription existing** (D-36): before the first browser registers the
-    keys are genuinely optional, so a deployment doing no push at all reports no problem and
-    the push phase runs over an empty backlog. After it, an unsigned send is a notification
-    nobody gets and nobody reports, which is the fault this exists to surface.
-
-    **A string rather than a raise**, because the caller's response is to skip one phase, not
-    to abandon the run: the decisions and the night's mail must not be lost to a VAPID typo
-    (`run_notify_stage`). The run still ends `failed` with this as its error, so the slot's
-    deadman goes red within the day — the same alerting path `validate_sweep_configuration`
-    uses, and for the same reason it is not in the API's lifespan: the API never sends a push,
-    so refusing its boot would trade the website for a setting it does not read.
-    """
-    async with SessionLocal() as s:
-        if not await push_subscription_repo.any_exist(s):
-            return None
-    try:
-        validate_push_configuration(settings)
-    except PushConfigurationError as exc:
-        return str(exc)
-    return None
-
-
 async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
     """The M7 notify slot against one run row (D-31): decide what every user is owed about the
-    events published since the last successful notify run, then mail the alerts.
+    events published since the last successful notify run, and queue it for the digest.
 
-    Three phases, sequenced here rather than folded into one pass. The decision pass writes
-    `queued` rows and commits them; the alert sender (NEU-1380) reads the `email` half of that
-    queue — *all* of it, including anything a previous run left behind — and marks each row
-    `sent`, `failed` or `suppressed`; the push sender (NEU-1387) does the same for the `push`
-    half. Splitting them is what makes a provider outage cost a delay rather than a
-    half-delivered mailing: the decisions are already durable, so the next run sends exactly
-    what did not go out.
-
-    **An aborted decision pass sends nothing.** Aborting means a run of consecutive failures
-    deciding, which is not a state to start mailing out of; the rows already written stay
-    `queued` for the next run, which is the same path a failed send takes.
-
-    **The two senders are independent, in both directions.** They read disjoint halves of the
-    queue and fail for unrelated reasons — Resend refusing mail says nothing about whether
-    Apple's push service will take a message — so a night where mail is broken should still put
-    the alerts on people's phones, and a night where push is broken should still deliver the
-    mail. That includes the VAPID configuration: a missing key skips the push *phase* and fails
-    the run, rather than cancelling the decisions and the mail with it
-    (`push_configuration_problem`).
-    The run is `failed` if any phase aborted or was skipped, because each is an operator's
-    problem, and the rows nothing sent stay `queued` for the run after the fix.
-
-    Like the provider poll, the same division of labour: no phase finalizes, because the
-    status, the error and the detail line belong to whoever opened the run (§6.2).
+    The decision pass alone. It writes `queued` digest rows and commits them; the digest slots
+    (`run_digest_stage`) mail them on each reader's cadence (ADR-0021). The pass does not
+    finalize, because the status, the error and the detail line belong to whoever opened the
+    run (§6.2).
     """
     try:
         # No `today`, no status set and no age bound: since M3 the pass reads the timeline's own
@@ -582,65 +528,15 @@ async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
             run_id=run_id,
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
-        detail = notify_detail(decided)
-        sent = None
-        pushed = None
-        push_problem: str | None = None
-        if not decided.aborted:
-            # One gateway for the whole pass, closed when it ends: the transport is built on
-            # the first send and pooled across every batch, so a night's alerts cost one
-            # connection rather than one per user.
-            async with MailGateway(settings) as mailer:
-                sent = await send_queued_alerts(
-                    session_factory=_session_factory,
-                    run_id=run_id,
-                    mailer=mailer,
-                    settings=settings,
-                    failure_threshold=settings.ingest_consecutive_failure_threshold,
-                )
-            detail = f"{detail}; {alert_send_detail(sent)}"
-            # The push half (D-36), unless this deployment cannot sign a send — in which case
-            # the phase is skipped and said so on the detail line, and the run fails at the
-            # end. Skipping rather than raising is what keeps a VAPID typo from costing the
-            # mail that has already gone out and the decisions already committed.
-            push_problem = await push_configuration_problem(settings)
-            if push_problem is None:
-                # Stateless, so the gateway is built here rather than held open: `pywebpush`
-                # makes its own connection per send and there is no pool to share.
-                pushed = await send_queued_pushes(
-                    session_factory=_session_factory,
-                    run_id=run_id,
-                    pusher=WebPushGateway(settings),
-                    settings=settings,
-                    failure_threshold=settings.ingest_consecutive_failure_threshold,
-                )
-                detail = f"{detail}; {push_send_detail(pushed)}"
-            else:
-                log.error("notify: skipping the push send — %s", push_problem)
-                detail = f"{detail}; push: not sent — {push_problem}"
-        aborted = (
-            decided.aborted
-            or (sent is not None and sent.aborted)
-            or (pushed is not None and pushed.aborted)
-            or push_problem is not None
-        )
         # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
         # has to be covered by the same net as the work it reports on.
         async with SessionLocal() as s:
             await finalize_run(
                 s,
                 run_id,
-                status="failed" if aborted else "succeeded",
-                # The first abort reason there is, in the order the phases ran: whichever of
-                # the three stopped, the run row has to name it — a `failed` run whose `error`
-                # is NULL tells an operator only that something did.
-                error=(
-                    decided.abort_error
-                    or (sent.abort_error if sent else None)
-                    or (pushed.abort_error if pushed else None)
-                    or push_problem
-                ),
-                detail=detail,
+                status="failed" if decided.aborted else "succeeded",
+                error=decided.abort_error,
+                detail=notify_detail(decided),
             )
             await s.commit()
     except Exception as e:
@@ -715,8 +611,9 @@ async def _ping(base_url: str | None, suffix: str = "") -> None:
 # The modes that reach no model and send no mail, and so are exempted from the LLM-routing and
 # mail guards in `main` — see the comment there. Membership is a property of what a mode *does*,
 # not of its schedule: `providers` joins the sweep because the D-27 poll is TMDB reads and
-# catalog writes end to end (NEU-1374). M7's `notify` and `digest` do not join it: both mail.
-_NO_MODEL_CALL_MODES = frozenset({"sweep", "providers"})
+# catalog writes end to end (NEU-1374), and `notify` because it only decides and queues since
+# ADR-0021 retired the alert mail. The `digest` slots do not join it: they are what mails.
+_NO_MODEL_CALL_MODES = frozenset({"sweep", "providers", "notify"})
 
 # Daily chain: TMDB refresh → per-film feed pass → LLM link/cluster → summarize. `feeds`
 # forces per_film=true; the light per_film=false pass runs hourly (run_hourly).
@@ -888,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     # The mail configuration rides on the same guard, and inherits that exemption for the
     # same reason: those modes are deliberately outside the daily chain's shared failure modes
     # (§6.1), and failing one on a setting it never reads would put it back inside them.
-    # `notify` *does* send mail (NEU-1380) and is deliberately not exempt: discovering a
+    # The `digest` slots *do* send mail and are deliberately not exempt: discovering a
     # missing RESEND_API_KEY at boot is a task that does not start, where discovering it
     # partway through is a backlog half-converted into `failed` rows.
     if mode not in _NO_MODEL_CALL_MODES:

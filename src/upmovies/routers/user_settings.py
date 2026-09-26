@@ -1,5 +1,5 @@
-"""`/me/settings`: the digest cadence, the availability-alert stores and the calendar token
-(D-33, D-34, D-44), subscriber-only (D-39).
+"""`/me/settings`: the digest cadence and the calendar token (D-33, D-34), subscriber-only
+(D-39).
 
 Same shape as `/me/follows` next door — `require_entitled()` applied once at the router so a
 route added later cannot forget it, cookie session plus CSRF on the writes. The gate is what
@@ -36,14 +36,9 @@ async def update_settings(
     user: User = Depends(entitled),
     db: AsyncSession = Depends(get_session),
 ) -> UserSettingsOut:
-    """Write the fields this PATCH names, creating the row on a first touch. A body naming
-    neither field is a `422` from the request model (D-44)."""
-    row = await settings_service.update(
-        db,
-        user=user,
-        digest_cadence=payload.digest_cadence,
-        alert_stores=None if payload.alert_stores is None else list(payload.alert_stores),
-    )
+    """Write the digest cadence, creating the row on a first touch. A body without one is a
+    `422` from the request model."""
+    row = await settings_service.update(db, user=user, digest_cadence=payload.digest_cadence)
     return UserSettingsOut.model_validate(row)
 
 

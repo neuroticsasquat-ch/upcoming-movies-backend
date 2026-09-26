@@ -12,7 +12,7 @@ from sqlalchemy import (  # noqa: I001
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET, JSONB
+from sqlalchemy.dialects.postgresql import CITEXT, INET, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -172,8 +172,6 @@ class EmailToken(Base):
 
 FOLLOW_ENTITY_TYPES = ("person", "company", "franchise", "title")
 FOLLOW_SOURCES = ("manual", "letterboxd_import", "tmdb_import", "derived")
-ALERT_STORES = ("buy", "rent", "stream")
-DEFAULT_ALERT_STORES = ("stream",)  # D-44; mirrored by the column's server default
 
 
 def _in_list(values: tuple[str, ...]) -> str:
@@ -183,7 +181,7 @@ def _in_list(values: tuple[str, ...]) -> str:
 class Follow(Base):
     """A user's standing interest in a person, company, franchise or title (D-10, D-42).
 
-    **The only thing a user keeps** (M8, ADR-0018, EF-14). It feeds the timeline, the alerts,
+    **The only thing a user keeps** (M8, ADR-0018, EF-14). It feeds the timeline, the digest,
     the calendar and the iCal feed — every one of them a query over this table
     (`app.follow_queries`) — so a row here is both "show me this on my timeline" and "tell me
     when something happens to it", and deleting it is the only way to stop either.
@@ -193,9 +191,6 @@ class Follow(Base):
     `coverage` tier D-43 spent here is dropped — a tier control was one more thing to get
     wrong on the way to the thing the user actually asked for, and the narrow default was
     silently deciding what they would never hear about.
-    The store preference is *not* here: it is one setting per user
-    (`UserSettings.alert_stores`, D-44), because a user who wants to hear about streaming
-    wants that for everything they follow.
 
     `entity_id` is text because the four entity types do not share an id space: people,
     companies and franchises are TMDB integer ids (`catalog.person`, `catalog.production_company`
@@ -433,23 +428,15 @@ class TmdbAuthRequest(Base):
 
 DIGEST_CADENCES = ("daily", "weekly", "off")
 DEFAULT_DIGEST_CADENCE = "weekly"  # D-33; mirrored by the column's server default
-NOTIFICATION_KINDS = ("alert", "digest")
-NOTIFICATION_CHANNELS = ("email", "push")
+NOTIFICATION_KINDS = ("digest",)  # ADR-0021: the digest is the only delivery
+NOTIFICATION_CHANNELS = ("email",)
 NOTIFICATION_STATUSES = ("queued", "sent", "failed", "suppressed")
 
 
 class UserSettings(Base):
-    """One user's delivery preferences: how often they want the digest, which stores an
-    availability alert is worth, and the token their calendar subscribes with (D-33, D-34,
-    D-44).
-
-    `alert_stores` is the subset of `{buy, rent, stream}` availability beats this user is
-    alerted on, product-wide (D-44). One setting rather than the per-item `alert_prefs` M8
-    replaced: the question "do I care about rentals?" is a property of the person, not of each
-    film they follow, and a per-film answer had nowhere to live once the follow became the
-    only row. An empty array is allowed and means no store alerts at all — the D-32
-    whitelist beats (a date assigned or moved, a new trailer) are always on and are deliberately
-    not representable here, so they cannot be switched off.
+    """One user's delivery preferences: how often they want the digest, and the token their
+    calendar subscribes with (D-33, D-34). There is no per-beat preference: the digest carries
+    everything the timeline carries, and a reader who wants less news unfollows (ADR-0021).
 
     Keyed by the user with no surrogate id, like the follow graph next door: there is one row per
     user by definition and nothing ever names it another way.
@@ -475,10 +462,6 @@ class UserSettings(Base):
             f"digest_cadence IN ({_in_list(DIGEST_CADENCES)})",
             name="ck_user_settings_digest_cadence",
         ),
-        CheckConstraint(
-            f"alert_stores <@ ARRAY[{_in_list(ALERT_STORES)}]::text[]",
-            name="ck_user_settings_alert_stores",
-        ),
         {"schema": "app"},
     )
 
@@ -487,9 +470,6 @@ class UserSettings(Base):
     )
     digest_cadence: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text(f"'{DEFAULT_DIGEST_CADENCE}'")
-    )
-    alert_stores: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{stream}'::text[]")
     )
     ical_token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     unsubscribe_token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
@@ -519,9 +499,9 @@ class Notification(Base):
     it selects newly published events by `created_at` since the last pass, so a pass that is
     run twice, or whose window overlaps after a crash, reconsiders events it has already
     decided. The key turns the second decision into a conflict to ignore instead of a second
-    mail. `kind` and `channel` are in it because the same event legitimately produces an alert
-    *and* a digest line, by email *and* (from D-36) by push — those are different deliveries of
-    the same news, not duplicates of one.
+    mail. `kind` and `channel` are in it from when an event could also earn an alert and a
+    push; ADR-0021 retired both, so each has one value now and the key is one row per
+    `(user, event)` in practice. The columns stay rather than churn the row's shape.
 
     `event_id` cascades: an event deleted from the ledger takes its delivery decisions with it.
     That is history the ledger no longer has a subject for, and notifications are not the claim
@@ -571,55 +551,3 @@ class Notification(Base):
     # by a person looking at a row that did not go out, and the provider's own message is the
     # most useful thing to put in front of them.
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class PushSubscription(Base):
-    """One browser's Web Push registration, as the Push API handed it to the client (D-36).
-
-    Keyed on `endpoint` rather than on the user: the endpoint *is* the push service's name for
-    one browser profile on one device, so it is the natural identity here — and a user with a
-    laptop, a phone and a work profile holds three rows, all of which are owed the same alert.
-    The unique constraint is what makes re-subscribing idempotent: a browser that re-registers
-    after a service-worker update sends the same endpoint back and updates its keys in place
-    instead of accumulating a row per visit.
-
-    That uniqueness is deliberately global rather than per user. One browser profile is one
-    endpoint, and a shared machine where a second account subscribes must *move* the row rather
-    than duplicate it — two rows would push both users' alerts to whoever is currently signed
-    in, which is the one failure mode a notification cannot be taken back from
-    (`push_subscription_repo.upsert`).
-
-    `p256dh` and `auth` are the subscription's public key and auth secret: the payload is
-    encrypted to them, so a row without both is undeliverable and neither is nullable. They are
-    the client's own material, not a credential of ours — what signs the request is `VAPID_*`.
-
-    **Revocation does not delete rows** (D-40). A lapsed subscriber's browser stays registered
-    and simply receives nothing, because the decision pass suppresses them upstream — so a
-    renewed grant resumes on the subscription already installed. The only thing that deletes a
-    row is the push service itself answering 404/410 (`push_sender`), which is the one
-    authoritative statement that the endpoint is gone, or the user unsubscribing.
-    """
-
-    __tablename__ = "push_subscription"
-    __table_args__ = (
-        # The sender's read: every subscription belonging to the user it is about to push to.
-        Index("ix_push_subscription_user_id", "user_id"),
-        {"schema": "app"},
-    )
-
-    id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
-    )
-    user_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("app.user.id", ondelete="CASCADE"), nullable=False
-    )
-    endpoint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
-    auth: Mapped[str] = mapped_column(Text, nullable=False)
-    # What the browser called itself when it subscribed, for the settings screen's "Chrome on
-    # Pixel 8" line and for an operator reading a row that keeps failing. Nullable because it
-    # is the request's `User-Agent` header, which a client is free not to send.
-    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
-    )

@@ -8,7 +8,7 @@ TMDB**.
 
 **The favorites list is not read** (EF-20). It used to buy person follows for each favorite's
 director and top-2 billing, and a follow is binary now (EF-1) — so a film somebody favorited
-years ago would push every credit change of its cast at them. The approve flow's scopes are
+years ago would put every credit change of its cast in front of them. The approve flow's scopes are
 unchanged: TMDB grants one session per approval and does not scope it per list, so there is
 nothing narrower to ask the user for.
 

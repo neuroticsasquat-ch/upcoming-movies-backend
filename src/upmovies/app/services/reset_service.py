@@ -98,7 +98,7 @@ async def request(db: AsyncSession, *, email: str, mailer: Mailer, settings: Set
     """Mail a reset link to `email`, if there is an account behind it.
 
     Silent about the unknown address because the route above answers 202 either way. Note that
-    an *unverified* address still gets a reset mail, unlike the digests and alerts D-31
+    an *unverified* address still gets a reset mail, unlike the digests D-31
     suppresses: the mail is not a notification the account opted into, it is the mechanism by
     which whoever holds the inbox proves they hold it, and refusing to send it would strand
     anyone who signed up, never clicked verify, and then forgot their password."""

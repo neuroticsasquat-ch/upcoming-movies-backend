@@ -30,8 +30,7 @@ attachment and a credit detachment are not.
   `credit_removed` does per person.
 - **Confidence is `rumored`** for the reason a credit attachment is (ADR-0002 makes TMDB the
   record for its own *scalar* fields, and a company row is not one), published only after the
-  quarantine window — which is what EF-8 means by a catalog attach card being confirmed by
-  construction for the push decision.
+  quarantine window — surviving which is a catalog attach card's confirmation (EF-8).
 
 **No prior-attach-card gate.** `credit_removed` cards only for people who already have a
 visible attachment card (NEU-1200's gate 1). That rule is deliberately *not* mirrored, and the

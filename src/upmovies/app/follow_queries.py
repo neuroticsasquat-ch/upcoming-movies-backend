@@ -17,7 +17,7 @@ whole shape of the module now, and it replaced D-11's "every film any follow rea
   is attached to. Nothing else about those films. Following a director is an interest in what
   they sign on to, not a subscription to the trailer of everything they have ever made.
 
-The timeline, the digest and the alert branch all spell the same clause over the two:
+The timeline and the digest both spell the same clause over the two:
 
     Event.film_id IN title_follow_film_ids(u)  OR  Event.id IN entity_attachment_event_ids(u)
 
@@ -382,12 +382,11 @@ def follow_reach(user_id: UUID) -> tuple[ColumnElement[bool], ColumnElement[bool
     """The two halves of `follow_scope`, kept apart: `(via a title follow, via an entity
     follow)` over `news.event`.
 
-    Every reader that only asks *whether* a card reaches this user wants them OR-ed, and that
-    is `follow_scope`. The notify pass's **alert** branch asks the harder question EF-7 poses —
-    *why* the card reached them — because the push sets differ by reach: a 12th-billed casting
-    card is digest-only for the film's follower and an interrupt for the performer's, and the
-    same row can be both at once for a user who follows the two. So it selects these as two
-    labelled booleans beside the event and decides per reach in Python.
+    Every reader today asks only *whether* a card reaches this user, and wants them OR-ed: that
+    is `follow_scope`, and it is the one caller. The split outlived the notify pass's alert
+    branch, which asked *why* a card reached them (EF-7) and decided per reach — ADR-0021
+    retired it. Kept rather than inlined because the pair is the clause's own decomposition,
+    and the next reader that needs the reach should not have to rediscover it.
 
     Returned as a pair rather than as two builders because they are one decomposition and
     reading one without the other is how the OR silently loses a term."""
@@ -401,16 +400,14 @@ def follow_scope(user_id: UUID) -> ColumnElement[bool]:
     """WHERE predicate over `news.event`: this user's follows deliver this card (EF-3).
 
     The clause the module docstring states, spelled once for the readers that need it as a
-    predicate rather than as two builders — the notify pass's alert and digest branches. The
+    predicate rather than as two builders — the notify pass's digest branch. The
     timeline instead hands `title_follow_film_ids` and `entity_attachment_event_ids` to
     `get_feed_grouped`, which OR-s them into the same shape itself, because its scope has to
     apply to four statements (the day count, the day window, the film-day rows and the event
     fetch) rather than one.
 
     `or_` over `follow_reach` rather than its own pair of `IN`s, so the scope and the reach can
-    never come to different answers about what a follow delivers — the alert branch decides
-    per reach (EF-7) and the digest branch over the whole scope, and the two must agree that a
-    card reaching nobody reaches neither.
+    never come to different answers about what a follow delivers.
 
     Lives here, beside the two builders, so there is one place to look for "what does a follow
     deliver" — NEU-1440 reads the builders under it, and a clause with a home in

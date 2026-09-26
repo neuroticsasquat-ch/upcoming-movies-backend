@@ -81,7 +81,7 @@ person, and whether the work they are known for fits the story's subject. A shar
 never enough on its own.
 
 Prefer null to a guess. A mention nobody is named for is recoverable and is reviewed by a \
-human; a confidently wrong person becomes an alert about somebody who was never in the \
+human; a confidently wrong person becomes news about somebody who was never in the \
 story. If two options remain genuinely indistinguishable on the evidence in front of you, \
 that is null, not a coin flip.
 
@@ -124,7 +124,7 @@ with the same two words. Pick the one whose scope the story actually describes, 
 null when the story does not say which arm it means.
 
 Prefer null to a guess. A mention nothing is named for is recoverable and is reviewed by a \
-human; a confidently wrong studio becomes an alert about a company that was never in the \
+human; a confidently wrong studio becomes news about a company that was never in the \
 story. If two options remain genuinely indistinguishable on the evidence in front of you, \
 that is null, not a coin flip.
 

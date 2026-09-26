@@ -273,14 +273,16 @@ async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m
             # And `watchlist_item` is gone, as it was at M8.
             exists = await conn.scalar(text("SELECT to_regclass('app.watchlist_item') IS NOT NULL"))
             assert exists is False
+            # `alert_stores`, which M8 added, does not survive to head either: ADR-0021 drops
+            # it with the alert it narrowed (NEU-1470).
             stores = await conn.scalar(
                 text(
-                    "SELECT column_default FROM information_schema.columns "
+                    "SELECT count(*) FROM information_schema.columns "
                     "WHERE table_schema = 'app' AND table_name = 'user_settings' "
                     "AND column_name = 'alert_stores'"
                 )
             )
-            assert stores is not None
+            assert stores == 0
     finally:
         await engine.dispose()
 
@@ -638,5 +640,105 @@ async def test_the_migration_gives_every_existing_settings_row_its_own_unsubscri
         assert len(set(tokens)) == 2
         # `secrets.token_urlsafe(32)`: 32 bytes, base64url without padding.
         assert all(len(token) == 43 for token in tokens)
+    finally:
+        await engine.dispose()
+
+
+# --- the digest-only migration (NEU-1470) ---------------------------------------------------
+
+_BEFORE_DIGEST_ONLY = "de5bd1b49fe2"
+"""The revision immediately before `a92a8e808b07`, which deletes the `alert` and `push`
+notification rows, tightens the two vocabularies and drops `push_subscription` and
+`user_settings.alert_stores` (ADR-0021)."""
+
+
+@pytest.fixture
+async def digest_only_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision short of the digest-only migration, on the
+    `credits_backfill_db_url` pattern: the thing under test is the transition."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_digest_only")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            _alembic(url, "upgrade", _BEFORE_DIGEST_ONLY)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def test_the_digest_only_migration_keeps_exactly_the_digest_email_rows(
+    digest_only_db_url: str,
+):
+    """Every `alert` row and every `push` row goes, the `digest`/`email` row for the same event
+    stays, and the tightened constraints then refuse the old vocabulary outright — so the
+    delete is not a one-off cleanup a stray writer could undo."""
+    engine = create_async_engine(digest_only_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO app."user" (id, email, password_hash, display_name) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 'ada@example.com', 'x', 'Ada')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO catalog.film (id, tmdb_id, title) VALUES
+                  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 1, 'Clayface')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO news.event (id, film_id, event_type, confidence, occurred_at) VALUES
+                  ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+                   'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'trailer', 'confirmed', now())
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.notification (user_id, event_id, kind, channel, status) VALUES
+                  ('11111111-1111-1111-1111-111111111111',
+                   'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'alert', 'email', 'sent'),
+                  ('11111111-1111-1111-1111-111111111111',
+                   'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'alert', 'push', 'queued'),
+                  ('11111111-1111-1111-1111-111111111111',
+                   'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'digest', 'email', 'queued')
+                """)
+            )
+            await conn.execute(
+                text("""
+                INSERT INTO app.push_subscription (user_id, endpoint, p256dh, auth) VALUES
+                  ('11111111-1111-1111-1111-111111111111', 'https://push.example/1', 'k', 'a')
+                """)
+            )
+
+        _alembic(digest_only_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("SELECT kind, channel FROM app.notification"))).all()
+            assert [tuple(row) for row in rows] == [("digest", "email")]
+            push = await conn.scalar(text("SELECT to_regclass('app.push_subscription')"))
+            assert push is None
+        for kind, channel in (("alert", "email"), ("digest", "push")):
+            with pytest.raises(Exception, match="ck_notification_"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "INSERT INTO app.notification "
+                            "(user_id, event_id, kind, channel, status) VALUES "
+                            "('11111111-1111-1111-1111-111111111111', "
+                            "'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', :kind, :channel, 'queued')"
+                        ),
+                        {"kind": kind, "channel": channel},
+                    )
     finally:
         await engine.dispose()
