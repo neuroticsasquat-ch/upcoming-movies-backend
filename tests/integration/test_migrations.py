@@ -10,15 +10,19 @@ schema. A missing constraint reads as one line of the assertion message, not a 3
 The head revision is also round-tripped (``downgrade -1`` → ``upgrade head``) so its
 ``downgrade()`` is proven to undo exactly what ``upgrade()`` did. Older downgrades are frozen
 history and not covered (``26f140c4f334`` cannot downgrade at all).
+
+Alembic runs in-process against each scratch database (``_alembic``), the same ``env.py`` the
+CLI runs, pointed at the scratch URL through ``Config.attributes``.
 """
 
+import asyncio
 import os
-import subprocess
-import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -29,19 +33,19 @@ _SCHEMAS = "'app', 'catalog', 'news', 'ingest'"
 Snapshot = set[tuple[object, ...]]
 
 
-def _alembic(url: str, *args: str) -> None:
-    # Alembic runs as a subprocess, never in-process: `migrations/env.py` calls `asyncio.run()`,
-    # which fails under pytest-asyncio's running session loop, and reads the URL from the
-    # lru-cached `get_settings()`, which conftest has already pointed at the test DB.
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", *args],
-        cwd=_REPO_ROOT,
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"alembic {' '.join(args)} failed:\n{result.stderr}")
+async def _alembic(url: str, cmd: str, revision: str) -> None:
+    # In-process, not a `python -m alembic` subprocess: each of those paid ~2.4 s of interpreter
+    # startup and model import that pytest has already paid (NEU-1507). Two things make that safe:
+    # - No config file name, so `env.py` skips `fileConfig(...)`, which would replace pytest's
+    #   log handlers and disable the app's loggers for the rest of the run.
+    # - `env.py` calls `asyncio.run()`, which fails under pytest-asyncio's running loop, so the
+    #   command runs in a worker thread, which has no running loop of its own.
+    # `env.py` prefers `attributes["url"]` to the lru-cached settings, which point at app_test.
+    config = Config()
+    config.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
+    config.attributes["url"] = url
+    run = {"upgrade": command.upgrade, "downgrade": command.downgrade}[cmd]
+    await asyncio.to_thread(run, config, revision)
 
 
 @pytest.fixture(scope="session")
@@ -59,7 +63,7 @@ async def migrated_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", "head")
+            await _alembic(url, "upgrade", "head")
             yield url
         finally:
             # Also on a failed upgrade -- the case this fixture exists to catch -- so a broken
@@ -131,8 +135,8 @@ async def test_migrations_build_the_model_schema(test_engine: AsyncEngine, migra
 async def test_head_migration_round_trips(test_engine: AsyncEngine, migrated_db_url: str):
     # The round-trip NEU-1346 had to do by hand: the head revision's downgrade must run, and
     # re-upgrading must land back on the model's schema. Ends at head, so test order is moot.
-    _alembic(migrated_db_url, "downgrade", "-1")
-    _alembic(migrated_db_url, "upgrade", "head")
+    await _alembic(migrated_db_url, "downgrade", "-1")
+    await _alembic(migrated_db_url, "upgrade", "head")
     model = await _snapshot(test_engine)
     migrated = await _migrated_snapshot(migrated_db_url)
     _assert_parity(model, migrated)
@@ -163,7 +167,7 @@ async def m8_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_M8)
+            await _alembic(url, "upgrade", _BEFORE_M8)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -237,7 +241,7 @@ async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m
                 """)
             )
 
-        _alembic(m8_db_url, "upgrade", "head")
+        await _alembic(m8_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             follows = (
@@ -308,7 +312,7 @@ async def binary_follows_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_BINARY_FOLLOWS)
+            await _alembic(url, "upgrade", _BEFORE_BINARY_FOLLOWS)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -361,7 +365,7 @@ async def test_the_binary_follow_migration_deletes_exactly_the_imported_person_f
                 """)
             )
 
-        _alembic(binary_follows_db_url, "upgrade", "head")
+        await _alembic(binary_follows_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             rows = (
@@ -414,7 +418,7 @@ async def dismissal_drop_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_DISMISSAL_DROP)
+            await _alembic(url, "upgrade", _BEFORE_DISMISSAL_DROP)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -464,7 +468,7 @@ async def test_the_dismissal_drop_takes_the_mutes_and_leaves_every_follow(
                 """)
             )
 
-        _alembic(dismissal_drop_db_url, "upgrade", "head")
+        await _alembic(dismissal_drop_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             exists = await conn.scalar(
@@ -508,7 +512,7 @@ async def credits_backfill_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_CREDITS_BACKFILL)
+            await _alembic(url, "upgrade", _BEFORE_CREDITS_BACKFILL)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -552,7 +556,7 @@ async def test_the_backfill_stamps_only_films_that_hold_credits(credits_backfill
                 """)
             )
 
-        _alembic(credits_backfill_db_url, "upgrade", "head")
+        await _alembic(credits_backfill_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             rows = (
@@ -595,7 +599,7 @@ async def unsubscribe_token_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_UNSUBSCRIBE_TOKEN)
+            await _alembic(url, "upgrade", _BEFORE_UNSUBSCRIBE_TOKEN)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -628,7 +632,7 @@ async def test_the_migration_gives_every_existing_settings_row_its_own_unsubscri
                 """)
             )
 
-        _alembic(unsubscribe_token_db_url, "upgrade", "head")
+        await _alembic(unsubscribe_token_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             tokens = (
@@ -666,7 +670,7 @@ async def digest_only_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_DIGEST_ONLY)
+            await _alembic(url, "upgrade", _BEFORE_DIGEST_ONLY)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -721,7 +725,7 @@ async def test_the_digest_only_migration_keeps_exactly_the_digest_email_rows(
                 """)
             )
 
-        _alembic(digest_only_db_url, "upgrade", "head")
+        await _alembic(digest_only_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             rows = (await conn.execute(text("SELECT kind, channel FROM app.notification"))).all()
