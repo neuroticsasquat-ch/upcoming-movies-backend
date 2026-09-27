@@ -10,7 +10,7 @@ uploader can act on, then hands the parsed rows here and answers 202 with a job 
 
 What is left in this module is the half that is Letterboxd's: turning a title and a year into a
 TMDB id. What a matched film then *becomes* — the film in full and a candidate on the review
-list, ticked if it is still inside the alert window — is in `ingest.imports.apply`, shared with
+list, if it is still inside the alert window — is in `ingest.imports.apply`, shared with
 the TMDB account import (D-16), which arrives at the same treatment from ids it does not have to
 guess. **The run writes no follows** (EF-22): it ends at `awaiting_review`, and the user's
 confirm (`ingest.imports.review`) is what follows the films they kept.
@@ -25,21 +25,27 @@ polls, and a wrapper that always finalizes — `failed` with the error on an une
 The one place it deliberately does *not* isolate per item is that same crash: a row that raises
 something other than a TMDB 404 stops the job rather than being counted and skipped, because at
 that point the likely cause is the whole import's (a dead client, a lost database) and burning
-the remaining thousand rows against it helps nobody."""
+the remaining thousand rows against it helps nobody.
+
+**Old films cost nothing** (NEU-1505, D-1505.6). A film outside the alert window is declined
+at the first point its date is known: before the search when the export's `Year` alone rules it
+out, and before `/movie/{id}` when the accepted hit's date does. Either way it is reported as
+`outside_window` and never reaches the catalog."""
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.repos import import_job_repo
-from upmovies.config import Settings
+from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
-from upmovies.ingest.imports.apply import Progress, finalize_failed, propose_film
+from upmovies.ingest.imports.apply import Progress, date_in_window, finalize_failed, propose_film
 from upmovies.ingest.imports.letterboxd import LetterboxdExport, WatchlistRow
 from upmovies.ingest.tmdb.client import TMDBClient
-from upmovies.ingest.tmdb.resolution import ResolvedTitle, resolve
+from upmovies.ingest.tmdb.resolution import FESTIVAL_YEAR_SLACK, ResolvedTitle, resolve
 
 log = logging.getLogger(__name__)
 
@@ -106,24 +112,48 @@ async def _import_watchlist_row(
     row: WatchlistRow,
     progress: Progress,
 ) -> None:
-    """One `watchlist.csv` row: the film in full, and a candidate for the review list — ticked
-    if it is still inside the alert window, unticked with a reason if not (EF-21, EF-22).
+    """One `watchlist.csv` row: the film in full, and a candidate for the review list, if it is
+    still inside the alert window (EF-21, EF-22).
 
     Both failures are reported under `kind="watchlist"`, and deliberately: a title this could
     not place and a title TMDB has since deleted are the same fact to a Letterboxd uploader —
-    the row is in their export, and it is not on the list. A film outside the window is not a
-    failure at all: it was placed, and it is on the list, greyed with its reason.
+    the row is in their export, and it is not on the list. A film outside the window is
+    `outside_window` wherever it is caught — by its year, by its hit's date, or by the stored
+    row's status — because to the user it is one fact: too old to follow (NEU-1505).
 
     The name and year are the export's, verbatim, rather than the catalog's: the user is going
     to look for this row in their own file."""
+    if row.year is not None and _year_outside_window(row.year):
+        progress.record_unmatched(name=row.name, year=row.year, kind="outside_window")
+        return
+
     hit = await _search(client, name=row.name, year=row.year)
     if hit is None:
         progress.record_unmatched(name=row.name, year=row.year, kind="watchlist")
+        return
+    if not date_in_window(hit.release_date):
+        progress.record_unmatched(name=row.name, year=row.year, kind="outside_window")
         return
 
     outcome = await propose_film(db, client, job_id, hit.tmdb_id, progress)
     if outcome == "tmdb_missing":
         progress.record_unmatched(name=row.name, year=row.year, kind="watchlist")
+    elif outcome == "outside_window":
+        progress.record_unmatched(name=row.name, year=row.year, kind="outside_window")
+
+
+def _year_outside_window(year: int) -> bool:
+    """Whether no film the search could accept for `year` can be inside the alert window, so
+    the row is declined with no request at all (NEU-1505, D-1505.6).
+
+    `resolve` accepts a hit only within `FESTIVAL_YEAR_SLACK` of the export's year, so the
+    latest primary date any acceptable hit can carry is 31 December of `year + slack`. When
+    that year is before the one the window starts in, nothing the search returns could pass
+    `date_in_window`, and the search would be spent to learn nothing."""
+    window_start = datetime.now(UTC).date() - timedelta(
+        days=get_settings().provider_poll_max_age_days
+    )
+    return year + FESTIVAL_YEAR_SLACK < window_start.year
 
 
 async def _search(client: TMDBClient, *, name: str, year: int | None) -> ResolvedTitle | None:

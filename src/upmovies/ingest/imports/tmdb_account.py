@@ -24,8 +24,9 @@ TMDB on its own.
 
 No resolution step, unlike Letterboxd: TMDB's ids are authoritative, so the only row that can
 reach the report names a cause rather than a list — TMDB answering 404 for a film its own list
-points at (`kind=tmdb_missing`). A film the alert window has closed on (EF-21) is on the review
-list instead, unticked with its reason.
+points at (`kind=tmdb_missing`) — and a film the alert window has closed on (EF-21), which is
+declined as `outside_window` off the list entry's own `release_date` before any `/movie/{id}`
+is spent on it (NEU-1505, D-1505.6), or after the upsert when the stored row says `Canceled`.
 
 Follows the same pipeline contract as the Letterboxd runner: its own session factory, a commit
 per row, a throttled heartbeat, and a wrapper that always finalizes."""
@@ -39,7 +40,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.app.repos import import_job_repo
 from upmovies.config import Settings
 from upmovies.db import SessionLocal
-from upmovies.ingest.imports.apply import Progress, finalize_failed, propose_film
+from upmovies.ingest.imports.apply import (
+    Progress,
+    UnmatchedKind,
+    date_in_window,
+    finalize_failed,
+    propose_film,
+)
 from upmovies.ingest.tmdb.client import TMDBClient
 from upmovies.ingest.tmdb.schemas import TMDBMovieSummary
 
@@ -152,9 +159,12 @@ async def import_tmdb_account(
 
         progress = Progress()
         for movie in watchlist:
-            outcome = await propose_film(db, client, job_id, movie.id, progress)
-            if outcome == "tmdb_missing":
-                _record_missing(progress, movie)
+            if not date_in_window(movie.release_date):
+                _record_unmatched(progress, movie, kind="outside_window")
+            else:
+                outcome = await propose_film(db, client, job_id, movie.id, progress)
+                if outcome != "proposed":
+                    _record_unmatched(progress, movie, kind=outcome)
             await progress.row_done(db, job_id)
 
         await progress.flush(db, job_id)
@@ -162,15 +172,16 @@ async def import_tmdb_account(
         await db.commit()
 
 
-def _record_missing(progress: Progress, movie: TMDBMovieSummary) -> None:
-    """Report a film on the account's watchlist that TMDB's own `/movie/{id}` answers 404 for.
+def _record_unmatched(progress: Progress, movie: TMDBMovieSummary, *, kind: UnmatchedKind) -> None:
+    """Report a film on the account's watchlist that TMDB's own `/movie/{id}` answers 404 for
+    (`tmdb_missing`), or that the alert window has closed on (`outside_window`).
 
-    The title and year come from the list payload, because for a deleted entry they are the only
-    description of the film left."""
+    The title and year come from the list payload: for a deleted entry they are the only
+    description of the film left, and a declined one was never fetched."""
     progress.record_unmatched(
         name=movie.title,
         year=movie.release_date.year if movie.release_date else None,
-        kind="tmdb_missing",
+        kind=kind,
     )
 
 

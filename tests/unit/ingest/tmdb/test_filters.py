@@ -1,6 +1,8 @@
+from datetime import date, timedelta
+
 import pytest
 
-from upmovies.ingest.tmdb.filters import classify_skip
+from upmovies.ingest.tmdb.filters import classify_skip, is_unreleased
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 
 
@@ -47,3 +49,25 @@ def test_excluded_status_takes_precedence_over_short():
 def test_normal_film_is_kept():
     details = _details(runtime=120, status="Planned")
     assert classify_skip(details, excluded_statuses=frozenset(), min_runtime=60) is None
+
+
+# --- is_unreleased (NEU-1505, D-1505.2) ---------------------------------------------------------
+
+TODAY = date(2026, 9, 27)
+
+
+@pytest.mark.parametrize(
+    ("release_date", "status", "expected"),
+    [
+        (None, None, True),  # nothing known: the most upcoming film there is
+        (TODAY, "Post Production", True),  # opens today: not yet released
+        (TODAY + timedelta(days=365), "Planned", True),
+        (TODAY - timedelta(days=1), "Post Production", False),  # the date alone decides
+        (TODAY - timedelta(days=1), None, False),
+        (None, "Released", False),  # the status alone decides
+        (TODAY + timedelta(days=30), "Canceled", False),  # called off, however far out
+    ],
+)
+def test_is_unreleased(release_date, status, expected):
+    details = _details(release_date=release_date, status=status)
+    assert is_unreleased(details, today=TODAY) is expected

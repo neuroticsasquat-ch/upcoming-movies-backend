@@ -61,6 +61,17 @@ and leaves films.
 8. **The film page has one button and every name is a link** (EF-16); an entity's page is
    the only place its follow starts, and it shows the entity's own cards (EF-17, EF-18).
 
+> **Amendment — 2026-09-27 (NEU-1505).** Decision 4 applies **only while the film is
+> unreleased**: primary `release_date` NULL or on/after today, and status neither `Released`
+> nor `Canceled` (`ingest.tmdb.filters.is_unreleased`, decided once per `upsert_film`). The
+> decision was written for a director's *next* film entering the catalog, and a released film
+> entering it — which only an import can cause — did not just attach anyone. Not the 365-day
+> alert window: a film that opened six months ago has not "attached" its director either. And
+> EF-21 is narrowed: an import **declines** a film outside the alert window before fetching it
+> and never lists a film it cannot follow (`unmatched`, kind `outside_window`, counted rather
+> than named on the review list); `import_candidate.skip_reason` is retired. See
+> `docs/specs/NEU-1505-imports-decline-released-films.md`.
+
 ## Considered alternatives
 
 - **Keep coverage, narrow the defaults.** Make `lead` narrower, or default `any` off. Rejected:

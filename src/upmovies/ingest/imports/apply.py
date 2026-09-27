@@ -16,17 +16,21 @@ asked for that, and NEU-1432's migration has already deleted the rows the path w
 `app.import_candidate` row, and the job stops at `awaiting_review` for the user to confirm the
 list — `ingest.imports.review` owns that half, and is where the follows are written.
 
-**And it only offers films that can still deliver something** (EF-21). A watchlisted film
-outside the alert window — called off, or released longer ago than the provider poll keeps
-looking — is upserted and listed, but unticked with `skip_reason = 'outside_window'`, so the
-user can see what the import declined rather than wondering where the title went.
+**And it only offers films that can still deliver something** (EF-21, NEU-1505). A watchlisted
+film outside the alert window — called off, or released longer ago than the provider poll keeps
+looking — is **declined**: not listed, and not fetched or written to the catalog when the date
+the runner already holds says so. It is reported in `import_job.unmatched` as `outside_window`,
+so the review list can say how many titles it left out. Each runner asks
+`release_date_in_window` of the date it has before `propose_film` spends a `/movie/{id}`;
+`propose_film` asks `in_alert_window` of the stored row once more after the upsert, for the
+`Canceled` status a list's date cannot show.
 
 Also here: `Progress`, the running totals both runners keep, because the counts it reports are
 incremented inside `propose_film`."""
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from time import monotonic
 from typing import Any, Literal
 from uuid import UUID
@@ -55,11 +59,11 @@ UnmatchedKind = Literal["watchlist", "rating", "tmdb_missing", "outside_window"]
 - `tmdb_missing` — TMDB has deleted the entry its own list still points at. The TMDB import's
   only resolution failure, because the ids there are authoritative (D-16); telling the user
   which list it was on would not help them find something that is gone.
-- `outside_window` — **historical**. NEU-1448 reported a matched film outside the alert window
-  (EF-21) here; since EF-22 it is an `app.import_candidate` row with that `skip_reason`
-  instead, because it was matched and the review list is where matched films go.
-  `app.dto.ImportJobOut` drops rows of this kind on the way out, so the jobs that ran in
-  between still poll without a 500 and without a matched film reading as unmatched.
+- `outside_window` — the title was matched, or certainly would have been, but falls outside the
+  alert window (EF-21), so the import declined it (NEU-1505, D-1505.5). NEU-1448 wrote this
+  kind for the same fact; NEU-1449 moved it onto the review list as an unticked row, and
+  NEU-1505 moved it back, because a list the user can only partly act on confused the first
+  person to use it.
 - `rating` — **historical** on the same terms. The ratings path is deleted (EF-20) and nothing
   writes this any more, but the column is JSONB and jobs that ran before this shipped still
   hold rows carrying it. Kept so polling one of those does not 500 on its own report."""
@@ -82,9 +86,9 @@ large library look stalled. The final write is unconditional, so the last rows a
 un-reported."""
 
 WatchlistOutcome = Literal["proposed", "outside_window", "tmdb_missing"]
-"""What `propose_film` did with one listed film. `outside_window` is still a candidate, just an
-unticked one, so only `tmdb_missing` leaves the runner anything to report — and it reports that
-its own way, Letterboxd naming the list and TMDB the cause."""
+"""What `propose_film` did with one listed film. Only `proposed` wrote a candidate; the other two
+leave the runner a row to report, which it names in its own terms — Letterboxd with the export's
+name and year, TMDB with its list's."""
 
 
 @dataclass
@@ -130,22 +134,23 @@ async def propose_film(
     progress: Progress,
 ) -> WatchlistOutcome:
     """The only treatment an import has: the film in full, and a candidate for the review list
-    (EF-22) — ticked if the film is still inside the alert window, unticked with a reason if it
-    is not (EF-21). Committed, so the per-row contract holds for the candidate as it does for
-    the film.
+    (EF-22) if the film is still inside the alert window (EF-21). Committed, so the per-row
+    contract holds for the candidate as it does for the film.
 
     **No follow is written here.** The user has not seen the list yet; `ingest.imports.review`
     writes the follows for the rows they confirm.
 
-    **The film is upserted either way** (EF-21). The window is read off the stored row, so the
-    upsert has to happen first; and a film somebody listed is worth holding in the catalog even
-    when this import will not offer it — the next import, or a manual follow, finds it already
-    there. What the window decides is the *tick*, not the row."""
+    **The caller has already asked the date** (`release_date_in_window`, NEU-1505), so the
+    window check here is the second of two: it reads the stored row, which is the only place a
+    `Canceled` status shows. A miss writes no candidate — the review list holds followable films
+    only (D-1505.3) — and the runner reports it as `outside_window`. The film row the upsert
+    wrote stays: it is a film whose date looked current, which is what the catalog admits."""
     film_id = await film_id_for(db, client, tmdb_id)
     if film_id is None:
         return "tmdb_missing"
+    if not await in_alert_window(db, film_id):
+        return "outside_window"
 
-    in_window = await in_alert_window(db, film_id)
     title = (await db.execute(select(Film.title).where(Film.id == film_id))).scalar_one()
     headline = (await headline_releases(db, [film_id], today=datetime.now(UTC).date())).get(film_id)
     out = headline_release_out(headline)
@@ -156,18 +161,38 @@ async def propose_film(
         tmdb_id=tmdb_id,
         title=title,
         headline_release=None if out is None else out.model_dump(mode="json"),
-        skip_reason=None if in_window else "outside_window",
     )
     await db.commit()
-    if not in_window:
-        return "outside_window"
     if added:
-        # `watchlist_created` counts the films the import offers — the ticked rows, each once —
+        # `watchlist_created` counts the films the import offers — every row, each once —
         # and `follows_created` stays at zero until the confirm sets it to the rows the user
         # kept. The two part company here (EF-22): a list of forty is not forty follows until
         # somebody says so.
         progress.watchlist_created += 1
     return "proposed"
+
+
+def release_date_in_window(release_date: date | None, *, today: date, max_age_days: int) -> bool:
+    """`alert_window_clause`'s date half, for a date that is not yet a row (NEU-1505, D-1505.6):
+    unknown, or no more than `max_age_days` before `today`.
+
+    What lets an import decline an old film *before* it spends a `/movie/{id}` on it, from the
+    date a search hit or a TMDB list entry already carries. It cannot see a status, which is
+    fine: `Canceled` is outside the window whatever the date, and `in_alert_window` still runs
+    on the stored row for every film that passes this. A second spelling of the window is the
+    drift `in_alert_window`'s docstring warns about, so a unit test holds the two to the same
+    table of dates."""
+    return release_date is None or release_date >= today - timedelta(days=max_age_days)
+
+
+def date_in_window(release_date: date | None) -> bool:
+    """`release_date_in_window` for today and the configured `PROVIDER_POLL_MAX_AGE_DAYS`: the
+    question each runner asks of a list's date before it proposes the film."""
+    return release_date_in_window(
+        release_date,
+        today=datetime.now(UTC).date(),
+        max_age_days=get_settings().provider_poll_max_age_days,
+    )
 
 
 async def in_alert_window(db: AsyncSession, film_id: UUID) -> bool:

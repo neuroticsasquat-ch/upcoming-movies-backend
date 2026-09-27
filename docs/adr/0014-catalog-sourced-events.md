@@ -71,6 +71,12 @@ thousands of false "attached to direct" events on day one.
 > indistinguishable from a trigger-written one on purpose — one carding rule, not two — and
 > the coupling is the documented cost: if the trigger is ever rewritten to fire on insert, that
 > row becomes a duplicate and goes with it. See `docs/specs/NEU-1436-admission-is-an-attachment.md`.
+>
+> **Amendment — 2026-09-27 (NEU-1505).** The exception holds **only while the film is
+> unreleased** (primary date NULL or on/after today; status not `Released`/`Canceled`). A
+> Letterboxd import first-observed four long-released Fincher films and the exception carded
+> them as attachments; the baseline rule is back to unconditional for any released film,
+> followed entities included. See `docs/specs/NEU-1505-imports-decline-released-films.md`.
 
 **Presentation.** `EventOut.summary` is a required `str` and every read path joins `EventSummary`,
 so an event without a summary row is invisible everywhere. A catalog-sourced event therefore

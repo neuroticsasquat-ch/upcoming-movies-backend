@@ -19,10 +19,8 @@ async def add(
     tmdb_id: int,
     title: str,
     headline_release: dict[str, Any] | None,
-    skip_reason: str | None,
 ) -> bool:
-    """Propose one film, and say whether it is new to the list. Selected unless it carries a
-    `skip_reason`. Caller commits.
+    """Propose one film, ticked, and say whether it is new to the list. Caller commits.
 
     A second proposal of a film already on this job's list is a no-op rather than an error: two
     export rows can resolve to the same film, and the first one's row already says everything
@@ -35,8 +33,6 @@ async def add(
             tmdb_id=tmdb_id,
             title=title,
             headline_release=headline_release,
-            selected=skip_reason is None,
-            skip_reason=skip_reason,
         )
         .on_conflict_do_nothing(index_elements=["job_id", "film_id"])
         .returning(ImportCandidate.id)
@@ -45,17 +41,12 @@ async def add(
 
 
 async def list_for_job(db: AsyncSession, job_id: UUID) -> list[ImportCandidate]:
-    """The job's proposals, selectable first and then by title — the order a review list reads
-    in, ticked rows above the greyed ones. `id` settles a tie so the order is stable between
-    polls."""
+    """The job's proposals by title, the order a review list reads in. `id` settles a tie so
+    the order is stable between polls."""
     stmt = (
         select(ImportCandidate)
         .where(ImportCandidate.job_id == job_id)
-        .order_by(
-            ImportCandidate.skip_reason.is_not(None),
-            ImportCandidate.title,
-            ImportCandidate.id,
-        )
+        .order_by(ImportCandidate.title, ImportCandidate.id)
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -63,13 +54,13 @@ async def list_for_job(db: AsyncSession, job_id: UUID) -> list[ImportCandidate]:
 async def selectable_film_ids(
     db: AsyncSession, *, job_id: UUID, film_ids: Collection[UUID]
 ) -> list[UUID]:
-    """Those of `film_ids` that are on this job's list with no `skip_reason`, each once."""
+    """Those of `film_ids` that are on this job's list, each once. Every row is followable
+    (NEU-1505), so this is what bounds a confirm to the job's own proposals."""
     if not film_ids:
         return []
     stmt = select(ImportCandidate.film_id).where(
         ImportCandidate.job_id == job_id,
         ImportCandidate.film_id.in_(list(film_ids)),
-        ImportCandidate.skip_reason.is_(None),
     )
     return list((await db.execute(stmt)).scalars().all())
 

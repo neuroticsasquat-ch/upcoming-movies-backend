@@ -4,8 +4,8 @@ run does not, and that the session is always deleted.
 The acceptance criteria of `NEU-1357-tmdb-account-import.md` as EF-20, EF-21 and EF-22 leave
 them, driven through `import_tmdb_account` against a respx-mocked TMDB. The favorites half is
 gone — the list is not read at all — the run stops at `awaiting_review` with a candidate per
-film and no follows, and a watchlisted film outside the alert window is listed unticked rather
-than offered."""
+film and no follows, and a watchlisted film outside the alert window is declined off the list's
+own date, before any `/movie/{id}` is spent on it (NEU-1505)."""
 
 import json
 from unittest.mock import patch
@@ -48,15 +48,23 @@ DETAILS: dict[int, tuple[str, str]] = {
 
 
 def _list_page(tmdb_ids) -> dict:
+    """The list entry carries the same date `/movie/{id}` will, as TMDB's does — that date is
+    what the import declines an old film by before fetching it (NEU-1505)."""
     return {
         "page": 1,
         "total_pages": 1,
         "total_results": len(tmdb_ids),
         "results": [
-            {"id": i, "title": f"Film {i}", "release_date": "2021-06-01", "popularity": 10.0}
+            {"id": i, "title": f"Film {i}", "release_date": DETAILS[i][0], "popularity": 10.0}
             for i in tmdb_ids
         ],
     }
+
+
+def _details_requested(tmdb_id: int) -> bool:
+    return any(
+        str(call.request.url).startswith(f"{BASE_URL}/movie/{tmdb_id}") for call in respx.calls
+    )
 
 
 def _mock_watchlist(tmdb_ids=WATCHLIST_IDS):
@@ -211,16 +219,12 @@ async def test_the_watchlist_stops_at_review_with_a_candidate_per_film(
     assert job.rows_done == job.rows_total == len(WATCHLIST_IDS)
 
     candidates = await _candidates(session, job)
-    assert {t: (c.selected, c.skip_reason) for t, c in candidates.items()} == {
-        1001: (True, None),
-        1002: (True, None),
-        OUTSIDE_WINDOW_TMDB_ID: (False, "outside_window"),
-    }
+    assert {t: c.selected for t, c in candidates.items()} == {1001: True, 1002: True}
     assert (job.watchlist_created, job.follows_created) == (2, 0)
     # No follow until the user has seen the list (EF-22).
     assert await _follows(session) == []
-    # The ids are authoritative and every one resolved, so there is nothing to report.
-    assert job.unmatched == []
+    # The ids are authoritative and every one resolved; the one report row is the old film.
+    assert job.unmatched == [{"name": "Film 1003", "year": 2019, "kind": "outside_window"}]
 
 
 @respx.mock
@@ -266,29 +270,54 @@ async def test_an_import_never_writes_a_person_follow(session, session_factory, 
 
 
 @respx.mock
-async def test_a_film_released_in_2019_is_listed_unticked_as_outside_window(
+async def test_a_film_released_in_2019_is_declined_without_a_details_request(
     session, session_factory, user
 ):
-    """EF-21: the film *is* there, and the user can see it on the list — the import simply has
-    nothing to deliver on it, so it is not offered."""
+    """EF-21 as NEU-1505 narrows it: the list entry's own date is outside the window, so the
+    import spends no `/movie/{id}` on the film, lists nothing, and tells the user by the
+    list's title and year."""
     _mock_tmdb()
     job = await _run(session, session_factory, user)
 
-    film = (
-        await session.execute(select(Film).where(Film.tmdb_id == OUTSIDE_WINDOW_TMDB_ID))
-    ).scalar_one()
-    candidate = (await _candidates(session, job))[OUTSIDE_WINDOW_TMDB_ID]
-    assert candidate.film_id == film.id
-    assert (candidate.selected, candidate.skip_reason) == (False, "outside_window")
-    assert job.unmatched == []
+    assert not _details_requested(OUTSIDE_WINDOW_TMDB_ID)
+    assert OUTSIDE_WINDOW_TMDB_ID not in await _candidates(session, job)
+    assert {"name": "Film 1003", "year": 2019, "kind": "outside_window"} in job.unmatched
 
 
 @respx.mock
-async def test_a_film_outside_the_window_is_still_upserted(session, session_factory, user):
+async def test_a_film_outside_the_window_is_not_upserted(session, session_factory, user):
+    # Inverted by NEU-1505: a film nobody can follow is not worth a catalog row, and holding
+    # one is what let its admission card a followed director.
     _mock_tmdb()
     await _run(session, session_factory, user)
 
-    assert OUTSIDE_WINDOW_TMDB_ID in {f.tmdb_id for f in await _rows(session, Film)}
+    assert OUTSIDE_WINDOW_TMDB_ID not in {f.tmdb_id for f in await _rows(session, Film)}
+
+
+@respx.mock
+async def test_an_undated_list_entry_is_fetched_and_judged_on_the_stored_row(
+    session, session_factory, user
+):
+    # A list entry with no date says nothing about the window, so it is fetched as before and
+    # the post-upsert check decides — here, a 2019 film TMDB's list simply had no date for.
+    _mock_tmdb()
+    respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/watchlist/movies").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "page": 1,
+                "total_pages": 1,
+                "total_results": 1,
+                "results": [{"id": 1003, "title": "Film 1003", "popularity": 10.0}],
+            },
+        )
+    )
+
+    job = await _run(session, session_factory, user)
+
+    assert _details_requested(1003)
+    assert await _candidates(session, job) == {}
+    assert job.unmatched == [{"name": "Film 1003", "year": None, "kind": "outside_window"}]
 
 
 @respx.mock
@@ -308,9 +337,11 @@ async def test_a_canceled_film_is_skipped_however_recent_its_date(session, sessi
 
     job = await _run(session, session_factory, user)
 
-    (candidate,) = (await _candidates(session, job)).values()
-    assert (candidate.selected, candidate.skip_reason) == (False, "outside_window")
-    assert job.unmatched == []
+    # Its list date is inside the window, so only the stored row's status can decline it, and
+    # it is declined the same way: reported, not listed.
+    assert await _candidates(session, job) == {}
+    assert job.unmatched == [{"name": "Film 1001", "year": 2099, "kind": "outside_window"}]
+    assert job.watchlist_created == 0
 
 
 @respx.mock
@@ -326,11 +357,14 @@ async def test_a_film_tmdb_has_deleted_is_reported_rather_than_failing_the_job(
     job = await _run(session, session_factory, user)
 
     assert job.status == "awaiting_review"
-    assert job.unmatched == [{"name": "Film 1001", "year": 2021, "kind": "tmdb_missing"}]
-    # The other two rows went through, and only they are on the list: no film, no candidate.
+    assert job.unmatched == [
+        {"name": "Film 1001", "year": 2099, "kind": "tmdb_missing"},
+        {"name": "Film 1003", "year": 2019, "kind": "outside_window"},
+    ]
+    # The other two rows went through, and only the one in the window is on the list.
     assert job.rows_done == 3
-    assert {f.tmdb_id for f in await _rows(session, Film)} == {1002, 1003}
-    assert set(await _candidates(session, job)) == {1002, 1003}
+    assert {f.tmdb_id for f in await _rows(session, Film)} == {1002}
+    assert set(await _candidates(session, job)) == {1002}
 
 
 # --- running it twice ------------------------------------------------------------------------

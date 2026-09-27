@@ -47,6 +47,7 @@ from upmovies.ingest.tmdb.credit_history import (
     record_credit_changes,
     recorded_credits_from_details,
 )
+from upmovies.ingest.tmdb.filters import is_unreleased
 from upmovies.ingest.tmdb.release_date_history import (
     diff_release_dates,
     displayable_from_details,
@@ -253,15 +254,22 @@ async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     """Insert/update a film and its relations (matched on `tmdb_id`). The surrogate `id`
     and `created_at` are preserved; `updated_at` is bumped. Reference rows are upserted by
     their natural keys; join rows are rebuilt (delete-and-reinsert) so a film dropping a
-    genre/company between runs is reflected."""
+    genre/company between runs is reflected.
+
+    `attachable` is EF-4's admission exception asked once per upsert (NEU-1505, D-1505.1): only
+    an unreleased film's first observation writes attachments for what somebody follows. All
+    three admission call sites read this one answer rather than each deciding for itself."""
+    attachable = is_unreleased(details, today=datetime.now(UTC).date())
     collection_id = await _upsert_collection(session, details)
     film_id, film_inserted = await _upsert_film_row(session, details, collection_id)
-    await record_collection_admission(session, film_id, collection_id, film_inserted=film_inserted)
+    await record_collection_admission(
+        session, film_id, collection_id, film_inserted=film_inserted, attachable=attachable
+    )
     await _upsert_references(session, details)
-    await _rebuild_joins(session, film_id, details)
+    await _rebuild_joins(session, film_id, details, attachable=attachable)
     await _rebuild_release_dates(session, film_id, details)
     await _rebuild_alternative_titles(session, film_id, details)
-    await _upsert_credits(session, film_id, details)
+    await _upsert_credits(session, film_id, details, attachable=attachable)
 
 
 async def _upsert_collection(session: AsyncSession, details: TMDBMovieDetails) -> int | None:
@@ -410,14 +418,17 @@ async def _upsert_references(session: AsyncSession, details: TMDBMovieDetails) -
         await session.execute(stmt)
 
 
-async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovieDetails) -> None:
+async def _rebuild_joins(
+    session: AsyncSession, film_id: UUID, details: TMDBMovieDetails, *, attachable: bool
+) -> None:
     """Rebuild the four join tables, and capture the studio *history* the company rebuild would
     otherwise throw away (EF-5).
 
     The company diff lives here for the reason the credit diff lives in `_upsert_credits`: both
     sides of it are in hand at this point and nowhere else, because the next statement deletes
     the stored one. First observation is a baseline, never a change — except for a studio
-    somebody follows, which is EF-4's admission exception. See `ingest.tmdb.company_history`.
+    somebody follows on a film that has yet to open, which is EF-4's admission exception. See
+    `ingest.tmdb.company_history`.
     """
     # Read the stored side before the delete below wipes it. None means the catalog has never
     # observed this film's companies, which `diff_companies` reads as a baseline.
@@ -461,13 +472,18 @@ async def _rebuild_joins(session: AsyncSession, film_id: UUID, details: TMDBMovi
         )
 
     # The marker is set last and only here, so the very first pass writes a baseline and every
-    # later one a diff — except for the studios somebody already follows, which are EF-4's
-    # one exception to the baseline rule (D-1436.2). The followed set is read only on that
-    # branch: there is no recorded grade for companies, so an ordinary diff never asks.
+    # later one a diff — except for the studios somebody already follows on an unreleased
+    # film, which are EF-4's one exception to the baseline rule (D-1436.2, D-1505.1). The
+    # followed set is read only on that branch: there is no recorded grade for companies, so
+    # an ordinary diff never asks, and a released film's admission is a plain baseline.
     current_companies = companies_from_details(details)
     if previous_companies is None:
-        changes = admission_company_attachments(
-            current_companies, followed=await load_followed_company_ids(session)
+        changes = (
+            admission_company_attachments(
+                current_companies, followed=await load_followed_company_ids(session)
+            )
+            if attachable
+            else []
         )
     else:
         changes = diff_companies(previous=previous_companies, current=current_companies)
@@ -554,7 +570,9 @@ async def _rebuild_alternative_titles(
         await session.execute(insert(FilmAlternativeTitle).values(rows))
 
 
-async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMovieDetails) -> None:
+async def _upsert_credits(
+    session: AsyncSession, film_id: UUID, details: TMDBMovieDetails, *, attachable: bool
+) -> None:
     """Upsert people from credits, then rebuild film_credit rows for this film.
 
     People are upserted (on_conflict_do_update) so that the same person appearing
@@ -565,8 +583,8 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     The rebuild is also where recorded-grade credit *history* is captured: both sides of the
     diff are in hand here and nowhere else, so `catalog.film_credit_change` is written from
     them before the old side is destroyed. First observation is a baseline, never a change —
-    except for a person somebody follows, which is EF-4's admission exception. See
-    `ingest.tmdb.credit_history`.
+    except for a person somebody follows on a film that has yet to open, which is EF-4's
+    admission exception. See `ingest.tmdb.credit_history`.
     """
     if not details.credits:
         return
@@ -617,14 +635,18 @@ async def _upsert_credits(session: AsyncSession, film_id: UUID, details: TMDBMov
     # Step 3 — History: what the rebuild would otherwise have thrown away. The marker is set
     # last and only here, so the very first pass writes a baseline and every later one a diff.
     #
-    # The one exception is EF-4 (D-1436.1): on a first observation the credits of people
-    # somebody *already* follows are written as attachments, because a film entering the
-    # catalog with a followed director on it is precisely what that follow was made for. Both
-    # branches read the one `followed` set above, which is what makes a follow created after
-    # admission a no-op on the next ingest rather than a fabricated `added`.
+    # The one exception is EF-4 (D-1436.1): on a first observation of an *unreleased* film
+    # (D-1505.1) the credits of people somebody *already* follows are written as attachments,
+    # because a film entering the catalog with a followed director on it is precisely what that
+    # follow was made for. A film that opened in 2008 did not just attach its director, so a
+    # released film's admission is a baseline like any other. Both branches read the one
+    # `followed` set above, which is what makes a follow created after admission a no-op on the
+    # next ingest rather than a fabricated `added`.
     current_recorded_credits = recorded_credits_from_details(details, followed=followed)
     if previous_recorded_credits is None:
-        changes = admission_attachments(current_recorded_credits, followed=followed)
+        changes = (
+            admission_attachments(current_recorded_credits, followed=followed) if attachable else []
+        )
     else:
         changes = diff_recorded_credits(
             previous=previous_recorded_credits, current=current_recorded_credits

@@ -14,10 +14,11 @@ through the `followed` tranche, or a seed tranche, or a story, with `belongs_to_
 already set. Left alone, the beat the follow was made for is the one beat that never cards.
 
 So the admission path writes the row the trigger would have written on an update —
-`field='collection_id'`, `NULL -> id` — and writes it **only when both hold**: the upsert
-inserted the film row, and somebody follows that collection. A film *updated* into a
-collection is the trigger's business already, and a film inserted into a collection nobody
-follows is a baseline like every other.
+`field='collection_id'`, `NULL -> id` — and writes it **only when all three hold**: the upsert
+inserted the film row, the film has yet to open (NEU-1505, D-1505.1), and somebody follows
+that collection. A film *updated* into a collection is the trigger's business already, a film
+released years ago did not just join its franchise, and a film inserted into a collection
+nobody follows is a baseline like every other.
 
 The row is indistinguishable from a trigger-written one, on purpose (D-1436.4). NEU-1434's
 reader maps `NULL -> id` to `collection_attached`, quarantines it, and checks at publication
@@ -53,12 +54,17 @@ async def load_followed_franchise_ids(session: AsyncSession) -> set[int]:
 
 
 async def record_collection_admission(
-    session: AsyncSession, film_id: UUID, collection_id: int | None, *, film_inserted: bool
+    session: AsyncSession,
+    film_id: UUID,
+    collection_id: int | None,
+    *,
+    film_inserted: bool,
+    attachable: bool,
 ) -> None:
-    """Write the synthetic `NULL -> collection_id` history row for a newly admitted film in a
-    followed franchise, if it is one. Pure DB I/O — the caller commits.
+    """Write the synthetic `NULL -> collection_id` history row for a newly admitted, unreleased
+    film in a followed franchise, if it is one. Pure DB I/O — the caller commits.
 
-    The three guards are in cost order, so the follow query runs only for a film that is
+    The four guards are in cost order, so the follow query runs only for a film that is
     actually a new admission into some collection:
 
     - `film_inserted` — an *update* into a collection is the trigger's row to write, and
@@ -66,6 +72,9 @@ async def record_collection_admission(
       pre-select rather than from `credits_observed_at` or `companies_observed_at`: those are
       per-payload-section markers with their own backfill histories, and the collection has no
       marker of its own.
+    - `attachable` — `ingest.tmdb.filters.is_unreleased`, asked once by `upsert_film`
+      (D-1505.1). A film that opened before it entered the catalog did not just join its
+      franchise; its arrival is a baseline.
     - `collection_id is not None` — a film admitted outside every franchise has nothing to
       record.
     - the follow — everything else on a new film stays the baseline it has always been.
@@ -79,7 +88,7 @@ async def record_collection_admission(
     of one film, which the sweep's per-film sessions do not produce, and the alternative
     (reading `xmax` off the `RETURNING`) buys a rarer failure with a more obscure statement.
     """
-    if not film_inserted or collection_id is None:
+    if not film_inserted or not attachable or collection_id is None:
         return
     if collection_id not in await load_followed_franchise_ids(session):
         return
