@@ -15,7 +15,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# `attributes["url"]` is set only by `tests/integration/test_migrations.py`, which runs Alembic
+# in-process against scratch databases. The CLI never sets it, so prod reads the settings URL.
+url = config.attributes.get("url") or get_settings().database_url
+config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
