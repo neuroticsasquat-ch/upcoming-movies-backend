@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 
 import upmovies.models  # noqa: F401, E402  -- register every model with Base.metadata
+from tests.fixtures.db import DatabaseInventory, read_inventory, reset_database  # noqa: E402
 from upmovies.app import passwords  # noqa: E402
 from upmovies.db import Base  # noqa: E402
 
@@ -76,7 +77,18 @@ def cheap_password_hasher() -> Iterator[PasswordHasher]:
 @pytest.fixture(scope="session")
 async def test_engine():
     url = os.environ["TEST_DATABASE_URL"]
-    engine = create_async_engine(url, pool_pre_ping=True)
+    # `synchronous_commit = off` on the suite's own connections to `app_test` (NEU-1506), and on
+    # nothing else: the dev `app` database never sees it. It is for the row-by-row committers
+    # -- the import runners and sweep phases commit per item, and a one-row commit drops from
+    # ~2.3 ms to ~0.9 ms -- not for the teardown, which it does not speed up. A crash can lose
+    # the last few commits but never corrupts anything, which a throwaway test database does
+    # not mind. Deliberately not `fsync = off`: that is server-wide, would put `app` at risk
+    # too, and lives in the Coder-rendered `docker-compose.yml`.
+    engine = create_async_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={"server_settings": {"synchronous_commit": "off"}},
+    )
     async with engine.begin() as conn:
         for s in _SCHEMAS:
             await conn.execute(text(f"DROP SCHEMA IF EXISTS {s} CASCADE"))
@@ -102,19 +114,24 @@ def session_factory(test_engine):
     return async_sessionmaker(test_engine, expire_on_commit=False)
 
 
+@pytest.fixture(scope="session")
+async def db_inventory(test_engine) -> DatabaseInventory:
+    """The tables and sequences the per-test reset clears, read once after `create_all`."""
+    async with test_engine.connect() as conn:
+        return await read_inventory(conn, _SCHEMAS)
+
+
 @pytest.fixture
-async def session(test_engine) -> AsyncIterator[AsyncSession]:
+async def session(test_engine, db_inventory) -> AsyncIterator[AsyncSession]:
+    """A session on `app_test`; afterwards every table in the four schemas is emptied and every
+    sequence restarted, whichever session wrote the rows (`tests/fixtures/db.py`).
+
+    The reset needs a **superuser**: it sets `session_replication_role`, which no other role
+    may. The dev role (`dev`) and CI's service role (`root`) both are; a non-superuser role
+    fails here with "permission denied to set parameter session_replication_role"."""
     maker = async_sessionmaker(test_engine, expire_on_commit=False)
     async with maker() as s:
         yield s
         await s.rollback()
     async with test_engine.begin() as conn:
-        result = await conn.execute(
-            text(
-                "SELECT schemaname || '.' || tablename FROM pg_tables "
-                "WHERE schemaname IN ('app', 'catalog', 'news', 'ingest')"
-            )
-        )
-        tables = [r[0] for r in result]
-        if tables:
-            await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+        await reset_database(conn, db_inventory)
