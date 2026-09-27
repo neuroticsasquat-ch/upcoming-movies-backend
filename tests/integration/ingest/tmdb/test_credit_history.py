@@ -36,9 +36,14 @@ def _crew(person_id: int, job: str, department: str = "Directing") -> dict:
     }
 
 
+# Undated and unreleased, because admission writes attachments for an unreleased film only
+# (NEU-1505); `make_details` defaults to a released one.
+UNRELEASED = {"status": "Planned", "release_date": None}
+
+
 def _details(tmdb_id: int, *, cast: list[dict] | None = None, crew: list[dict] | None = None):
     return TMDBMovieDetails.model_validate(
-        make_details(tmdb_id, credits={"cast": cast or [], "crew": crew or []})
+        make_details(tmdb_id, **UNRELEASED, credits={"cast": cast or [], "crew": crew or []})
     )
 
 

@@ -307,15 +307,8 @@ class FollowListResponse(BaseModel):
 # except `user_id`, which the caller is.
 
 
-_MATCHED_KINDS = ("outside_window",)
-"""`kind` values in `app.import_job.unmatched` that name a film the import *did* match — written
-only by jobs that ran between NEU-1448 and EF-22 (NEU-1449), which moved those rows onto
-`app.import_candidate`. Dropped on the way out: a matched film listed under "titles we could
-not match" would be false, and would invite the very follow EF-21 declined."""
-
-
 class ImportUnmatchedOut(BaseModel):
-    """A title the import could not place, and why.
+    """A title the import could not place or declined as too old, and why.
 
     `name` and `year` are the source's, verbatim, because the user is going to look for them in
     their own export or their own TMDB list. The three kinds are two different failures: a
@@ -328,22 +321,24 @@ class ImportUnmatchedOut(BaseModel):
     more, but `app.import_job.unmatched` is a JSONB column and jobs that ran before M5 still
     hold rows carrying it. Polling one of those must not 500 on its own report.
 
-    A film the alert window closed on is **not** here — it was matched, and is in the catalog.
-    It is an `ImportCandidateOut` with a `skip_reason`."""
+    `outside_window` is **live** again (NEU-1505, D-1505.5): the title was matched, or was
+    certainly matchable, but falls outside the alert window, so the import declined it without
+    fetching it and it is not on the review list. A row of this kind from a NEU-1448-era job
+    meant the same thing and is returned as it is."""
 
     name: str
     year: int | None = None
-    kind: Literal["watchlist", "rating", "tmdb_missing"]
+    kind: Literal["watchlist", "rating", "tmdb_missing", "outside_window"]
 
 
 class ImportCandidateOut(BaseModel):
     """One film on an import's review list (EF-22), as `app.import_candidate` holds it.
 
-    `selected` is the tick the list opens with. A row with a `skip_reason` is unticked and not
-    selectable — the confirm ignores its id — and is listed so the user can see what the import
-    declined (EF-21). `title` is the catalog's, so a wrong Letterboxd match is visible before it
-    becomes a follow; `headline_release` is the date the row leads with, as on the follows
-    page, snapshotted when the job ran."""
+    `selected` is the tick the list opens with. Every row is followable (NEU-1505): a film the
+    alert window has closed on is declined before it gets here, and is in `unmatched` as
+    `outside_window` instead. `title` is the catalog's, so a wrong Letterboxd match is visible
+    before it becomes a follow; `headline_release` is the date the row leads with, as on the
+    follows page, snapshotted when the job ran."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -352,13 +347,12 @@ class ImportCandidateOut(BaseModel):
     title: str
     headline_release: HeadlineReleaseOut | None
     selected: bool
-    skip_reason: Literal["outside_window"] | None
 
 
 class ImportConfirmIn(BaseModel):
-    """The films the user kept from the review list (EF-22). Ids that are not selectable
-    candidates of the job are ignored rather than refused, so a stale list costs the user
-    nothing but the rows that went stale.
+    """The films the user kept from the review list (EF-22). Ids that are not candidates of
+    the job are ignored rather than refused, so a stale list costs the user nothing but the
+    rows that went stale.
 
     Capped at the size of the largest list an import can propose — both runners read at most
     5,000 rows — so a body cannot ask the confirm to look up more ids than a job could hold."""
@@ -396,19 +390,13 @@ class ImportJobOut(BaseModel):
     # not every film offered, because the user can untick some.
     watchlist_created: int
     follows_created: int
-    # Titles the import could not place. Films it placed are `candidates`, ticked or not.
+    # Titles the import could not place or declined as too old. Films it offers are
+    # `candidates`.
     unmatched: list[ImportUnmatchedOut]
     # The review list, only while `status` is `awaiting_review` (EF-22) and empty otherwise:
     # the rows are deleted once the list is confirmed or superseded, when the follows — or the
     # next import — are the record. Filled by the route, not read off the job row.
     candidates: list[ImportCandidateOut] = Field(default_factory=list)
-
-    @field_validator("unmatched", mode="before")
-    @classmethod
-    def _failures_only(cls, rows: object) -> object:
-        if not isinstance(rows, list):
-            return rows
-        return [r for r in rows if not (isinstance(r, dict) and r.get("kind") in _MATCHED_KINDS)]
 
     # The TMDB account a `tmdb` job read, for "Imported from @user"; NULL on a Letterboxd job
     # and the only thing kept about that account (D-16).

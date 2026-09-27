@@ -19,20 +19,25 @@ def hit(tmdb_id: int, title: str, year: int | None, **overrides) -> TMDBMovieSum
 
 def test_matches_on_title_and_year():
     resolved = resolve([hit(1, "Dune", 2021)], name="Dune", year=2021)
-    assert resolved == (1, "Dune")
+    # The hit's own date rides along, so an import can judge the window before fetching.
+    assert resolved == (1, "Dune", date(2021, 6, 1))
 
 
 def test_the_fold_absorbs_punctuation_spacing_and_case():
     # `squash_fold` is the same normalization `link.retrieval` uses; here it is an equality
     # test rather than a substring one.
     hits = [hit(1, "WALL·E", 2008)]
-    assert resolve(hits, name="wall e", year=2008) == (1, "WALL·E")
+    assert resolve(hits, name="wall e", year=2008) == (1, "WALL·E", date(2008, 6, 1))
 
 
 def test_matches_the_original_title_too():
     # A user whose Letterboxd is set to original titles exports the French name.
     hits = [hit(1, "Anatomy of a Fall", 2023, original_title="Anatomie d'une chute")]
-    assert resolve(hits, name="Anatomie d'une chute", year=2023) == (1, "Anatomy of a Fall")
+    assert resolve(hits, name="Anatomie d'une chute", year=2023) == (
+        1,
+        "Anatomy of a Fall",
+        date(2023, 6, 1),
+    )
 
 
 def test_a_year_one_out_still_matches():
@@ -48,12 +53,12 @@ def test_a_year_two_out_does_not():
 def test_an_exact_year_beats_a_year_that_is_one_out():
     # Both passes run over the whole hit list, exact first, so TMDB's ordering cannot decide it.
     hits = [hit(1, "Dune", 2020, popularity=99.0), hit(2, "Dune", 2021, popularity=1.0)]
-    assert resolve(hits, name="Dune", year=2021) == (2, "Dune")
+    assert resolve(hits, name="Dune", year=2021) == (2, "Dune", date(2021, 6, 1))
 
 
 def test_popularity_breaks_a_tie_between_exact_matches():
     hits = [hit(1, "Heat", 1995, popularity=3.0), hit(2, "Heat", 1995, popularity=40.0)]
-    assert resolve(hits, name="Heat", year=1995) == (2, "Heat")
+    assert resolve(hits, name="Heat", year=1995) == (2, "Heat", date(1995, 6, 1))
 
 
 def test_a_tie_on_popularity_is_broken_deterministically():

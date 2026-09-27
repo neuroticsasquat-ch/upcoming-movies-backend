@@ -29,9 +29,11 @@ film *was* observed and TMDB listed no companies for it — and a studio arrivin
 genuine attachment.
 
 EF-4 is the one exception to it, and it is `admission_company_attachments` rather than a
-change to the diff: on a first observation a company **somebody follows at that moment** is
-written as `added`, because a film entering the catalog already carrying a followed studio is
-exactly the beat that follow was made for.
+change to the diff: on a first observation of a film **that has yet to open**, a company
+**somebody follows at that moment** is written as `added`, because a film entering the catalog
+already carrying a followed studio is exactly the beat that follow was made for. A released
+film's first observation is a baseline outright (NEU-1505, D-1505.1); the caller asks
+`ingest.tmdb.filters.is_unreleased` once per upsert.
 
 Which of the two a film is, is read from the durable `film.companies_observed_at` marker and
 **not** from `film_production_company` being empty, for the reason the credit half documents at
@@ -122,9 +124,10 @@ def diff_companies(
 def admission_company_attachments(
     current: Collection[int], *, followed: Collection[int]
 ) -> list[CompanyChange]:
-    """The `added` rows a **first** observation writes: every incoming company somebody
-    follows at that moment (EF-4, D-1436.2). Everything else on the new film is the baseline
-    it has always been.
+    """The `added` rows a **first** observation of an unreleased film writes: every incoming
+    company somebody follows at that moment (EF-4, D-1436.2). Everything else on the new film
+    is the baseline it has always been. The release gate is the caller's (`upsert_film`,
+    D-1505.1), so this stays pure.
 
     `ingest.tmdb.credit_history.admission_attachments` for studios, and a separate function
     rather than a branch inside `diff_companies` for that module's reason: the baseline rule

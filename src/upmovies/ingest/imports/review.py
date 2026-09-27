@@ -48,8 +48,8 @@ async def confirm(
 ) -> ImportJob:
     """Follow the films the user kept, finish the job, and return it. Commits.
 
-    Ids that are not selectable candidates of this job — skipped for the alert window, from
-    another job, or simply unknown — are ignored rather than refused (the ticket's rule): the
+    Ids that are not candidates of this job — from another job, or simply unknown — are
+    ignored rather than refused (the ticket's rule): the
     user answered a list, and the answer is whichever of its ticked rows they sent.
 
     `follows_created` counts the confirmed rows, as EF-22 words it — every kept film, including

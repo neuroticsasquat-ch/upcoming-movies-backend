@@ -823,7 +823,7 @@ How long a film stays *interesting* after release: from announcement until
 `Canceled` (D-46; `catalog.queries.ALERT_WINDOW_DEAD_STATUSES`). It no longer governs what an
 entity follow covers — nothing does, an entity follow covers events, not films (EF-3). It
 still bounds the provider poll, an entity page's "recently released" list and which films an
-**import** may propose (EF-21). A **title** follow ignores it entirely — the user asked for
+**import** may propose (EF-21; a film outside it is declined before it is fetched, NEU-1505). A **title** follow ignores it entirely — the user asked for
 that film, in any state, at any age. The name outlived the alerts it once bounded (ADR-0021):
 it is kept because the poll, the entity page and the import all key on it.
 _Avoid_: in play (the working set's term, ending on release day), coverage window (retired
@@ -833,7 +833,9 @@ with coverage), active, upcoming.
 A user's one-off request to bring a library in — a Letterboxd export or a TMDB account's
 watchlist — tracked as a job. It reads the watchlist only, proposes the films inside the
 **alert window** as a review list, and writes one **title** follow per film the user confirms
-(EF-20 to EF-22). It follows no people. An import that is not confirmed follows nothing, and
+(EF-20 to EF-22). It follows no people. A film outside the window is never fetched, never
+enters the catalog and never appears on the list: the list holds followable films only and
+states how many titles it left out (NEU-1505). An import that is not confirmed follows nothing, and
 the user's next import discards it.
 _Avoid_: sync, link (nothing stays connected; the TMDB session is dropped when the job ends),
 migration.
