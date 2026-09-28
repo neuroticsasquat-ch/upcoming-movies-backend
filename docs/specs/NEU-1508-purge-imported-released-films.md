@@ -235,6 +235,10 @@ undated films only; the refresh phase re-reads films already in `catalog.film`; 
 candidate index is built from live film rows under `active_film_clause`. If TMDB ever
 re-dated one of these films to the future, discover or the sweep could admit it as a new row
 with a new UUID; that is a new, legitimate observation and the old follows do not return.
+*One gap remained after this shipped: an undated TMDB list entry, or a search date that
+disagreed with the fetched details, let an import upsert an out-of-window film before
+`in_alert_window` declined it. NEU-1510 closed it by checking the fetched details before the
+upsert.*
 
 ### 3.4 Frontend
 

@@ -833,9 +833,11 @@ with coverage), active, upcoming.
 A user's one-off request to bring a library in — a Letterboxd export or a TMDB account's
 watchlist — tracked as a job. It reads the watchlist only, proposes the films inside the
 **alert window** as a review list, and writes one **title** follow per film the user confirms
-(EF-20 to EF-22). It follows no people. A film outside the window is never fetched, never
-enters the catalog and never appears on the list: the list holds followable films only and
-states how many titles it left out (NEU-1505). The out-of-window films that imports admitted
+(EF-20 to EF-22). It follows no people. A film outside the window never enters the catalog
+through an import and never appears on the list: one whose list or search date already says so
+is not even fetched, and one only its fetched details give away is dropped before anything is
+written (NEU-1505, NEU-1510). The list holds followable films only and states how many titles it
+left out. The out-of-window films that imports admitted
 before that gate were purged once, follows and all (NEU-1508): a film first observed outside
 the window was never announced, so "films are never deleted" did not protect it. An import
 that is not confirmed follows nothing, and the user's next import discards it.
