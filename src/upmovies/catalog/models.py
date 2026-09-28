@@ -138,11 +138,12 @@ class Film(Base):
     tmdb_missing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     """When TMDB was last confirmed to have no entry at this film's id — NULL while it is live.
 
-    A tombstone for the *TMDB entry*, not for the film. Films are never deleted (spec §4.4:
-    "if we announced it, we do not un-announce it"), so a missing film keeps its page, its
-    events and its linked stories. All this column does is take the id off the sweep's normal
-    refresh cadence, which is the one place a permanently dead id costs a request every single
-    day (NEU-1124).
+    A tombstone for the *TMDB entry*, not for the film. Films are never deleted once announced
+    (spec §4.4: "if we announced it, we do not un-announce it"), so a missing film keeps its
+    page, its events and its linked stories. NEU-1508 removed, once, the films pre-NEU-1505
+    imports had admitted already outside the alert window, which were never announced. All this
+    column does is take the id off the sweep's normal refresh cadence, which is the one place a
+    permanently dead id costs a request every single day (NEU-1124).
 
     Load-bearing because a 404 is self-perpetuating without it: the refresh set is ordered
     stalest-first on `updated_at`, and a film that cannot be fetched never has its `updated_at`

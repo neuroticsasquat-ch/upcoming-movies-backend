@@ -835,8 +835,10 @@ watchlist — tracked as a job. It reads the watchlist only, proposes the films 
 **alert window** as a review list, and writes one **title** follow per film the user confirms
 (EF-20 to EF-22). It follows no people. A film outside the window is never fetched, never
 enters the catalog and never appears on the list: the list holds followable films only and
-states how many titles it left out (NEU-1505). An import that is not confirmed follows nothing, and
-the user's next import discards it.
+states how many titles it left out (NEU-1505). The out-of-window films that imports admitted
+before that gate were purged once, follows and all (NEU-1508): a film first observed outside
+the window was never announced, so "films are never deleted" did not protect it. An import
+that is not confirmed follows nothing, and the user's next import discards it.
 _Avoid_: sync, link (nothing stays connected; the TMDB session is dropped when the job ends),
 migration.
 

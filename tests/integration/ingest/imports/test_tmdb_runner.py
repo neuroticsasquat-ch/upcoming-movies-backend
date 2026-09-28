@@ -8,6 +8,7 @@ film and no follows, and a watchlisted film outside the alert window is declined
 own date, before any `/movie/{id}` is spent on it (NEU-1505)."""
 
 import json
+from datetime import date
 from unittest.mock import patch
 
 import httpx
@@ -15,6 +16,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from tests.fixtures.catalog import add_film
 from tests.fixtures.tmdb import make_details
 from upmovies.app.models import Follow, ImportCandidate, ImportJob
 from upmovies.app.repos import import_job_repo
@@ -292,6 +294,26 @@ async def test_a_film_outside_the_window_is_not_upserted(session, session_factor
     await _run(session, session_factory, user)
 
     assert OUTSIDE_WINDOW_TMDB_ID not in {f.tmdb_id for f in await _rows(session, Film)}
+
+
+@respx.mock
+async def test_a_released_film_already_in_the_catalog_is_declined_too(
+    session, session_factory, user
+):
+    """D-1505.6's "already in the catalog" half, which NEU-1508's purge relies on: the list
+    entry's date declines the film before anything looks at the catalog, so a stored released
+    film is not re-fetched or offered — and a purged one could not come back."""
+    await add_film(
+        session, OUTSIDE_WINDOW_TMDB_ID, release_date=date(2019, 6, 1), status="Released"
+    )
+    await session.commit()
+    _mock_tmdb()
+
+    job = await _run(session, session_factory, user)
+
+    assert not _details_requested(OUTSIDE_WINDOW_TMDB_ID)
+    assert OUTSIDE_WINDOW_TMDB_ID not in await _candidates(session, job)
+    assert {"name": "Film 1003", "year": 2019, "kind": "outside_window"} in job.unmatched
 
 
 @respx.mock
