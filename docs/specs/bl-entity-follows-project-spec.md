@@ -293,7 +293,9 @@ Numbered `EF-n` so tickets can cite them. Each names the accepted decision it co
   (2026-09-27): a film outside the window is **declined before it is fetched** (Letterboxd off
   the row's year, then the search hit's date; TMDB off the summary's date), never upserted, and
   reported under `unmatched` as kind `outside_window`. The review list holds followable films
-  only and states the counts it left out; `import_candidate.skip_reason` is retired.*
+  only and states the counts it left out; `import_candidate.skip_reason` is retired. The
+  out-of-window films earlier imports had already admitted were purged once by NEU-1508
+  (2026-09-28), title follows and events with them.*
 - **EF-22 The import is two-phase.** The job resolves titles and upserts films as today, then
   stops at a new status **`awaiting_review`** with its candidates in `app.import_candidate
   (job_id, film_id, tmdb_id, title, headline_release, selected DEFAULT true, skip_reason

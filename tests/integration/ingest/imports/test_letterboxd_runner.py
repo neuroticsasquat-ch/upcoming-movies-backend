@@ -420,6 +420,33 @@ async def test_a_film_outside_the_window_is_not_upserted(session, session_factor
 
 
 @respx.mock
+async def test_a_released_film_already_in_the_catalog_is_declined_too(
+    session, session_factory, user
+):
+    """D-1505.6's "already in the catalog" half, which NEU-1508's purge relies on: the hit's
+    date declines the row before anything looks at the catalog, so a stored released film is
+    not proposed, not re-fetched and not offered — and a purged one could not come back."""
+    await add_film(
+        session,
+        RECENTLY_GONE_TMDB_ID,
+        release_date=datetime.fromisoformat(DETAILS[RECENTLY_GONE_TMDB_ID][0]).date(),
+        status="Released",
+    )
+    await session.commit()
+    export = parse_upload(watchlist_csv([("Recently Gone", RECENT_YEAR)]))
+    _mock_tmdb()
+
+    job = await _run(session, session_factory, user, export)
+
+    assert _searched() == {"Recently Gone"}
+    assert _requested(f"/movie/{RECENTLY_GONE_TMDB_ID}") == []
+    assert job.unmatched == [
+        {"name": "Recently Gone", "year": RECENT_YEAR, "kind": "outside_window"}
+    ]
+    assert await _candidates(session, job) == {}
+
+
+@respx.mock
 async def test_a_canceled_film_is_skipped_however_recent_its_date(session, session_factory, user):
     # The window's status term is `Canceled` alone (NEU-1417) — a film called off next year
     # has a date well inside the ceiling and still nothing to say.

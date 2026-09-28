@@ -75,8 +75,12 @@ import, because the rule is what is wrong.
   TMDB account: the same check on each `TMDBMovieSummary.release_date` before `propose_film`.
   A film already in the catalog is judged by the same date rule first, so an old film admitted
   before this fix is reported `outside_window` rather than offered.
-- **D-1505.7 Old films already admitted by imports stay in the catalog.** Harmless once the
-  admission rule is gated; a purge would also have to reason about follows and events on them.
+- ~~**D-1505.7 Old films already admitted by imports stay in the catalog.** Harmless once the
+  admission rule is gated; a purge would also have to reason about follows and events on them.~~
+  *Reversed by NEU-1508 (2026-09-28): they have no business in the database. A one-off script
+  removes every film that was outside the alert window on the day it was created, by the
+  release date it had then, deleting its title follows and events and unlinking its stories;
+  see `docs/specs/NEU-1508-purge-imported-released-films.md`.*
 - **D-1505.8 The wrongly published cards are deleted, by a dry-run script, after an audit.**
   Supersession does not fit: a superseded card stays on the public feed, the film page and
   title-follow timelines (only the entity arms and the digest exclude it), and needs a removal

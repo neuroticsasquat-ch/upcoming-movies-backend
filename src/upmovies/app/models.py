@@ -201,7 +201,9 @@ class Follow(Base):
     the DTO normalises the value on the way in so `"012"` and `"12"` cannot become two follows.
     The cost is that
     the catalog cannot cascade a deletion into this table — acceptable, because films are never
-    deleted (spec §4.4) and people, companies and collections are only ever upserted."""
+    deleted once announced (spec §4.4) and people, companies and collections are only ever
+    upserted. NEU-1508 removed, once, the films pre-NEU-1505 imports had admitted already outside
+    the alert window, which were never announced, and deleted their title follows with them."""
 
     __tablename__ = "follow"
     __table_args__ = (
