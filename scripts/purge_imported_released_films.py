@@ -26,9 +26,10 @@ already outside the window was never announced.
 
 For each film, in one transaction:
 
-- linked stories are unlinked and marked `rejected` (D-1508.3). The FK would only null
-  `film_id`, leaving `link_status = 'linked'` on a row pointing at nothing, and the linker
-  only revisits `pending`;
+- linked stories are unlinked and marked `rejected` (D-1508.3), with the confidence cleared
+  and a `link_note` as a manual unlink writes them. The FK would only null `film_id`, leaving
+  `link_status = 'linked'` on a row pointing at nothing, and the linker only revisits
+  `pending`;
 - events go explicitly — `event_story`, `event_summary`, `event` — after the audit has read the
   `app.notification` rows that cascade with them (D-1508.6). There should be none left after
   `prune_admission_cards.py`;
@@ -88,6 +89,10 @@ IMPORTS_SHIPPED = datetime(2026, 9, 17, tzinfo=UTC)
 # value is harmless and an earlier one misses films: if the deploy lands after this date, pass
 # `--before` with the deploy's timestamp.
 DEFAULT_CUTOFF = datetime(2026, 9, 28, tzinfo=UTC)
+
+PURGED_LINK_NOTE = "purged-film"
+"""The `link_note` on a story this script unlinked — `link.moderation._reject`'s shape, so a
+rejected row carries no confidence and says why it was rejected."""
 
 
 @dataclass
@@ -225,7 +230,13 @@ async def purge(session: AsyncSession, *, apply: bool, before: datetime = DEFAUL
         await session.execute(
             update(Story)
             .where(Story.film_id.in_(film_ids))
-            .values(film_id=None, link_status="rejected")
+            .values(
+                film_id=None,
+                link_status="rejected",
+                link_confidence=None,
+                link_note=PURGED_LINK_NOTE,
+                linked_at=func.now(),
+            )
         )
         if event_ids:
             await session.execute(delete(EventStory).where(EventStory.event_id.in_(event_ids)))

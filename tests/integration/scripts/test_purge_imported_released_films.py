@@ -12,13 +12,18 @@ from xml.etree import ElementTree
 
 from sqlalchemy import func, select
 
-from scripts.purge_imported_released_films import DEFAULT_CUTOFF, IMPORTS_SHIPPED, purge
+from scripts.purge_imported_released_films import (
+    DEFAULT_CUTOFF,
+    IMPORTS_SHIPPED,
+    PURGED_LINK_NOTE,
+    purge,
+)
 from tests.fixtures.catalog import add_film
 from upmovies.app.models import Follow, Notification, User
 from upmovies.catalog.models import Film, FilmFieldChange
 from upmovies.catalog.ref import film_ref
 from upmovies.config import get_settings
-from upmovies.news.models import Event, EventSummary, Story
+from upmovies.news.models import Event, EventStory, EventSummary, Story
 
 # The night of the incident import. Fixture rows are stamped with it explicitly: every column
 # involved defaults to `now()`, and a fixture left to the default drifts out of the window the
@@ -73,7 +78,7 @@ async def _candidate_ids(session) -> set[int]:
 
 async def _button(session, make_user) -> tuple[Film, Story, Event, User]:
     """A pre-fix import film with everything the purge must account for: a title follow, a
-    linked story, and a catalog card with a summary and a digest row."""
+    linked story, and a catalog card with that story, a summary and a digest row."""
     user = await make_user(email="tom@example.com")
     film = await _film(session, 4922, release_date=BUTTON)
     story = Story(
@@ -82,6 +87,8 @@ async def _button(session, make_user) -> tuple[Film, Story, Event, User]:
         title="Fincher looks back at Benjamin Button",
         film_id=film.id,
         link_status="linked",
+        link_confidence=0.91,
+        linked_at=NOW,
     )
     event = Event(
         film_id=film.id,
@@ -97,6 +104,7 @@ async def _button(session, make_user) -> tuple[Film, Story, Event, User]:
         )
     )
     await session.flush()
+    session.add(EventStory(event_id=event.id, story_id=story.id))
     session.add(
         EventSummary(
             event_id=event.id,
@@ -135,6 +143,10 @@ async def test_a_dry_run_reports_the_film_its_follow_story_and_event_and_deletes
     assert await _count(session, Film) == 1
     assert await _count(session, Follow) == 1
     assert await _count(session, Event) == 1
+    assert await _count(session, EventStory) == 1
+    unchanged = await session.get(Story, story.id)
+    assert unchanged is not None
+    assert (unchanged.film_id, unchanged.link_status) == (film.id, "linked")
 
 
 async def test_apply_removes_the_film_follow_and_card_and_unlinks_the_story(session, make_user):
@@ -148,11 +160,14 @@ async def test_apply_removes_the_film_follow_and_card_and_unlinks_the_story(sess
     assert await _count(session, Follow) == 0
     assert await _count(session, Event, Event.id == event_id) == 0
     assert await _count(session, EventSummary, EventSummary.event_id == event_id) == 0
+    assert await _count(session, EventStory, EventStory.event_id == event_id) == 0
     assert await _count(session, Notification, Notification.event_id == event_id) == 0
     # The article is fetched, not ours to lose; it just no longer claims a link (D-1508.3).
     kept = await session.get(Story, story_id)
     assert kept is not None
     assert (kept.film_id, kept.link_status) == (None, "rejected")
+    # Shaped like a manual unlink: a rejected row claims no confidence and says why.
+    assert (kept.link_confidence, kept.link_note) == (None, PURGED_LINK_NOTE)
 
 
 async def test_a_film_upcoming_when_first_observed_is_untouched(session):
@@ -163,6 +178,10 @@ async def test_a_film_upcoming_when_first_observed_is_untouched(session):
     # The sweep case seen locally: admitted undated, then back-dated by years.
     undated = await _film(session, 102, release_date=None)
     await _redated(session, undated, old=None, new="2017-03-11")
+    # Admitted dated and upcoming, then back-dated by years: only the date at creation keeps
+    # it, where the first film's current date would have kept it anyway.
+    backdated = await _film(session, 103, release_date=date(2026, 12, 1))
+    await _redated(session, backdated, old="2026-12-01", new="2017-03-11")
     await session.commit()
 
     assert await _candidate_ids(session) == set()

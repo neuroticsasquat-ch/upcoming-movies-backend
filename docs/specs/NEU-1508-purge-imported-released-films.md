@@ -204,7 +204,11 @@ WHERE f.created_at >= :imports_shipped AND f.created_at < :before
 ```
 
 `old_value` is JSONB: a JSON `null` for "was undated" (which `#>> '{}'` renders as SQL NULL,
-so the film is kept) or a JSON string date. Write it with SQLAlchemy Core in the script, as
+so the film is kept) or a JSON string date. **Amended at implementation:** the `COALESCE` above
+falls through to the *current* `release_date` when that JSON `null` renders as SQL NULL, which
+purges exactly the back-dated sweep films D-1508.1 keeps. The script branches on whether a
+change row exists (`CASE WHEN first_change.id IS NOT NULL THEN old_value #>> '{}' ELSE
+release_date::text END`); the undated-film test fails under the `COALESCE`. Write it with SQLAlchemy Core in the script, as
 the precedent does; the SQL above is the meaning, not the code.
 
 ### 3.2 What the cascade takes
