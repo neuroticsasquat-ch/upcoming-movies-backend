@@ -463,10 +463,38 @@ async def test_a_canceled_film_is_skipped_however_recent_its_date(session, sessi
 
     job = await _run(session, session_factory, user, export)
 
-    # The date let it through to the fetch; the stored row's status declines it, the same way.
+    # The date let it through to the fetch; the fetched status declines it, the same way, and
+    # before the film is written (NEU-1510).
+    assert 1001 not in {f.tmdb_id for f in await _rows(session, Film)}
     assert await _candidates(session, job) == {}
     assert job.unmatched == [{"name": "Dune", "year": NEXT_YEAR, "kind": "outside_window"}]
     assert job.watchlist_created == 0
+
+
+@respx.mock
+async def test_a_hit_whose_details_disagree_across_the_window_line_is_not_written(
+    session, session_factory, user
+):
+    """NEU-1510: the hit's date is inside the window, so the row is fetched, but `/movie/{id}`
+    puts the film's primary date years back. The details decide, before the upsert: nothing
+    enters the catalog, and the row is reported by the export's name and year."""
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR)]))
+    _mock_tmdb()
+    respx.get(f"{BASE_URL}/movie/1001").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_details(
+                1001, release_date="2019-06-01", status="Released", credits=_credits(1001)
+            ),
+        )
+    )
+
+    job = await _run(session, session_factory, user, export)
+
+    assert len(_requested("/movie/1001")) == 1
+    assert 1001 not in {f.tmdb_id for f in await _rows(session, Film)}
+    assert await _candidates(session, job) == {}
+    assert job.unmatched == [{"name": "Dune", "year": NEXT_YEAR, "kind": "outside_window"}]
 
 
 @respx.mock

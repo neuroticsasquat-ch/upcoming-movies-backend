@@ -75,6 +75,10 @@ import, because the rule is what is wrong.
   TMDB account: the same check on each `TMDBMovieSummary.release_date` before `propose_film`.
   A film already in the catalog is judged by the same date rule first, so an old film admitted
   before this fix is reported `outside_window` rather than offered.
+  *Gap closed by NEU-1510: when the runner held no date (an undated TMDB list entry) or the
+  fetched details disagreed with it, the upsert still wrote the film before `in_alert_window`
+  declined it. A film with no stored row is now judged on its fetched details before anything
+  is written.*
 - ~~**D-1505.7 Old films already admitted by imports stay in the catalog.** Harmless once the
   admission rule is gated; a purge would also have to reason about follows and events on them.~~
   *Reversed by NEU-1508 (2026-09-28): they have no business in the database. A one-off script

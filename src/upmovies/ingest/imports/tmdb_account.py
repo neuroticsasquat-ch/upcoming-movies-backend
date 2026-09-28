@@ -26,7 +26,8 @@ No resolution step, unlike Letterboxd: TMDB's ids are authoritative, so the only
 reach the report names a cause rather than a list — TMDB answering 404 for a film its own list
 points at (`kind=tmdb_missing`) — and a film the alert window has closed on (EF-21), which is
 declined as `outside_window` off the list entry's own `release_date` before any `/movie/{id}`
-is spent on it (NEU-1505, D-1505.6), or after the upsert when the stored row says `Canceled`.
+is spent on it (NEU-1505, D-1505.6), or after the fetch when the details say otherwise — an
+undated entry, a disagreeing date, `Canceled` — before a new film is written (NEU-1510).
 
 Follows the same pipeline contract as the Letterboxd runner: its own session factory, a commit
 per row, a throttled heartbeat, and a wrapper that always finalizes."""

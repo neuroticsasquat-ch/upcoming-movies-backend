@@ -316,28 +316,58 @@ async def test_a_released_film_already_in_the_catalog_is_declined_too(
     assert {"name": "Film 1003", "year": 2019, "kind": "outside_window"} in job.unmatched
 
 
-@respx.mock
-async def test_an_undated_list_entry_is_fetched_and_judged_on_the_stored_row(
-    session, session_factory, user
-):
-    # A list entry with no date says nothing about the window, so it is fetched as before and
-    # the post-upsert check decides — here, a 2019 film TMDB's list simply had no date for.
-    _mock_tmdb()
-    respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/watchlist/movies").mock(
+def _mock_undated_watchlist_entry(tmdb_id: int):
+    return respx.get(f"{BASE_URL}/account/{ACCOUNT_ID}/watchlist/movies").mock(
         return_value=httpx.Response(
             200,
             json={
                 "page": 1,
                 "total_pages": 1,
                 "total_results": 1,
-                "results": [{"id": 1003, "title": "Film 1003", "popularity": 10.0}],
+                "results": [{"id": tmdb_id, "title": f"Film {tmdb_id}", "popularity": 10.0}],
             },
         )
     )
 
+
+@respx.mock
+async def test_an_undated_list_entry_is_fetched_and_judged_on_its_details(
+    session, session_factory, user
+):
+    # A list entry with no date says nothing about the window, so it is fetched as before, and
+    # the fetched details decide before anything is written (NEU-1510) — here, a 2019 film
+    # TMDB's list simply had no date for.
+    _mock_tmdb()
+    _mock_undated_watchlist_entry(1003)
+
     job = await _run(session, session_factory, user)
 
     assert _details_requested(1003)
+    assert 1003 not in {f.tmdb_id for f in await _rows(session, Film)}
+    assert await _candidates(session, job) == {}
+    assert job.unmatched == [{"name": "Film 1003", "year": None, "kind": "outside_window"}]
+
+
+@respx.mock
+async def test_a_stale_out_of_window_film_already_in_the_catalog_is_refreshed_not_deleted(
+    session, session_factory, user
+):
+    """D-1510.2: a film the catalog held before the import exists on its own terms. Its stale
+    credits send it to TMDB like any other, it is refreshed, and the stored row declines it —
+    an import never deletes a film it did not create."""
+    film = await add_film(
+        session, OUTSIDE_WINDOW_TMDB_ID, release_date=date(2019, 6, 1), status="Released"
+    )
+    await session.commit()
+    _mock_tmdb()
+    _mock_undated_watchlist_entry(OUTSIDE_WINDOW_TMDB_ID)
+
+    job = await _run(session, session_factory, user)
+
+    assert _details_requested(OUTSIDE_WINDOW_TMDB_ID)
+    stored = await session.get(Film, film.id, populate_existing=True)
+    assert stored is not None
+    assert stored.credits_observed_at is not None
     assert await _candidates(session, job) == {}
     assert job.unmatched == [{"name": "Film 1003", "year": None, "kind": "outside_window"}]
 
@@ -359,8 +389,9 @@ async def test_a_canceled_film_is_skipped_however_recent_its_date(session, sessi
 
     job = await _run(session, session_factory, user)
 
-    # Its list date is inside the window, so only the stored row's status can decline it, and
-    # it is declined the same way: reported, not listed.
+    # Its list date is inside the window, so only the fetched status can decline it, and it is
+    # declined the same way: reported, not listed — and not written (NEU-1510).
+    assert 1001 not in {f.tmdb_id for f in await _rows(session, Film)}
     assert await _candidates(session, job) == {}
     assert job.unmatched == [{"name": "Film 1001", "year": 2099, "kind": "outside_window"}]
     assert job.watchlist_created == 0
