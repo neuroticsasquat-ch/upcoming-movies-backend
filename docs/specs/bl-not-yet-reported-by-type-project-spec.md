@@ -146,8 +146,13 @@ significant first:
 - `credit_removed` lands in Other updates during the window between a frontend deploy and the
   backend migration (NR-12). That is what frees the deploy order.
 - A heading with nothing under it renders nothing, the same NEU-1467 rule as the sections.
-- The map and the order live in the frontend (NR-7). The order is hand-mirrored from
-  `_EVENT_STAGE`, and a test pins it.
+- The map and the order live in the frontend (NR-7). The order is a hand-written list, and a
+  test pins that list as a literal. It cannot be derived from `_EVENT_STAGE`: Crew, Studios
+  and Franchise all map to the `announced` stage and tie there, so their order is a product
+  choice (people before organisations); and `canceled` is the top-ranked stage yet files under
+  Production status, because a reader looks for a cancellation where a film's status lives.
+  "Follows the significance ranking" means Now available through Release date and Cast come
+  out as the arc ranks them, with those two exceptions.
 
 **NR-4 — A film row per (update type, film).**
 - A film with changes of two types that day appears under both headings, each time with the full
@@ -239,15 +244,28 @@ significant first:
 - The docstrings that name `credit_removed` in `ingest/sweep/company_events.py` and
   `confirm_events.py`.
 
-The ticket greps for `credit_removed` / `CREDIT_REMOVED` across `src/` and `tests/`. It leaves
-the string only in historical migrations.
+The ticket greps for `credit_removed` / `CREDIT_REMOVED` across `src/`, `tests/` and `scripts/`.
+It leaves the string only in historical migrations. `scripts/` is not optional:
+`scripts/backfill_credit_supersessions.py` imports `CREDIT_REMOVED_EVENT_TYPE` and would fail at
+import once the constant goes, and `scripts/backfill_credit_removals.py` drives the detachment
+phase and must still run.
 
 **NR-12 — Existing `credit_removed` cards are migrated, then the type is retired.** It is one
 Alembic revision, with data and constraint together:
 
 1. Add `cast_removed` and `crew_removed` to `ck_event_type`.
 2. For each `credit_removed` event, read its credits' roles from the
-   `catalog.film_credit_change` rows whose `carded_by_event_id` is that event:
+   `catalog.film_credit_change` rows the sweep carded it from. **Not** via
+   `carded_by_event_id`: no removal card has ever set that column. Only
+   `news.attachment_confirm` writes it, when it stamps a story card, and the local snapshot
+   has 28 removal cards with 0 credit rows linked that way. The card's natural key is the one
+   `group_detachments` grouped on: the rows at the card's `film_id` with `change = 'removed'`
+   and `changed_at = occurred_at`. Restrict those rows to people the card names, by joining
+   `catalog.person` and matching `normalize_name(person.name)` (`news/subject_key.py`, or its
+   `sql_normalized_name`) against the card's `subject_key`: the prior-attachment gate drops
+   people, so an unfiltered join over-counts (locally it reports 2 mixed cards; filtered, 1).
+   Each row's class is `recorded_role(credit_type, job)` (`catalog/seed_grade.py`), `cast` or
+   not.
    - **Single class** (the common case; 27 of 28 in the stale local snapshot): retype in place.
      The id, summary, timestamps and every FK reference stay as they are.
    - **Mixed**: the original event keeps its id and becomes the **cast** half. A new event is
@@ -255,7 +273,6 @@ Alembic revision, with data and constraint together:
      `occurred_at`, `created_at` and `status`, and with `subject_key` split by class. Both
      halves' `event_summary` rows are re-rendered from their class's credits, using the same
      deterministic renderer, `model` and `prompt_version` the sweep writes.
-     - Re-point the crew-class `film_credit_change.carded_by_event_id` rows to the new half.
      - Re-point the crew-class attachment cards (`crew_attached`) whose `superseded_by` is the
        original to the new half.
      - Copy the original's `app.notification` rows (keyed
@@ -270,9 +287,21 @@ since `uq_event_catalog_change` would reject two `credit_removed` cards at one `
 It therefore deletes the crew half of each split pair after re-pointing its references back.
 Document it as lossy for the crew half's summary.
 
-If any `credit_removed` card has no `carded_by_event_id` credit rows to read its roles from, the
-migration falls back to parsing its summary with the renderer's fixed phrasings. It logs every
-such card and fails if a summary matches neither class.
+If a `credit_removed` card has no matching `film_credit_change` row for one of the names on its
+`subject_key` (none locally), the migration **fails** naming the card rather than guessing: the
+history table is the only record of who was which class, and a summary parse would break on a
+name with a period in it ("D.C. Shen" is on the one mixed card locally). Fix the data and re-run.
+
+**The renderer in a migration.** "The same deterministic renderer, `model` and `prompt_version`
+the sweep writes" means importing `render_summary` / `CreditsDetached` / `CreditDetached`,
+`DETERMINISTIC_MODEL` and `TEMPLATE_VERSION` from `synthesize.deterministic` inside the
+revision. Nine existing revisions already import from `upmovies`, so that is allowed, and it is
+accepted here on purpose: a later wording change to the renderer changes what a *re-run* of this
+migration writes, but the migration runs once per database, and the alternative, copying four
+phrasings into the revision, drifts in the other direction. The migration writes the
+`news.event_summary` rows itself (insert for the crew half, update for the cast half, same
+`source_updated_at` as the original); the sweep's `write_deterministic_summary` is async and
+refuses an edited row, so it is not called.
 
 ### Labels
 
@@ -298,6 +327,12 @@ such card and fails if a summary matches neither class.
   title-case fallback as "Credit Removed".
 - A test pins the frontend map to a copied list of the digest's keys and strings, so the drift
   is caught where the frontend can see it.
+- **`other` leaves the frontend map.** Today `EVENT_TYPE_LABELS` carries `other: "Update"` and
+  the digest map does not (its `digest_beat_label` *falls back* to "Update" for any unknown
+  type). Key-for-key equality means the frontend drops the entry: `other` is in
+  `HIDDEN_EVENT_TYPES` and never reaches a surface, nothing in the frontend reads the key, and
+  if one ever did arrive the title-case fallback would read "Other", which is no worse. The two
+  maps are then literally equal.
 - **Update-type headings are not beat labels.** "Trailer" the heading and "New trailer" the
   pill are different strings on purpose: a heading names a kind, a pill names a beat.
 
@@ -324,13 +359,25 @@ its beat pill, so the two repos can deploy in either order:
 Linear project: https://linear.app/neuroticsasquatch/project/bl-not-yet-reported-by-type-c8cdaf65f491
 (`P-NEU-94`). The milestone descriptions carry the shared contracts.
 
-## 7. Owed after merge
+## 7. Owed around merge
 
-- A real-data check of the migration against a prod snapshot: count mixed cards (the local
-  snapshot is stale at 2026-09-01 and had one) and confirm none has `edited_at` set.
+- **Before NEU-1518 deploys**, not after: a real-data check of the migration against a prod
+  snapshot. Count the mixed cards with the NR-12 query (the local snapshot is stale at
+  2026-09-01 and had one), confirm every name on every card matches a credit row, and confirm
+  none has `edited_at` set. It is a dry run of the migration's own reads, so it belongs before
+  the revision runs for real.
 - An eyeball of a backfill-tall day, ADR-0016's 70+ row case, on a phone. Update-type headings
   should make it shorter to scan, not longer.
 - Optional, not ticketed: frontend docblocks that misdescribe backend order. `groupByDay` says
   `last_created_at DESC`, and `FeedDayPosters` / `dayPosterLeads` say "by popularity". The
   backend actually orders day → significance → natural title. Fix them if the layout ticket
   touches those files.
+
+## 8. Revisions
+
+- **2026-10-01, readiness review.** NR-12 had the migration reading roles through
+  `film_credit_change.carded_by_event_id`, a column no removal card sets; it now reads the
+  `(film_id, 'removed', changed_at = occurred_at)` rows filtered to the card's `subject_key`,
+  and fails rather than parsing summaries. NR-11's grep gained `scripts/`. NR-3 records that
+  the heading order is a pinned literal, not a derivation from `_EVENT_STAGE`. NR-14 decides
+  that `other` leaves the frontend map. §7's prod-snapshot check moved to before deploy.
