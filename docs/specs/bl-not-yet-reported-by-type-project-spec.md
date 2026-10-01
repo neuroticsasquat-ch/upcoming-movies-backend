@@ -53,6 +53,16 @@ role class into `cast_removed` and `crew_removed` and migrates the existing card
 **Out**
 
 - **In the news.** It keeps its film rows exactly as today, apart from losing its count.
+  This is deferred, not rejected; Tom raised it after scaffolding (2026-10-01).
+  - Local data, which runs to about 2026-09-01: In the news has a median of 2 films a day and
+    a max of 16, and 1% of film-days have more than one change type. Not yet reported has a
+    median of 29.5 films a day.
+  - At that size, headings would mostly hold one film each.
+  - Revisit if In the news regularly reaches about 10 or more films a day, for example after
+    more sources or seed methods land.
+  - Try a cheaper step first: order In the news by significance. `splitByNewsBacked` currently
+    re-sorts by title and discards the backend's significance order.
+  - NR-7 keeps the switch cheap.
 - **The film page** (`EventTimeline` / `EventCard`). It stays laid out by film-day and section.
   It changes only through the shared label map (NR-13, NR-14).
 - **The digest's structure.** It still groups by film entry; only its label map changes.
@@ -168,7 +178,7 @@ significant first:
 **NR-7 — The frontend does the grouping; no DTO change.**
 - A pure function in `frontend/src/lib/feed-groups.ts` holds the type → heading map and the
   heading order beside the other grouping helpers, which keeps the order and membership
-  testable without rendering. Its working name is `groupByUpdateType(tmdbOnlyItems)`, returning
+  testable without rendering. Its working name is `groupByUpdateType(items)`, returning
   `[{ key, label, rows: [{ item, events }] }]`.
 - It takes the day's Not yet reported rows and returns the headings in NR-3 order. Each heading
   holds its film rows, and each row holds only that heading's events.
@@ -177,6 +187,17 @@ significant first:
 - A catalog row that arrives with `events: []` (the NEU-1212 fallback, an older backend) is
   filed under the heading of each type in its `event_types`. It shows the film header with no
   event lines; its badges are dropped as redundant with the heading.
+- **The grouping is section-agnostic.** The function takes any list of a day's `FeedDayItem` rows
+  and never reads `news_backed`. It must not assume catalog provenance anywhere: no reliance on
+  empty `sources`, and no type list limited to catalog types beyond the NR-3 map itself.
+  `FeedDayGroups` is the only place that decides which section is grouped, and it passes only
+  the Not yet reported rows.
+- The same applies to the block that renders a grouped section (headings, film rows, event
+  lines, the Now available JustWatch credit): it takes the grouped headings, not the section.
+  An event line under a heading keeps its source chips when it has any.
+- This is a hedge, not a plan. Grouping In the news later should be a change to the call site,
+  plus Announced and First look headings, which are story-only types the NR-3 map omits
+  (§2, *In the news*).
 
 **NR-8 — JustWatch credit once, at the foot of the Now available heading.**
 - `FeedDayCard`'s per-row attribution keeps applying to In the news rows.
