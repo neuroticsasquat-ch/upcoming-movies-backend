@@ -1848,7 +1848,7 @@ async def test_film_detail_does_not_read_another_cards_subject_key_as_a_video(
         event_type="now_available",
         provenance="catalog",
         subject_key=["US:rent"],
-        summary="Available to rent on Apple TV.",
+        summary="Available to rent.",
     )
     await add_event(film=film, event_type="casting", subject_key=["Gal Gadot"])
 
