@@ -503,12 +503,17 @@ _Avoid_: casting event (that is one of the two types, not the pair), crew change
 (that is the history row it reads).
 
 **Credit detachment event**:
-The catalog-sourced card raised when a seed-grade credit leaves a film's credit set — a single
-new type `credit_removed` covering director, writer and cast alike, at `rumored`. It is the
+The catalog-sourced card raised when a seed-grade credit leaves a film's credit set, at
+`rumored`. It comes in two types that mirror the attachment pair: `cast_removed` for a cast
+credit and `crew_removed` for a director, writer or other crew credit (NEU-1518). Until
+then it was one type, `credit_removed`, for every role; the split exists
+because the feed files a removal under the same **update type** heading as the attachment it
+corrects (Cast or Crew), and one card covering both roles has nowhere to go. It is the
 correction half of the credit-attachment beat: a brief attachment that TMDB later retracts would
 otherwise live uncorrected forever, and a future notification system needs a removal event to
 tell a user the attachment they were told about is gone. It is gated on a **prior visible
-attachment card** (`crew_attached` or `casting`, any provenance, `occurred_at` before the
+attachment card** of the matching role class (`casting` for `cast_removed`, `crew_attached` for
+`crew_removed`; any provenance, `occurred_at` before the
 detachment): a first-observation baseline credit that was never carded has no published beat to
 correct, so its departure emits no card. **Forward-dwell gate (NEU-1205):** a removal also cards
 only if the person does *not* re-attach within `SWEEP_CREDIT_DWELL_DAYS` (default 3, 0 disables)
@@ -517,17 +522,18 @@ than carded as a real departure; the removal is held until it is ≥ N days old 
 re-attach window is fully observed. The forward gate reads raw `catalog.film_credit_change` (not
 `news.event`), because the flap's re-attachment is itself suppressed by removal-aware suppression
 and so is never carded; it is scoped to the same seed-grade role so a cast→director move is two
-events, not a flap. Like attachments it is keyed on the observation — one `credit_removed` card
-per `(film, changed_at)`, all roles in one body — and it sits beside the attachment card (which
+events, not a flap. Like attachments it is keyed on the observation — one card per `(film, changed_at,
+role class)`, every person of that class in one body — and it sits beside the attachment card (which
 stays visible) in the "Not yet reported" section, so the later "no longer attached" card *is*
-the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE` (a removal is not
+the correction. Both removal types are deliberately unmapped in `_EVENT_STAGE` (a removal is not
 forward progress and should not headline a day) and excluded from the LLM and story-dedup
-vocabularies: the model cannot emit it, and a trade "X exits" story does not yet attach to it.
-Reverses the original ADR-0014 decision that detachments were "recorded as history but never
+vocabularies: the model cannot emit them, and a trade "X exits" story does not yet attach to
+them. Reverses the original ADR-0014 decision that detachments were "recorded as history but never
 carded" — NEU-1201's collapsed catalog section (now headed "Not yet reported"; it did not exist
 when that decision was made) made the clutter concern moot.
-_Avoid_: crew detached, cast departed (those imply the old split that only existed because
-`casting` pre-existed), credit removal (too generic — a release date disappearing is also a
+_Avoid_: crew detached, cast departed (the on-screen labels are **Cast departure** / **Crew
+departure**; in code use the type names), `credit_removed` (the retired single type; existing
+cards were retyped or split by the migration), credit removal (too generic — a release date disappearing is also a
 removal, and is out of scope), retraction, cancellation (those are about the *film*, not a
 person).
 
