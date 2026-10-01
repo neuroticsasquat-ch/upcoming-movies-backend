@@ -299,9 +299,9 @@ def test_unknown_role_is_rejected_in_a_group_too():
 
 
 def test_template_version_bumped():
-    """Bumped to 9 by the collection bodies (EF-5, NEU-1434): a summary has to be traceable
-    back to the phrasing that produced it, so this moves whenever a template above does."""
-    assert TEMPLATE_VERSION == "deterministic-9"
+    """Bumped to 10 when the rent and buy bodies stopped naming stores: a summary has to be
+    traceable back to the phrasing that produced it, so this moves whenever a template does."""
+    assert TEMPLATE_VERSION == "deterministic-10"
 
 
 # ── Detachment summary tests (NEU-1200) ──────────────────────────────────
@@ -399,22 +399,37 @@ def test_flatrate_reads_as_streaming():
     ) == ("Now streaming on Netflix.")
 
 
-def test_rent_names_every_provider_carrying_it():
+def test_rent_does_not_name_the_stores():
+    """A store is not a reason to choose a film the way a streaming service is — any one will
+    rent it — so the body says only that the film can be rented."""
     assert render_summary(
         NowAvailable(
             offers=(AvailableOn(monetization_type="rent", providers=("Apple TV", "Prime Video")),)
         )
-    ) == ("Available to rent on Apple TV and Prime Video.")
+    ) == ("Available to rent.")
 
 
-def test_buy_has_a_clause_of_its_own():
+def test_buy_does_not_name_the_stores():
     assert render_summary(
         NowAvailable(offers=(AvailableOn(monetization_type="buy", providers=("Apple TV",)),))
-    ) == ("Available to buy on Apple TV.")
+    ) == ("Available to buy.")
+
+
+def test_rent_and_buy_first_seen_together_are_one_sentence():
+    """A title reaching the home market turns up to rent and to buy in the same poll, so this is
+    the common case — and two sentences that differ by one verb read as a stutter."""
+    assert render_summary(
+        NowAvailable(
+            offers=(
+                AvailableOn(monetization_type="buy", providers=("Apple TV",)),
+                AvailableOn(monetization_type="rent", providers=("Prime Video",)),
+            )
+        )
+    ) == ("Available to rent or buy.")
 
 
 def test_several_types_first_seen_together_read_in_box_order():
-    """One observation that first sees a film under rent *and* flatrate is one card, and the
+    """One observation that first sees a film under buy *and* flatrate is one card, and the
     clauses read in the order the where-to-watch box lists them (D-29) rather than in whichever
     order the poll's payload happened to emit."""
     assert render_summary(
@@ -424,7 +439,7 @@ def test_several_types_first_seen_together_read_in_box_order():
                 AvailableOn(monetization_type="flatrate", providers=("Netflix", "Hulu")),
             )
         )
-    ) == ("Now streaming on Netflix and Hulu. Available to buy on Apple TV.")
+    ) == ("Now streaming on Netflix and Hulu. Available to buy.")
 
 
 def test_an_unknown_monetization_type_is_rejected():
