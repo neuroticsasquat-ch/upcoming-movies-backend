@@ -1434,7 +1434,7 @@ async def test_film_detail_backfilled_removal_under_occurrence_day(client, make_
     film = await make_film(slug="backfill-2026")
     await add_event(
         film=film,
-        event_type="credit_removed",
+        event_type="cast_removed",
         summary="Maya Boyd departs the cast.",
         created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),  # carded June 3
         occurred_at=datetime(2026, 6, 1, 9, tzinfo=UTC),  # happened June 1
@@ -1443,7 +1443,7 @@ async def test_film_detail_backfilled_removal_under_occurrence_day(client, make_
 
     body = (await client.get("/films/backfill-2026")).json()
     assert [g["day"] for g in body["day_groups"]] == ["2026-06-01"]
-    assert body["day_groups"][0]["tmdb_events"][0]["event_type"] == "credit_removed"
+    assert body["day_groups"][0]["tmdb_events"][0]["event_type"] == "cast_removed"
 
 
 async def test_film_detail_within_day_ordered_by_occurred_at(client, make_film, add_event):
@@ -1582,7 +1582,7 @@ async def test_detail_event_carries_status_superseded_by_and_occurred_at(
     film = await make_film(slug="superseded-2026", title="A Superseded Credit")
     removal = await add_event(
         film=film,
-        event_type="credit_removed",
+        event_type="crew_removed",
         summary="No longer directing.",
         occurred_at=datetime(2026, 5, 2, tzinfo=UTC),
     )
@@ -1604,8 +1604,8 @@ async def test_detail_event_carries_status_superseded_by_and_occurred_at(
     assert attachment["superseded_by"] == str(removal.id)
     assert attachment["occurred_at"] == "2026-05-01T00:00:00Z"
 
-    assert events["credit_removed"]["status"] == "published"
-    assert events["credit_removed"]["superseded_by"] is None
+    assert events["crew_removed"]["status"] == "published"
+    assert events["crew_removed"]["superseded_by"] is None
 
 
 # ── entity ids for follow buttons (NEU-1395) ─────────────────────────────────

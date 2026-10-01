@@ -31,7 +31,7 @@ from upmovies.ingest.tmdb.credit_history import (
     diff_recorded_credits,
     record_credit_changes,
 )
-from upmovies.news.catalog_events import CREDIT_REMOVED_EVENT_TYPE
+from upmovies.news.catalog_events import CAST_REMOVED_EVENT_TYPE, CREW_REMOVED_EVENT_TYPE
 from upmovies.news.models import Event, EventSummary
 from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL, TEMPLATE_VERSION
 
@@ -1191,7 +1191,7 @@ async def test_detachment_cards_when_prior_catalog_attachment(session, session_f
     assert result.events_created == 1
     assert result.detachments_read == 1
     events = await _events(session, film)
-    removal = [e for e in events if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    removal = [e for e in events if e.event_type == CREW_REMOVED_EVENT_TYPE]
     assert len(removal) == 1
     assert removal[0].provenance == "catalog"
     assert removal[0].confidence == "rumored"
@@ -1315,7 +1315,9 @@ async def test_detachment_older_than_lookback(session, session_factory, run_id):
     assert result.events_created == 0
 
 
-async def test_detachment_one_card_per_observation(session, session_factory, run_id):
+async def test_detachment_one_card_per_observation_and_class(session, session_factory, run_id):
+    """NR-10: a director and an actor departing in one observation are two cards, one per role
+    class, each rendered from its own class's credits and naming only its own people."""
     film = await add_film(session, 1, release_date=None, status="Planned")
     director = await _person(session, 100, "Denis Villeneuve")
     actor = await _person(session, 200, "Timothée Chalamet")
@@ -1329,15 +1331,59 @@ async def test_detachment_one_card_per_observation(session, session_factory, run
 
     result = await _run_detachment(session_factory, run_id)
 
-    assert result.events_created == 1
-    events = await _events(session, film)
-    removal = [e for e in events if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
-    assert len(removal) == 1
-    assert set(removal[0].subject_key or []) == {"denis villeneuve", "timothée chalamet"}
-    summary = await _summary(session, removal[0])
-    assert summary.summary == (
-        "Denis Villeneuve is no longer attached to direct. Timothée Chalamet departs the cast."
+    assert result.events_created == 2
+    (crew,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
+    (cast,) = await _by_type(session, film, CAST_REMOVED_EVENT_TYPE)
+    assert crew.occurred_at == cast.occurred_at == NOW
+    assert crew.subject_key == ["denis villeneuve"]
+    assert cast.subject_key == ["timothée chalamet"]
+    assert (await _summary(session, crew)).summary == (
+        "Denis Villeneuve is no longer attached to direct."
     )
+    assert (await _summary(session, cast)).summary == "Timothée Chalamet departs the cast."
+
+
+async def test_a_director_and_a_writer_departing_together_share_a_crew_card(
+    session, session_factory, run_id
+):
+    """Director, writer and other crew are one class, as they are one `crew_attached` beat."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    director = await _person(session, 100, "Denis Villeneuve")
+    writer = await _person(session, 200, "Jon Spaihts")
+    await _attached(session, film, director)
+    await _attached(session, film, writer, job="Screenplay")
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, director, change=CREDIT_REMOVED, changed_at=NOW)
+    await _attached(session, film, writer, job="Screenplay", change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.events_created == 1
+    (removal,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
+    assert removal.subject_key == ["denis villeneuve", "jon spaihts"]
+    assert (await _summary(session, removal)).summary == (
+        "Denis Villeneuve is no longer attached to direct. "
+        "Jon Spaihts is no longer attached to write."
+    )
+
+
+async def test_the_prior_attachment_gate_is_per_class(session, session_factory, run_id):
+    """NR-10: a crew departure needs a prior `crew_attached` card. An actor who was only ever
+    carded as cast leaving the director's chair has no crew attachment to correct."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Greta Gerwig")
+    await _cast(session, film, person)
+    await session.commit()
+    await _run(session_factory, run_id)
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    result = await _run_detachment(session_factory, run_id)
+
+    assert result.events_created == 0
+    assert [e.event_type for e in await _events(session, film)] == ["casting"]
 
 
 async def test_reattachment_after_removal_is_carded(session, session_factory, run_id):
@@ -1357,6 +1403,28 @@ async def test_reattachment_after_removal_is_carded(session, session_factory, ru
     result2 = await _run(session_factory, run_id, now=later + timedelta(hours=2))
 
     assert result2.events_created == 1
+
+
+async def test_a_cast_removal_does_not_unlock_a_crew_reattachment(session, session_factory, run_id):
+    """NR-10: removal-aware suppression pairs `crew_attached` with `crew_removed` only. An
+    actor-director leaving the cast says nothing about the director's chair, so the crew
+    attachment TMDB records again is still the one already carded."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Greta Gerwig")
+    await _attached(session, film, person, changed_at=YESTERDAY)
+    await _cast(session, film, person, changed_at=YESTERDAY)
+    await session.commit()
+    assert (await _run(session_factory, run_id)).events_created == 2
+    await _cast(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+    assert (await _run_detachment(session_factory, run_id)).events_created == 1
+    later = NOW + timedelta(hours=1)
+    await _attached(session, film, person, changed_at=later)
+    await session.commit()
+
+    result = await _run(session_factory, run_id, now=later + timedelta(hours=2))
+
+    assert result.events_created == 0
 
 
 async def test_reattachment_without_removal_still_suppressed(session, session_factory, run_id):
@@ -1410,7 +1478,7 @@ async def test_final_departure_carded_when_no_reattach(session, session_factory,
     result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
 
     assert result.events_created == 1
-    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    removal = [e for e in await _events(session, film) if e.event_type == CREW_REMOVED_EVENT_TYPE]
     assert len(removal) == 1
 
 
@@ -1449,7 +1517,7 @@ async def test_held_removal_cards_after_window_passes(session, session_factory, 
     result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS, now=later)
 
     assert result.events_created == 1
-    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    removal = [e for e in await _events(session, film) if e.event_type == CREW_REMOVED_EVENT_TYPE]
     assert len(removal) == 1
     assert removal[0].occurred_at == removed_at
 
@@ -1483,7 +1551,7 @@ async def test_flap_then_final_departure_cards_only_final(session, session_facto
 
     assert result2.events_created == 1
     events = await _events(session, film)
-    removal = [e for e in events if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    removal = [e for e in events if e.event_type == CAST_REMOVED_EVENT_TYPE]
     assert len(removal) == 1
     assert removal[0].occurred_at == base + timedelta(days=4)
 
@@ -1506,7 +1574,7 @@ async def test_per_person_gate_in_group(session, session_factory, run_id):
     result = await _run_detachment(session_factory, run_id, dwell_days=DWELL_DAYS)
 
     assert result.events_created == 1
-    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    removal = [e for e in await _events(session, film) if e.event_type == CREW_REMOVED_EVENT_TYPE]
     assert removal[0].subject_key == ["final departer"]
 
 
@@ -1554,7 +1622,7 @@ async def test_forward_gate_role_scoped(session, session_factory, run_id):
     # Cast removal cards because the director arrival is a different role.
     assert result.events_created == 1
     events = await _events(session, film)
-    assert {e.event_type for e in events} == {"casting", "crew_attached", CREDIT_REMOVED_EVENT_TYPE}
+    assert {e.event_type for e in events} == {"casting", "crew_attached", CAST_REMOVED_EVENT_TYPE}
 
 
 async def test_dwell_zero_disables_gate(session, session_factory, run_id):
@@ -1654,7 +1722,7 @@ async def test_backfill_applies_forward_gate(session):
     session.add(
         Event(
             film_id=film.id,
-            event_type="casting",
+            event_type="crew_attached",
             confidence="rumored",
             provenance="catalog",
             occurred_at=removed_at - timedelta(days=1),
@@ -1681,7 +1749,7 @@ async def test_backfill_applies_forward_gate(session):
     await session.commit()
 
     assert carded is True
-    removal = [e for e in await _events(session, film) if e.event_type == CREDIT_REMOVED_EVENT_TYPE]
+    removal = [e for e in await _events(session, film) if e.event_type == CREW_REMOVED_EVENT_TYPE]
     assert len(removal) == 1
     assert removal[0].subject_key == ["final departer"]
 
@@ -1697,7 +1765,7 @@ async def test_backfill_skips_already_carded(session):
         session.add(
             Event(
                 film_id=film.id,
-                event_type=CREDIT_REMOVED_EVENT_TYPE,
+                event_type=CREW_REMOVED_EVENT_TYPE,
                 confidence="rumored",
                 provenance="catalog",
                 occurred_at=removed_at,
@@ -1742,7 +1810,7 @@ async def test_a_removal_supersedes_the_prior_attachment_card(session, session_f
     await _run_detachment(session_factory, run_id)
 
     (attachment,) = await _by_type(session, film, "crew_attached")
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    (removal,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
     assert attachment.status == "superseded"
     assert attachment.superseded_by == removal.id
     assert removal.status == "published"
@@ -1767,10 +1835,10 @@ async def test_a_reattachment_after_a_removal_is_a_fresh_published_card(
     await _run(session_factory, run_id, now=later + timedelta(hours=2))
 
     events = sorted(await _events(session, film), key=lambda e: e.occurred_at)
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    (removal,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
     assert [(e.event_type, e.status) for e in events] == [
         ("crew_attached", "superseded"),
-        (CREDIT_REMOVED_EVENT_TYPE, "published"),
+        (CREW_REMOVED_EVENT_TYPE, "published"),
         ("crew_attached", "published"),
     ]
     assert [e.superseded_by for e in events] == [removal.id, None, None]
@@ -1797,7 +1865,7 @@ async def test_a_removal_supersedes_a_story_attachment_card(session, session_fac
     await _run_detachment(session_factory, run_id)
 
     (casting,) = await _by_type(session, film, "casting")
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    (removal,) = await _by_type(session, film, CAST_REMOVED_EVENT_TYPE)
     assert casting.id == story_card.id
     assert casting.status == "superseded"
     assert casting.superseded_by == removal.id
@@ -1811,28 +1879,57 @@ async def test_a_removal_supersedes_only_the_most_recent_attachment_card(
     person = await _person(session, 100, "Greta Gerwig")
     older = Event(
         film_id=film.id,
-        event_type="casting",
+        event_type="crew_attached",
         confidence="rumored",
         provenance="story",
         occurred_at=YESTERDAY - timedelta(days=3),
         region=None,
         subject_key=["greta gerwig"],
     )
-    session.add(older)
+    # Written directly: carding it through the sweep would be suppressed by the older card.
+    latest = Event(
+        film_id=film.id,
+        event_type="crew_attached",
+        confidence="rumored",
+        provenance="catalog",
+        occurred_at=YESTERDAY,
+        region=None,
+        subject_key=["greta gerwig"],
+    )
+    session.add_all([older, latest])
     await session.flush()
+    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await session.commit()
+
+    await _run_detachment(session_factory, run_id)
+
+    (removal,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
+    cards = {e.id: e for e in await _by_type(session, film, "crew_attached")}
+    assert (cards[latest.id].status, cards[latest.id].superseded_by) == ("superseded", removal.id)
+    assert (cards[older.id].status, cards[older.id].superseded_by) == ("published", None)
+
+
+async def test_a_removal_supersedes_only_its_own_classs_card(session, session_factory, run_id):
+    """NR-10: an actor-director leaving the cast marks their casting card and leaves their
+    `crew_attached` card published, even though it is the more recent of the two."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    person = await _person(session, 100, "Greta Gerwig")
+    await _cast(session, film, person, changed_at=YESTERDAY - timedelta(days=1))
+    await session.commit()
+    await _run(session_factory, run_id)
     await _attached(session, film, person, changed_at=YESTERDAY)
     await session.commit()
     await _run(session_factory, run_id)
-    await _attached(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
+    await _cast(session, film, person, change=CREDIT_REMOVED, changed_at=NOW)
     await session.commit()
 
     await _run_detachment(session_factory, run_id)
 
     (casting,) = await _by_type(session, film, "casting")
     (crew,) = await _by_type(session, film, "crew_attached")
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
-    assert (crew.status, crew.superseded_by) == ("superseded", removal.id)
-    assert (casting.status, casting.superseded_by) == ("published", None)
+    (removal,) = await _by_type(session, film, CAST_REMOVED_EVENT_TYPE)
+    assert (casting.status, casting.superseded_by) == ("superseded", removal.id)
+    assert (crew.status, crew.superseded_by) == ("published", None)
 
 
 async def test_a_removal_marks_each_named_person_and_nobody_else(session, session_factory, run_id):
@@ -1854,12 +1951,14 @@ async def test_a_removal_marks_each_named_person_and_nobody_else(session, sessio
 
     (crew,) = await _by_type(session, film, "crew_attached")
     (casting,) = await _by_type(session, film, "casting")
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
-    assert set(removal.subject_key or []) == {"denis villeneuve", "timothée chalamet"}
-    assert (crew.status, crew.superseded_by) == ("superseded", removal.id)
+    (crew_removal,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
+    (cast_removal,) = await _by_type(session, film, CAST_REMOVED_EVENT_TYPE)
+    assert crew_removal.subject_key == ["denis villeneuve"]
+    assert cast_removal.subject_key == ["timothée chalamet"]
+    assert (crew.status, crew.superseded_by) == ("superseded", crew_removal.id)
     # The casting card names both the departing lead and the performer who stays. The card is
     # the unit of supersession (D-2), so it is marked — Zendaya's *own* claim lives on it.
-    assert (casting.status, casting.superseded_by) == ("superseded", removal.id)
+    assert (casting.status, casting.superseded_by) == ("superseded", cast_removal.id)
 
 
 async def test_an_attachment_card_after_the_removal_is_not_superseded(
@@ -1887,7 +1986,7 @@ async def test_an_attachment_card_after_the_removal_is_not_superseded(
 
     await _run_detachment(session_factory, run_id)
 
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    (removal,) = await _by_type(session, film, CREW_REMOVED_EVENT_TYPE)
     cards = {e.occurred_at: e for e in await _by_type(session, film, "crew_attached")}
     assert (cards[YESTERDAY].status, cards[YESTERDAY].superseded_by) == ("superseded", removal.id)
     assert (cards[later_card.occurred_at].status, cards[later_card.occurred_at].superseded_by) == (
@@ -1937,7 +2036,7 @@ async def test_two_departures_sharing_one_card_do_not_reach_an_older_card(
 
     await _run_detachment(session_factory, run_id)
 
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    (removal,) = await _by_type(session, film, CAST_REMOVED_EVENT_TYPE)
     cards = {e.id: e for e in await _by_type(session, film, "casting")}
     assert (cards[shared.id].status, cards[shared.id].superseded_by) == ("superseded", removal.id)
     assert (cards[older_story_card.id].status, cards[older_story_card.id].superseded_by) == (
@@ -2161,7 +2260,7 @@ async def test_a_published_credit_that_is_later_removed_still_cards_the_removal(
 
     await _run_detachment(session_factory, run_id)
 
-    (removal,) = await _by_type(session, film, CREDIT_REMOVED_EVENT_TYPE)
+    (removal,) = await _by_type(session, film, CAST_REMOVED_EVENT_TYPE)
     assert removal.subject_key == ["zendaya"]
     published = await session.get(Event, card.id, populate_existing=True)
     assert published is not None

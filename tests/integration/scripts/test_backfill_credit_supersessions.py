@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from scripts.backfill_credit_supersessions import backfill
 from tests.fixtures.catalog import add_film
-from upmovies.news.catalog_events import CREDIT_REMOVED_EVENT_TYPE
+from upmovies.news.catalog_events import CAST_REMOVED_EVENT_TYPE, CREW_REMOVED_EVENT_TYPE
 from upmovies.news.models import Event
 
 REMOVED_AT = datetime(2026, 8, 1, tzinfo=UTC)
@@ -56,7 +56,7 @@ async def test_backfill_marks_the_prior_attachment_for_each_existing_removal_car
     removal = await _card(
         session,
         film,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=CREW_REMOVED_EVENT_TYPE,
         occurred_at=REMOVED_AT,
         names=["denis villeneuve"],
     )
@@ -77,7 +77,7 @@ async def test_backfill_is_idempotent(session, session_factory):
     older = await _card(
         session,
         film,
-        event_type="casting",
+        event_type="crew_attached",
         occurred_at=ATTACHED_AT - timedelta(days=30),
         names=["greta gerwig"],
         provenance="story",
@@ -88,7 +88,7 @@ async def test_backfill_is_idempotent(session, session_factory):
     await _card(
         session,
         film,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=CREW_REMOVED_EVENT_TYPE,
         occurred_at=REMOVED_AT,
         names=["greta gerwig"],
     )
@@ -99,7 +99,7 @@ async def test_backfill_is_idempotent(session, session_factory):
 
     assert (first.superseded, first.skipped) == (1, 0)
     assert (second.superseded, second.skipped) == (0, 1)
-    # The older casting card is *not* reached on the second pass: the removal is done.
+    # The older crew card is *not* reached on the second pass: the removal is done.
     older = await _reload(session, older.id)
     assert (older.status, older.superseded_by) == ("published", None)
 
@@ -113,7 +113,7 @@ async def test_backfill_handles_attach_remove_reattach_remove(session, session_f
     first_leave = await _card(
         session,
         film,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=CAST_REMOVED_EVENT_TYPE,
         occurred_at=REMOVED_AT,
         names=["zendaya"],
     )
@@ -127,7 +127,7 @@ async def test_backfill_handles_attach_remove_reattach_remove(session, session_f
     second_leave = await _card(
         session,
         film,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=CAST_REMOVED_EVENT_TYPE,
         occurred_at=REMOVED_AT + timedelta(days=20),
         names=["zendaya"],
     )
@@ -148,7 +148,7 @@ async def test_backfill_skips_a_removal_with_no_prior_attachment_card(session, s
     await _card(
         session,
         film,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=CREW_REMOVED_EVENT_TYPE,
         occurred_at=REMOVED_AT,
         names=["nobody carded"],
     )
@@ -162,3 +162,35 @@ async def test_backfill_skips_a_removal_with_no_prior_attachment_card(session, s
         0,
         0,
     )
+
+
+async def test_backfill_supersedes_only_the_removals_own_class(session, session_factory):
+    """NR-10: a `cast_removed` card marks the person's casting card and not their more recent
+    `crew_attached` one — the script applies the sweep's own per-class write."""
+    film = await add_film(session, 1, release_date=None, status="Planned")
+    casting = await _card(
+        session, film, event_type="casting", occurred_at=ATTACHED_AT, names=["greta gerwig"]
+    )
+    crew = await _card(
+        session,
+        film,
+        event_type="crew_attached",
+        occurred_at=ATTACHED_AT + timedelta(days=1),
+        names=["greta gerwig"],
+    )
+    removal = await _card(
+        session,
+        film,
+        event_type=CAST_REMOVED_EVENT_TYPE,
+        occurred_at=REMOVED_AT,
+        names=["greta gerwig"],
+    )
+    await session.commit()
+
+    result = await backfill(session_factory)
+
+    assert (result.removals_read, result.superseded) == (1, 1)
+    casting = await _reload(session, casting.id)
+    crew = await _reload(session, crew.id)
+    assert (casting.status, casting.superseded_by) == ("superseded", removal.id)
+    assert (crew.status, crew.superseded_by) == ("published", None)

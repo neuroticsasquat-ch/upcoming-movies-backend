@@ -67,6 +67,7 @@ from sqlalchemy import (
     Select,
     Text,
     any_,
+    case,
     cast,
     false,
     func,
@@ -100,8 +101,9 @@ from upmovies.news.catalog_events import (
     COMPANY_ATTACHED_EVENT_TYPE,
     COMPANY_EVENT_TYPES,
     COMPANY_REMOVED_EVENT_TYPE,
+    CREDIT_ATTACHMENT_EVENT_TYPES,
+    CREDIT_DETACHMENT_EVENT_TYPES,
     CREDIT_EVENT_TYPES,
-    CREDIT_REMOVED_EVENT_TYPE,
     PERSON_ATTACHMENT_EVENT_TYPES,
 )
 from upmovies.news.models import (
@@ -151,7 +153,7 @@ association."""
 STORY_PERSON_DETACH_MENTION_TYPES: tuple[str, ...] = ()
 """The `story_person` mention types that name somebody in connection with a *detachment*.
 
-**Still empty after M4, deliberately.** The story vocabulary has no `credit_removed` type — the
+**Still empty after M4, deliberately.** The story vocabulary has no person removal type — the
 four types EF-12 added are all organisation beats — so no story-formed person detach card
 exists and `_first_detachment_arm` selects nothing. The arm is spelled anyway, and pinned empty
 by a test: it is the seam any later prompt change fills, and the contract is that all six arms
@@ -487,8 +489,8 @@ def entity_attachment_event_ids(
 
     Five branches, UNION-ed (`_entity_event_pairs`):
 
-    - `_person_attachment_pairs` — `casting` / `crew_attached` / `credit_removed` cards whose
-      `subject_key` names a followed person (D-1437.3);
+    - `_person_attachment_pairs` — `casting` / `crew_attached` / `cast_removed` /
+      `crew_removed` cards whose `subject_key` names a followed person (D-1437.3);
     - `_organisation_attachment_pairs` twice — `company_attached` / `company_removed` and
       `collection_attached` / `collection_removed` cards carrying a followed id token
       (D-1437.4);
@@ -643,9 +645,9 @@ def _person_attachment_pairs(
     """The person branch: every published credit attach or detach card naming one of the people
     in scope, keyed to the person it names.
 
-    `credit_removed` cards name the removed person exactly as the attach cards name the
-    arriving one — the sweep's removal path writes `subject_key` from the same
-    `normalize_name` — so the three types are one test rather than two.
+    `cast_removed` / `crew_removed` cards name the removed person exactly as the attach cards
+    name the arriving one — the sweep's removal path writes `subject_key` from the same
+    `normalize_name` — so the four types are one test rather than two.
 
     A join on `sql_normalized_name(person.name) = ANY(event.subject_key)` where this used to
     hold an `EXISTS` of the same test, because the key has to come *out*. It is the same
@@ -956,7 +958,7 @@ def first_association_clause(
     attach card at all** it still selects, provided no detach card precedes `E`: a story
     reporting a studio's exit from a film we only ever held it on as a baseline is the first
     detachment we have heard of. The *person* detach arm is the same rule and still selects
-    nothing at all, because the story vocabulary has no `credit_removed` type — see
+    nothing at all, because the story vocabulary has no person removal type — see
     `STORY_PERSON_DETACH_MENTION_TYPES` and `_first_detachment_arm`.
 
     The organisation arms do **not** re-check the mention against `E.subject_key` either, and
@@ -1144,9 +1146,11 @@ def _first_detachment_arm(
     in their head. M4 filled the *organisation* half of the vocabulary and left this one empty
     (NEU-1446); `_organisation_association_arm` is where the live detach rule runs.
 
-    "First detachment" is "no published `credit_removed` card for this person on this film since
-    the last attach card for them", not "no `credit_removed` card ever": a person who joins,
-    leaves, rejoins and leaves again has detached twice, and both are news."""
+    "First detachment" is "no published removal card of this card's class for this person on
+    this film since the last attach card of that class for them", not "no removal card ever": a
+    person who joins, leaves, rejoins and leaves again has detached twice, and both are news.
+    Per class (NR-10), as the sweep's gates are: an actor-director leaving the cast and later
+    the director's chair has made two first detachments, one from each."""
     mention = aliased(StoryPerson)
     person = aliased(Person)
     attach = aliased(Event)
@@ -1156,7 +1160,7 @@ def _first_detachment_arm(
         .where(
             attach.film_id == Event.film_id,
             attach.status == _PUBLISHED,
-            attach.event_type.in_(_ATTACH_CARD_TYPES),
+            attach.event_type == case(CREDIT_ATTACHMENT_EVENT_TYPES, value=Event.event_type),
             _card_names_person(
                 attach,
                 mention=mention,
@@ -1173,7 +1177,7 @@ def _first_detachment_arm(
         .where(
             removal.film_id == Event.film_id,
             removal.status == _PUBLISHED,
-            removal.event_type == CREDIT_REMOVED_EVENT_TYPE,
+            removal.event_type == Event.event_type,
             removal.created_at < Event.created_at,
             _card_names_person(
                 removal,
@@ -1195,7 +1199,7 @@ def _first_detachment_arm(
     return _mentioning_pairs(
         user_id=user_id,
         entity_id=entity_id,
-        card_types=(CREDIT_REMOVED_EVENT_TYPE,),
+        card_types=CREDIT_DETACHMENT_EVENT_TYPES,
         mention_types=STORY_PERSON_DETACH_MENTION_TYPES,
         mention=mention,
         person=person,

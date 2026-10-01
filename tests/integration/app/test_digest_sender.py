@@ -1468,13 +1468,14 @@ def test_every_visible_event_type_has_a_digest_label_and_an_unknown_one_still_re
     visible = (
         "announced",
         "canceled",
+        "cast_removed",
         "casting",
         "collection_attached",
         "collection_removed",
         "company_attached",
         "company_removed",
-        "credit_removed",
         "crew_attached",
+        "crew_removed",
         "now_available",
         "production_start",
         "production_wrap",
@@ -1486,4 +1487,6 @@ def test_every_visible_event_type_has_a_digest_label_and_an_unknown_one_still_re
     for event_type in visible:
         assert digest_beat_label(event_type) != "Update"
     assert digest_beat_label("release_date") == "Release date"
+    assert digest_beat_label("cast_removed") == "Cast departure"
+    assert digest_beat_label("crew_removed") == "Crew departure"
     assert digest_beat_label("bogus") == "Update"
