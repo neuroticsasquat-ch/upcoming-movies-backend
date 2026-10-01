@@ -1,4 +1,8 @@
-"""Backfill the supersession marks for `credit_removed` cards written before NEU-1347.
+"""Backfill the supersession marks for credit removal cards written before NEU-1347.
+
+The removal cards are `cast_removed` / `crew_removed` since NEU-1518, which migrated every
+older all-roles removal card into one of them; each supersedes only attachment cards of its own
+class.
 
 Before the supersession write shipped, a removal carded without touching the attachment card
 it corrected, so those originals still read `published`. This walks every removal card in
@@ -26,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from upmovies.db import SessionLocal
 from upmovies.ingest.sweep.credit_events import supersede_prior_attachment_cards
 from upmovies.ingest.sweep.seeds import SessionFactory
-from upmovies.news.catalog_events import CREDIT_REMOVED_EVENT_TYPE
+from upmovies.news.catalog_events import CREDIT_DETACHMENT_EVENT_TYPES
 from upmovies.news.models import Event
 
 
@@ -56,7 +60,7 @@ async def backfill(session_factory: SessionFactory) -> BackfillResult:
             (
                 await s.execute(
                     select(Event.id)
-                    .where(Event.event_type == CREDIT_REMOVED_EVENT_TYPE)
+                    .where(Event.event_type.in_(CREDIT_DETACHMENT_EVENT_TYPES))
                     .order_by(Event.occurred_at, Event.created_at)
                 )
             )

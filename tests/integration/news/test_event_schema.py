@@ -177,7 +177,7 @@ async def test_superseded_by_points_at_the_correcting_event(session):
     await session.flush()
     removal = Event(
         film_id=film.id,
-        event_type="credit_removed",
+        event_type="crew_removed",
         confidence="confirmed",
         occurred_at=datetime.now(UTC),
     )

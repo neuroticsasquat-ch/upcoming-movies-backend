@@ -134,11 +134,13 @@ class CreditDetached:
 
 @dataclass(frozen=True)
 class CreditsDetached:
-    """Every credit one observation detached, rendered as one body (NEU-1200).
+    """Every credit of one role class one observation detached, rendered as one body
+    (NEU-1200, NR-10).
 
-    Mirrors `CreditsAttached`: one removal card per observation, all roles in one body
-    since `credit_removed` is a single type and `uq_event_catalog_change` allows one
-    catalog event per film, type and timestamp.
+    Mirrors `CreditsAttached`: one removal card per observation and class — a `cast_removed`
+    body holds only `cast` credits, a `crew_removed` body only `director` / `writer` / `crew`
+    ones. The renderer itself is class-blind and renders whatever roles it is handed, which is
+    what lets the NEU-1518 migration re-render each half of a split card from its own subset.
     """
 
     credits: tuple[CreditDetached, ...]

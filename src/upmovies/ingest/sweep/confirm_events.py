@@ -106,8 +106,8 @@ class _Candidate:
     """Whether the attachment is standing in the catalog right now."""
     entity_id: int | None
     """The company or collection the card is about, for the supersession a confirmed
-    detachment performs. None for a person: no story-formed `credit_removed` card can exist,
-    because the story vocabulary has no such type."""
+    detachment performs. None for a person: no story-formed `cast_removed` / `crew_removed`
+    card can exist, because the story vocabulary has no such types."""
     kind: str
 
 

@@ -3,13 +3,19 @@ which are written by the video poll and read back by the public read models (D-3
 
 from upmovies.news.catalog_events import (
     CANCELED_EVENT_TYPE,
+    CAST_REMOVED_EVENT_TYPE,
     CATALOG_EVENT_TYPES,
     COLLECTION_ATTACHED_EVENT_TYPE,
     COLLECTION_EVENT_TYPES,
     COLLECTION_REMOVED_EVENT_TYPE,
+    CREDIT_ATTACHMENT_EVENT_TYPES,
+    CREDIT_DETACHMENT_EVENT_TYPES,
+    CREW_REMOVED_EVENT_TYPE,
     ONCE_PER_FILM_EVENT_TYPES,
+    PERSON_ATTACHMENT_EVENT_TYPES,
     STATUS_EVENT_TYPES,
     TRAILER_EVENT_TYPE,
+    credit_removal_event_type,
     video_key_of,
     video_subject_key,
 )
@@ -71,7 +77,7 @@ def test_the_collection_types_are_registered_everywhere_the_vocabulary_is_enumer
         assert event_type not in HIDDEN_EVENT_TYPES
 
     # The arrival ranks on the arc; the departure deliberately does not, like `company_removed`
-    # and `credit_removed` — a detachment is a correction to an arc, not a stage of one.
+    # and the credit removals — a detachment is a correction to an arc, not a stage of one.
     assert event_stage_rank(COLLECTION_ATTACHED_EVENT_TYPE) == event_stage_rank("company_attached")
     assert event_stage_rank(COLLECTION_REMOVED_EVENT_TYPE) == -1
     assert COLLECTION_ATTACHED_EVENT_TYPE in _STALE_EVENT_TYPES
@@ -126,3 +132,37 @@ def test_canceled_is_a_catalog_dedup_target():
     it, a trade story reporting a cancellation belongs on the card the status flip raised —
     the production milestones' rule exactly."""
     assert CANCELED_EVENT_TYPE in CATALOG_EVENT_TYPES
+
+
+# --- the credit removal types (NR-9, NEU-1518) ----------------------------------
+
+
+def test_a_departing_credit_cards_as_its_attachment_classes_removal():
+    """`cast` mirrors `casting`; `director`, `writer` and `crew` mirror `crew_attached`."""
+    assert credit_removal_event_type("cast") == CAST_REMOVED_EVENT_TYPE
+    for role in ("director", "writer", "crew"):
+        assert credit_removal_event_type(role) == CREW_REMOVED_EVENT_TYPE
+    assert CREDIT_ATTACHMENT_EVENT_TYPES == {
+        CAST_REMOVED_EVENT_TYPE: "casting",
+        CREW_REMOVED_EVENT_TYPE: "crew_attached",
+    }
+
+
+def test_the_removal_types_are_registered_on_the_retired_types_terms():
+    """NR-9: both read in the digest, neither ranks on the arc, and neither is in the LLM or
+    story-dedup vocabularies — exactly the registration the all-roles type they replaced had.
+    The person follow branch selects both."""
+    from upmovies.app.services.digest_sender import DIGEST_BEAT_LABELS
+    from upmovies.link.cluster import _STALE_EVENT_TYPES, _VALID_TYPES
+    from upmovies.news.visibility import HIDDEN_EVENT_TYPES
+    from upmovies.public.arc import event_stage_rank
+
+    assert DIGEST_BEAT_LABELS[CAST_REMOVED_EVENT_TYPE] == "Cast departure"
+    assert DIGEST_BEAT_LABELS[CREW_REMOVED_EVENT_TYPE] == "Crew departure"
+    for event_type in CREDIT_DETACHMENT_EVENT_TYPES:
+        assert event_stage_rank(event_type) == -1
+        assert event_type not in HIDDEN_EVENT_TYPES
+        assert event_type not in CATALOG_EVENT_TYPES
+        assert event_type not in _VALID_TYPES
+        assert event_type not in _STALE_EVENT_TYPES
+        assert event_type in PERSON_ATTACHMENT_EVENT_TYPES

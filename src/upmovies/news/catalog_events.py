@@ -67,8 +67,40 @@ CREDIT_ROLE_EVENT_TYPES: dict[str, str] = {
 # is always "is this person already carded", never "is this film already carded".
 CREDIT_EVENT_TYPES = frozenset(CREDIT_ROLE_EVENT_TYPES.values())
 
-# The shared vocabulary home for the detachment carding phase.
-CREDIT_REMOVED_EVENT_TYPE = "credit_removed"
+# The detachment carding phase's two types (NR-9, NEU-1518), one per role class, mirroring the
+# attachment types: a `cast` credit departing cards as `cast_removed`, a `director`, `writer` or
+# `crew` one as `crew_removed`. They replaced a single all-roles removal type, whose one body
+# could name a writer and two actors and so had no one place on a feed laid out by update type.
+# Two types rather than a role column because `uq_event_catalog_change` is `(film_id, event_type,
+# occurred_at)`: one observation detaching an actor and a writer is two cards, and only distinct
+# types let both hold that timestamp. Both are `rumored`, both are absent from
+# `public.arc._EVENT_STAGE`, and neither is in the LLM or story-dedup vocabularies — a detachment
+# is not a beat a trade story is clustered onto.
+CAST_REMOVED_EVENT_TYPE = "cast_removed"
+CREW_REMOVED_EVENT_TYPE = "crew_removed"
+
+# The removal type that undoes each attachment type, keyed by the attachment type. The class
+# pairing every removal rule runs on: the prior-attachment gate, supersession and removal-aware
+# suppression each look only across one entry of this dict.
+CREDIT_REMOVAL_EVENT_TYPES: dict[str, str] = {
+    "casting": CAST_REMOVED_EVENT_TYPE,
+    "crew_attached": CREW_REMOVED_EVENT_TYPE,
+}
+
+# The inverse: the attachment type each removal type corrects.
+CREDIT_ATTACHMENT_EVENT_TYPES: dict[str, str] = {
+    removal: attachment for attachment, removal in CREDIT_REMOVAL_EVENT_TYPES.items()
+}
+
+# The removal types, as an ordered tuple for the reason `PERSON_ATTACHMENT_EVENT_TYPES` gives.
+CREDIT_DETACHMENT_EVENT_TYPES: tuple[str, ...] = tuple(sorted(CREDIT_ATTACHMENT_EVENT_TYPES))
+
+
+def credit_removal_event_type(role: str) -> str:
+    """The removal type a credit recorded under `role` cards as when it departs — the
+    attachment type `CREDIT_ROLE_EVENT_TYPES` gives it, mapped to its class's removal."""
+    return CREDIT_REMOVAL_EVENT_TYPES[CREDIT_ROLE_EVENT_TYPES[role]]
+
 
 # Every card a person attaching to or detaching from a film can be (EF-3, NEU-1437). The
 # carding paths need the two halves apart — an attachment is matched on who is already carded,
@@ -81,13 +113,13 @@ CREDIT_REMOVED_EVENT_TYPE = "credit_removed"
 # order is not stable between processes, so the same statement would read differently in a log
 # or a plan cache from one run to the next.
 PERSON_ATTACHMENT_EVENT_TYPES: tuple[str, ...] = tuple(
-    sorted(CREDIT_EVENT_TYPES | {CREDIT_REMOVED_EVENT_TYPE})
+    sorted(CREDIT_EVENT_TYPES | set(CREDIT_DETACHMENT_EVENT_TYPES))
 )
 
 # The studio half (EF-5, NEU-1433). A production company joining or leaving a film, read out
 # of `catalog.film_company_change` the way the credit types are read out of
 # `film_credit_change`. Registered in `ck_event_type` and in `public.arc._EVENT_STAGE`
-# (`company_attached` only, for the reason `CREDIT_REMOVED_EVENT_TYPE` is absent from it: a
+# (`company_attached` only, for the reason `CREDIT_DETACHMENT_EVENT_TYPES` are absent from it: a
 # detachment is a correction to an arc, not a stage of one), and deliberately **not** in
 # `HIDDEN_EVENT_TYPES` — a studio attaching is a beat the timeline shows.
 #

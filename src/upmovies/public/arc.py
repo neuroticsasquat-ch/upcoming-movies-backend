@@ -40,8 +40,8 @@ _EVENT_STAGE: dict[str, str] = {
     # A studio attaching is the same "this is real now" beat a director attaching is (EF-5):
     # a film with a distributor behind it has moved, and on a day that carries nothing else
     # that is what the group should read as. `company_removed` is deliberately absent, like
-    # `credit_removed` — a detachment is a correction to an arc, not a stage of one, and at
-    # -1 it yields to any real beat it shares a day with.
+    # `cast_removed` and `crew_removed` (NR-9) — a detachment is a correction to an arc, not a
+    # stage of one, and at -1 it yields to any real beat it shares a day with.
     "company_attached": "announced",
     # A film filed under a franchise is the same "this is real now" beat (EF-5, NEU-1434):
     # TMDB files a title under a collection once the sequel it belongs to is a real thing, so

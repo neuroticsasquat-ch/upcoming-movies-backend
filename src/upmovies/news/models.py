@@ -78,9 +78,9 @@ class Event(Base):
     __tablename__ = "event"
     __table_args__ = (
         CheckConstraint(
-            "event_type IN ('announced', 'canceled', 'casting', 'collection_attached', "
-            "'collection_removed', 'company_attached', 'company_removed', "
-            "'credit_removed', 'crew_attached', "
+            "event_type IN ('announced', 'canceled', 'cast_removed', 'casting', "
+            "'collection_attached', 'collection_removed', 'company_attached', "
+            "'company_removed', 'crew_attached', 'crew_removed', "
             "'now_available', 'production_start', 'production_wrap', 'release_date', "
             "'trailer', 'first_look', 'other')",
             name="ck_event_type",
@@ -127,8 +127,8 @@ class Event(Base):
     # Nothing is ever hidden or deleted by supersession.
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'published'"))
     # The event that supersedes this one — an attachment card pointing forward at the
-    # `credit_removed` card that corrected it. SET NULL rather than CASCADE: losing the
-    # correction must not take the original claim out of the ledger with it.
+    # `cast_removed` / `crew_removed` card that corrected it. SET NULL rather than CASCADE:
+    # losing the correction must not take the original claim out of the ledger with it.
     # `name=` matches the hand-named constraint in migration 65ba376f1b57; the parity test
     # (tests/integration/test_migrations.py) compares constraint names, so the two must agree.
     superseded_by: Mapped[UUID | None] = mapped_column(
