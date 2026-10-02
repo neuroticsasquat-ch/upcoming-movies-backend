@@ -807,15 +807,42 @@ _Avoid_: series, universe, saga, collection (on screen; fine in code).
 
 **Timeline**:
 The signed-in home surface: the publication log filtered to the user's follows. Same axis as
-the feed (**publication**), same day grouping, same "what's new since I last looked" reading —
-it is the feed with a where-clause, not a different kind of surface. The where-clause is
-`film IN (titles you follow) OR event IN (attachments of entities you follow)` (EF-3); it is
-the same clause the digest and the notify pass read. A story mention reaches an entity
+the feed (**publication**), same day grouping, same "what's new since I last looked" reading.
+The where-clause is `film IN (titles you follow) OR event IN (attachments of entities you
+follow)` (EF-3); it is the same clause the digest and the notify pass read. Unlike the feed,
+a timeline row remembers its **reach**: a day is laid out in **follow blocks**, and a card
+that reached the reader two ways appears in each of them. A story mention reaches an entity
 follower only as the entity's first association with, or first detachment from, the film
 (EF-13, `first_association_clause`); every other mention is nothing to them. Anonymous readers
 see the global feed in its place.
 _Avoid_: personalized feed, my feed, stream, dashboard, watchlist (retired: the set of films
-you follow is just the Films filter of the follows page).
+you follow is just the Films filter of the follows page), "the feed with a where-clause" (true
+of what it selects, no longer of what a row is).
+
+**Reach** (of a timeline row):
+The follow that delivered the row: a title follow, or one person, studio or franchise follow.
+A row has exactly one reach; a card reached by a director follow and a studio follow is two
+rows, and a card on a film the reader also follows by title is a third, in the Films block.
+The feed has no reach — nothing filtered it. `via` in the API and the code.
+_Avoid_: attribution (the digest's old word for the same fact, retired with its "Following:"
+line), source (that is an outlet), origin, provenance (that is where an event was born).
+
+**Follow block**:
+One of the four groups a timeline day is laid out in, by the kind of follow that reached its
+rows: **Films** (title follows, the film's whole day as the feed shows it), **People**,
+**Studios** and **Franchises** (one **entity row** per followed entity). Always in that order;
+a block with nothing in it is silence. Each block splits into In the news and Not yet reported
+exactly as a feed day does. The same four blocks shape the digest.
+_Avoid_: section (that is In the news / Not yet reported, one level finer), group, tab, filter
+(nothing is hidden; every block renders), entity section.
+
+**Entity row** (on the timeline) / **entity entry** (in a digest):
+One followed person, studio or franchise's row under its follow block for one day (or, in the
+weekly digest, for the week): the entity's name linked to its page as the headline, then one
+line per card the follow delivered — the film's title and parenthetical, linked, followed by
+the summary. The film is named on the line because the entity, not the film, is the row.
+_Avoid_: entity card (that is the entity page's own card list), via line (retired, ADR-0019),
+film row (that is a Films-block row, headed by the film).
 
 **Last activity** (of a follow):
 The publication time of the newest card that would reach this user through this follow — any
@@ -872,20 +899,26 @@ calendar, personal feed (that is the timeline), subscription calendar (that is t
 **Digest**:
 The one delivery of a user's timeline by mail — daily or weekly, their choice, never both, and
 nothing arrives outside it (ADR-0021). It carries every card the timeline carries, `rumored`
-ones included (EF-7; NEU-1437), each as a dated line under its film. A digest reads by
-**film entry**, not by day: one entry per film, its beats in the order they were published,
-entries ranked by their most significant beat — the day grouping is the feed's, not the mail's.
-On the **slate day** either cadence carries the **slate** in front. How soon a reader hears
-about a beat is the cadence they chose; there is no faster channel.
+ones included (EF-7; NEU-1437), and nothing is cut: there is no cap and no lead card. The
+**daily is the timeline day, reproduced in mail** — the day heading, its poster strip, its
+**follow blocks**, their sections and update types, its film and entity rows — one feed day
+per publication day the batch spans. The **weekly reads by entry, not by day**: the same
+blocks and sections, but one **film entry** or **entity entry** per film or entity across
+the week, its lines in publication order. On the **slate day** either cadence carries the
+**slate** in front. How soon a reader hears about a beat is the cadence they chose; there is
+no faster channel.
 _Avoid_: newsletter, summary email, notification, "the weekly slate mail" (the slate is a
 section, not a cadence), alert (retired: the per-beat interrupt mail D-32 whitelisted, removed
-by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody).
+by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody), highlights
+(nothing is selected out).
 
 **Slate**:
 The upcoming US dates — theatrical, digital and physical — for the films a user follows by
 title, over the next 30 days, soonest first. The same set the my-films calendar and the `.ics`
-feed list (EF-14): a slate cannot name a date the calendar would not. A date set or moved since
-the previous slate day is marked as such.
+feed list (EF-14): a slate cannot name a date the calendar would not, and in the mail it is
+**the my-films calendar reproduced** for those days — date heading, release-type bucket, the
+calendar's film row. A date set or moved since the previous slate day is marked as such; the
+marker is the one thing the slate shows that the calendar page does not.
 _Avoid_: calendar (that is the surface), upcoming releases (that is the public page), watchlist.
 
 **Slate day**:
@@ -894,17 +927,18 @@ send day, and the daily cadence's one slate-bearing morning. Thursday.
 _Avoid_: digest day, send day.
 
 **Lead film** (of a digest):
-The film entry ranked first — the most significant beat in the mail, by the feed's beat
-significance, title breaking ties. It names the subject line and renders as the mail's lead
-card; every other entry is compact.
-_Avoid_: hero, headline (that is a release date), top story.
+The film carrying the most significant beat in the mail, by the feed's beat significance,
+title breaking ties. It names the subject line and the preheader, and nothing else: it is
+not rendered differently from any other film, and the mail has no lead card.
+_Avoid_: hero, headline (that is a release date), top story, lead card (retired).
 
 **Film entry** (in a digest):
-One film's block in a digest: the film's header (title, parenthetical, headline release),
-which follows put it in the mail, and its beat lines. A digest shows at most a fixed number of
-entries and links to the timeline for the rest; the cut is presentation, the queue is still
-sent.
-_Avoid_: card (that is one beat on screen), item, row.
+One film's block under the Films follow block of a digest: the film's header (title,
+parenthetical, headline release) and its beat lines. Title follows only, so it never says
+which follow put it there. In the daily it is one film-day, as on the timeline; in the weekly
+it is the film's whole week. Every entry renders; nothing is cut.
+_Avoid_: card (that is one beat on screen), item, row, "Following:" line (retired: a film
+entry is always a title follow, and an entity's cards are the entity entry's).
 
 **Home-release date**:
 A US digital (TMDB type 4) or physical (type 5) release date. Part of the displayable set beside
