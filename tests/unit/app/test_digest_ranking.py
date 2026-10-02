@@ -1,7 +1,8 @@
-"""The digest's pure functions (NEU-1460, NEU-1462, NEU-1528): how the lines a batch's reaches
-deliver are laid out as timeline days — follow blocks, sections, update types, film and entity
-rows — how films rank for the subject, what the subject and preheader say, which day the daily
-carries the slate, and which marker a slate row wears.
+"""The digest's pure functions (NEU-1460, NEU-1462, NEU-1528, NEU-1529): how the lines a
+batch's reaches deliver are laid out — the daily as timeline days, the weekly by entry; follow
+blocks, sections, update types, film and entity rows — how films rank for the subject, what
+the subject and preheader say, which day the daily carries the slate, and which marker a slate
+row wears.
 
 Hand-built lines throughout — none of this touches the database, which is the point of the
 functions being pure. `test_digest_sender.py` proves the loader feeds them what they expect."""
@@ -13,6 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from upmovies.app.services.digest_sender import (
+    DAY_LINE_ORDER,
     MAX_DAY_POSTERS,
     DigestBatch,
     DigestBeat,
@@ -32,11 +34,11 @@ from upmovies.app.services.digest_sender import (
     digest_context,
     digest_preheader,
     digest_subject,
-    event_order_key,
     group_blocks,
     group_days,
     group_rows,
     group_update_types,
+    group_week,
     natural_title,
     rank_films,
     short_date,
@@ -138,7 +140,7 @@ def test_a_daily_lays_each_publication_day_out_newest_first():
     older = _title(_beat("Heat 2", created_at=T0 - timedelta(days=1)))
     newer = _title(_beat("Dune", created_at=T0))
 
-    days = group_days([older, newer], dated=True)
+    days = group_days([older, newer])
 
     assert [d.day for d in days] == [T0.date(), (T0 - timedelta(days=1)).date()]
 
@@ -146,24 +148,92 @@ def test_a_daily_lays_each_publication_day_out_newest_first():
 def test_the_publication_day_is_the_utc_one():
     late_evening_utc = datetime(2026, 9, 22, 23, 30, tzinfo=UTC)
 
-    (day,) = group_days([_title(_beat(created_at=late_evening_utc))], dated=True)
+    (day,) = group_days([_title(_beat(created_at=late_evening_utc))])
 
     assert day.day == date(2026, 9, 22)
 
 
-def test_a_weekly_lays_every_line_out_in_one_undated_group():
-    lines = [
-        _title(_beat("Heat 2", created_at=T0 - timedelta(days=3))),
-        _title(_beat("Dune", created_at=T0)),
-    ]
+# --- the weekly's entries (FB-19) -----------------------------------------------------------
 
-    (group,) = group_days(lines, dated=False)
 
-    assert group.day is None
-    (films,) = group.blocks
+def test_a_weekly_reads_by_entry_one_film_entry_across_the_week():
+    """No days: a film's cards from three days are one entry, its lines in publication order —
+    not the feed's event order, which would put the older-news casting first."""
+    first = _beat("Heat 2", "trailer", created_at=T0 - timedelta(days=3))
+    second = _beat("Heat 2", "trailer", created_at=T0 - timedelta(days=1))
+    old_news = _beat("Heat 2", "trailer", created_at=T0, occurred_at=T0 - timedelta(days=30))
+
+    week = group_week([_title(old_news), _title(first), _title(second)])
+
+    (films,) = week.blocks
     (section,) = films.sections
-    (update_type,) = section.update_types
-    assert _titles(update_type.rows) == ["Dune", "Heat 2"]
+    (trailer,) = section.update_types
+    (entry,) = trailer.rows
+    assert entry.beats == (first, second, old_news)
+
+
+def test_an_entity_with_cards_on_two_films_is_one_entry_with_its_lines_in_publication_order():
+    """An entity entry spans its films and days; its lines run as the week went (FB-19), not
+    film by film as the daily's entity row does (FB-6)."""
+    ada = _reach("person", "Ada", "1")
+    zodiac = _beat("Zodiac", "casting", created_at=T0 - timedelta(days=2))
+    abyss = _beat("The Abyss", "casting", created_at=T0)
+
+    week = group_week([_via(ada, abyss), _via(ada, zodiac)])
+
+    (people,) = week.blocks
+    (attached,) = people.sections[0].update_types
+    (entry,) = attached.rows
+    assert entry.reach == ada
+    assert [b.film.title for b in entry.beats] == ["Zodiac", "The Abyss"]
+
+
+def test_a_film_with_cards_in_both_sections_is_an_entry_in_both():
+    week = group_week(
+        [
+            _title(_beat("Heat 2", "casting", news=True, created_at=T0 - timedelta(days=2))),
+            _title(_beat("Heat 2", "release_date", created_at=T0)),
+        ]
+    )
+
+    (films,) = week.blocks
+    news, catalog = films.sections
+    assert _titles(news.rows) == ["Heat 2"]
+    (release_date,) = catalog.update_types
+    assert _titles(release_date.rows) == ["Heat 2"]
+
+
+def test_film_entries_rank_by_significance_then_title_and_entity_entries_by_name():
+    """DC-3 kept within the Films block; FB-6's name order for the entity blocks — across
+    every day of the week."""
+    week = group_week(
+        [
+            _title(_beat("Arrival", "casting", news=True, created_at=T0)),
+            _title(_beat("Zodiac", "release_date", news=True, created_at=T0 - timedelta(days=4))),
+            _title(_beat("Cobra", "casting", news=True, created_at=T0 - timedelta(days=1))),
+            _via(_reach("person", "Zed", "1"), _beat("Heat 2", news=True)),
+            _via(
+                _reach("person", "Bea", "2"),
+                _beat("Heat 2", news=True, created_at=T0 - timedelta(days=5)),
+            ),
+        ]
+    )
+
+    films, people = week.blocks
+    assert _titles(films.sections[0].rows) == ["Zodiac", "Arrival", "Cobra"]
+    assert _titles(people.sections[0].rows) == ["Bea", "Zed"]
+
+
+def test_the_week_has_one_poster_strip_over_its_films_news_backed_first():
+    week = group_week(
+        [
+            _title(_beat("Arrival", created_at=T0)),
+            _title(_beat("Zodiac", news=True, created_at=T0 - timedelta(days=3))),
+            _via(_reach("company", "A24"), _beat("Arrival", created_at=T0 - timedelta(days=1))),
+        ]
+    )
+
+    assert [film.title for film in week.posters] == ["Zodiac", "Arrival"]
 
 
 def test_blocks_come_in_their_fixed_order_and_an_empty_one_is_left_out():
@@ -175,7 +245,7 @@ def test_blocks_come_in_their_fixed_order_and_an_empty_one_is_left_out():
         _title(_beat("Dune", "trailer")),
     ]
 
-    blocks = group_blocks(lines, beat_key=event_order_key)
+    blocks = group_blocks(lines, order=DAY_LINE_ORDER)
 
     assert [(b.key, b.label) for b in blocks] == [
         ("films", "Films"),
@@ -190,7 +260,7 @@ def test_each_block_splits_into_in_the_news_then_not_yet_reported():
         _title(_beat("Heat 2", "trailer", news=True)),
     ]
 
-    (films,) = group_blocks(lines, beat_key=event_order_key)
+    (films,) = group_blocks(lines, order=DAY_LINE_ORDER)
 
     news, catalog = films.sections
     assert (news.news_backed, catalog.news_backed) == (True, False)
@@ -199,7 +269,7 @@ def test_each_block_splits_into_in_the_news_then_not_yet_reported():
 
 
 def test_a_block_with_only_one_section_has_only_that_section():
-    (films,) = group_blocks([_title(_beat(news=True))], beat_key=event_order_key)
+    (films,) = group_blocks([_title(_beat(news=True))], order=DAY_LINE_ORDER)
 
     assert [s.news_backed for s in films.sections] == [True]
 
@@ -214,7 +284,7 @@ def test_a_card_two_follows_reached_is_a_line_in_each_of_their_blocks():
         _via(_reach("company", "Legendary"), cancel),
     ]
 
-    blocks = group_blocks(lines, beat_key=event_order_key)
+    blocks = group_blocks(lines, order=DAY_LINE_ORDER)
 
     assert [b.key for b in blocks] == ["films", "people", "studios"]
     for block in blocks:
@@ -235,7 +305,7 @@ def test_film_rows_rank_by_significance_then_natural_title():
             _title(_beat("The Abyss", "casting")),
             _title(_beat("Zed", "release_date")),
         ],
-        beat_key=event_order_key,
+        order=DAY_LINE_ORDER,
     )
 
     assert _titles(rows) == ["Zed", "The Abyss", "Cobra"]
@@ -245,7 +315,7 @@ def test_a_film_row_holds_every_beat_of_its_film_in_the_feeds_event_order():
     later = _beat("Heat 2", "casting", occurred_at=T0 + timedelta(hours=2))
     earlier = _beat("Heat 2", "crew_attached", occurred_at=T0)
 
-    (row,) = group_rows([_title(later), _title(earlier)], beat_key=event_order_key)
+    (row,) = group_rows([_title(later), _title(earlier)], order=DAY_LINE_ORDER)
 
     assert row.beats == (earlier, later)
 
@@ -260,7 +330,7 @@ def test_entity_rows_merge_their_films_and_sort_by_name():
     abyss = _beat("The Abyss")
     rows = group_rows(
         [_via(the_ada, heat), _via(bea, heat), _via(ada, heat), _via(ada, abyss)],
-        beat_key=event_order_key,
+        order=DAY_LINE_ORDER,
     )
 
     assert _titles(rows) == ["ada Lovelace", "Bea", "The Ada"]
@@ -271,7 +341,7 @@ def test_entity_rows_merge_their_films_and_sort_by_name():
             _via(_reach("company", "The Weinstein Company", "1"), heat),
             _via(_reach("company", "Universal", "2"), heat),
         ],
-        beat_key=event_order_key,
+        order=DAY_LINE_ORDER,
     )
     assert _titles(studios) == ["Universal", "The Weinstein Company"]
 
@@ -282,7 +352,7 @@ def test_an_entity_the_catalog_cannot_name_trails_under_its_fallback_headline():
             _via(_reach("person", None, "9"), _beat()),
             _via(_reach("person", "Zed", "1"), _beat()),
         ],
-        beat_key=event_order_key,
+        order=DAY_LINE_ORDER,
     )
 
     assert _titles(rows) == ["Zed", "A person you follow"]
@@ -306,7 +376,7 @@ def test_films_use_the_feeds_update_types_in_their_order():
         _beat("Heat 2", "now_available"),
         _beat("Heat 2", "canceled"),
     ]
-    rows = group_rows([_title(b) for b in beats], beat_key=event_order_key)
+    rows = group_rows([_title(b) for b in beats], order=DAY_LINE_ORDER)
 
     types = group_update_types(rows, block="films")
 
@@ -330,7 +400,7 @@ def test_entities_use_attached_detached_canceled_other():
             _via(ada, _beat("C", "casting")),
             _via(ada, _beat("D", "trailer")),
         ],
-        beat_key=event_order_key,
+        order=DAY_LINE_ORDER,
     )
 
     types = group_update_types(rows, block="people")
@@ -365,7 +435,7 @@ def test_the_strip_leads_with_news_backed_films_de_duplicated_and_capped():
 
 
 def test_a_day_of_only_entity_rows_still_has_a_strip():
-    (day,) = group_days([_via(_reach("company", "A24"), _beat("Heat 2"))], dated=True)
+    (day,) = group_days([_via(_reach("company", "A24"), _beat("Heat 2"))])
 
     assert [p.title for p in day.posters] == ["Heat 2"]
 
@@ -627,16 +697,43 @@ def test_an_entity_line_names_and_links_its_film():
 def test_the_daily_omits_the_date_and_the_weekly_keeps_it():
     beat = _beat("Heat 2", "trailer", news=True)
 
-    daily = _days(_context(_title(beat), cadence="daily"))
-    weekly = _days(_context(_title(beat), cadence="weekly"))
+    daily = _context(_title(beat), cadence="daily")
+    weekly = _context(_title(beat), cadence="weekly")
 
-    assert daily[0]["heading"] == "Tuesday, September 22, 2026"
-    assert daily[0]["blocks"][0]["sections"][0]["rows"][0]["lines"][0]["prefix"] == "New trailer"
-    assert weekly[0]["heading"] is None
-    assert (
-        weekly[0]["blocks"][0]["sections"][0]["rows"][0]["lines"][0]["prefix"]
-        == "22 Sep · New trailer"
+    assert daily["week"] is None
+    (day,) = _days(daily)
+    assert day["heading"] == "Tuesday, September 22, 2026"
+    assert day["blocks"][0]["sections"][0]["rows"][0]["lines"][0]["prefix"] == "New trailer"
+    assert weekly["days"] == []
+    week = cast(dict, weekly["week"])
+    assert "heading" not in week
+    assert week["blocks"][0]["sections"][0]["rows"][0]["lines"][0]["prefix"] == (
+        "22 Sep · New trailer"
     )
+
+
+def test_an_entity_entrys_lines_each_carry_their_date():
+    ada = _reach("person", "Ada", "7")
+    context = _context(
+        _via(ada, _beat("Zodiac", "casting", created_at=T0 - timedelta(days=2))),
+        _via(ada, _beat("Heat 2", "casting", created_at=T0)),
+        cadence="weekly",
+    )
+
+    week = cast(dict, context["week"])
+    (entry,) = week["blocks"][0]["sections"][0]["update_types"][0]["rows"]
+    assert [(line["prefix"], line["film"]["title"]) for line in entry["lines"]] == [
+        ("20 Sep", "Zodiac"),
+        ("22 Sep", "Heat 2"),
+    ]
+
+
+def test_a_weekly_with_only_a_slate_has_no_week():
+    context = digest_context(
+        _batch(slate=1), cadence="weekly", today=TODAY, settings=get_settings()
+    )
+
+    assert (context["days"], context["week"]) == ([], None)
 
 
 def test_justwatch_is_credited_per_news_film_row_and_once_under_now_available():

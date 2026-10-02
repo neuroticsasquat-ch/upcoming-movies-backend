@@ -1,7 +1,8 @@
-"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462, NEU-1528): what the
-daily and weekly digests say — the timeline day reproduced (day → follow block → section →
-update type → film or entity row → line) beside the slate and its new/moved markers, under a
-wordmark.
+"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462, NEU-1528,
+NEU-1529): what the daily and weekly digests say — the daily as the timeline day reproduced
+(day → follow block → section → update type → film or entity row → line), the weekly by entry
+(follow block → section → update type → film or entity entry → dated line) — beside the slate
+and its new/moved markers, under a wordmark.
 
 `test_templates.py` asserts the rendering rules against whichever template is handy; this
 asserts the digest's own copy. The timeline is rendered through `digest_sender.render_batch`
@@ -343,19 +344,133 @@ def test_justwatch_is_credited_once_under_now_available_and_per_news_film_row():
     assert text.index("Now streaming.") < text.index("Availability from JustWatch")
 
 
-def test_the_weekly_is_one_undated_group_whose_lines_carry_their_dates():
-    """The weekly's minimal path until it gets its own shape (FB-19): no day headings, the
-    date on every line."""
-    envelope = _mail(*ALL_BLOCKS, cadence="weekly")
+WEEK = (
+    *ALL_BLOCKS,
+    DigestLine(_beat(HEAT, "crew_attached", "Villeneuve will produce.", at=YESTERDAY), VILLENEUVE),
+    DigestLine(_beat(DUNE, "casting", "Villeneuve cameos."), VILLENEUVE),
+)
+"""`ALL_BLOCKS` plus an entity entry that spans two films on two days, published in the
+reverse of their films' title order."""
 
-    for part in (envelope.text, envelope.html):
-        assert "October 2, 2026" not in part
-        assert "October 1, 2026" not in part
-    text = envelope.text
-    assert "  2 Oct · Casting [unconfirmed] · Zendaya returns.\n" in text
-    assert "  1 Oct · Now streaming.\n" in text
-    assert "  2 Oct · Cleopatra (US, 2026) · The film has been canceled." in text
-    assert text.count("\nFILMS\n") == 1
+WEEKLY_TIMELINE = f"""NEW ON YOUR TIMELINE
+
+FILMS
+
+In the news
+
+Dune: Part Three (US, 2026) — {BASE}/film/1
+  2 Oct · Casting [unconfirmed] · Zendaya returns.
+    via Variety — https://variety.example/x
+
+Not yet reported (unconfirmed)
+
+-- Now available --
+
+Heat 2 (US, 2026) — {BASE}/film/2
+  1 Oct · Now streaming.
+
+Availability from JustWatch
+
+-- Release date --
+
+Heat 2 (US, 2026) — {BASE}/film/2
+  2 Oct · US wide date slipped.
+
+PEOPLE
+
+In the news
+
+Denis Villeneuve — {BASE}/person/5-denis
+  2 Oct · Crew attached · Dune: Part Three (US, 2026) · Villeneuve will direct. — {BASE}/film/1
+    via Variety — https://variety.example/x
+
+Not yet reported (unconfirmed)
+
+-- Attached --
+
+Denis Villeneuve — {BASE}/person/5-denis
+  1 Oct · Heat 2 (US, 2026) · Villeneuve will produce. — {BASE}/film/2
+  2 Oct · Dune: Part Three (US, 2026) · Villeneuve cameos. — {BASE}/film/1
+
+-- Canceled --
+
+Denis Villeneuve — {BASE}/person/5-denis
+  2 Oct · Cleopatra (US, 2026) · The film has been canceled. — {BASE}/film/3
+
+STUDIOS
+
+Not yet reported (unconfirmed)
+
+-- Attached --
+
+Legendary Pictures — {BASE}/studio/9-legendary
+  2 Oct · Dune: Part Three (US, 2026) · Legendary joins. — {BASE}/film/1
+
+-- Canceled --
+
+Legendary Pictures — {BASE}/studio/9-legendary
+  2 Oct · Cleopatra (US, 2026) · The film has been canceled. — {BASE}/film/3
+
+FRANCHISES
+
+Not yet reported (unconfirmed)
+
+-- Attached --
+
+A franchise you follow
+  2 Oct · Heat 2 (US, 2026) · Filed under a franchise. — {BASE}/film/2
+
+You are getting this weekly digest"""
+
+
+def test_the_weekly_text_part_reads_by_entry_with_every_line_dated():
+    """FB-19, FB-24: no day headings; one entry per film or entity under each section and
+    update type it touched, across both days — Heat 2 under Now available and Release date,
+    Villeneuve under In the news, Attached and Canceled — every line dated, an entity entry's
+    lines in publication order rather than by film."""
+    assert WEEKLY_TIMELINE in _mail(*WEEK, cadence="weekly").text
+
+
+def test_the_weekly_html_part_has_no_day_headings_and_dates_every_line():
+    html = _mail(*WEEK, cadence="weekly").html
+
+    assert "<h3" not in html
+    for part in ("October 2, 2026", "October 1, 2026"):
+        assert part not in html
+    order = [
+        ">New on your timeline</h2>",
+        ">Films</h4>",
+        ">In the news</h5>",
+        "<strong>2 Oct · Casting</strong>",
+        ">Now available</h6>",
+        "<strong>1 Oct</strong>",
+        "Now streaming.",
+        ">Release date</h6>",
+        ">People</h4>",
+        ">Attached</h6>",
+        "Villeneuve will produce.",
+        "Villeneuve cameos.",
+        ">Studios</h4>",
+        ">Franchises</h4>",
+    ]
+    positions = [html.index(marker) for marker in order]
+    assert positions == sorted(positions)
+    assert html.count("<strong>2 Oct") + html.count("<strong>1 Oct") == len(WEEK)
+
+
+def test_the_weekly_has_one_poster_strip_at_the_top_of_the_timeline():
+    """FB-19: the week's films, de-duplicated, in one strip under "New on your timeline" —
+    not one per day, though the week spans two."""
+    html = _mail(*WEEK, cadence="weekly").html
+
+    assert html.count('style="margin:0 0 12px;"') == 1  # the strip's table
+    imgs = re.findall(r'<img src="([^"]+)" width="52"', html)
+    assert imgs == [
+        "https://image.tmdb.org/t/p/w154/1.jpg",
+        "https://image.tmdb.org/t/p/w154/2.jpg",
+    ]
+    assert html.index(">New on your timeline</h2>") < html.index("w154/1.jpg")
+    assert html.index("w154/2.jpg") < html.index(">Films</h4>")
 
 
 def test_the_text_part_carries_links_as_bare_urls():
@@ -406,6 +521,7 @@ def _digest(
         "preheader": preheader,
         "slate": list(slate),
         "days": list(days),
+        "week": None,
         "unsubscribe_url": UNSUBSCRIBE_URL,
         **overrides,
     }
