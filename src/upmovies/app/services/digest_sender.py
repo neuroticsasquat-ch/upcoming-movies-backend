@@ -45,15 +45,14 @@ built, so the three cannot disagree about what the mail says.
 **The weekly send is the "your slate" mail (D-33), and so is the daily one on the slate day
 (DC-2).** The weekly always carries the slate; the daily carries it only when the run's `today`
 falls on `SLATE_WEEKDAY`, so a daily reader sees upcoming dates once a week, on the day the
-weekly readers do. Before the timeline section it lists the upcoming US dates — theatrical,
-digital and physical — for every film the user follows by
-title in the next `SLATE_WINDOW_DAYS` (`app.follow_queries.title_follow_film_ids`, EF-14),
-joined to `film_release_date` directly rather than to notification
-rows: a date that has not *moved* produces
-no event, and the slate's job is to say what is coming, not what changed. Each film's date per
-release type is the governing one — the earliest row in the (film, US, type) subject, the same
-collapse `public.service.get_calendar` and `catalog.headline_release` apply — so the slate
-cannot name a date the calendar would not. A date **set or moved since the previous slate
+weekly readers do. Before the timeline section it is **the my-films calendar reproduced** for
+the next `SLATE_WINDOW_DAYS` (FB-26): the rows `public.service._calendar_page` builds for this
+user's title follows (EF-14), read from `film_release_date` directly rather than from
+notification rows — a date that has not *moved* produces no event, and the slate's job is to say
+what is coming, not what changed — and laid out as the calendar page lays them out: date →
+release-type bucket → film row, under month headings only across a month boundary. The rows
+are the calendar's own, so the slate cannot name a date, or describe a film, differently from
+it. A date **set or moved since the previous slate
 day** carries a `new` or `moved` marker (DC-9), read from the release-date card that set or
 moved it — see `load_slate_markers`.
 
@@ -103,13 +102,13 @@ from typing import Any, Literal
 from uuid import UUID
 
 import httpx
-from sqlalchemy import Date, Row, and_, cast, exists, func, or_, select, update
+from sqlalchemy import Row, and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app import tokens
 from upmovies.app.entitlements import entitled_user_clause
 from upmovies.app.entity_names import entity_names
-from upmovies.app.follow_queries import follow_attribution_pairs, title_follow_film_ids
+from upmovies.app.follow_queries import follow_attribution_pairs
 from upmovies.app.models import (
     DEFAULT_DIGEST_CADENCE,
     Follow,
@@ -122,10 +121,9 @@ from upmovies.app.services.notify_service import EMAIL_CHANNEL
 from upmovies.app.verification import verified_user_clause
 from upmovies.catalog.models import (
     Film,
-    FilmReleaseDate,
     FilmReleaseDateChange,
 )
-from upmovies.catalog.ref import film_ref
+from upmovies.catalog.ref import film_ref, parse_film_ref
 from upmovies.catalog.release_grade import PRIMARY_REGION, RELEASE_TYPE_BUCKETS
 from upmovies.config import WEEKDAYS, Settings
 from upmovies.ingest.runs import record_progress
@@ -143,10 +141,15 @@ from upmovies.mail import (
 )
 from upmovies.news.models import Event, EventSummary
 from upmovies.public.arc import derive_arc_stage, event_stage_rank, most_significant_event_type
+from upmovies.public.dto import CalendarItem
 from upmovies.public.release import RELEASE_BUCKET_LABELS
 from upmovies.public.service import (
+    _CALENDAR_BUCKET_ORDER,
+    _calendar_governing_cte,
+    _calendar_page,
     _directors_for_films,
     _has_story,
+    _my_films_visible,
     _production_countries_for_films,
     _release_year,
     _sources_by_event,
@@ -188,10 +191,9 @@ SLATE_WINDOW_DAYS = 30
 """How many dates the slate covers: today and the 29 after it. "The next 30 days" is
 thirty dates, not a 31-day span with both ends in."""
 
-SLATE_RELEASE_TYPES: tuple[int, ...] = tuple(sorted(RELEASE_TYPE_BUCKETS))
-"""TMDB release types the slate lists: the theatrical arc and the US home release — every
-displayable bucket, US only, which is the region the home release is displayable in at all
-(`catalog.release_grade`)."""
+SLATE_POSTER_SIZE = "w92"
+"""The my-films calendar row's poster (`CalendarFilmRow`): the slate is that row (FB-26), so it
+fetches the image the calendar page fetches, not the timeline's `POSTER_SIZE`."""
 
 SLATE_MARKER_DAYS = 7
 """How far back a slate row looks for the release-date card that set or moved it (DC-9): the
@@ -204,10 +206,6 @@ marked. Accepted: a missing marker costs a reader a hint, while a doubled one wo
 same move news two weeks running."""
 
 SlateMarker = Literal["new", "moved"]
-
-_SLATE_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical")
-"""Two rows sharing a date: the theatrical arc first, then the home release in the order it
-happens — the calendar's rule (`public.service._CALENDAR_BUCKET_ORDER`)."""
 
 DIGEST_BEAT_LABELS: dict[str, str] = {
     "release_date": "Release date",
@@ -358,7 +356,12 @@ def film_url(tmdb_id: int, title: str, base_url: str) -> str:
     """The film's public page — the same `/film/{ref}` the sitemap emits, built from the same
     `film_ref`, so a link in a mail cannot address a film differently from a link on the site
     (and cannot land on the 301 a bare id would)."""
-    return f"{base_url.rstrip('/')}/film/{film_ref(tmdb_id, title)}"
+    return ref_url(film_ref(tmdb_id, title), base_url)
+
+
+def ref_url(ref: str, base_url: str) -> str:
+    """The film page for a ref already minted — a calendar row carries its own (FB-26)."""
+    return f"{base_url.rstrip('/')}/film/{ref}"
 
 
 def settings_url(base_url: str) -> str:
@@ -402,12 +405,6 @@ def carries_slate(cadence: DigestCadence, today: date, settings: Settings) -> bo
     if cadence == "weekly":
         return True
     return today.weekday() == WEEKDAYS.index(settings.slate_weekday)
-
-
-def release_label(release_type: int) -> str:
-    """The slate's name for a release type: the bucket's display label plus the word the film
-    page's section heading supplies and a mail has to spell out."""
-    return f"{RELEASE_BUCKET_LABELS[RELEASE_TYPE_BUCKETS[release_type]]} release"
 
 
 ARC_STAGE_LABELS: dict[str, str] = {
@@ -876,23 +873,97 @@ def rank_films(beats: Iterable[DigestBeat]) -> tuple[RankedFilm, ...]:
 
 @dataclass(frozen=True)
 class SlateItem:
-    """One (film, release type) with a US date inside the slate window."""
+    """One my-films calendar row inside the slate window — a (film, release type) with a US
+    date — and its marker (FB-26)."""
 
-    title: str
-    release_label: str
-    film_url: str
-    poster_url: str | None
+    calendar: CalendarItem
+    """The row exactly as `GET /me/calendar` serves it: the slate shows these fields and no
+    others, so it cannot describe a film differently from the calendar page."""
     marker: SlateMarker | None = None
     """`new` or `moved` when the date was set or moved since the previous slate day (DC-9);
     None for a date that has not changed, which carries nothing."""
 
 
 @dataclass(frozen=True)
+class SlateBucket:
+    """One release type's rows on one slate date, under the calendar's sub-heading."""
+
+    bucket: str
+    items: tuple[SlateItem, ...]
+
+    @property
+    def label(self) -> str:
+        """The calendar's bucket label (`components/calendar/release-labels.ts`): the date
+        heading above it says "release", so the bucket does not."""
+        return RELEASE_BUCKET_LABELS.get(self.bucket, self.bucket.title())
+
+
+@dataclass(frozen=True)
 class SlateDay:
-    """One date on the slate and everything the user's followed films have on it."""
+    """One date on the slate and everything the user's followed films have on it, by bucket."""
 
     day: date
-    items: tuple[SlateItem, ...]
+    buckets: tuple[SlateBucket, ...]
+
+    @property
+    def count(self) -> int:
+        return sum(len(bucket.items) for bucket in self.buckets)
+
+
+@dataclass(frozen=True)
+class SlateMonth:
+    """The slate's dates in one month, under a month heading only when the slate spans more
+    than one (FB-26)."""
+
+    heading: str | None
+    days: tuple[SlateDay, ...]
+
+
+def _bucket_rank(bucket: str) -> int:
+    """`_calendar_type_rank`'s order in Python: wide, limited, digital, physical; a bucket
+    nobody ranked last, as the calendar sorts it."""
+    if bucket in _CALENDAR_BUCKET_ORDER:
+        return _CALENDAR_BUCKET_ORDER.index(bucket)
+    return len(_CALENDAR_BUCKET_ORDER)
+
+
+def group_slate(items: Iterable[SlateItem]) -> tuple[SlateDay, ...]:
+    """The calendar's date → bucket nesting (`lib/calendar-groups.ts::groupByReleaseDate`):
+    dates soonest first, buckets in the calendar's order, rows in the order given — which is
+    `_calendar_page`'s, so within a bucket the slate orders films as the calendar page does.
+    Pure."""
+    by_day: dict[date, dict[str, list[SlateItem]]] = {}
+    for item in items:
+        by_day.setdefault(item.calendar.release_date, {}).setdefault(
+            item.calendar.release_type, []
+        ).append(item)
+    return tuple(
+        SlateDay(
+            day=day,
+            buckets=tuple(
+                SlateBucket(bucket=bucket, items=tuple(rows))
+                for bucket, rows in sorted(buckets.items(), key=lambda kv: _bucket_rank(kv[0]))
+            ),
+        )
+        for day, buckets in sorted(by_day.items())
+    )
+
+
+def slate_months(days: Sequence[SlateDay]) -> tuple[SlateMonth, ...]:
+    """The slate's days under month headings — the calendar's month level, which a 30-day
+    window only needs when it crosses a month boundary. One heading-less group when every date
+    is in one month (the long date headings already name it); otherwise a group per month,
+    each headed by the month's name, as the calendar heads its months. No year level: a
+    30-day window that crosses one is still read by its months. Pure."""
+    groups: list[tuple[tuple[int, int], list[SlateDay]]] = []
+    for day in days:
+        key = (day.day.year, day.day.month)
+        if not groups or groups[-1][0] != key:
+            groups.append((key, []))
+        groups[-1][1].append(day)
+    if len(groups) <= 1:
+        return tuple(SlateMonth(heading=None, days=tuple(g)) for _, g in groups)
+    return tuple(SlateMonth(heading=_MONTHS[month - 1], days=tuple(g)) for (_, month), g in groups)
 
 
 @dataclass(frozen=True)
@@ -936,7 +1007,7 @@ class DigestBatch:
 
     @property
     def slate_count(self) -> int:
-        return sum(len(d.items) for d in self.slate)
+        return sum(d.count for d in self.slate)
 
     @property
     def has_content(self) -> bool:
@@ -1203,86 +1274,62 @@ async def _load_reaches(
     return {event_id: tuple(reaches) for event_id, reaches in reached.items()}
 
 
-async def load_slate(
-    session: AsyncSession, *, user_id: UUID, today: date, settings: Settings
-) -> tuple[SlateDay, ...]:
-    """The upcoming US dates for the films this user follows, soonest first (D-33).
+async def load_slate(session: AsyncSession, *, user_id: UUID, today: date) -> tuple[SlateDay, ...]:
+    """The my-films calendar for the slate window: the upcoming US dates for the films this
+    user follows by title, soonest first (D-33), as the calendar page builds them (FB-26).
 
-    The set is `follow_queries.title_follow_film_ids` — the films they asked for by name, and
-    only those (EF-14). A followed director contributes nothing: an entity follow delivers that
-    entity's attachment cards, not a place on a date list (EF-3). The same set the my-films
-    calendar and the `.ics` feed read, so the three cannot disagree about what is coming.
+    Not a query of its own: `public.service._calendar_page` over the my-films governing CTE
+    (`title_follow_user_id`) and the my-films cuts (`_my_films_visible`), with the window's end
+    added. So the set, the governing-date collapse, the region, the slug rule, the within-date
+    order and every field a row shows are the calendar page's — the slate cannot name a date,
+    or describe a film, differently from it. The window is `SLATE_WINDOW_DAYS` dates starting
+    today: a date that is today is still a date to know about, and the day the count runs out
+    is the first one left off. The calendar pages by *date*, so a page of that many dates holds
+    the whole window.
 
-    One governing date per (film, release type): the earliest `film_release_date` row in the
-    subject, cast to a UTC calendar date — the same collapse `public.service.get_calendar`
-    makes, restricted to `PRIMARY_REGION` because that is the only region every displayable
-    bucket is displayable in (`catalog.release_grade`). The window is `SLATE_WINDOW_DAYS`
-    dates starting today: a date that is today is still a date to know about, and the day
-    the count runs out is the first one left off.
-
-    The calendar's popularity, runtime and adult cuts are deliberately absent. Those keep noise
-    off a public listing; a film the user followed by name is not noise to them. A film with no
-    slug is skipped for the reason the decision pass skips it — no page to link.
-
-    Each row's marker is `load_slate_markers`' answer for its (film, bucket).
+    Each row's marker is `load_slate_markers`' answer for its (film, bucket) — the one thing
+    the slate shows that the calendar page does not.
     """
-    governing = (
-        select(
-            FilmReleaseDate.film_id.label("film_id"),
-            FilmReleaseDate.release_type.label("release_type"),
-            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
-                "governing_date"
+    governing = _calendar_governing_cte(name="slate_governing", title_follow_user_id=user_id)
+    page = await _calendar_page(
+        session,
+        governing=governing,
+        visible=(
+            *_my_films_visible(governing, today=today),
+            governing.c.governing_date < today + timedelta(days=SLATE_WINDOW_DAYS),
+        ),
+        limit=SLATE_WINDOW_DAYS,
+        offset=0,
+    )
+    if not page.items:
+        return ()
+    # The calendar row addresses its film by ref, which `_calendar_page` mints from the tmdb id;
+    # the markers are keyed by the film's own id.
+    tmdb_by_ref = {item.film_ref: parse_film_ref(item.film_ref) for item in page.items}
+    id_by_tmdb = dict(
+        (
+            await session.execute(
+                select(Film.tmdb_id, Film.id).where(Film.tmdb_id.in_(set(tmdb_by_ref.values())))
+            )
+        )
+        .tuples()
+        .all()
+    )
+    film_id_by_ref = {
+        ref: id_by_tmdb[tmdb_id] for ref, tmdb_id in tmdb_by_ref.items() if tmdb_id in id_by_tmdb
+    }
+    markers = await load_slate_markers(session, film_ids=set(film_id_by_ref.values()), today=today)
+    return group_slate(
+        SlateItem(
+            calendar=item,
+            marker=(
+                markers.get((film_id, item.release_type))
+                if (film_id := film_id_by_ref.get(item.film_ref)) is not None
+                else None
             ),
         )
-        .where(
-            FilmReleaseDate.film_id.in_(title_follow_film_ids(user_id)),
-            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
-            FilmReleaseDate.release_type.in_(SLATE_RELEASE_TYPES),
-        )
-        .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
-        .cte("governing")
+        for item in page.items
     )
-    rows = (
-        await session.execute(
-            select(
-                governing.c.governing_date,
-                governing.c.release_type,
-                Film.id.label("film_id"),
-                Film.tmdb_id,
-                Film.title,
-                Film.poster_path,
-            )
-            .select_from(governing)
-            .join(Film, Film.id == governing.c.film_id)
-            .where(
-                governing.c.governing_date >= today,
-                governing.c.governing_date < today + timedelta(days=SLATE_WINDOW_DAYS),
-                Film.slug.is_not(None),
-            )
-        )
-    ).all()
-    ordered = sorted(
-        rows,
-        key=lambda r: (
-            r.governing_date,
-            _SLATE_BUCKET_ORDER.index(RELEASE_TYPE_BUCKETS[r.release_type]),
-            r.title.casefold(),
-            r.tmdb_id,
-        ),
-    )
-    markers = await load_slate_markers(session, film_ids={row.film_id for row in rows}, today=today)
-    by_day: dict[date, list[SlateItem]] = {}
-    for row in ordered:
-        by_day.setdefault(row.governing_date, []).append(
-            SlateItem(
-                title=row.title,
-                release_label=release_label(row.release_type),
-                film_url=film_url(row.tmdb_id, row.title, settings.public_base_url),
-                poster_url=poster_url(row.poster_path, settings.tmdb_image_base),
-                marker=markers.get((row.film_id, RELEASE_TYPE_BUCKETS[row.release_type])),
-            )
-        )
-    return tuple(SlateDay(day=day, items=tuple(items)) for day, items in by_day.items())
 
 
 def slate_marker(changes: Iterable[str]) -> SlateMarker | None:
@@ -1331,7 +1378,7 @@ async def load_slate_markers(
         today - timedelta(days=SLATE_MARKER_DAYS - 1), time.min, tzinfo=UTC
     )
     window_end = datetime.combine(today + timedelta(days=1), time.min, tzinfo=UTC)
-    tokens = [f"{PRIMARY_REGION}:{bucket}" for bucket in _SLATE_BUCKET_ORDER]
+    tokens = [f"{PRIMARY_REGION}:{bucket}" for bucket in _CALENDAR_BUCKET_ORDER]
     rows = await session.execute(
         select(
             Event.id,
@@ -1404,7 +1451,7 @@ async def load_batch(
         include_slate = carries_slate(cadence, today, settings) and recipient.deliverable
     slate: tuple[SlateDay, ...] = ()
     if include_slate:
-        slate = await load_slate(session, user_id=recipient.user_id, today=today, settings=settings)
+        slate = await load_slate(session, user_id=recipient.user_id, today=today)
     return DigestBatch(recipient=recipient, lines=lines, unsendable=unsendable, slate=slate)
 
 
@@ -1612,6 +1659,49 @@ def _timeline_context(
     }
 
 
+def _slate_context(days: Sequence[SlateDay], *, settings: Settings) -> list[dict[str, object]]:
+    """The slate half of the context (FB-26): month (headed only across a boundary) → date →
+    bucket → the calendar's film row, its fields as `CalendarFilmRow` shows them, plus the
+    marker. `films`, not `items`: Jinja resolves `bucket.items` to the dict method."""
+    return [
+        {
+            "heading": month.heading,
+            "days": [
+                {
+                    "heading": day_heading(d.day),
+                    "buckets": [
+                        {
+                            "label": bucket.label,
+                            "films": [
+                                {
+                                    "title": item.calendar.film_title,
+                                    "year": item.calendar.release_year,
+                                    "url": ref_url(
+                                        item.calendar.film_ref, settings.public_base_url
+                                    ),
+                                    "poster_url": poster_url(
+                                        item.calendar.poster_path,
+                                        settings.tmdb_image_base,
+                                        size=SLATE_POSTER_SIZE,
+                                    ),
+                                    "director": item.calendar.director,
+                                    "stars": " · ".join(item.calendar.stars),
+                                    "genres": " · ".join(item.calendar.genres),
+                                    "marker": item.marker,
+                                }
+                                for item in bucket.items
+                            ],
+                        }
+                        for bucket in d.buckets
+                    ],
+                }
+                for d in month.days
+            ],
+        }
+        for month in slate_months(days)
+    ]
+
+
 def digest_context(
     batch: DigestBatch, *, cadence: DigestCadence, today: date, settings: Settings
 ) -> dict[str, object]:
@@ -1630,23 +1720,7 @@ def digest_context(
         "slate_window_days": SLATE_WINDOW_DAYS,
         "subject": digest_subject(batch),
         "preheader": digest_preheader(batch),
-        "slate": [
-            {
-                "heading": day_heading(d.day),
-                # `entries`, not `items`: Jinja resolves `day.items` to the dict method.
-                "entries": [
-                    {
-                        "title": item.title,
-                        "release_label": item.release_label,
-                        "film_url": item.film_url,
-                        "poster_url": item.poster_url,
-                        "marker": item.marker,
-                    }
-                    for item in d.items
-                ],
-            }
-            for d in batch.slate
-        ],
+        "slate": _slate_context(batch.slate, settings=settings),
         **_timeline_context(batch.lines, cadence=cadence, today=today),
         "unsubscribe_url": recipient_unsubscribe_url(batch.recipient, settings),
     }

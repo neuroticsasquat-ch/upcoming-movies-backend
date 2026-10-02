@@ -22,6 +22,7 @@ from upmovies.app.services.digest_sender import (
     SLATE_WINDOW_DAYS,
     digest_beat_label,
     digest_detail,
+    load_slate,
     render_digest,
     send_digests,
 )
@@ -31,6 +32,7 @@ from upmovies.ingest.runs import create_run
 from upmovies.mail import MailError, MailGateway, MessageId, NoopTransport
 from upmovies.news.models import Event
 from upmovies.news.subject_key import company_subject_token, normalize_name
+from upmovies.public.service import get_my_films_calendar
 
 TODAY = date(2026, 9, 18)
 """A Friday — off the default `SLATE_WEEKDAY`, so a daily send on it carries no slate."""
@@ -194,6 +196,11 @@ def _timeline(part: str) -> str:
     return part[part.index(heading) :]
 
 
+def _slate_rows(text: str) -> list[str]:
+    """The text part's lines with each slate row's trailing ` — {url}` cut off."""
+    return [line.split(" — ")[0] for line in text.splitlines()]
+
+
 async def _rows(session) -> list[Notification]:
     return list(
         (
@@ -258,10 +265,13 @@ async def test_the_weekly_digest_carries_the_slate_and_the_timeline_under_follow
     assert envelope.to == "sub@example.com"
     assert envelope.subject == "Dune: Part Three — new trailer, + 1 more film · your slate"
     text = envelope.text
-    # The slate: both dates, soonest first, each naming its release kind and the film.
-    assert text.index("Friday, September 25, 2026") < text.index("Friday, October 9, 2026")
-    assert text.index("Friday, September 25, 2026") < text.index("Wide release")
-    assert text.index("Friday, October 9, 2026") < text.index("Digital release")
+    # The slate: both dates, soonest first, each with its bucket and the film under it — and,
+    # crossing into October, under month headings (FB-26).
+    assert text.index("SEPTEMBER") < text.index("Friday, September 25, 2026")
+    assert text.index("Friday, September 25, 2026") < text.index("OCTOBER")
+    assert text.index("OCTOBER") < text.index("Friday, October 9, 2026")
+    assert text.index("Friday, September 25, 2026") < text.index("  Wide\n")
+    assert text.index("Friday, October 9, 2026") < text.index("  Digital\n")
     # The timeline: Not yet reported's headings in the feed's order (NR-3), each line dated
     # and with no beat label under a heading that names its type.
     timeline = _timeline(text)
@@ -275,8 +285,8 @@ async def test_the_weekly_digest_carries_the_slate_and_the_timeline_under_follow
     assert "September 15, 2026" not in timeline
     assert f"{BASE_URL}/film/{dune.tmdb_id}-dune-part-three" in text
     assert f"{BASE_URL}/settings" in text
-    # Dune is on the slate as a 62px row and in the timeline's poster strip at 52px.
-    assert f'<img src="{IMAGE_BASE}/w154/dune.jpg" width="62"' in envelope.html
+    # Dune is on the slate as the calendar's 48px w92 row and in the timeline's strip at 52px.
+    assert f'<img src="{IMAGE_BASE}/w92/dune.jpg" width="48"' in envelope.html
     assert f'<img src="{IMAGE_BASE}/w154/dune.jpg" width="52"' in envelope.html
     assert [row.status for row in await _rows(session)] == ["sent"] * 3
     assert all(row.sent_at is not None for row in await _rows(session))
@@ -500,13 +510,13 @@ async def test_a_slate_row_is_marked_new_or_moved_by_the_change_that_carded_it(
 
     assert result.slate_dates == 6
     (envelope,) = mailbox.sent
-    lines = envelope.text.splitlines()
-    assert "  Arrival — Wide release [new]" in lines
-    assert "  Blade — Wide release [moved]" in lines
-    assert "  Casino — Wide release" in lines
-    assert "  Dune — Wide release" in lines
-    assert "  Edge — Wide release" in lines
-    assert "  Edge — Digital release [moved]" in lines
+    lines = _slate_rows(envelope.text)
+    assert "    Arrival (2026) [new]" in lines
+    assert "    Blade (2026) [moved]" in lines
+    assert "    Casino (2026)" in lines
+    assert "    Dune (2026)" in lines
+    assert lines.count("    Edge (2026)") == 1  # the wide date: untouched
+    assert "    Edge (2026) [moved]" in lines  # the digital date
     assert envelope.html.count(">New</span>") == 1
     assert envelope.html.count(">Moved</span>") == 2
 
@@ -525,7 +535,7 @@ async def test_a_date_set_and_then_moved_since_the_last_slate_is_new(
 
     _result, mailbox = await send("weekly")
 
-    assert "  Arrival — Wide release [new]" in mailbox.sent[0].text.splitlines()
+    assert "    Arrival (2026) [new]" in _slate_rows(mailbox.sent[0].text)
 
 
 async def test_an_unpersisted_change_falls_back_to_the_summarys_verb(
@@ -554,9 +564,9 @@ async def test_an_unpersisted_change_falls_back_to_the_summarys_verb(
 
     _result, mailbox = await send("weekly")
 
-    lines = mailbox.sent[0].text.splitlines()
-    assert "  Arrival — Wide release [new]" in lines
-    assert "  Blade — Wide release [moved]" in lines
+    lines = _slate_rows(mailbox.sent[0].text)
+    assert "    Arrival (2026) [new]" in lines
+    assert "    Blade (2026) [moved]" in lines
 
 
 async def test_only_a_published_us_release_date_card_marks_a_slate_row(
@@ -584,7 +594,7 @@ async def test_only_a_published_us_release_date_card_marks_a_slate_row(
     _result, mailbox = await send("weekly")
 
     (envelope,) = mailbox.sent
-    assert "  Arrival — Wide release" in envelope.text.splitlines()
+    assert "    Arrival (2026)" in _slate_rows(envelope.text)
     assert "[new]" not in envelope.text and "[moved]" not in envelope.text
 
 
@@ -1200,12 +1210,77 @@ async def test_the_slate_is_the_governing_us_date_per_release_type_inside_the_wi
     assert "Friday, September 18, 2026" in text  # today, wide
     assert "Monday, September 28, 2026" in text  # dune's earliest US wide row
     assert "Saturday, October 17, 2026" in text  # today + 29, digital
-    assert "Physical release" not in text  # today + 30
+    assert "Physical" not in text  # today + 30
     assert "Thursday, September 17, 2026" not in text  # yesterday
     assert "Sunday, September 20, 2026" not in text  # GB
     assert "Tuesday, September 22, 2026" not in text  # premiere
     assert "Thursday, October 8, 2026" not in text  # dune's later US wide row
     assert "Other" not in text
+
+
+async def test_the_slate_is_the_my_films_calendar_over_its_window(
+    session,
+    subscriber,
+    make_film,
+    add_release_date,
+    watchlist,
+    attach_credits,
+    attach_genres,
+    record_date_change,
+):
+    """FB-26: the slate's rows are `GET /me/calendar`'s for the window — the same films, dates,
+    buckets, within-date order and fields — and nothing past the window's end; the marker rides
+    beside the row, not in it."""
+    today = datetime.now(tz=UTC).date()  # `get_my_films_calendar` reads the wall clock
+    user = await subscriber()
+    dune = await make_film(slug="dune", title="Dune", popularity=5.0)
+    edge = await make_film(slug="edge", title="Edge", popularity=9.0)
+    heat = await make_film(slug="heat", title="Heat", poster_path=None)
+    other = await make_film(slug="other", title="Other")
+    for film in (dune, edge, heat):
+        await watchlist(user_id=user.id, film_id=film.id)
+    await attach_credits(
+        dune,
+        cast=[
+            {"id": 901 + n, "name": name, "character": "X", "credit_order": n}
+            for n, name in enumerate(("Ada", "Bea", "Cy", "Di"))
+        ],
+        crew=[{"id": 900, "name": "Vee", "job": "Director", "department": "Directing"}],
+    )
+    await attach_genres(dune, [(1, "War"), (2, "Drama"), (3, "Action"), (4, "Sci-Fi")])
+    # Two films on one date and bucket: the calendar's popularity order holds inside it.
+    await add_release_date(film=dune, release_type=3, release_date=_on(today + timedelta(days=5)))
+    await add_release_date(film=edge, release_type=3, release_date=_on(today + timedelta(days=5)))
+    await add_release_date(film=dune, release_type=4, release_date=_on(today + timedelta(days=5)))
+    # Not `today`: the calendar reads the clock again, and a UTC midnight between the two reads
+    # would drop a today-dated row from one side only. The governing-date test pins today.
+    await add_release_date(film=heat, release_type=2, release_date=_on(today + timedelta(days=1)))
+    await add_release_date(
+        film=heat, release_type=5, release_date=_on(today + timedelta(days=SLATE_WINDOW_DAYS))
+    )
+    await add_release_date(film=other, release_type=3, release_date=_on(today + timedelta(days=2)))
+    await record_date_change(film=edge, created_at=_on(today, 0), changes=[(3, "moved")])
+
+    slate = await load_slate(session, user_id=user.id, today=today)
+    calendar = await get_my_films_calendar(session, user_id=user.id, limit=100, offset=0)
+
+    window_end = today + timedelta(days=SLATE_WINDOW_DAYS)
+    in_window = [item for item in calendar.items if item.release_date < window_end]
+    rows = [item for day in slate for bucket in day.buckets for item in bucket.items]
+    assert [row.calendar for row in rows] == in_window
+    assert (len(rows), len(calendar.items)) == (4, 5)
+    assert [(r.calendar.film_title, r.calendar.release_type, r.marker) for r in rows] == [
+        ("Heat", "limited", None),
+        ("Edge", "wide", "moved"),
+        ("Dune", "wide", None),
+        ("Dune", "digital", None),
+    ]
+    dune_row = rows[2].calendar
+    assert (dune_row.director, dune_row.stars, dune_row.genres) == (
+        "Vee",
+        ["Ada", "Bea", "Cy"],
+        ["Action", "Drama", "Sci-Fi"],
+    )
 
 
 async def test_unfollowing_takes_a_film_off_the_slate(

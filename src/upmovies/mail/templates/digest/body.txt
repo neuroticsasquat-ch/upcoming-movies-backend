@@ -51,13 +51,21 @@ Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %
 {% if slate %}
 YOUR SLATE — the next {{ slate_window_days }} days of films you follow
 
-{% for day in slate %}
+{% for month in slate %}
+{% if month.heading %}
+{{ month.heading | upper }}
+
+{% endif %}
+{% for day in month.days %}
 {{ day.heading }}
-{% for item in day.entries %}
-  {{ item.title }} — {{ item.release_label }}{{ " [" ~ item.marker ~ "]" if item.marker else "" }}
-  {{ item.film_url }}
+{% for bucket in day.buckets %}
+  {{ bucket.label }}
+{% for film in bucket.films %}
+    {{ film.title }}{{ " (" ~ film.year ~ ")" if film.year else "" }}{{ " [" ~ film.marker ~ "]" if film.marker else "" }} — {{ film.url }}
+{% endfor %}
 {% endfor %}
 
+{% endfor %}
 {% endfor %}
 {% endif %}
 {% if days or week %}

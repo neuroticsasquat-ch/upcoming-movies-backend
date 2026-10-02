@@ -1,8 +1,8 @@
-"""The digest's pure functions (NEU-1460, NEU-1462, NEU-1528, NEU-1529): how the lines a
+"""The digest's pure functions (NEU-1460, NEU-1462, NEU-1528, NEU-1529, NEU-1530): how the lines a
 batch's reaches deliver are laid out — the daily as timeline days, the weekly by entry; follow
 blocks, sections, update types, film and entity rows — how films rank for the subject, what
-the subject and preheader say, which day the daily carries the slate, and which marker a slate
-row wears.
+the subject and preheader say, which day the daily carries the slate, how the slate nests as the
+calendar does, and which marker a slate row wears.
 
 Hand-built lines throughout — none of this touches the database, which is the point of the
 functions being pure. `test_digest_sender.py` proves the loader feeds them what they expect."""
@@ -24,7 +24,6 @@ from upmovies.app.services.digest_sender import (
     DigestRecipient,
     DigestRow,
     DigestSource,
-    SlateDay,
     SlateItem,
     arc_stage_label,
     beat_order_key,
@@ -37,14 +36,17 @@ from upmovies.app.services.digest_sender import (
     group_blocks,
     group_days,
     group_rows,
+    group_slate,
     group_update_types,
     group_week,
     natural_title,
     rank_films,
     short_date,
     slate_marker,
+    slate_months,
 )
 from upmovies.config import get_settings
+from upmovies.public.dto import CalendarItem
 
 TODAY = date(2026, 9, 24)
 T0 = datetime(2026, 9, 22, 9, tzinfo=UTC)
@@ -113,11 +115,28 @@ def _via(reach: DigestReach, beat: DigestBeat) -> DigestLine:
     return DigestLine(beat=beat, reach=reach)
 
 
-def _slate(n: int) -> tuple[SlateDay, ...]:
-    item = SlateItem(
-        title="Dune", release_label="Wide release", film_url="https://x.test/f", poster_url=None
+def _calendar(
+    title: str = "Dune", *, day: date = TODAY, bucket: str = "wide", tmdb_id: int = 1
+) -> CalendarItem:
+    return CalendarItem(
+        film_ref=f"{tmdb_id}-{title.lower()}",
+        film_title=title,
+        release_year=day.year,
+        poster_path=None,
+        release_date=day,
+        release_type=bucket,
+        director=None,
+        stars=[],
+        genres=[],
     )
-    return (SlateDay(day=TODAY, items=(item,) * n),) if n else ()
+
+
+def _slate_item(title: str = "Dune", *, marker=None, **kwargs) -> SlateItem:
+    return SlateItem(calendar=_calendar(title, **kwargs), marker=marker)
+
+
+def _slate(n: int):
+    return group_slate(_slate_item(tmdb_id=i) for i in range(n))
 
 
 def _batch(*lines: DigestLine, slate: int = 0) -> DigestBatch:
@@ -829,18 +848,113 @@ def test_the_summary_fallback_reads_the_markets_own_verb(summary, bucket, expect
 
 
 def test_the_context_carries_each_slate_rows_marker():
-    items = (
-        SlateItem(title="A", release_label="Wide release", film_url="u", poster_url=None),
-        SlateItem(
-            title="B", release_label="Wide release", film_url="u", poster_url=None, marker="new"
-        ),
-    )
     batch = DigestBatch(
-        recipient=RECIPIENT, lines=(), unsendable=(), slate=(SlateDay(day=TODAY, items=items),)
+        recipient=RECIPIENT,
+        lines=(),
+        unsendable=(),
+        slate=group_slate((_slate_item("A"), _slate_item("B", marker="new"))),
     )
 
     context = digest_context(batch, cadence="daily", today=TODAY, settings=get_settings())
 
-    (day,) = cast(list[dict[str, object]], context["slate"])
-    assert [e["marker"] for e in cast(list[dict[str, object]], day["entries"])] == [None, "new"]
+    (month,) = cast(list[dict], context["slate"])
+    (day,) = month["days"]
+    (bucket,) = day["buckets"]
+    assert [f["marker"] for f in bucket["films"]] == [None, "new"]
     assert context["days"] == []
+
+
+# --- the slate as the my-films calendar (NEU-1530, FB-26) --------------------------------
+
+
+def test_the_slate_groups_by_date_then_bucket_in_the_calendars_order():
+    """`_calendar_type_rank`'s order within a date — wide, limited, digital, physical — and the
+    rows of one bucket in the order the calendar page gave them, not re-sorted."""
+    later = TODAY + timedelta(days=3)
+    days = group_slate(
+        (
+            _slate_item("Zodiac", day=later, bucket="physical"),
+            _slate_item("Edge", day=later, bucket="digital"),
+            _slate_item("Casino", day=TODAY, bucket="limited"),
+            _slate_item("Blade", day=TODAY, bucket="wide"),
+            _slate_item("Arrival", day=TODAY, bucket="wide"),
+        )
+    )
+
+    assert [d.day for d in days] == [TODAY, later]
+    assert [(b.bucket, b.label) for b in days[0].buckets] == [
+        ("wide", "Wide"),
+        ("limited", "Limited"),
+    ]
+    assert [i.calendar.film_title for i in days[0].buckets[0].items] == ["Blade", "Arrival"]
+    assert [b.label for b in days[1].buckets] == ["Digital", "Physical"]
+    assert [d.count for d in days] == [3, 2]
+
+
+def test_a_slate_inside_one_month_has_no_month_heading():
+    days = group_slate(
+        (_slate_item(day=date(2026, 10, 1)), _slate_item(day=date(2026, 10, 31), tmdb_id=2))
+    )
+
+    (month,) = slate_months(days)
+    assert month.heading is None
+    assert [d.day for d in month.days] == [date(2026, 10, 1), date(2026, 10, 31)]
+
+
+def test_a_slate_across_a_month_boundary_heads_each_month_and_no_year():
+    """FB-26: the month level only where the window crosses one; never a year level, even
+    across December."""
+    days = group_slate(
+        (
+            _slate_item(day=date(2026, 12, 20)),
+            _slate_item(day=date(2026, 12, 31), tmdb_id=2),
+            _slate_item(day=date(2027, 1, 4), tmdb_id=3),
+        )
+    )
+
+    months = slate_months(days)
+    assert [m.heading for m in months] == ["December", "January"]
+    assert [[d.day.day for d in m.days] for m in months] == [[20, 31], [4]]
+
+
+def test_an_empty_slate_has_no_months():
+    assert slate_months(()) == ()
+
+
+def test_the_context_carries_the_calendar_rows_fields_and_the_w92_poster():
+    item = CalendarItem(
+        film_ref="42-dune",
+        film_title="Dune",
+        release_year=2026,
+        poster_path="/dune.jpg",
+        release_date=TODAY,
+        release_type="wide",
+        director="Denis Villeneuve",
+        stars=["A", "B", "C"],
+        genres=["Drama", "Sci-Fi"],
+    )
+    settings = get_settings().model_copy(
+        update={"public_base_url": "https://app.test/", "tmdb_image_base": "https://img.test/p"}
+    )
+    batch = DigestBatch(
+        recipient=RECIPIENT,
+        lines=(),
+        unsendable=(),
+        slate=group_slate((SlateItem(calendar=item, marker="moved"),)),
+    )
+
+    context = digest_context(batch, cadence="weekly", today=TODAY, settings=settings)
+
+    (month,) = cast(list[dict], context["slate"])
+    (film,) = month["days"][0]["buckets"][0]["films"]
+    assert film == {
+        "title": "Dune",
+        "year": 2026,
+        "url": "https://app.test/film/42-dune",
+        "poster_url": "https://img.test/p/w92/dune.jpg",
+        "director": "Denis Villeneuve",
+        "stars": "A · B · C",
+        "genres": "Drama · Sci-Fi",
+        "marker": "moved",
+    }
+    assert month["days"][0]["heading"] == "Thursday, September 24, 2026"
