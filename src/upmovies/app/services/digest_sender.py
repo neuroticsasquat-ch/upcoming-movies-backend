@@ -92,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app import tokens
 from upmovies.app.entitlements import entitled_user_clause
+from upmovies.app.entity_names import entity_names
 from upmovies.app.follow_queries import follow_attribution_pairs, title_follow_film_ids
 from upmovies.app.models import (
     DEFAULT_DIGEST_CADENCE,
@@ -105,14 +106,11 @@ from upmovies.app.services.notify_service import EMAIL_CHANNEL
 from upmovies.app.verification import verified_user_clause
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
-    Collection,
     Film,
     FilmReleaseDate,
     FilmReleaseDateChange,
-    Person,
-    ProductionCompany,
 )
-from upmovies.catalog.ref import collection_ref, company_ref, film_ref, person_ref
+from upmovies.catalog.ref import film_ref
 from upmovies.catalog.release_grade import PRIMARY_REGION, RELEASE_TYPE_BUCKETS
 from upmovies.config import WEEKDAYS, Settings
 from upmovies.ingest.runs import record_progress
@@ -828,14 +826,6 @@ async def _first_sources(session: AsyncSession, event_ids: list[UUID]) -> dict[U
     return first
 
 
-_ENTITY_TABLES: dict[str, type[Person] | type[ProductionCompany] | type[Collection]] = {
-    "person": Person,
-    "company": ProductionCompany,
-    "franchise": Collection,
-}
-_ENTITY_REFS = {"person": person_ref, "company": company_ref, "franchise": collection_ref}
-
-
 async def _load_following(
     session: AsyncSession,
     *,
@@ -846,7 +836,8 @@ async def _load_following(
 ) -> dict[UUID, tuple[DigestFollowing, ...]]:
     """Per film, the follows that reached any of its beats in this batch (DC-6), named and
     linked: `follow_attribution_pairs` narrowed to the batch's event ids, then one name lookup
-    per entity table. Person, studio, franchise, then by name; the title row last.
+    per entity table (`entity_names`, which the timeline's rows share). Person, studio,
+    franchise, then by name; the title row last.
 
     An entity id the catalog no longer holds is dropped from the line rather than rendered as
     a bare number — a name nobody can read is worse than one fewer name."""
@@ -860,18 +851,15 @@ async def _load_following(
     for entity_type, entity_id, event_id in rows:
         reached.setdefault(film_of[event_id], set()).add((entity_type, entity_id))
 
-    wanted: dict[str, set[int]] = {}
-    for pairs_of_film in reached.values():
-        for entity_type, entity_id in pairs_of_film:
-            if entity_type in _ENTITY_TABLES and entity_id.isdigit():
-                wanted.setdefault(entity_type, set()).add(int(entity_id))
-    names: dict[tuple[str, int], str] = {}
-    for entity_type, ids in wanted.items():
-        table = _ENTITY_TABLES[entity_type]
-        for entity_id, name in await session.execute(
-            select(table.id, table.name).where(table.id.in_(ids))
-        ):
-            names[(entity_type, entity_id)] = name
+    names = await entity_names(
+        session,
+        {
+            pair
+            for pairs_of_film in reached.values()
+            for pair in pairs_of_film
+            if pair[0] != "title"
+        },
+    )
 
     base = settings.public_base_url.rstrip("/")
     following: dict[UUID, tuple[DigestFollowing, ...]] = {}
@@ -881,12 +869,11 @@ async def _load_following(
             if entity_type == "title":
                 rows_of_film.append(DigestFollowing("title", titles[film_id], None))
                 continue
-            name = names.get((entity_type, int(entity_id))) if entity_id.isdigit() else None
-            if name is None:
+            resolved = names[(entity_type, entity_id)]
+            if resolved is None:
                 continue
-            ref = _ENTITY_REFS[entity_type](int(entity_id), name)
-            url = f"{base}/{_FOLLOWING_ROUTES[entity_type]}/{ref}"
-            rows_of_film.append(DigestFollowing(entity_type, name, url))
+            url = f"{base}/{_FOLLOWING_ROUTES[entity_type]}/{resolved.ref}"
+            rows_of_film.append(DigestFollowing(entity_type, resolved.name, url))
         following[film_id] = tuple(
             sorted(
                 rows_of_film,
