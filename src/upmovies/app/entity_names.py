@@ -1,7 +1,7 @@
 """What a person, studio or franchise follow is called, and where its page lives (FB-15).
 
 The timeline names the entity each of its entity rows came through (`FeedVia`), and the digest
-names the entities that reached an entry; both start from `follow_attribution_pairs`-shaped
+heads its entity rows the same way; both start from `follow_attribution_pairs`-shaped
 `(entity_type, entity_id)` keys and need the same two things back — the catalog's current name
 and the canonical ref the entity page's route takes. One lookup per entity type over a whole
 page of keys, never one per row.

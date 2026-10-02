@@ -60,11 +60,15 @@ def subscriber(session, make_user):
 
 @pytest.fixture
 def queued(session, make_film, add_event):
-    """One `queued` digest row on a film called Dune — the whole backlog most tests need."""
+    """One `queued` digest row on a film called Dune, which the user follows by title — the
+    whole backlog most tests need. A card no follow reaches is not in the mail (FB-25)."""
 
     async def _queue(user_id: UUID) -> Notification:
         dune = await make_film(slug="dune", title="Dune")
         event = await add_event(film=dune, event_type="casting", created_at=PUBLISHED)
+        session.add(
+            Follow(user_id=user_id, entity_type="title", entity_id=str(dune.id), source="manual")
+        )
         row = Notification(
             user_id=user_id, event_id=event.id, kind="digest", channel="email", status="queued"
         )
