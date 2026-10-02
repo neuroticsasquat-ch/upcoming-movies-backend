@@ -65,24 +65,44 @@
           {% if slate %}
           <h2 style="margin:0 0 4px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#555555;">Your slate</h2>
           <p style="margin:0 0 16px;font-size:14px;color:#555555;">The next {{ slate_window_days }} days of films you follow.</p>
-          {% for day in slate %}
-          <p style="margin:0 0 8px;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:#777777;">{{ day.heading }}</p>
-          {% for item in day.entries %}
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+          {% for month in slate %}
+          {% if month.heading %}
+          <h3 style="margin:20px 0 4px;font-size:15px;font-weight:700;line-height:1.3;color:#1a1a1a;">{{ month.heading }}</h3>
+          {% endif %}
+          {% for day in month.days %}
+          <h4 style="margin:12px 0 6px;font-size:14px;font-weight:600;line-height:1.3;color:#555555;">{{ day.heading }}</h4>
+          <div style="margin:0 0 8px;padding:0 0 0 12px;border-left:2px solid #eeeeee;">
+          {% for bucket in day.buckets %}
+          <h5 style="margin:6px 0 4px;font-size:12px;font-weight:600;color:#777777;">{{ bucket.label }}</h5>
+          {% for film in bucket.films %}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 10px;">
             <tr>
-              {% if item.poster_url %}
-              <td width="62" valign="top" style="padding:0 12px 0 0;">
-                <a href="{{ item.film_url }}"><img src="{{ item.poster_url }}" width="62" alt="" style="display:block;width:62px;height:auto;border:0;border-radius:4px;"></a>
+              <td width="48" valign="top" style="padding:0 12px 0 0;">
+                {% if film.poster_url %}
+                <a href="{{ film.url }}"><img src="{{ film.poster_url }}" width="48" alt="{{ film.title }}" style="display:block;width:48px;height:auto;border:0;border-radius:4px;"></a>
+                {% else %}
+                <div style="width:48px;height:72px;border-radius:4px;background:#eeeeee;"></div>
+                {% endif %}
               </td>
-              {% endif %}
-              <td valign="top">
-                <p style="margin:0 0 4px;font-size:16px;font-weight:600;line-height:1.3;">
-                  <a href="{{ item.film_url }}" style="color:#1a1a1a;text-decoration:none;">{{ item.title }}</a>
+              <td valign="top" style="font-size:13px;line-height:1.4;color:#555555;">
+                <p style="margin:0 0 2px;font-size:14px;font-weight:600;line-height:1.3;">
+                  <a href="{{ film.url }}" style="color:#1a1a1a;text-decoration:none;">{{ film.title }}{% if film.year %} <span style="font-weight:400;color:#555555;">({{ film.year }})</span>{% endif %}</a>{% if film.marker == "new" %} <span style="display:inline-block;padding:2px 6px;border-radius:4px;background:#dcfce7;color:#166534;font-size:10px;font-weight:500;line-height:1;letter-spacing:0.025em;text-transform:uppercase;vertical-align:middle;">New</span>{% elif film.marker == "moved" %} <span style="display:inline-block;padding:2px 6px;border-radius:4px;background:#e0e7ff;color:#3730a3;font-size:10px;font-weight:500;line-height:1;letter-spacing:0.025em;text-transform:uppercase;vertical-align:middle;">Moved</span>{% endif %}
                 </p>
-                <p style="margin:0;font-size:14px;color:#555555;">{{ item.release_label }}{% if item.marker == "new" %} <span style="display:inline-block;padding:2px 6px;border-radius:4px;background:#dcfce7;color:#166534;font-size:10px;font-weight:500;line-height:1;letter-spacing:0.025em;text-transform:uppercase;vertical-align:middle;">New</span>{% elif item.marker == "moved" %} <span style="display:inline-block;padding:2px 6px;border-radius:4px;background:#e0e7ff;color:#3730a3;font-size:10px;font-weight:500;line-height:1;letter-spacing:0.025em;text-transform:uppercase;vertical-align:middle;">Moved</span>{% endif %}</p>
+                {% if film.director %}
+                <p style="margin:0;">Dir. {{ film.director }}</p>
+                {% endif %}
+                {% if film.stars %}
+                <p style="margin:0;">{{ film.stars }}</p>
+                {% endif %}
+                {% if film.genres %}
+                <p style="margin:0;">{{ film.genres }}</p>
+                {% endif %}
               </td>
             </tr>
           </table>
+          {% endfor %}
+          {% endfor %}
+          </div>
           {% endfor %}
           {% endfor %}
           {% endif %}

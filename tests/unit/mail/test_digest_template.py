@@ -1,8 +1,8 @@
 """The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462, NEU-1528,
-NEU-1529): what the daily and weekly digests say — the daily as the timeline day reproduced
-(day → follow block → section → update type → film or entity row → line), the weekly by entry
-(follow block → section → update type → film or entity entry → dated line) — beside the slate
-and its new/moved markers, under a wordmark.
+NEU-1529, NEU-1530): what the daily and weekly digests say — the daily as the timeline day
+reproduced (day → follow block → section → update type → film or entity row → line), the weekly
+by entry (follow block → section → update type → film or entity entry → dated line) — beside
+the slate, the my-films calendar reproduced with its new/moved markers, under a wordmark.
 
 `test_templates.py` asserts the rendering rules against whichever template is handy; this
 asserts the digest's own copy. The timeline is rendered through `digest_sender.render_batch`
@@ -32,41 +32,85 @@ from upmovies.mail import Envelope, MailError, render
 SETTINGS_URL = "https://app.example.com/settings"
 UNSUBSCRIBE_URL = "https://api.example.com/digest/unsubscribe/tok-ada"
 
+
+def _slate_film(title: str, marker: str | None = None, **overrides) -> dict[str, object]:
+    slug = title.lower().replace(" ", "-").replace(":", "")
+    return {
+        "title": title,
+        "year": 2026,
+        "url": f"https://app.example.com/film/1-{slug}",
+        "poster_url": None,
+        "director": None,
+        "stars": "",
+        "genres": "",
+        "marker": marker,
+        **overrides,
+    }
+
+
+def _slate_day(heading: str, *buckets: tuple[str, list[dict[str, object]]]) -> dict[str, object]:
+    return {
+        "heading": heading,
+        "buckets": [{"label": label, "films": films} for label, films in buckets],
+    }
+
+
 SLATE = [
     {
-        "heading": "Friday, September 25, 2026",
-        "entries": [
-            {
-                "title": "Dune: Part Three",
-                "release_label": "Wide release",
-                "film_url": "https://app.example.com/film/1234-dune-part-three",
-                "poster_url": "https://image.tmdb.org/t/p/w154/dune.jpg",
-                "marker": None,
-            }
+        "heading": None,
+        "days": [
+            _slate_day(
+                "Friday, September 25, 2026",
+                (
+                    "Wide",
+                    [
+                        _slate_film(
+                            "Dune: Part Three",
+                            poster_url="https://image.tmdb.org/t/p/w92/dune.jpg",
+                            director="Denis Villeneuve",
+                            stars="Timothée Chalamet · Zendaya · Florence Pugh",
+                            genres="Adventure · Drama · Science Fiction",
+                        )
+                    ],
+                ),
+            )
         ],
     },
 ]
 
-
-def _slate_row(title: str, marker: str | None) -> dict[str, object]:
-    slug = title.lower().replace(" ", "-")
-    return {
-        "title": title,
-        "release_label": "Wide release",
-        "film_url": f"https://app.example.com/film/1-{slug}",
-        "poster_url": None,
-        "marker": marker,
-    }
-
-
 MARKED_SLATE = [
     {
-        "heading": "Friday, September 25, 2026",
-        "entries": [
-            _slate_row("Arrival", "new"),
-            _slate_row("Blade", "moved"),
-            _slate_row("Casino", None),
+        "heading": None,
+        "days": [
+            _slate_day(
+                "Friday, September 25, 2026",
+                (
+                    "Wide",
+                    [
+                        _slate_film("Arrival", "new"),
+                        _slate_film("Blade", "moved"),
+                        _slate_film("Casino"),
+                    ],
+                ),
+            )
         ],
+    },
+]
+
+ACROSS_A_MONTH = [
+    {
+        "heading": "September",
+        "days": [
+            _slate_day(
+                "Wednesday, September 30, 2026",
+                ("Wide", [_slate_film("Arrival", "new")]),
+                ("Digital", [_slate_film("Blade"), _slate_film("Casino")]),
+            )
+        ],
+    },
+    {
+        "heading": "October",
+        "days": [_slate_day("Friday, October 2, 2026", ("Limited", [_slate_film("Dune")]))],
     },
 ]
 
@@ -590,33 +634,100 @@ def test_an_empty_preheader_renders_no_element():
     assert "display:none" not in html
 
 
-def test_the_slate_lists_every_date_film_and_release_kind_in_both_parts():
+def test_the_slate_lists_every_date_bucket_and_film_in_both_parts():
     envelope = _digest(slate=SLATE, subject="Your slate: 1 upcoming date")
 
     for part in (envelope.text, envelope.html):
         assert "30 days" in part
-        for day in SLATE:
-            assert day["heading"] in part
-            for item in day["entries"]:
-                assert item["title"] in part
-                assert item["release_label"] in part
-                assert item["film_url"] in part
+        assert "Friday, September 25, 2026" in part
+        assert "Wide" in part
+        assert "Dune: Part Three" in part
+        assert "(2026)" in part
+        assert "https://app.example.com/film/1-dune-part-three" in part
     assert "New on your timeline" not in envelope.html
+    assert "Your slate" in envelope.html
+
+
+def test_the_slate_html_row_is_the_calendars_film_row():
+    """FB-26: poster, title (year), `Dir. …`, the stars and the genres — `CalendarFilmRow`'s
+    lines, in its order."""
+    html = _digest(slate=SLATE).html
+    row = html[html.index(">Dune: Part Three") :]
+
+    assert row.index("(2026)") < row.index("Dir. Denis Villeneuve")
+    assert row.index("Dir. Denis Villeneuve") < row.index("Timothée Chalamet · Zendaya")
+    assert row.index("Timothée Chalamet · Zendaya") < row.index("Adventure · Drama")
+
+
+def test_the_slate_text_part_is_date_then_bucket_then_one_line_per_film():
+    text = _digest(slate=SLATE).text
+
+    assert (
+        "Friday, September 25, 2026\n"
+        "  Wide\n"
+        "    Dune: Part Three (2026) — https://app.example.com/film/1-dune-part-three\n"
+    ) in text
+    assert "Denis Villeneuve" not in text
+
+
+def test_a_slate_across_a_month_boundary_heads_its_months_and_two_buckets_share_a_date():
+    """The rendering FB-26 names: month headings only because the window crosses one, the
+    date under its month, and two buckets under one date in the order given, in both parts."""
+    envelope = _digest(slate=ACROSS_A_MONTH, subject="Your slate: 4 upcoming dates")
+
+    assert (
+        "SEPTEMBER\n\n"
+        "Wednesday, September 30, 2026\n"
+        "  Wide\n"
+        "    Arrival (2026) [new] — https://app.example.com/film/1-arrival\n"
+        "  Digital\n"
+        "    Blade (2026) — https://app.example.com/film/1-blade\n"
+        "    Casino (2026) — https://app.example.com/film/1-casino\n"
+        "\n"
+        "OCTOBER\n\n"
+        "Friday, October 2, 2026\n"
+        "  Limited\n"
+        "    Dune (2026) — https://app.example.com/film/1-dune\n"
+    ) in envelope.text
+    html = envelope.html
+    order = [
+        ">September</h3>",
+        ">Wednesday, September 30, 2026</h4>",
+        ">Wide</h5>",
+        ">Arrival",
+        ">Digital</h5>",
+        ">Blade",
+        ">Casino",
+        ">October</h3>",
+        ">Friday, October 2, 2026</h4>",
+        ">Limited</h5>",
+        ">Dune",
+    ]
+    positions = [html.index(marker) for marker in order]
+    assert positions == sorted(positions)
+    assert "2026</h3>" not in html  # no year heading
+
+
+def test_a_slate_in_one_month_has_no_month_heading():
+    envelope = _digest(slate=SLATE)
+
+    assert "</h3>" not in envelope.html[: envelope.html.index("Dune: Part Three")]
+    assert "SEPTEMBER" not in envelope.text
 
 
 def test_a_slate_marker_is_bracketed_in_text_and_a_pill_in_html():
-    """DC-9: `[new]` / `[moved]` after the release kind in text, a pill in HTML, and nothing
-    at all on a row whose date did not change."""
+    """DC-9, FB-26: `[new]` / `[moved]` after the title in text, a pill after it in HTML, and
+    nothing at all on a row whose date did not change."""
     envelope = _digest(slate=MARKED_SLATE, subject="Your slate: 3 upcoming dates")
 
     lines = envelope.text.splitlines()
-    assert "  Arrival — Wide release [new]" in lines
-    assert "  Blade — Wide release [moved]" in lines
-    assert "  Casino — Wide release" in lines
+    assert "    Arrival (2026) [new] — https://app.example.com/film/1-arrival" in lines
+    assert "    Blade (2026) [moved] — https://app.example.com/film/1-blade" in lines
+    assert "    Casino (2026) — https://app.example.com/film/1-casino" in lines
     html = envelope.html
-    arrival = html[html.index(">Arrival<") : html.index(">Blade<")]
-    blade = html[html.index(">Blade<") : html.index(">Casino<")]
-    casino = html[html.index(">Casino<") :]
+    arrival = html[html.index(">Arrival ") : html.index(">Blade ")]
+    blade = html[html.index(">Blade ") : html.index(">Casino ")]
+    casino = html[html.index(">Casino ") :]
     assert ">New</span>" in arrival and ">Moved</span>" not in arrival
     assert ">Moved</span>" in blade and ">New</span>" not in blade
     assert ">New</span>" not in casino and ">Moved</span>" not in casino
@@ -655,11 +766,15 @@ def test_both_parts_open_with_the_wordmark():
     assert envelope.html.index(">Backlotter</p>") < envelope.html.index("Hi Ada")
 
 
-def test_the_slate_rows_keep_their_62px_posters():
+def test_the_slate_rows_carry_the_calendars_48px_poster_or_its_placeholder():
     html = _digest(slate=SLATE).html
 
     imgs = re.findall(r'<img [^>]*width="(\d+)"[^>]*width:(\d+)px', html)
-    assert imgs == [("62", "62")]
+    assert imgs == [("48", "48")]
+    assert "w92/dune.jpg" in html
+    placeholder = _digest(slate=MARKED_SLATE).html
+    assert "<img" not in placeholder
+    assert placeholder.count("width:48px;height:72px") == 3
 
 
 def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():

@@ -1978,10 +1978,22 @@ async def get_my_films_calendar(
     """
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     governing = _calendar_governing_cte(name="my_films_governing", title_follow_user_id=user_id)
-    visible = (governing.c.governing_date >= today, Film.slug.is_not(None))
     return await _calendar_page(
-        session, governing=governing, visible=visible, limit=limit, offset=offset
+        session,
+        governing=governing,
+        visible=_my_films_visible(governing, today=today),
+        limit=limit,
+        offset=offset,
     )
+
+
+def _my_films_visible(governing: CTE, *, today: date) -> tuple[ColumnElement[bool], ...]:
+    """The my-films calendar's cuts over its governing CTE: upcoming, and a page to link to.
+
+    Spelled once because the digest's slate (`digest_sender.load_slate`, FB-26) is this page
+    over a 30-day window, and a slate whose cuts drifted from the page's would name a date the
+    calendar does not — or miss one it does."""
+    return (governing.c.governing_date >= today, Film.slug.is_not(None))
 
 
 async def get_ical_feed(
