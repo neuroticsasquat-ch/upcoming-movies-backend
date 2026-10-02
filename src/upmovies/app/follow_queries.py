@@ -21,10 +21,11 @@ The timeline and the digest both spell the same clause over the two:
 
     Event.film_id IN title_follow_film_ids(u)  OR  Event.id IN entity_attachment_event_ids(u)
 
-`get_timeline` hands them to `get_feed_grouped` as `film_filter` and `event_filter`, which OR-s
-the two grains itself; the notify pass OR-s them in its own statement. Reusing the builders
-rather than restating the rule is the point — a digest that quietly covered less than the
-timeline it summarises is the drift this module exists to prevent.
+`get_timeline` takes the two halves apart (`follow_reach`): their OR bounds its day window, and
+each half gives its own rows — a title row per followed film, an entity row per followed entity
+through `entity_attribution_pairs` (FB-13). The notify pass OR-s them in its own statement.
+Reusing the builders rather than restating the rule is the point — a digest that quietly covered
+less than the timeline it summarises is the drift this module exists to prevent.
 
 **Neither kind of follow has a window, an in-play term or a mute** (EF-14). An entity follow
 selects events, published now, one per attachment, so there is nothing to bound; a title follow
@@ -384,11 +385,10 @@ def follow_reach(user_id: UUID) -> tuple[ColumnElement[bool], ColumnElement[bool
     """The two halves of `follow_scope`, kept apart: `(via a title follow, via an entity
     follow)` over `news.event`.
 
-    Every reader today asks only *whether* a card reaches this user, and wants them OR-ed: that
-    is `follow_scope`, and it is the one caller. The split outlived the notify pass's alert
-    branch, which asked *why* a card reached them (EF-7) and decided per reach — ADR-0021
-    retired it. Kept rather than inlined because the pair is the clause's own decomposition,
-    and the next reader that needs the reach should not have to rediscover it.
+    The notify pass asks only *whether* a card reaches this user, and wants them OR-ed: that is
+    `follow_scope`. The timeline asks *how* (FB-13, ADR-0022): the OR bounds its day window, and
+    the title half alone selects its title rows. Kept as one decomposition because the pair is
+    the clause's own, and a reader that took the halves from separate builders could drift.
 
     Returned as a pair rather than as two builders because they are one decomposition and
     reading one without the other is how the OR silently loses a term."""
@@ -403,10 +403,8 @@ def follow_scope(user_id: UUID) -> ColumnElement[bool]:
 
     The clause the module docstring states, spelled once for the readers that need it as a
     predicate rather than as two builders — the notify pass's digest branch. The
-    timeline instead hands `title_follow_film_ids` and `entity_attachment_event_ids` to
-    `get_feed_grouped`, which OR-s them into the same shape itself, because its scope has to
-    apply to four statements (the day count, the day window, the film-day rows and the event
-    fetch) rather than one.
+    timeline takes `follow_reach` instead and OR-s it itself, because it also needs the title
+    half on its own.
 
     `or_` over `follow_reach` rather than its own pair of `IN`s, so the scope and the reach can
     never come to different answers about what a follow delivers.
@@ -590,6 +588,32 @@ def _entity_event_pairs(
     return union_all(*branches)
 
 
+def entity_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
+    """`(entity_type, entity_id, event_id)` — which of this user's person, studio and franchise
+    follows reached which published card: `follow_attribution_pairs`' entity arms on their own.
+
+    What the timeline groups its entity rows by (FB-13). The timeline and the digest read the
+    same pairs — this builder is the digest's entity arm — so the page and the mail cannot come
+    to different answers about which entity a card arrived through.
+
+    **De-duplicated**, for the reason `follow_attribution_pairs` gives: a writer-director's
+    `canceled` card comes out of `_canceled_pairs` once per credit, and a catalog casting card
+    matched by name is matched again by the resolved mention of the story that promoted it. A
+    pair is a reason, not a count; two follows reaching one card stay two rows.
+
+    No visibility term, as on every builder here.
+    """
+    pairs = _entity_event_pairs(user_id=user_id, only=None)
+    # `only=None` wants every type, so the person branch alone makes this non-empty.
+    assert pairs is not None
+    reached = pairs.subquery("reached")
+    return (
+        select(reached.c.entity_type, reached.c.entity_id, reached.c.event_id)
+        .distinct()
+        .correlate(None)
+    )
+
+
 def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
     """`(entity_type, entity_id, event_id)` — which of this user's follows reached which
     published card (DC-6), across both grains.
@@ -601,8 +625,9 @@ def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
 
     Two arms:
 
-    - every row `_entity_event_pairs` yields for this user's person, studio and franchise
-      follows (all five branches, EF-15's attribution), with `created_at` dropped;
+    - `entity_attribution_pairs` — every row `_entity_event_pairs` yields for this user's
+      person, studio and franchise follows (all five branches, EF-15's attribution), with
+      `created_at` dropped;
     - a **title** arm, `('title', film_id, event_id)` for every published card whose film is
       in `title_follow_film_ids` — `status = 'published'` on the entity branches' terms, as in
       `follow_last_activity`. Keyed by the card's own `film_id`, so the id is the canonical
@@ -630,12 +655,7 @@ def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
         .where(Event.status == _PUBLISHED, Event.film_id.in_(title_follow_film_ids(user_id)))
         .correlate(None)
     )
-    pairs = _entity_event_pairs(user_id=user_id, only=None)
-    # `only=None` wants every type, so the person branch alone makes this non-empty.
-    assert pairs is not None
-    reached = pairs.subquery("reached")
-    entity = select(reached.c.entity_type, reached.c.entity_id, reached.c.event_id)
-    attributed = union(entity, title).subquery("attributed")
+    attributed = union(entity_attribution_pairs(user_id), title).subquery("attributed")
     return select(attributed.c.entity_type, attributed.c.entity_id, attributed.c.event_id)
 
 

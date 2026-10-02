@@ -1,9 +1,14 @@
-"""`GET /me/timeline`: the grouped feed filtered by the user's follows (D-11, D-12),
+"""`GET /me/timeline`: the grouped feed over what the user's follows deliver (EF-3, D-12),
 subscriber-only (D-39).
 
+A timeline row is a feed row with a reach (FB-13, ADR-0022): one per (reach, film, day,
+section), `via` null for a title follow and naming the person, studio or franchise otherwise. A
+film-day reached both ways is two rows. The DTO is `/feed/grouped`'s — whose rows all carry
+`via: null` — and day pagination means what it means there, which is what lets the client
+render either on `/` once `me` resolves.
+
 The gate is applied once at the router and the handler takes the same dependency object, as in
-`routers/follows.py`. Read-only, so no CSRF; the response is `/feed/grouped`'s exactly, which is
-what lets the client swap one for the other on `/` once `me` resolves."""
+`routers/follows.py`. Read-only, so no CSRF."""
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession

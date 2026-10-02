@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from tests.fixtures.public import ref
 from upmovies.app.models import Follow
+from upmovies.catalog.ref import company_ref, person_ref
 from upmovies.news.models import EventStory, Story, StoryPerson
 from upmovies.news.subject_key import (
     collection_subject_token,
@@ -341,21 +342,112 @@ async def test_a_cancellation_reaches_a_person_follower_at_any_credit(
     assert [i["film_ref"] for i in items] == [ref(film)]
 
 
-async def test_a_card_matched_by_two_follows_appears_once(
-    entitled_client, make_film, attach_companies, catalog_card, follow
+async def test_a_film_reached_by_title_and_director_is_a_row_per_reach(
+    entitled_client, make_film, make_person, catalog_card, follow
 ):
-    """Both halves of the clause reach this card — the film by title, the card by its company
-    token — and the union is de-duplicated, so it is one row carrying one event."""
+    """FB-13, ADR-0022: a timeline row is (reach, film, day, section). The title row is the
+    film's whole day, exactly its feed row; the director's row holds only the card the director
+    reached the user through. Both carry the attachment (FB-5), and each row's `event_types` is
+    its own events'."""
+    await make_person(id=DIRECTOR, name=DIRECTOR_NAME)
     film = await make_film(slug="both", title="Both")
-    await attach_companies(film, [(508, "Regency")])
-    await catalog_card(film, event_type="company_attached", tokens=(company_subject_token(508),))
+    await catalog_card(film, event_type="crew_attached", names=(DIRECTOR_NAME,))
+    await catalog_card(film, event_type="trailer")
 
-    await follow("company", 508)
+    await follow("person", DIRECTOR)
     await follow("title", film.id)
 
-    body = (await entitled_client.get("/me/timeline")).json()
-    assert [i["film_ref"] for i in body["items"]] == [ref(film)]
-    assert [i["event_count"] for i in body["items"]] == [1]
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert [i["film_ref"] for i in items] == [ref(film), ref(film)]
+    title_row, director_row = items
+    assert title_row["via"] is None
+    assert director_row["via"] == {
+        "entity_type": "person",
+        "entity_id": str(DIRECTOR),
+        "name": DIRECTOR_NAME,
+        "ref": person_ref(DIRECTOR, DIRECTOR_NAME),
+    }
+    assert title_row["event_types"] == ["trailer", "crew_attached"]
+    assert director_row["event_types"] == ["crew_attached"]
+    for row in items:
+        assert sorted(row["event_types"]) == sorted({e["event_type"] for e in row["events"]})
+        assert row["event_count"] == len(row["events"])
+
+
+async def test_an_entity_only_film_day_is_one_entity_row(
+    entitled_client, make_film, attach_companies, catalog_card, follow
+):
+    """A film-day nobody follows by title, reached by a studio's attachment: one row, headlined
+    by the studio, holding the attachment and nothing else of the film's day."""
+    film = await make_film(slug="theirs", title="Theirs")
+    await attach_companies(film, [(508, "Regency")])
+    await catalog_card(film, event_type="company_attached", tokens=(company_subject_token(508),))
+    await catalog_card(film, event_type="release_date")
+
+    await follow("company", 508)
+
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert len(items) == 1
+    assert items[0]["via"] == {
+        "entity_type": "company",
+        "entity_id": "508",
+        "name": "Regency",
+        "ref": company_ref(508, "Regency"),
+    }
+    assert [e["event_type"] for e in items[0]["events"]] == ["company_attached"]
+
+
+async def test_a_cancellation_reaching_two_followed_entities_is_two_rows(
+    entitled_client, make_film, attach_companies, attach_credits, catalog_card, follow
+):
+    """FB-5: one card, two reasons, two rows — person before studio within the day. The director
+    is credited twice (writer and director), which `_canceled_pairs` yields once per credit: the
+    pairs are de-duplicated, so their row still holds the card once."""
+    film = await make_film(slug="called-off", title="Called Off")
+    await attach_companies(film, [(508, "Regency")])
+    await attach_credits(
+        film,
+        crew=[
+            {"id": DIRECTOR, "name": DIRECTOR_NAME, "job": "Director"},
+            {"id": DIRECTOR, "name": DIRECTOR_NAME, "job": "Writer"},
+        ],
+    )
+    await catalog_card(film, event_type="canceled", confidence="confirmed")
+
+    await follow("company", 508)
+    await follow("person", DIRECTOR)
+
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert [(i["via"]["entity_type"], i["via"]["entity_id"]) for i in items] == [
+        ("person", str(DIRECTOR)),
+        ("company", "508"),
+    ]
+    assert [i["event_types"] for i in items] == [["canceled"], ["canceled"]]
+    assert [i["event_count"] for i in items] == [1, 1]
+
+
+async def test_an_entity_the_catalog_cannot_name_ships_with_null_name_and_ref(
+    entitled_client, session, make_film, catalog_card
+):
+    """FB-10: a follow can outlive the entity it names. The row still ships; `name` and `ref`
+    are null together. Written directly because the follow route would refuse an id the catalog
+    does not hold — the state a purge or an import leaves behind."""
+    film = await make_film(slug="theirs", title="Theirs")
+    await catalog_card(film, event_type="company_attached", tokens=(company_subject_token(999),))
+    session.add(
+        Follow(
+            user_id=entitled_client.user.id,
+            entity_type="company",
+            entity_id="999",
+            source="manual",
+        )
+    )
+    await session.commit()
+
+    items = (await entitled_client.get("/me/timeline")).json()["items"]
+    assert [i["via"] for i in items] == [
+        {"entity_type": "company", "entity_id": "999", "name": None, "ref": None}
+    ]
 
 
 # --- first association: a story mention reaches an entity follower once (EF-13) ---------------
@@ -679,6 +771,8 @@ async def test_timeline_row_is_identical_to_the_feed_row_for_the_same_film(
     feed = (await client.get("/feed/grouped")).json()
     timeline = (await entitled_client.get("/me/timeline")).json()
     assert timeline == feed
+    # The global feed reaches nobody through a follow, and says so (FB-12).
+    assert [i["via"] for i in feed["items"]] == [None]
 
 
 async def test_timeline_hides_the_same_events_the_feed_does(
