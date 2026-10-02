@@ -618,10 +618,11 @@ def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
     """`(entity_type, entity_id, event_id)` — which of this user's follows reached which
     published card (DC-6), across both grains.
 
-    The one builder the digest reads for its "Following:" line. The sender joins it to the
-    batch's event ids and names the entity rows; `_entity_event_pairs` stays private behind it,
-    so the line and the timeline cannot come to different answers about what an entity follow
-    delivers.
+    The one builder the digest reads for each card's reach (FB-25): the sender joins it to the
+    batch's event ids and makes one line per pair, so a card two follows reached is a line under
+    each. `_entity_event_pairs` stays private behind it and `entity_attribution_pairs`, which the
+    timeline's entity rows read, so the mail and the timeline cannot come to different answers
+    about what an entity follow delivers.
 
     Two arms:
 
@@ -633,11 +634,9 @@ def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
       `follow_last_activity`. Keyed by the card's own `film_id`, so the id is the canonical
       UUID text whatever case the follow row was stored in.
 
-    **The title arm is not for the line.** The mail renders only the entity rows, and omits the
-    line when an entry has none: a reader who followed the film by name asked for it, and does
-    not need telling why it arrived. The arm is here so the preview and the tests can assert an
-    entry's *full* reach — a film reached by a title follow and a director follow yields both
-    rows, and the director is still named.
+    **The title arm is the Films block.** A card with a title pair is a line under its film's
+    row; a card with only entity pairs is under those entities' rows and not under Films at all
+    — a film reached by a title follow and a director follow yields both rows, and both lines.
 
     **De-duplicated** (`UNION`, not `UNION ALL`): a writer-director's `canceled` card comes out
     of `_canceled_pairs` once per credit, and a pair is a reason, not a count. Two follows

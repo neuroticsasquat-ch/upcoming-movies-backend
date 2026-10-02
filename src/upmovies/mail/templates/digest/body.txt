@@ -1,21 +1,23 @@
-{% macro film_entry(entry) %}
-{{ entry.title }} ({{ entry.parenthetical }})
-{{ entry.status }}
-{% if entry.following %}
-Following: {% for f in entry.following %}{{ f.name }} <{{ f.url }}>{% if not loop.last %}, {% endif %}{% endfor %}
-
+{% macro digest_row(row) %}
+{% if row.film %}
+{{ row.film.title }} ({{ row.film.parenthetical }}) — {{ row.film.url }}
+{% elif row.entity.url %}
+{{ row.entity.name }} — {{ row.entity.url }}
+{% else %}
+{{ row.entity.name }}
 {% endif %}
-{% for beat in entry.beats %}
-{{ beat.date }} · {{ beat.label }}{% if beat.unconfirmed %} [unconfirmed]{% endif %} · {{ beat.summary }}
-{% if beat.source %}
-  via {{ beat.source.name }}{% if beat.source.url %} — {{ beat.source.url }}{% endif %}
+{% for line in row.lines %}
+  {{ line.prefix or "" }}{% if line.unconfirmed %} [unconfirmed]{% endif %}{% if line.prefix or line.unconfirmed %} · {% endif %}{% if line.film %}{{ line.film.title }} ({{ line.film.parenthetical }}) · {% endif %}{{ line.summary }}{% if line.film %} — {{ line.film.url }}{% endif %}
+
+{% if line.source %}
+    via {{ line.source.name }}{% if line.source.url %} — {{ line.source.url }}{% endif %}
 
 {% endif %}
 {% endfor %}
-{% if entry.credits_justwatch %}
-Availability from JustWatch
+{% if row.credits_justwatch %}
+  Availability from JustWatch
 {% endif %}
-{{ entry.film_url }}
+
 {% endmacro %}
 {{ product_name }}
 
@@ -33,18 +35,38 @@ YOUR SLATE — the next {{ slate_window_days }} days of films you follow
 
 {% endfor %}
 {% endif %}
-{% if lead %}
+{% if days %}
 NEW ON YOUR TIMELINE
 
-{{ film_entry(lead) }}
-{% for entry in entries %}
-{{ film_entry(entry) }}
-{% endfor %}
-{% if overflow_line %}
-{{ overflow_line }}
-{{ timeline_url }}
+{% for day in days %}
+{% if day.heading %}
+{{ day.heading }}
 
 {% endif %}
+{% for block in day.blocks %}
+{{ block.label | upper }}
+
+{% for section in block.sections %}
+{{ section.label }}{% if section.qualifier %} {{ section.qualifier }}{% endif %}
+
+
+{% for row in section.rows %}
+{{ digest_row(row) }}
+{%- endfor %}
+{% for update_type in section.update_types %}
+-- {{ update_type.label }} --
+
+{% for row in update_type.rows %}
+{{ digest_row(row) }}
+{%- endfor %}
+{% if update_type.credits_justwatch %}
+Availability from JustWatch
+
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% endfor %}
 {% endif %}
 You are getting this {{ cadence }} digest because you follow people, companies, franchises and
 films on {{ product_name }}, and because films you follow have dates coming up. Change

@@ -1,21 +1,34 @@
-"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462): what the daily and
-weekly digests say, laid out as film entries — a header, a "Following:" line, dated and sourced
-beats — beside the slate and its new/moved markers, under a wordmark, with the lead film as a
-lead card and the rest as compact rows.
+"""The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462, NEU-1528): what the
+daily and weekly digests say — the timeline day reproduced (day → follow block → section →
+update type → film or entity row → line) beside the slate and its new/moved markers, under a
+wordmark.
 
 `test_templates.py` asserts the rendering rules against whichever template is handy; this
-asserts the digest's own copy. The context is
-hand-built in the shape `digest_sender.digest_context` builds, because the template computes
-nothing: every string it shows arrives here as a value."""
+asserts the digest's own copy. The timeline is rendered through `digest_sender.render_batch`
+from hand-built lines, so what is asserted is the mail a batch becomes; the slate and the
+chrome around it are rendered from a hand-built context in the shape `digest_context` builds,
+because the template computes nothing: every string it shows arrives here as a value."""
 
 import re
+from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
-from upmovies.mail import MailError, render
+from upmovies.app.services.digest_sender import (
+    DigestBatch,
+    DigestBeat,
+    DigestFilm,
+    DigestLine,
+    DigestReach,
+    DigestRecipient,
+    DigestSource,
+    render_batch,
+)
+from upmovies.config import get_settings
+from upmovies.mail import Envelope, MailError, render
 
 SETTINGS_URL = "https://app.example.com/settings"
-TIMELINE_URL = "https://app.example.com/"
 UNSUBSCRIBE_URL = "https://api.example.com/digest/unsubscribe/tok-ada"
 
 SLATE = [
@@ -56,77 +69,333 @@ MARKED_SLATE = [
     },
 ]
 
-HEAT = {
-    "title": "Heat 2",
-    "film_url": "https://app.example.com/film/5678-heat-2",
-    "poster_url": None,
-    "parenthetical": "USA, Dir: Michael Mann, 2026",
-    "status": "Wide release · 14 August 2026",
-    "following": [
-        {"name": "Michael Mann", "url": "https://app.example.com/person/1-michael-mann"},
-        {"name": "Legendary Pictures", "url": "https://app.example.com/studio/2-legendary"},
-    ],
-    "beats": [
-        {
-            "date": "22 Sep",
-            "label": "Casting",
-            "unconfirmed": True,
-            "summary": "Ada is in talks.",
-            "source": {"name": "Deadline", "url": "https://deadline.example/heat-2-ada"},
-        },
-        {
-            "date": "23 Sep",
-            "label": "Production started",
-            "unconfirmed": False,
-            "summary": "Cameras are rolling.",
-            "source": {"name": "TMDB", "url": None},
-        },
-    ],
-    "credits_justwatch": False,
-}
 
-ZODIAC = {
-    "title": "Zodiac",
-    "film_url": "https://app.example.com/film/9-zodiac",
-    "poster_url": "https://image.tmdb.org/t/p/w154/zodiac.jpg",
-    "parenthetical": "USA, Dir: David Fincher, 2007",
-    "status": "Released",
-    "following": [],
-    "beats": [
-        {
-            "date": "20 Sep",
-            "label": "Now streaming",
-            "unconfirmed": False,
-            "summary": "Now streaming on Netflix.",
-            "source": {"name": "TMDB", "url": None},
-        },
-        {
-            "date": "21 Sep 2025",
-            "label": "New trailer",
-            "unconfirmed": False,
-            "summary": "A trailer landed.",
-            "source": None,
-        },
-    ],
-    "credits_justwatch": True,
-}
+# --- the timeline, rendered from lines ---------------------------------------------------
 
-ENTRIES = [HEAT, ZODIAC]
+TODAY = date(2026, 10, 2)
+DAY = datetime(2026, 10, 2, 9, tzinfo=UTC)
+YESTERDAY = DAY - timedelta(days=1)
+BASE = "https://app.example.com"
+
+
+def _film(title: str, n: int, *, poster: bool = True) -> DigestFilm:
+    return DigestFilm(
+        film_id=uuid4(),
+        tmdb_id=n,
+        title=title,
+        film_url=f"{BASE}/film/{n}",
+        poster_url=f"https://image.tmdb.org/t/p/w154/{n}.jpg" if poster else None,
+        parenthetical="US, 2026",
+    )
+
+
+DUNE = _film("Dune: Part Three", 1)
+HEAT = _film("Heat 2", 2)
+CLEO = _film("Cleopatra", 3, poster=False)
+
+VILLENEUVE = DigestReach("person", "5", "Denis Villeneuve", f"{BASE}/person/5-denis")
+LEGENDARY = DigestReach("company", "9", "Legendary Pictures", f"{BASE}/studio/9-legendary")
+UNNAMED_FRANCHISE = DigestReach("franchise", "7", None, None)
+
+
+def _beat(
+    film: DigestFilm,
+    event_type: str,
+    summary: str,
+    *,
+    news: bool = False,
+    rumored: bool = False,
+    at: datetime = DAY,
+) -> DigestBeat:
+    return DigestBeat(
+        notification_id=uuid4(),
+        event_id=uuid4(),
+        event_type=event_type,
+        created_at=at,
+        occurred_at=at,
+        confidence="rumored" if rumored else "confirmed",
+        summary=summary,
+        source=DigestSource("Variety", "https://variety.example/x") if news else None,
+        news_backed=news,
+        film=film,
+    )
+
+
+CANCEL = _beat(CLEO, "canceled", "The film has been canceled.")
+
+ALL_BLOCKS = (
+    DigestLine(_beat(DUNE, "casting", "Zendaya returns.", news=True, rumored=True), None),
+    DigestLine(_beat(HEAT, "release_date", "US wide date slipped."), None),
+    DigestLine(_beat(HEAT, "now_available", "Now streaming.", at=YESTERDAY), None),
+    DigestLine(_beat(DUNE, "crew_attached", "Villeneuve will direct.", news=True), VILLENEUVE),
+    DigestLine(CANCEL, VILLENEUVE),
+    DigestLine(CANCEL, LEGENDARY),
+    DigestLine(_beat(DUNE, "company_attached", "Legendary joins."), LEGENDARY),
+    DigestLine(_beat(HEAT, "collection_attached", "Filed under a franchise."), UNNAMED_FRANCHISE),
+)
+"""Two days; all four blocks; both sections; an entity in both sections; a card two entities
+reached; an entity the catalog cannot name; a `now_available` under Not yet reported."""
+
+
+def _mail(*lines: DigestLine, cadence: str = "daily") -> Envelope:
+    batch = DigestBatch(
+        recipient=DigestRecipient(
+            user_id=uuid4(),
+            email="ada@example.com",
+            display_name="Ada",
+            deliverable=True,
+            unsubscribe_token="tok-ada",
+        ),
+        lines=lines,
+        unsendable=(),
+    )
+    envelope = render_batch(
+        batch,
+        cadence=cadence,  # type: ignore[arg-type]
+        today=TODAY,
+        settings=get_settings().model_copy(update={"product_name": "Backlotter"}),
+    )
+    assert envelope is not None
+    return envelope
+
+
+DAILY_TIMELINE = f"""NEW ON YOUR TIMELINE
+
+Friday, October 2, 2026
+
+FILMS
+
+In the news
+
+Dune: Part Three (US, 2026) — {BASE}/film/1
+  Casting [unconfirmed] · Zendaya returns.
+    via Variety — https://variety.example/x
+
+Not yet reported (unconfirmed)
+
+-- Release date --
+
+Heat 2 (US, 2026) — {BASE}/film/2
+  US wide date slipped.
+
+PEOPLE
+
+In the news
+
+Denis Villeneuve — {BASE}/person/5-denis
+  Crew attached · Dune: Part Three (US, 2026) · Villeneuve will direct. — {BASE}/film/1
+    via Variety — https://variety.example/x
+
+Not yet reported (unconfirmed)
+
+-- Canceled --
+
+Denis Villeneuve — {BASE}/person/5-denis
+  Cleopatra (US, 2026) · The film has been canceled. — {BASE}/film/3
+
+STUDIOS
+
+Not yet reported (unconfirmed)
+
+-- Attached --
+
+Legendary Pictures — {BASE}/studio/9-legendary
+  Dune: Part Three (US, 2026) · Legendary joins. — {BASE}/film/1
+
+-- Canceled --
+
+Legendary Pictures — {BASE}/studio/9-legendary
+  Cleopatra (US, 2026) · The film has been canceled. — {BASE}/film/3
+
+FRANCHISES
+
+Not yet reported (unconfirmed)
+
+-- Attached --
+
+A franchise you follow
+  Heat 2 (US, 2026) · Filed under a franchise. — {BASE}/film/2
+
+Thursday, October 1, 2026
+
+FILMS
+
+Not yet reported (unconfirmed)
+
+-- Now available --
+
+Heat 2 (US, 2026) — {BASE}/film/2
+  Now streaming.
+
+Availability from JustWatch
+
+You are getting this daily digest"""
+
+
+def test_the_daily_text_part_is_the_timeline_day_by_day():
+    """FB-18, FB-20, FB-24: day → block → section → update type → row → line, newest day
+    first; a film row headed by the film and its link, an entity row by the entity and its
+    link, each entity line naming and linking its film; beat labels only under In the news and
+    Other updates, the Unconfirmed marker only under In the news, no "via TMDB"."""
+    text = _mail(*ALL_BLOCKS).text
+
+    assert DAILY_TIMELINE in text
+
+
+def test_the_daily_html_part_carries_the_same_tree_under_a_heading_ladder():
+    html = _mail(*ALL_BLOCKS).html
+
+    order = [
+        ">New on your timeline</h2>",
+        ">Friday, October 2, 2026</h3>",
+        ">Films</h4>",
+        ">In the news</h5>",
+        "Zendaya returns.",
+        ">Not yet reported <span",
+        ">Release date</h6>",
+        "US wide date slipped.",
+        ">People</h4>",
+        "Villeneuve will direct.",
+        ">Canceled</h6>",
+        ">Studios</h4>",
+        ">Attached</h6>",
+        "Legendary joins.",
+        ">Franchises</h4>",
+        "A franchise you follow",
+        ">Thursday, October 1, 2026</h3>",
+        ">Now available</h6>",
+        "Now streaming.",
+        "Availability from JustWatch",
+    ]
+    positions = [html.index(marker) for marker in order]
+    assert positions == sorted(positions)
+    assert f'<a href="{BASE}/person/5-denis"' in html
+    assert f'<a href="{BASE}/studio/9-legendary"' in html
+    assert html.count("The film has been canceled.") == 2
+
+
+def test_an_entity_the_catalog_cannot_name_is_its_fallback_unlinked():
+    html = _mail(*ALL_BLOCKS).html
+
+    fallback = html.index("A franchise you follow")
+    assert html.rindex("<p", 0, fallback) > html.rindex("<a ", 0, fallback)
+
+
+def test_the_retired_furniture_is_gone_from_both_parts():
+    """FB-21: no "Following:" line, no overflow line, no "See the film page", no lead card."""
+    envelope = _mail(*ALL_BLOCKS)
+
+    for part in (envelope.text, envelope.html):
+        assert "Following:" not in part
+        assert "more film" not in part
+        assert "on your timeline</a>" not in part
+        assert "See the film page" not in part
+        assert "via TMDB" not in part
+    assert 'width="92"' not in envelope.html
+
+
+def test_each_day_has_one_poster_strip_of_its_films_de_duplicated():
+    """FB-7: Dune is reached three ways on the first day and is one poster; Cleopatra has no
+    poster and is left out; the second day's strip is Heat 2 alone."""
+    html = _mail(*ALL_BLOCKS).html
+
+    imgs = re.findall(r'<img src="([^"]+)" width="(\d+)"[^>]*width:(\d+)px', html)
+    assert imgs == [
+        ("https://image.tmdb.org/t/p/w154/1.jpg", "52", "52"),
+        ("https://image.tmdb.org/t/p/w154/2.jpg", "52", "52"),
+        ("https://image.tmdb.org/t/p/w154/2.jpg", "52", "52"),
+    ]
+    assert html.index(">Friday, October 2, 2026</h3>") < html.index("w154/1.jpg")
+
+
+def test_the_poster_strip_is_capped_at_eight():
+    lines = [DigestLine(_beat(_film(f"Film {n}", 10 + n), "casting", "x"), None) for n in range(12)]
+
+    assert _mail(*lines).html.count("<img ") == 8
+
+
+def test_only_an_in_the_news_rumored_beat_is_marked_unconfirmed():
+    rumored_catalog = DigestLine(_beat(HEAT, "casting", "In talks.", rumored=True), None)
+    envelope = _mail(*ALL_BLOCKS, rumored_catalog)
+
+    assert envelope.text.count("[unconfirmed]") == 1
+    assert envelope.html.count(">Unconfirmed</span>") == 1
+    pill_end = envelope.html.index(">Unconfirmed</span>")
+    pill = envelope.html[envelope.html.rindex("<span", 0, pill_end) : pill_end]
+    assert "background:#fef3c7" in pill and "color:#92400e" in pill
+
+
+def test_justwatch_is_credited_once_under_now_available_and_per_news_film_row():
+    """NR-8 under Not yet reported (once for the heading, however many films); DC-17 under In
+    the news (once per film row with a `now_available` line)."""
+    catalog = [
+        DigestLine(_beat(HEAT, "now_available", "Now streaming."), None),
+        DigestLine(_beat(DUNE, "now_available", "Now renting."), None),
+    ]
+    news = [DigestLine(_beat(CLEO, "now_available", "On Netflix.", news=True), None)]
+
+    for lines, count in ((catalog, 1), (news, 1), (catalog + news, 2)):
+        envelope = _mail(*lines)
+        for part in (envelope.text, envelope.html):
+            assert part.count("Availability from JustWatch") == count
+    text = _mail(*catalog).text
+    assert text.index("Now renting.") < text.index("Now streaming.")
+    assert text.index("Now streaming.") < text.index("Availability from JustWatch")
+
+
+def test_the_weekly_is_one_undated_group_whose_lines_carry_their_dates():
+    """The weekly's minimal path until it gets its own shape (FB-19): no day headings, the
+    date on every line."""
+    envelope = _mail(*ALL_BLOCKS, cadence="weekly")
+
+    for part in (envelope.text, envelope.html):
+        assert "October 2, 2026" not in part
+        assert "October 1, 2026" not in part
+    text = envelope.text
+    assert "  2 Oct · Casting [unconfirmed] · Zendaya returns.\n" in text
+    assert "  1 Oct · Now streaming.\n" in text
+    assert "  2 Oct · Cleopatra (US, 2026) · The film has been canceled." in text
+    assert text.count("\nFILMS\n") == 1
+
+
+def test_the_text_part_carries_links_as_bare_urls():
+    envelope = _mail(*ALL_BLOCKS)
+
+    assert "<a " not in envelope.text
+    assert f"{BASE}/film/1" in envelope.text
+
+
+def test_no_clock_time_appears_in_either_part():
+    envelope = _mail(*ALL_BLOCKS)
+
+    assert not re.search(r"\d:\d\d", envelope.text)
+    assert not re.search(r"\d:\d\d", envelope.html)
+
+
+def test_markup_escapes_in_html_and_not_in_text():
+    film = _film("Heat & <Sons>", 50)
+    line = DigestLine(_beat(film, "casting", "A <b>bold</b> & brave move.", news=True), None)
+
+    envelope = _mail(line)
+
+    assert "Heat &amp; &lt;Sons&gt;" in envelope.html
+    assert "A &lt;b&gt;bold&lt;/b&gt; &amp; brave move." in envelope.html
+    assert "Heat & <Sons>" in envelope.text
+    assert "A <b>bold</b> & brave move." in envelope.text
+
+
+# --- the slate and the chrome, from a hand-built context ----------------------------------
 
 
 def _digest(
     *,
     slate=(),
-    entries=(),
+    days=(),
     cadence="weekly",
     subject="Heat 2 — casting, + 1 more film",
     preheader="",
-    overflow=0,
     **overrides,
 ):
-    """`entries` in mail order; the first becomes the context's `lead`, as `digest_context`
-    splits it."""
-    lead, *rest = list(entries) or [None]
     context: dict[str, object] = {
         "product_name": "Backlotter",
         "display_name": "Ada",
@@ -136,15 +405,7 @@ def _digest(
         "subject": subject,
         "preheader": preheader,
         "slate": list(slate),
-        "lead": lead,
-        "entries": rest,
-        "overflow": overflow,
-        "overflow_line": (
-            f"and {overflow} more film{'' if overflow == 1 else 's'} on your timeline"
-            if overflow
-            else ""
-        ),
-        "timeline_url": TIMELINE_URL,
+        "days": list(days),
         "unsubscribe_url": UNSUBSCRIBE_URL,
         **overrides,
     }
@@ -153,134 +414,54 @@ def _digest(
     )
 
 
+ONE_DAY = [
+    {
+        "heading": "Friday, October 2, 2026",
+        "posters": [],
+        "blocks": [
+            {
+                "label": "Films",
+                "sections": [
+                    {
+                        "label": "In the news",
+                        "qualifier": None,
+                        "rows": [
+                            {
+                                "film": {
+                                    "title": "Heat 2",
+                                    "parenthetical": "US, 2026",
+                                    "url": f"{BASE}/film/2",
+                                },
+                                "entity": None,
+                                "lines": [
+                                    {
+                                        "prefix": "Casting",
+                                        "unconfirmed": True,
+                                        "film": None,
+                                        "summary": "Ada is in talks.",
+                                        "source": None,
+                                    }
+                                ],
+                                "credits_justwatch": False,
+                            }
+                        ],
+                        "update_types": [],
+                    }
+                ],
+            }
+        ],
+    }
+]
+
+
 def test_the_subject_is_the_contexts_verbatim():
-    envelope = _digest(entries=ENTRIES, subject="Heat 2 — casting, + 1 more film · your slate")
+    envelope = _digest(days=ONE_DAY, subject="Heat 2 — casting, + 1 more film · your slate")
 
     assert envelope.subject == "Heat 2 — casting, + 1 more film · your slate"
 
 
-def test_both_parts_carry_every_title_header_beat_date_source_and_url():
-    envelope = _digest(entries=ENTRIES)
-
-    for part in (envelope.text, envelope.html):
-        for entry in ENTRIES:
-            assert entry["title"] in part
-            assert entry["film_url"] in part
-            assert f"({entry['parenthetical']})" in part
-            assert entry["status"] in part
-            for f in entry["following"]:
-                assert f["name"] in part
-                assert f["url"] in part
-            for beat in entry["beats"]:
-                assert beat["date"] in part
-                assert beat["label"] in part
-                assert beat["summary"] in part
-                if beat["source"]:
-                    assert f"via {beat['source']['name']}" in part or (
-                        f'via <a href="{beat["source"]["url"]}"' in part
-                    )
-                    if beat["source"]["url"]:
-                        assert beat["source"]["url"] in part
-
-
-def test_the_text_part_spells_the_header_and_beat_lines_exactly():
-    text = _digest(entries=ENTRIES).text
-
-    assert "Heat 2 (USA, Dir: Michael Mann, 2026)\nWide release · 14 August 2026\n" in text
-    assert (
-        "Following: Michael Mann <https://app.example.com/person/1-michael-mann>, "
-        "Legendary Pictures <https://app.example.com/studio/2-legendary>\n"
-    ) in text
-    assert "22 Sep · Casting [unconfirmed] · Ada is in talks.\n" in text
-    assert "  via Deadline — https://deadline.example/heat-2-ada\n" in text
-    assert "23 Sep · Production started · Cameras are rolling.\n  via TMDB\n" in text
-
-
-def test_the_text_part_carries_links_as_bare_urls():
-    envelope = _digest(slate=SLATE, entries=ENTRIES, overflow=2)
-
-    assert "<a " not in envelope.text
-    assert SLATE[0]["entries"][0]["film_url"] in envelope.text
-    assert TIMELINE_URL in envelope.text
-
-
-def test_no_clock_time_appears_in_either_part():
-    envelope = _digest(slate=SLATE, entries=ENTRIES)
-
-    assert not re.search(r"\d:\d\d", envelope.text)
-    assert not re.search(r"\d:\d\d", envelope.html)
-
-
-def test_only_a_rumored_beat_is_marked_unconfirmed():
-    envelope = _digest(entries=ENTRIES)
-
-    assert envelope.text.count("[unconfirmed]") == 1
-    assert envelope.html.count("Unconfirmed") == 1
-    html_casting = envelope.html[envelope.html.index("22 Sep") : envelope.html.index("23 Sep")]
-    assert "Unconfirmed" in html_casting
-
-
-def test_a_story_source_is_linked_and_tmdb_is_not():
-    html = _digest(entries=[HEAT]).html
-
-    assert '<a href="https://deadline.example/heat-2-ada"' in html
-    assert "via TMDB" in html
-    assert 'href="None"' not in html
-
-
-def test_a_beat_with_no_source_has_no_source_line():
-    text = _digest(entries=[ZODIAC]).text
-
-    assert "21 Sep 2025 · New trailer · A trailer landed.\nAvailability from JustWatch" in text
-
-
-def test_the_following_line_is_absent_when_the_entry_has_no_entity_follow():
-    envelope = _digest(entries=[ZODIAC])
-
-    for part in (envelope.text, envelope.html):
-        assert "Following:" not in part
-
-
-def test_the_justwatch_credit_appears_once_per_entry_that_needs_it_in_both_parts():
-    only_heat = _digest(entries=[HEAT])
-    both = _digest(entries=[ZODIAC, {**ZODIAC, "title": "Seven", "film_url": "https://x.test/7"}])
-
-    for part in (only_heat.text, only_heat.html):
-        assert "Availability from JustWatch" not in part
-    for part in (both.text, both.html):
-        assert part.count("Availability from JustWatch") == 2
-
-
-def test_the_justwatch_credit_follows_the_entrys_last_beat():
-    text = _digest(entries=[ZODIAC]).text
-
-    assert text.index("A trailer landed.") < text.index("Availability from JustWatch")
-    assert text.index("Availability from JustWatch") < text.index(ZODIAC["film_url"])
-
-
-def test_the_cap_line_links_the_timeline_only_when_entries_were_left_off():
-    capped = _digest(entries=ENTRIES, overflow=1)
-    capped_more = _digest(entries=ENTRIES, overflow=3)
-    uncapped = _digest(entries=ENTRIES)
-
-    assert "and 1 more film on your timeline\nhttps://app.example.com/\n" in capped.text
-    assert f'<a href="{TIMELINE_URL}"' in capped.html
-    assert "and 1 more film on your timeline" in capped.html
-    assert "and 3 more films on your timeline" in capped_more.text
-    for part in (uncapped.text, uncapped.html):
-        assert "more film" not in part
-        assert "on your timeline</a>" not in part
-
-
-def test_the_cap_line_closes_the_entries():
-    text = _digest(entries=ENTRIES, overflow=1).text
-
-    assert text.index(ZODIAC["film_url"]) < text.index("and 1 more film")
-    assert text.index("and 1 more film") < text.index(SETTINGS_URL)
-
-
 def test_the_preheader_is_a_hidden_first_element_in_html_only():
-    envelope = _digest(entries=ENTRIES, preheader="Also: Zodiac — now streaming")
+    envelope = _digest(days=ONE_DAY, preheader="Also: Zodiac — now available")
 
     assert "display:none" in envelope.html
     assert envelope.html.index("Also: Zodiac") < envelope.html.index("Hi Ada")
@@ -288,25 +469,9 @@ def test_the_preheader_is_a_hidden_first_element_in_html_only():
 
 
 def test_an_empty_preheader_renders_no_element():
-    html = _digest(entries=ENTRIES, preheader="").html
+    html = _digest(days=ONE_DAY, preheader="").html
 
     assert "display:none" not in html
-
-
-def test_entries_render_in_the_order_given():
-    envelope = _digest(entries=[ZODIAC, HEAT])
-
-    for part in (envelope.text, envelope.html):
-        assert part.index("Zodiac") < part.index("Heat 2")
-
-
-def test_the_beats_render_under_their_films_header():
-    envelope = _digest(entries=ENTRIES)
-
-    for part in (envelope.text, envelope.html):
-        assert part.index("Heat 2") < part.index("Ada is in talks.")
-        assert part.index("Ada is in talks.") < part.index("Cameras are rolling.")
-        assert part.index("Cameras are rolling.") < part.index("Zodiac")
 
 
 def test_the_slate_lists_every_date_film_and_release_kind_in_both_parts():
@@ -343,7 +508,7 @@ def test_a_slate_marker_is_bracketed_in_text_and_a_pill_in_html():
 
 def test_a_slate_marker_pill_is_shaped_like_the_unconfirmed_pill():
     """One pill shape in the mail (NEU-1461): only the colours tell the two apart."""
-    html = _digest(slate=MARKED_SLATE, entries=[HEAT]).html
+    html = _digest(slate=MARKED_SLATE, days=ONE_DAY).html
 
     def pill(word: str) -> str:
         end = html.index(f">{word}</span>")
@@ -359,7 +524,7 @@ def test_a_slate_marker_pill_is_shaped_like_the_unconfirmed_pill():
 
 def test_the_slate_comes_before_the_timeline():
     """D-33: the weekly send *is* the slate mail, so the slate leads."""
-    envelope = _digest(slate=SLATE, entries=ENTRIES)
+    envelope = _digest(slate=SLATE, days=ONE_DAY)
 
     for part in (envelope.text.lower(), envelope.html.lower()):
         assert part.index("your slate") < part.index("on your timeline")
@@ -367,71 +532,22 @@ def test_the_slate_comes_before_the_timeline():
 
 def test_both_parts_open_with_the_wordmark():
     """DC-14: one line of text naming the product heads the card."""
-    envelope = _digest(entries=ENTRIES, preheader="Also: Zodiac — now streaming")
+    envelope = _digest(days=ONE_DAY, preheader="Also: Zodiac — now available")
 
     assert envelope.text.startswith("Backlotter\n\nHi Ada,")
     assert envelope.html.index("Also: Zodiac") < envelope.html.index(">Backlotter</p>")
     assert envelope.html.index(">Backlotter</p>") < envelope.html.index("Hi Ada")
 
 
-def test_the_lead_card_renders_for_the_first_entry_only():
-    """DC-14: the lead film is the lead card — 92px poster; every other entry is a compact
-    row with the 62px one."""
-    lead = {**ZODIAC, "poster_url": "https://image.tmdb.org/t/p/w185/zodiac.jpg"}
-    row = {**HEAT, "poster_url": "https://image.tmdb.org/t/p/w154/heat.jpg"}
-    third = {**ZODIAC, "title": "Seven", "film_url": "https://x.test/7"}
-
-    html = _digest(entries=[lead, row, third]).html
-
-    assert html.count('width="92"') == 2  # the lead's poster cell and its <img>
-    assert f'<img src="{lead["poster_url"]}" width="92"' in html
-    assert f'<img src="{row["poster_url"]}" width="62"' in html
-    assert f'<img src="{third["poster_url"]}" width="62"' in html
-    assert html.index(lead["poster_url"]) < html.index("Heat 2")
-
-
-def test_every_image_is_sized_as_specified():
-    """Only two poster widths exist: 92px on the lead card, 62px on compact rows and the
-    slate — each `<img` carries the width as an attribute and in its style, because Outlook
-    reads the one and every other client the other."""
-    lead = {**ZODIAC, "poster_url": "https://image.tmdb.org/t/p/w185/zodiac.jpg"}
-    row = {**HEAT, "poster_url": "https://image.tmdb.org/t/p/w154/heat.jpg"}
-
-    html = _digest(slate=SLATE, entries=[lead, row]).html
+def test_the_slate_rows_keep_their_62px_posters():
+    html = _digest(slate=SLATE).html
 
     imgs = re.findall(r'<img [^>]*width="(\d+)"[^>]*width:(\d+)px', html)
-    assert imgs == [("62", "62"), ("92", "92"), ("62", "62")]
-
-
-def test_a_digest_of_one_entry_has_a_lead_card_and_no_rows():
-    lead = {**ZODIAC, "poster_url": "https://image.tmdb.org/t/p/w185/zodiac.jpg"}
-
-    html = _digest(entries=[lead]).html
-
-    assert f'<img src="{lead["poster_url"]}" width="92"' in html
-    assert 'width="62"' not in html
-
-
-def test_the_unconfirmed_marker_is_the_feeds_amber_pill():
-    html = _digest(entries=[ZODIAC, HEAT]).html
-
-    pill = html[html.rindex("<span", 0, html.index("Unconfirmed")) : html.index("Unconfirmed")]
-    assert "background:#fef3c7" in pill
-    assert "color:#92400e" in pill
-    assert "text-transform:uppercase" in pill
-
-
-def test_the_poster_is_rendered_when_there_is_one_and_omitted_when_there_is_not():
-    with_poster = _digest(entries=[ZODIAC]).html
-    without = _digest(entries=[HEAT]).html
-
-    assert "<img" in with_poster
-    assert ZODIAC["poster_url"] in with_poster
-    assert "<img" not in without
+    assert imgs == [("62", "62")]
 
 
 def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
-    envelope = _digest(entries=ENTRIES)
+    envelope = _digest(days=ONE_DAY)
 
     for part in (envelope.text, envelope.html):
         assert SETTINGS_URL in part
@@ -442,7 +558,7 @@ def test_both_parts_carry_the_settings_link_and_say_why_the_mail_arrived():
 def test_the_footer_links_unsubscribe_to_the_token_url_and_keeps_the_settings_link():
     """DC-10: the footer's "unsubscribe" is the one-click link; the settings link stays for
     changing the cadence rather than stopping it."""
-    envelope = _digest(entries=ENTRIES)
+    envelope = _digest(days=ONE_DAY)
 
     assert f'<a href="{UNSUBSCRIBE_URL}" style="color:#1a56db;">unsubscribe</a>' in envelope.html
     assert f"Or unsubscribe in one click:\n\n{UNSUBSCRIBE_URL}\n" in envelope.text
@@ -453,7 +569,7 @@ def test_the_footer_links_unsubscribe_to_the_token_url_and_keeps_the_settings_li
 def test_without_a_token_the_footer_offers_the_settings_link_alone():
     """`render_digest` previews a user with no settings row without writing one, so there is
     no token to link — the footer falls back to the settings page's "or stop it"."""
-    envelope = _digest(entries=ENTRIES, unsubscribe_url=None)
+    envelope = _digest(days=ONE_DAY, unsubscribe_url=None)
 
     for part in (envelope.text, envelope.html):
         assert "unsubscribe" not in part
@@ -462,24 +578,9 @@ def test_without_a_token_the_footer_offers_the_settings_link_alone():
 
 
 def test_display_name_is_optional_the_way_every_other_template_makes_it():
-    envelope = _digest(entries=ENTRIES, display_name="")
+    envelope = _digest(days=ONE_DAY, display_name="")
 
     assert envelope.text.startswith("Backlotter\n\nHi,")
-
-
-def test_markup_escapes_in_html_and_not_in_text():
-    entry = {
-        **HEAT,
-        "title": "Heat & <Sons>",
-        "beats": [{**HEAT["beats"][0], "summary": "A <b>bold</b> & brave move."}],
-    }
-
-    envelope = _digest(entries=[entry])
-
-    assert "Heat &amp; &lt;Sons&gt;" in envelope.html
-    assert "A &lt;b&gt;bold&lt;/b&gt; &amp; brave move." in envelope.html
-    assert "Heat & <Sons>" in envelope.text
-    assert "A <b>bold</b> & brave move." in envelope.text
 
 
 def test_a_digest_with_nothing_to_say_is_not_a_mail():
