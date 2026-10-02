@@ -228,7 +228,7 @@ async def test_the_weekly_digest_carries_the_slate_and_the_timeline_under_follow
     """One mail: the slate first (the two upcoming US dates for the watchlisted film), then
     the timeline — the trailer outranks the production start, so Dune leads and names the
     subject — laid out under Films by update type, with no day headings and every line
-    dated (the weekly's undated group, FB-19's minimal path)."""
+    dated (the weekly reads by entry, FB-19)."""
     user = await subscriber()
     dune = await make_film(slug="dune", title="Dune: Part Three", poster_path="/dune.jpg")
     heat = await make_film(slug="heat-2", title="Heat 2")

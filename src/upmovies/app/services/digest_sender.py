@@ -21,9 +21,13 @@ Not yet reported, the latter by update type — the feed's map (NR-3) under Film
 Detached / Canceled / Other updates under the others (FB-4). Under Films a row is a **film
 row** headed by the film (title and parenthetical, linked); under the other three it is an
 **entity row** headed by the followed entity, each line naming its film (FB-20). Nothing is
-cut and nothing leads: every row renders, and every row is marked `sent` (FB-21). The weekly
-renders the same tree with every line under one undated group, each line carrying its date,
-until it gets its own shape (FB-19).
+cut and nothing leads: every row renders, and every row is marked `sent` (FB-21).
+
+**The weekly reads by entry, not by day (FB-19, `group_week`).** The same blocks, sections and
+update types, but no day headings: one **film entry** per film and one **entity entry** per
+entity across the week, under each section and update type it touched, its lines in
+publication order and each dated; one poster strip over the week's films. A film with cards in
+both sections is an entry in both.
 
 A card no follow reaches any more — the reader unfollowed between the decision pass and this
 one — is not a line: the timeline no longer shows it, so the mail does not either, and its row
@@ -595,14 +599,37 @@ def event_order_key(beat: DigestBeat) -> tuple[datetime, datetime, str]:
     return beat.occurred_at, beat.created_at, str(beat.event_id)
 
 
+def film_then_event_order_key(beat: DigestBeat) -> tuple[Any, ...]:
+    """A daily entity row's line order: its film's natural title, then the feed's event order
+    (FB-6) — the timeline's entity row."""
+    return *beat.film.sort_key, *event_order_key(beat)
+
+
 def beat_order_key(beat: DigestBeat) -> tuple[datetime, datetime, str]:
     """**Publication** order — `created_at`, then `occurred_at`, then the event id so two beats
-    published together still sort the same way twice (DC-3). The weekly's: its lines span
-    days, so they run in the order the reader could have seen them."""
+    published together still sort the same way twice (DC-3). The weekly's: an entry's lines
+    span days, so they run in the order the reader could have seen them (FB-19)."""
     return beat.created_at, beat.occurred_at, str(beat.event_id)
 
 
-BeatKey = Callable[[DigestBeat], tuple[datetime, datetime, str]]
+BeatKey = Callable[[DigestBeat], tuple[Any, ...]]
+
+
+@dataclass(frozen=True)
+class LineOrder:
+    """How the lines under a row run — a film row's and an entity row's. The one thing a
+    daily row and a weekly entry lay out differently below the update type."""
+
+    film_row: BeatKey
+    entity_row: BeatKey
+
+
+DAY_LINE_ORDER = LineOrder(film_row=event_order_key, entity_row=film_then_event_order_key)
+"""The daily's (FB-6): the timeline day's rows, whose day heading already dates every line."""
+
+ENTRY_LINE_ORDER = LineOrder(film_row=beat_order_key, entity_row=beat_order_key)
+"""The weekly's (FB-19): an entry's lines in publication order, film and entity entries alike
+— an entity entry spanning two films reads as the week went, not film by film."""
 
 
 @dataclass(frozen=True)
@@ -667,18 +694,30 @@ class DigestBlock:
 
 @dataclass(frozen=True)
 class DigestDay:
-    """One timeline day of the mail — or, in the weekly, the one undated group (`day` None)."""
+    """One timeline day of the daily (FB-18): its heading's day, its poster strip, its
+    blocks."""
 
-    day: date | None
+    day: date
     posters: tuple[DigestFilm, ...]
     blocks: tuple[DigestBlock, ...]
 
 
-def group_rows(lines: Iterable[DigestLine], *, beat_key: BeatKey) -> tuple[DigestRow, ...]:
+@dataclass(frozen=True)
+class DigestWeek:
+    """The weekly's timeline (FB-19): no day, one poster strip over the week's films, and the
+    blocks, whose rows are **entries** — one film or entity across the whole week under each
+    section and update type it touched."""
+
+    posters: tuple[DigestFilm, ...]
+    blocks: tuple[DigestBlock, ...]
+
+
+def group_rows(lines: Iterable[DigestLine], *, order: LineOrder) -> tuple[DigestRow, ...]:
     """One block's lines (of one section) as its rows. Title lines make one film row per film,
-    ordered by `film_row_key`, beats by `beat_key`; entity lines one entity row per entity,
-    ordered by name (`entity_row_key`), beats by their film's natural title and then
-    `beat_key` (FB-6). A block holds one kind or the other, never both."""
+    ordered by `film_row_key`, beats by `order.film_row`; entity lines one entity row per
+    entity, ordered by name (`entity_row_key`), beats by `order.entity_row` (FB-6). A block
+    holds one kind or the other, never both. Over one day's lines a row is a timeline row;
+    over a week's, an entry."""
     by_reach: dict[tuple[str, str], tuple[DigestReach | None, list[DigestBeat]]] = {}
     for line in lines:
         key = (
@@ -690,11 +729,7 @@ def group_rows(lines: Iterable[DigestLine], *, beat_key: BeatKey) -> tuple[Diges
     rows = [
         DigestRow(
             reach=reach,
-            beats=tuple(
-                sorted(beats, key=beat_key)
-                if reach is None
-                else sorted(beats, key=lambda b: (b.film.sort_key, beat_key(b)))
-            ),
+            beats=tuple(sorted(beats, key=order.film_row if reach is None else order.entity_row)),
         )
         for reach, beats in by_reach.values()
     ]
@@ -734,9 +769,10 @@ def group_update_types(rows: Sequence[DigestRow], *, block: str) -> tuple[Digest
     )
 
 
-def group_blocks(lines: Iterable[DigestLine], *, beat_key: BeatKey) -> tuple[DigestBlock, ...]:
-    """One day's lines as follow blocks in `FOLLOW_BLOCKS` order, each split into In the news
-    and Not yet reported (FB-1). A block or a section with nothing in it is left out."""
+def group_blocks(lines: Iterable[DigestLine], *, order: LineOrder) -> tuple[DigestBlock, ...]:
+    """One day's (or the week's) lines as follow blocks in `FOLLOW_BLOCKS` order, each split
+    into In the news and Not yet reported (FB-1). A block or a section with nothing in it is
+    left out."""
     by_block: dict[str, list[DigestLine]] = {}
     for line in lines:
         by_block.setdefault(line.block, []).append(line)
@@ -748,7 +784,7 @@ def group_blocks(lines: Iterable[DigestLine], *, beat_key: BeatKey) -> tuple[Dig
         for news_backed in (True, False):
             rows = group_rows(
                 (line for line in by_block[key] if line.beat.news_backed is news_backed),
-                beat_key=beat_key,
+                order=order,
             )
             if not rows:
                 continue
@@ -765,9 +801,10 @@ def group_blocks(lines: Iterable[DigestLine], *, beat_key: BeatKey) -> tuple[Dig
 
 
 def day_posters(lines: Iterable[DigestLine]) -> tuple[DigestFilm, ...]:
-    """The poster strip over every block of a day (FB-7): the films with a poster, news-backed
-    first, each by natural title, de-duplicated, at most `MAX_DAY_POSTERS` — the feed's
-    `dayPosterLeads`. A film reached twice is one poster."""
+    """The poster strip over every block of a day (FB-7) — or of the week (FB-19): the films
+    with a poster, news-backed first, each by natural title, de-duplicated, at most
+    `MAX_DAY_POSTERS` — the feed's `dayPosterLeads`. A film reached twice is one poster, and so
+    is a film news-backed on one day and not on another: its news-backed line leads it."""
     candidates = sorted(
         (line.beat for line in lines if line.beat.film.poster_url is not None),
         key=lambda beat: (not beat.news_backed, beat.film.sort_key),
@@ -778,23 +815,33 @@ def day_posters(lines: Iterable[DigestLine]) -> tuple[DigestFilm, ...]:
     return tuple(posters.values())[:MAX_DAY_POSTERS]
 
 
-def group_days(lines: Iterable[DigestLine], *, dated: bool) -> tuple[DigestDay, ...]:
-    """The mail's timeline: `dated` (the daily) one day per publication day, newest first,
-    beats in the feed's event order (FB-18); otherwise (the weekly, until FB-19 gives it its
-    own shape) every line in one undated group, beats in publication order."""
-    by_day: dict[date | None, list[DigestLine]] = {}
+def group_days(lines: Iterable[DigestLine]) -> tuple[DigestDay, ...]:
+    """The daily's timeline (FB-18): one day per publication day, newest first, each laid out
+    as the timeline lays that day out, its rows' lines in the feed's order (`DAY_LINE_ORDER`)."""
+    by_day: dict[date, list[DigestLine]] = {}
     for line in lines:
-        by_day.setdefault(line.beat.day if dated else None, []).append(line)
-    beat_key = event_order_key if dated else beat_order_key
+        by_day.setdefault(line.beat.day, []).append(line)
     return tuple(
         DigestDay(
             day=day,
             posters=day_posters(day_lines),
-            blocks=group_blocks(day_lines, beat_key=beat_key),
+            blocks=group_blocks(day_lines, order=DAY_LINE_ORDER),
         )
-        for day, day_lines in sorted(
-            by_day.items(), key=lambda item: item[0] or date.min, reverse=True
-        )
+        for day, day_lines in sorted(by_day.items(), reverse=True)
+    )
+
+
+def group_week(lines: Sequence[DigestLine]) -> DigestWeek:
+    """The weekly's timeline (FB-19): the daily's blocks, sections and update types, but read
+    by entry rather than by day — one film entry per film under Films and one entity entry per
+    entity under the other three, across every day the batch spans, under each section and
+    update type it touched. A film with cards in both sections is an entry in both, as it
+    would be on two feed days. Film entries rank by their most significant beat, then title
+    (DC-3, `film_row_key`); entity entries by name (FB-6). An entry's lines run in publication
+    order (`ENTRY_LINE_ORDER`), and the template dates each one. One poster strip, over the
+    week's films."""
+    return DigestWeek(
+        posters=day_posters(lines), blocks=group_blocks(lines, order=ENTRY_LINE_ORDER)
     )
 
 
@@ -868,8 +915,8 @@ class DigestBatch:
 
     recipient: DigestRecipient
     lines: tuple[DigestLine, ...]
-    """Every queued card once per reach that delivered it, unordered — `group_days` lays them
-    out, `rank_films` ranks them. Nothing is capped (FB-21)."""
+    """Every queued card once per reach that delivered it, unordered — `group_days` (daily) or
+    `group_week` (weekly) lays them out, `rank_films` ranks them. Nothing is capped (FB-21)."""
     unsendable: tuple[tuple[UUID, str], ...]
     """`(notification id, why)` for rows this pass can never send — the event lost its summary,
     is no longer the published card, or no follow reaches it any more — marked `failed` with
@@ -1513,31 +1560,56 @@ def _section_context(
     }
 
 
-def _days_context(
-    days: Sequence[DigestDay], *, with_dates: bool, today: date
+def _posters_context(posters: Sequence[DigestFilm]) -> list[dict[str, object]]:
+    return [
+        {"title": film.title, "url": film.film_url, "poster_url": film.poster_url}
+        for film in posters
+    ]
+
+
+def _blocks_context(
+    blocks: Sequence[DigestBlock], *, with_dates: bool, today: date
 ) -> list[dict[str, object]]:
     return [
         {
-            "heading": day_heading(d.day) if d.day is not None else None,
-            "posters": [
-                {"title": film.title, "url": film.film_url, "poster_url": film.poster_url}
-                for film in d.posters
-            ],
-            "blocks": [
-                {
-                    "label": block.label,
-                    "sections": [
-                        _section_context(
-                            section, block=block.key, with_dates=with_dates, today=today
-                        )
-                        for section in block.sections
-                    ],
-                }
-                for block in d.blocks
+            "label": block.label,
+            "sections": [
+                _section_context(section, block=block.key, with_dates=with_dates, today=today)
+                for section in block.sections
             ],
         }
-        for d in days
+        for block in blocks
     ]
+
+
+def _timeline_context(
+    lines: Sequence[DigestLine], *, cadence: DigestCadence, today: date
+) -> dict[str, object]:
+    """The "New on your timeline" half of the context: `days` for the daily (FB-18), `week`
+    for the weekly (FB-19), the other empty. A line carries its date exactly when no day
+    heading above it does — so in the weekly, always."""
+    if cadence == "daily":
+        return {
+            "days": [
+                {
+                    "heading": day_heading(d.day),
+                    "posters": _posters_context(d.posters),
+                    "blocks": _blocks_context(d.blocks, with_dates=False, today=today),
+                }
+                for d in group_days(lines)
+            ],
+            "week": None,
+        }
+    if not lines:
+        return {"days": [], "week": None}
+    week = group_week(lines)
+    return {
+        "days": [],
+        "week": {
+            "posters": _posters_context(week.posters),
+            "blocks": _blocks_context(week.blocks, with_dates=True, today=today),
+        },
+    }
 
 
 def digest_context(
@@ -1546,12 +1618,10 @@ def digest_context(
     """The `digest` template's context for one batch — the only place it is built. Every
     string the mail shows is decided here; the templates lay it out and compute nothing.
 
-    The daily is laid out by day (FB-18); the weekly, until it gets its own shape (FB-19), as
-    one undated group whose lines carry their dates.
+    The daily is laid out by day (FB-18); the weekly by entry, its lines dated (FB-19).
 
     Raises `ValueError` (through `digest_subject`) for a batch with nothing to say:
     `render_batch` never builds one, so a caller that does has skipped that check."""
-    by_day = cadence == "daily"
     return {
         "product_name": settings.product_name,
         "display_name": batch.recipient.display_name,
@@ -1577,10 +1647,7 @@ def digest_context(
             }
             for d in batch.slate
         ],
-        # A line carries its date exactly when no day heading above it does.
-        "days": _days_context(
-            group_days(batch.lines, dated=by_day), with_dates=not by_day, today=today
-        ),
+        **_timeline_context(batch.lines, cadence=cadence, today=today),
         "unsubscribe_url": recipient_unsubscribe_url(batch.recipient, settings),
     }
 
