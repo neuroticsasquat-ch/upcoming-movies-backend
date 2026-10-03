@@ -241,7 +241,8 @@ async def test_a_person_follow_no_longer_reaches_the_films_own_beats(
     [
         pytest.param("casting", "rumored", id="a casting attachment"),
         pytest.param("crew_attached", "rumored", id="a crew attachment"),
-        pytest.param("credit_removed", "rumored", id="a detachment"),
+        pytest.param("cast_removed", "rumored", id="a cast detachment"),
+        pytest.param("crew_removed", "rumored", id="a crew detachment"),
         pytest.param("canceled", "confirmed", id="a cancellation"),
     ],
 )

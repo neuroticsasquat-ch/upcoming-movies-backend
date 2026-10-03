@@ -260,13 +260,13 @@ def attach_card(session, add_event, director):
     return _card
 
 
-@pytest.mark.parametrize("event_type", ["casting", "crew_attached", "credit_removed"])
+@pytest.mark.parametrize("event_type", ["casting", "crew_attached", "cast_removed", "crew_removed"])
 async def test_a_followed_persons_attach_and_detach_cards_are_selected_by_name(
     session, user, make_film, attach_card, event_type
 ):
-    """The three cards a person attaching to or leaving a film can be. A detach card names the
+    """The four cards a person attaching to or leaving a film can be. A detach card names the
     departing person exactly as an attach card names the arriving one — the sweep's removal
-    path writes `subject_key` from the same `normalize_name` — so the three are one test."""
+    path writes `subject_key` from the same `normalize_name` — so the four are one test."""
     film = await make_film(slug="theirs", title="Theirs")
     card = await attach_card(film, event_type=event_type)
     await _follow(session, user, "person", str(DIRECTOR))
@@ -295,7 +295,7 @@ async def test_a_superseded_attach_card_is_not_selected(session, user, make_film
     it is not is a beat to deliver."""
     film = await make_film(slug="theirs", title="Theirs")
     withdrawn = await attach_card(film, status="superseded")
-    correction = await attach_card(film, event_type="credit_removed")
+    correction = await attach_card(film, event_type="cast_removed")
     withdrawn.superseded_by = correction.id
     await session.commit()
     await _follow(session, user, "person", str(DIRECTOR))
@@ -998,7 +998,7 @@ async def test_a_mention_on_a_card_that_is_not_an_attachment_is_not_an_associati
 
 async def test_the_vocabulary_is_the_union_of_the_three_kinds(session, user, make_film, story_card):
     """M4 filled the detach half of the vocabulary with the two organisation beats and left the
-    person half empty (NEU-1446) — the story vocabulary still has no `credit_removed`, so the
+    person half empty (NEU-1446) — the story vocabulary still has no person removal type, so the
     person detach arm is still spelled and dead.
 
     Pinned as two statements rather than one: the public constants say what the whole
@@ -1014,7 +1014,7 @@ async def test_the_vocabulary_is_the_union_of_the_three_kinds(session, user, mak
     assert set(STORY_DETACH_MENTION_TYPES) == {"company_removed", "collection_removed"}
 
     film = await make_film(slug="uncredited", title="Uncredited")
-    card = await story_card(film, event_type="credit_removed")
+    card = await story_card(film, event_type="cast_removed")
     await _mention(session, card)
     await _follow(session, user, "person", str(DIRECTOR))
 

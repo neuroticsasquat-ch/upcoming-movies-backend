@@ -27,17 +27,17 @@ attachment and a credit detachment are not.
   per-observation grain because they never pass through a quarantine release that would
   collapse them.
 - **A removal card supersedes the attach card it corrects** (D-2), per company, exactly as
-  `credit_removed` does per person.
+  `cast_removed` / `crew_removed` do per person.
 - **Confidence is `rumored`** for the reason a credit attachment is (ADR-0002 makes TMDB the
   record for its own *scalar* fields, and a company row is not one), published only after the
   quarantine window — surviving which is a catalog attach card's confirmation (EF-8).
 
-**No prior-attach-card gate.** `credit_removed` cards only for people who already have a
-visible attachment card (NEU-1200's gate 1). That rule is deliberately *not* mirrored, and the
-reason is the baseline rule: every film in the catalog on the day this ships has its companies
-recorded as a baseline, so almost no studio on almost any film has an attach card for years to
-come. Requiring one would silence essentially every detachment the phase could raise, which is
-half of what EF-3 promises a studio follower. A detachment with no attachment card is a
+**No prior-attach-card gate.** `cast_removed` / `crew_removed` card only for people who already have
+a visible attachment card of their class (NEU-1200's gate 1, NR-10). That rule is deliberately *not*
+mirrored, and the reason is the baseline rule: every film in the catalog on the day this ships has
+its companies recorded as a baseline, so almost no studio on almost any film has an attach card for
+years to come. Requiring one would silence essentially every detachment the phase could raise, which
+is half of what EF-3 promises a studio follower. A detachment with no attachment card is a
 complete beat on its own — "Legendary is no longer attached" needs no prior card to be news —
 where a person's is not, because the credit half's cards are the only reason a reader knew
 they were attached.

@@ -11,6 +11,8 @@ cases drive to show what a second import adds. **And no person follow, ever** (E
 ratings path that wrote them is gone, and the assertion is here so that nothing quietly grows a
 second one back."""
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
 import pytest
 import respx
@@ -32,22 +34,34 @@ BASE_URL = get_settings().tmdb_base_url.rstrip("/")
 
 # --- the fixture export --------------------------------------------------------------------
 #
-# Four watchlist rows: two films still inside the alert window, one released in 2019 and so
-# outside it (EF-21), and one title TMDB has never heard of. The ratings file rides along in
-# the zip and must contribute nothing at all.
+# Five watchlist rows: two films still inside the alert window, two outside it (EF-21) — one
+# whose year alone says so, one only its search hit's date gives away (NEU-1505) — and one
+# title TMDB has never heard of. The ratings file rides along in the zip and must contribute
+# nothing at all.
+#
+# The years are relative to today, because the window is: `NEXT_YEAR` is certainly inside it,
+# and `RECENT_YEAR` is the year before the window starts — close enough that the export's year
+# cannot rule it out (the festival slack reaches into the window's first year), far enough that
+# a hit dated June of it is always past the 365-day ceiling.
+
+WINDOW_START = datetime.now(UTC).date() - timedelta(days=get_settings().provider_poll_max_age_days)
+NEXT_YEAR = datetime.now(UTC).year + 1
+RECENT_YEAR = WINDOW_START.year - 1
 
 WATCHLIST = [
-    ("Dune", 2021),
-    ("Arrival", 2016),
+    ("Dune", NEXT_YEAR),
+    ("Arrival", NEXT_YEAR),
     ("Long Gone", 2019),
-    ("A Film That Does Not Exist", 1999),
+    ("Recently Gone", RECENT_YEAR),
+    ("A Film That Does Not Exist", NEXT_YEAR),
 ]
 RATINGS = [("Heat", 1995, 5.0), ("The Insider", 1999, 4.5), ("Blackhat", 2015, 2.0)]
 
 SEARCH_HITS = {
-    "Dune": (1001, 2021),
-    "Arrival": (1002, 2016),
+    "Dune": (1001, NEXT_YEAR),
+    "Arrival": (1002, NEXT_YEAR),
     "Long Gone": (1003, 2019),
+    "Recently Gone": (1004, RECENT_YEAR),
     # The rated titles resolve too, so that a request spent on one would be a *visible*
     # failure rather than a silent unmatched row.
     "Heat": (2001, 1995),
@@ -56,7 +70,13 @@ SEARCH_HITS = {
 
 IN_WINDOW_TMDB_IDS = (1001, 1002)
 OUTSIDE_WINDOW_TMDB_ID = 1003
+RECENTLY_GONE_TMDB_ID = 1004
 RATED_TMDB_IDS = (2001, 2002)
+
+OUTSIDE_WINDOW_REPORT = [
+    {"name": "Long Gone", "year": 2019, "kind": "outside_window"},
+    {"name": "Recently Gone", "year": RECENT_YEAR, "kind": "outside_window"},
+]
 
 # Every film TMDB answers for, and what it says about the two things the window reads. An
 # undated, `Post Production` film is inside the window; a 2019 `Released` one is past the
@@ -65,6 +85,7 @@ DETAILS: dict[int, tuple[str, str]] = {
     1001: ("2099-06-01", "Post Production"),
     1002: ("2099-09-01", "Post Production"),
     1003: ("2019-06-01", "Released"),
+    1004: (f"{RECENT_YEAR}-06-01", "Released"),
     2001: ("1995-12-15", "Released"),
     2002: ("1999-11-05", "Released"),
 }
@@ -135,6 +156,14 @@ def _hits_for(query: str | None) -> list[dict]:
         return []
     tmdb_id, year = match
     return [{"id": tmdb_id, "title": query, "release_date": f"{year}-06-01", "popularity": 10.0}]
+
+
+def _requested(path: str) -> list:
+    return [call for call in respx.calls if str(call.request.url).startswith(f"{BASE_URL}{path}")]
+
+
+def _searched() -> set[str | None]:
+    return {call.request.url.params.get("query") for call in _requested("/search/movie")}
 
 
 def _client() -> TMDBClient:
@@ -221,16 +250,13 @@ async def test_a_fixture_export_stops_at_review_with_a_candidate_per_matched_fil
     assert job.rows_done == job.rows_total == len(WATCHLIST)
     assert job.error is None
 
-    # Three of the four rows were matched and are on the list; two are ticked. The fourth could
-    # not be placed and is the whole of the report.
+    # The two films inside the window are the list, both ticked. The report holds the two the
+    # import declined as too old and the one it could not place, in export order.
     candidates = await _candidates(session, job)
-    assert {t: (c.selected, c.skip_reason) for t, c in candidates.items()} == {
-        1001: (True, None),
-        1002: (True, None),
-        OUTSIDE_WINDOW_TMDB_ID: (False, "outside_window"),
-    }
+    assert {t: c.selected for t, c in candidates.items()} == {1001: True, 1002: True}
     assert job.unmatched == [
-        {"name": "A Film That Does Not Exist", "year": 1999, "kind": "watchlist"},
+        *OUTSIDE_WINDOW_REPORT,
+        {"name": "A Film That Does Not Exist", "year": NEXT_YEAR, "kind": "watchlist"},
     ]
     # `watchlist_created` is what the list offers; `follows_created` waits for the confirm.
     assert (job.watchlist_created, job.follows_created) == (2, 0)
@@ -276,12 +302,7 @@ async def test_the_ratings_cost_no_requests_and_produce_no_report_rows(
     _mock_tmdb()
     job = await _run(session, session_factory, user, export)
 
-    searched = {
-        call.request.url.params.get("query")
-        for call in respx.calls
-        if "/search/movie" in str(call.request.url)
-    }
-    assert searched.isdisjoint({name for name, _, _ in RATINGS})
+    assert _searched().isdisjoint({name for name, _, _ in RATINGS})
     assert {row["name"] for row in job.unmatched}.isdisjoint({name for name, _, _ in RATINGS})
     assert {f.tmdb_id for f in await _rows(session, Film)}.isdisjoint(RATED_TMDB_IDS)
     assert set(await _candidates(session, job)).isdisjoint(RATED_TMDB_IDS)
@@ -297,7 +318,7 @@ async def test_a_candidate_carries_the_catalogs_title_and_headline_release(
     """The catalog's title rather than the export's — the fixture TMDB calls 1001 `Movie 1001`
     while the export says `Dune` — because a search rule placed this row, and the catalog's
     title is how the user catches a wrong match before it becomes a follow."""
-    export = parse_upload(watchlist_csv([("Dune", 2021)]))
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR)]))
     _mock_tmdb()
 
     job = await _run(session, session_factory, user, export)
@@ -313,7 +334,7 @@ async def test_a_candidate_carries_the_catalogs_title_and_headline_release(
         "country": None,
         "bucket": None,
     }
-    assert (candidate.selected, candidate.skip_reason) == (True, None)
+    assert candidate.selected
     assert (job.watchlist_created, job.follows_created) == (1, 0)
     assert job.unmatched == []
 
@@ -321,7 +342,7 @@ async def test_a_candidate_carries_the_catalogs_title_and_headline_release(
 @respx.mock
 async def test_two_rows_that_resolve_to_one_film_are_one_candidate(session, session_factory, user):
     # Two titles in the export, one film at TMDB: one proposal, counted once.
-    export = parse_upload(watchlist_csv([("Dune", 2021), ("Dune Part One", 2021)]))
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR), ("Dune Part One", NEXT_YEAR)]))
     _mock_tmdb()
     respx.get(f"{BASE_URL}/search/movie", params={"query": "Dune Part One"}).mock(
         return_value=httpx.Response(
@@ -334,7 +355,7 @@ async def test_two_rows_that_resolve_to_one_film_are_one_candidate(session, sess
                     {
                         "id": 1001,
                         "title": "Dune Part One",
-                        "release_date": "2021-06-01",
+                        "release_date": f"{NEXT_YEAR}-06-01",
                         "popularity": 10.0,
                     }
                 ],
@@ -352,50 +373,84 @@ async def test_two_rows_that_resolve_to_one_film_are_one_candidate(session, sess
 
 
 @respx.mock
-async def test_a_film_released_in_2019_is_listed_unticked_as_outside_window(
-    session, session_factory, user, export
+async def test_a_row_whose_year_is_certainly_outside_the_window_makes_no_request(
+    session, session_factory, user
 ):
-    """EF-21: the import offers only films that can still deliver something. 2019 is past the
-    365-day `PROVIDER_POLL_MAX_AGE_DAYS` ceiling, so there is no beat left for a follow on it
-    to carry — but it was matched, so it is on the list with its reason, not in the report."""
+    """NEU-1505, D-1505.6. A 2019 row can only match a film dated 2020 at the latest (the
+    festival slack), which is past the 365-day `PROVIDER_POLL_MAX_AGE_DAYS` ceiling, so the
+    search would be spent to learn nothing. Reported by the export's name and year."""
+    export = parse_upload(watchlist_csv([("Long Gone", 2019)]))
     _mock_tmdb()
+
     job = await _run(session, session_factory, user, export)
 
-    candidate = (await _candidates(session, job))[OUTSIDE_WINDOW_TMDB_ID]
-    assert (candidate.selected, candidate.skip_reason) == (False, "outside_window")
-    assert "Long Gone" not in {row["name"] for row in job.unmatched}
+    assert respx.calls.call_count == 0
+    assert job.unmatched == [{"name": "Long Gone", "year": 2019, "kind": "outside_window"}]
+    assert await _candidates(session, job) == {}
 
 
 @respx.mock
-async def test_a_film_outside_the_window_is_not_followed_even_if_confirmed(
-    session, session_factory, user, export
+async def test_a_hit_dated_outside_the_window_is_declined_before_its_details_request(
+    session, session_factory, user
 ):
-    # The client sends the unticked row's id anyway: a skipped row is never selectable.
+    # The year leaves room for a film inside the window, so the row is searched; the hit's
+    # own date then rules it out, and no `/movie/{id}` is spent on it.
+    export = parse_upload(watchlist_csv([("Recently Gone", RECENT_YEAR)]))
     _mock_tmdb()
+
     job = await _run(session, session_factory, user, export)
-    candidate = (await _candidates(session, job))[OUTSIDE_WINDOW_TMDB_ID]
 
-    confirmed = await confirm(session, user_id=user.id, job_id=job.id, film_ids=[candidate.film_id])
-
-    assert confirmed.follows_created == 0
-    assert await _follows(session) == []
+    assert _searched() == {"Recently Gone"}
+    assert _requested(f"/movie/{RECENTLY_GONE_TMDB_ID}") == []
+    assert job.unmatched == [
+        {"name": "Recently Gone", "year": RECENT_YEAR, "kind": "outside_window"}
+    ]
+    assert await _candidates(session, job) == {}
 
 
 @respx.mock
-async def test_a_film_outside_the_window_is_still_upserted(session, session_factory, user, export):
-    """The window decides the *tick*, not the catalog row. The film is worth holding: the next
-    import, or a manual follow from the film page, finds it already there."""
+async def test_a_film_outside_the_window_is_not_upserted(session, session_factory, user, export):
+    """Inverted by NEU-1505: a film nobody can follow from here is not worth a catalog row, and
+    holding one is what let its admission card a followed director."""
     _mock_tmdb()
     await _run(session, session_factory, user, export)
 
-    assert OUTSIDE_WINDOW_TMDB_ID in {f.tmdb_id for f in await _rows(session, Film)}
+    stored = {f.tmdb_id for f in await _rows(session, Film)}
+    assert stored.isdisjoint({OUTSIDE_WINDOW_TMDB_ID, RECENTLY_GONE_TMDB_ID})
+
+
+@respx.mock
+async def test_a_released_film_already_in_the_catalog_is_declined_too(
+    session, session_factory, user
+):
+    """D-1505.6's "already in the catalog" half, which NEU-1508's purge relies on: the hit's
+    date declines the row before anything looks at the catalog, so a stored released film is
+    not proposed, not re-fetched and not offered — and a purged one could not come back."""
+    await add_film(
+        session,
+        RECENTLY_GONE_TMDB_ID,
+        release_date=datetime.fromisoformat(DETAILS[RECENTLY_GONE_TMDB_ID][0]).date(),
+        status="Released",
+    )
+    await session.commit()
+    export = parse_upload(watchlist_csv([("Recently Gone", RECENT_YEAR)]))
+    _mock_tmdb()
+
+    job = await _run(session, session_factory, user, export)
+
+    assert _searched() == {"Recently Gone"}
+    assert _requested(f"/movie/{RECENTLY_GONE_TMDB_ID}") == []
+    assert job.unmatched == [
+        {"name": "Recently Gone", "year": RECENT_YEAR, "kind": "outside_window"}
+    ]
+    assert await _candidates(session, job) == {}
 
 
 @respx.mock
 async def test_a_canceled_film_is_skipped_however_recent_its_date(session, session_factory, user):
     # The window's status term is `Canceled` alone (NEU-1417) — a film called off next year
     # has a date well inside the ceiling and still nothing to say.
-    export = parse_upload(watchlist_csv([("Dune", 2021)]))
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR)]))
     _mock_tmdb()
     respx.get(f"{BASE_URL}/movie/1001").mock(
         return_value=httpx.Response(
@@ -408,17 +463,45 @@ async def test_a_canceled_film_is_skipped_however_recent_its_date(session, sessi
 
     job = await _run(session, session_factory, user, export)
 
-    (candidate,) = (await _candidates(session, job)).values()
-    assert (candidate.selected, candidate.skip_reason) == (False, "outside_window")
-    assert job.unmatched == []
+    # The date let it through to the fetch; the fetched status declines it, the same way, and
+    # before the film is written (NEU-1510).
+    assert 1001 not in {f.tmdb_id for f in await _rows(session, Film)}
+    assert await _candidates(session, job) == {}
+    assert job.unmatched == [{"name": "Dune", "year": NEXT_YEAR, "kind": "outside_window"}]
     assert job.watchlist_created == 0
+
+
+@respx.mock
+async def test_a_hit_whose_details_disagree_across_the_window_line_is_not_written(
+    session, session_factory, user
+):
+    """NEU-1510: the hit's date is inside the window, so the row is fetched, but `/movie/{id}`
+    puts the film's primary date years back. The details decide, before the upsert: nothing
+    enters the catalog, and the row is reported by the export's name and year."""
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR)]))
+    _mock_tmdb()
+    respx.get(f"{BASE_URL}/movie/1001").mock(
+        return_value=httpx.Response(
+            200,
+            json=make_details(
+                1001, release_date="2019-06-01", status="Released", credits=_credits(1001)
+            ),
+        )
+    )
+
+    job = await _run(session, session_factory, user, export)
+
+    assert len(_requested("/movie/1001")) == 1
+    assert 1001 not in {f.tmdb_id for f in await _rows(session, Film)}
+    assert await _candidates(session, job) == {}
+    assert job.unmatched == [{"name": "Dune", "year": NEXT_YEAR, "kind": "outside_window"}]
 
 
 @respx.mock
 async def test_a_film_with_no_release_date_is_inside_the_window(session, session_factory, user):
     # The NULL guards in `alert_window_clause` are the point: an undated film is the most
     # upcoming thing there is, and dropping it would be exactly backwards.
-    export = parse_upload(watchlist_csv([("Dune", 2021)]))
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR)]))
     _mock_tmdb()
     respx.get(f"{BASE_URL}/movie/1001").mock(
         return_value=httpx.Response(
@@ -430,7 +513,7 @@ async def test_a_film_with_no_release_date_is_inside_the_window(session, session
     job = await _run(session, session_factory, user, export)
 
     (candidate,) = (await _candidates(session, job)).values()
-    assert (candidate.selected, candidate.skip_reason) == (True, None)
+    assert candidate.selected
     # Nothing to lead with at all, and the row says so rather than inventing a date.
     assert candidate.headline_release is None
     assert job.unmatched == []
@@ -452,7 +535,7 @@ async def test_re_uploading_the_same_export_creates_nothing_new(
 
     assert second.status == "awaiting_review"
     # The same list, offered again: an already-followed film is still a film on the watchlist.
-    assert set(await _candidates(session, second)) == {*IN_WINDOW_TMDB_IDS, OUTSIDE_WINDOW_TMDB_ID}
+    assert set(await _candidates(session, second)) == set(IN_WINDOW_TMDB_IDS)
     await _confirm_all(session, user, second)
     assert len(await _follows(session)) == before
     # The report is not idempotency-dependent: the title is still unplaceable.
@@ -491,7 +574,7 @@ async def test_a_second_run_supersedes_the_first_list(session, session_factory, 
     assert first.finished_at is not None
     assert await _candidates(session, first) == {}
     assert second.status == "awaiting_review"
-    assert len(await _candidates(session, second)) == 3
+    assert len(await _candidates(session, second)) == 2
 
 
 # --- the mute ------------------------------------------------------------------------------
@@ -520,7 +603,7 @@ async def test_an_import_proposes_a_film_the_catalog_already_holds(
 async def test_each_row_is_committed_as_it_is_done(session, session_factory, user):
     """The commit-per-row contract, candidates included: a crash on row two leaves row one's
     film *and* its candidate committed, visible to a session that is not the runner's."""
-    export = parse_upload(watchlist_csv([("Dune", 2021), ("Arrival", 2016)]))
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR), ("Arrival", NEXT_YEAR)]))
     _mock_tmdb()
     respx.get(f"{BASE_URL}/movie/1002").mock(return_value=httpx.Response(500))
 
@@ -542,7 +625,7 @@ async def test_a_crash_mid_run_fails_the_job_and_keeps_the_rows_already_done(
     # `run_letterboxd_import` rather than `import_letterboxd`: the wrapper's `except` is the
     # thing under test. Nothing awaits the task in production, so an exception escaping it
     # would leave the job polling `running` forever.
-    export = parse_upload(watchlist_csv([("Dune", 2021), ("Arrival", 2016)]))
+    export = parse_upload(watchlist_csv([("Dune", NEXT_YEAR), ("Arrival", NEXT_YEAR)]))
     _mock_tmdb()
     respx.get(f"{BASE_URL}/movie/1002").mock(return_value=httpx.Response(500))
 

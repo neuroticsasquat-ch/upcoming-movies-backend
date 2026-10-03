@@ -13,11 +13,16 @@ from upmovies.catalog.models import Film, FilmCompanyChange, FilmFieldChange, Fi
 from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
 from upmovies.ingest.tmdb.upsert import upsert_film
 
+# Undated and unreleased, because admission writes attachments for an unreleased film only
+# (NEU-1505); `make_details` defaults to a released one.
+UNRELEASED = {"status": "Planned", "release_date": None}
+
 
 def _details(tmdb_id: int, company_ids: list[int]) -> TMDBMovieDetails:
     return TMDBMovieDetails.model_validate(
         make_details(
             tmdb_id,
+            **UNRELEASED,
             production_companies=[
                 {"id": company_id, "name": f"Studio {company_id}"} for company_id in company_ids
             ],

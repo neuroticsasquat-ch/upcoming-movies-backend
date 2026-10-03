@@ -10,7 +10,6 @@ from sqlalchemy import (
     Select,
     case,
     cast,
-    distinct,
     exists,
     func,
     nulls_last,
@@ -23,9 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app.dto import headline_release_out
 from upmovies.app.entitlements import entitled_user_clause
+from upmovies.app.entity_names import ENTITY_TYPES, entity_names
 from upmovies.app.follow_queries import (
-    entity_attachment_event_ids,
+    entity_attribution_pairs,
     entity_event_ids,
+    follow_reach,
     title_follow_film_ids,
 )
 from upmovies.app.models import User, UserSettings
@@ -99,6 +100,7 @@ from upmovies.public.dto import (
     FeedDayResponse,
     FeedItem,
     FeedResponse,
+    FeedVia,
     FilmDetailResponse,
     FilmIndexItem,
     FilmIndexResponse,
@@ -1341,69 +1343,104 @@ async def get_feed(session: AsyncSession, *, limit: int, offset: int) -> FeedRes
     return FeedResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-def _feed_scope(
-    film_filter: Select[tuple[UUID]] | None, event_filter: Select[tuple[UUID]] | None
-) -> tuple[ColumnElement[bool], ...]:
-    """`get_feed_grouped`'s narrowing as a WHERE-clause tuple: empty for the unfiltered feed,
-    and the **OR** of the two filters when both are given (NEU-1365).
+def _publication_day() -> ColumnElement[date]:
+    """An event's feed day: the UTC calendar date of its `created_at` (ADR-0016).
 
-    OR and not AND: the two answer the same question of different grains — the timeline wants
-    every event on a film the user follows *plus* every event naming a person they follow on a
-    film they do not (D-11) — so intersecting them would return only the mentions that landed on
-    an already-followed film, which is the one case neither filter was added for.
-
-    Phrased on `Event.film_id` rather than `Film.id` so one clause serves every query that has to
-    agree: the day queries join `Film`, the event fetch does not, and a film that reached the page
-    on one named event would otherwise ship its whole day.
-    """
-    terms: list[ColumnElement[bool]] = []
-    if film_filter is not None:
-        terms.append(Event.film_id.in_(film_filter))
-    if event_filter is not None:
-        terms.append(Event.id.in_(event_filter))
-    return (or_(*terms),) if terms else ()
+    `created_at`, NOT `occurred_at`, on purpose: the feed is a publication log. A backfill or a
+    new catalog tranche therefore lands as one tall day — that is the designed behaviour, not a
+    bug to fix by regrouping on `occurred_at`."""
+    return cast(func.timezone("UTC", Event.created_at), Date)
 
 
-async def get_feed_grouped(
-    session: AsyncSession,
+def _feed_event_columns() -> tuple[Any, ...]:
+    """What `_event_out` reads off a fetched event row (the event's own columns, its summary,
+    its feed day and its section), for both of the grouped feed's event fetches — the film-day
+    rows' and the timeline's entity rows'."""
+    return (
+        Event.id,
+        Event.film_id,
+        Event.event_type,
+        Event.confidence,
+        Event.provenance,
+        Event.status,
+        Event.superseded_by,
+        Event.created_at,
+        Event.occurred_at,
+        Event.subject_key,
+        _publication_day().label("event_day"),
+        EventSummary.summary,
+        EventSummary.edited_at,
+        _has_story().label("has_story"),
+    )
+
+
+def _feed_day_item(
+    film: Any,
     *,
-    limit: int,
-    offset: int,
-    film_filter: Select[tuple[UUID]] | None = None,
-    event_filter: Select[tuple[UUID]] | None = None,
-) -> FeedDayResponse:
-    """The grouped feed — and, given either filter, any narrowing of it (NEU-1351, NEU-1365).
+    day: date,
+    events: list[EventOut],
+    news_backed: bool,
+    countries_by_film: dict[UUID, list[str]],
+    directors_by_film: dict[UUID, list[str]],
+    via: FeedVia | None = None,
+) -> FeedDayItem:
+    """One grouped-feed row. `film` is any row carrying `film_id`, `tmdb_id`, `title`,
+    `release_date`, `poster_path` and `film_status`; `event_count`, `event_types` and
+    `top_event_type` are computed over `events` and nothing else (NEU-1199)."""
+    return FeedDayItem(
+        film_ref=film_ref(film.tmdb_id, film.title),
+        film_title=film.title,
+        release_year=_release_year(film.release_date),
+        poster_path=film.poster_path,
+        arc_stage=derive_arc_stage(film.film_status),
+        production_countries=countries_by_film.get(film.film_id, []),
+        directors=directors_by_film.get(film.film_id, []),
+        day=day,
+        top_event_type=most_significant_event_type([e.event_type for e in events]),
+        event_types=ordered_event_types([e.event_type for e in events]),
+        event_count=len(events),
+        news_backed=news_backed,
+        events=events,
+        via=via,
+    )
 
-    `film_filter` is a `SELECT film.id` and `event_filter` a `SELECT event.id`, both composed by
-    the caller; the timeline passes the films its user follows and the events naming the people
-    they follow (`app.follow_queries`). Together they narrow the *event* scope — see `_feed_scope`
-    for why that is an OR — and that one scope applies identically to the day count, the day
-    window, the film-day rows and the events fetched for them. Which is what makes a filtered page
-    the same DTO with fewer rows in it, day pagination and all, rather than a second query to keep
-    in step with this one.
+
+async def _feed_day_window(
+    session: AsyncSession, scope: tuple[ColumnElement[bool], ...], *, limit: int, offset: int
+) -> tuple[int, list[date]]:
+    """`(total, days)`: how many feed days hold a visible event in `scope`, and this page's.
+
+    Pagination is by DAY: limit/offset count distinct days (newest first), not rows — so the UI
+    shows "N days at a time" with a deterministic "view more". `total` is the number of distinct
+    days, so the client knows when no more days remain.
     """
-    # Pagination is by DAY: limit/offset count distinct days (newest first), not film rows —
-    # so the UI shows "N days at a time" with a deterministic "view more". `total` is the
-    # number of distinct days, so the client knows when no more days remain.
-    #
-    # The day is `created_at`, NOT `occurred_at`, on purpose: the feed is a publication log
-    # (ADR-0016). A backfill or a new catalog tranche therefore lands as one tall day — that is
-    # the designed behaviour, not a bug to fix by regrouping on `occurred_at`.
-    day = cast(func.timezone("UTC", Event.created_at), Date)
-    visible = feed_visible()
-    scoped = _feed_scope(film_filter, event_filter)
-
+    day = _publication_day()
     distinct_days = (
         select(day.label("day"))
         .select_from(Event)
         .join(EventSummary, EventSummary.event_id == Event.id)
         .join(Film, Film.id == Event.film_id)
-        .where(*visible, *scoped)
+        .where(*feed_visible(), *scope)
         .group_by(day)
     )
-    total_days = await session.scalar(select(func.count()).select_from(distinct_days.subquery()))
+    total = await session.scalar(select(func.count()).select_from(distinct_days.subquery()))
+    days = await session.scalars(distinct_days.order_by(day.desc()).limit(limit).offset(offset))
+    return total or 0, list(days)
 
-    window = distinct_days.order_by(day.desc()).limit(limit).offset(offset).subquery()
+
+async def _film_day_items(
+    session: AsyncSession, days: list[date], scope: tuple[ColumnElement[bool], ...] = ()
+) -> list[FeedDayItem]:
+    """One row per (film, day, section) over `days`, each holding the visible events `scope`
+    lets through — the whole grouped feed with no scope, a title follower's films with one.
+
+    `scope` applies to the film-day rows *and* to the events fetched for them, so a scope over
+    events rather than films could never ship a film's unscoped events alongside its scoped ones.
+    """
+    if not days:
+        return []
+    day = _publication_day()
+    visible = feed_visible()
 
     rows = (
         await session.execute(
@@ -1413,101 +1450,45 @@ async def get_feed_grouped(
                 Film.title.label("title"),
                 Film.release_date.label("release_date"),
                 Film.poster_path.label("poster_path"),
-                Film.status.label("status"),
+                Film.status.label("film_status"),
                 day.label("day"),
-                func.count().label("event_count"),
-                func.array_agg(distinct(Event.event_type)).label("event_types"),
-                func.bool_or(_has_story()).label("news_backed"),
             )
             .select_from(Event)
             .join(EventSummary, EventSummary.event_id == Event.id)
             .join(Film, Film.id == Event.film_id)
-            .where(*visible, *scoped, day.in_(select(window.c.day)))
+            .where(*visible, *scope, day.in_(days))
             .group_by(Film.id, Film.tmdb_id, Film.title, Film.release_date, Film.poster_path, day)
             .order_by(day.desc(), _natural_title_col().asc(), Film.slug.asc())
         )
     ).all()
 
     if not rows:
-        return FeedDayResponse(items=[], total=total_days or 0, limit=limit, offset=offset)
+        return []
 
     # Fetch full events (with summaries and sources) for each (film_id, day) group.
     event_rows = (
         await session.execute(
-            select(
-                Event.id,
-                Event.film_id,
-                Event.event_type,
-                Event.confidence,
-                Event.provenance,
-                Event.status,
-                Event.superseded_by,
-                Event.created_at,
-                Event.occurred_at,
-                Event.subject_key,
-                cast(func.timezone("UTC", Event.created_at), Date).label("event_day"),
-                EventSummary.summary,
-                EventSummary.edited_at,
-                _has_story().label("has_story"),
-            )
+            select(*_feed_event_columns())
             .join(EventSummary, EventSummary.event_id == Event.id)
             .where(
                 Event.film_id.in_({r.film_id for r in rows}),
-                cast(func.timezone("UTC", Event.created_at), Date).in_({r.day for r in rows}),
+                day.in_({r.day for r in rows}),
                 visible_events(),
-                # The same scope as the rows above, not just their (film, day) keys: a film that
-                # reached the page on one event naming a followed person ships that event, not
-                # every event it happened to have that day (NEU-1365).
-                *scoped,
+                *scope,
             )
             .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
         )
     ).all()
-
-    event_ids = [e.id for e in event_rows]
-    sources_by_event: dict[UUID, list[Story]] = {}
-    if event_ids:
-        source_rows = (
-            await session.execute(
-                select(EventStory.event_id, Story)
-                .join(Story, Story.id == EventStory.story_id)
-                .where(EventStory.event_id.in_(event_ids))
-                .order_by(nulls_last(Story.published_at.asc()), Story.id.asc())
-            )
-        ).all()
-        for event_id, story in source_rows:
-            sources_by_event.setdefault(event_id, []).append(story)
+    sources_by_event = await _sources_by_event(session, [e.id for e in event_rows])
 
     # Build per-film-day event lookups split by category so that a film-day with events
     # from both categories appears in both sections (NEU-1199).
     news_events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
     catalog_events_by_film_day: dict[tuple[UUID, date], list[EventOut]] = {}
     for e in event_rows:
-        key = (e.film_id, e.event_day)
         target = news_events_by_film_day if e.has_story else catalog_events_by_film_day
-        target.setdefault(key, []).append(
-            EventOut(
-                event_id=e.id,
-                event_type=e.event_type,
-                confidence=e.confidence,
-                created_at=e.created_at,
-                occurred_at=e.occurred_at,
-                summary=e.summary,
-                summary_edited=e.edited_at is not None,
-                provenance=e.provenance,
-                status=e.status,
-                superseded_by=e.superseded_by,
-                video_key=video_key_of(e.event_type, e.subject_key),
-                sources=[
-                    SourceOut(
-                        url=source_url(story),
-                        source=outlet_label(story),
-                        title=story.title,
-                        published_at=story.published_at,
-                    )
-                    for story in cap_sources(sources_by_event.get(e.id, []))
-                ],
-            )
+        target.setdefault((e.film_id, e.event_day), []).append(
+            _event_out(e, e.summary, e.edited_at, sources_by_event.get(e.id, []))
         )
 
     # Two batched lookups per page, not per row — the title parenthetical's country and
@@ -1516,32 +1497,23 @@ async def get_feed_grouped(
     countries_by_film = await _production_countries_for_films(session, feed_film_ids)
     directors_by_film = await _directors_for_films(session, feed_film_ids)
 
-    def _make_item(row: Any, events: list[EventOut], news_backed: bool) -> FeedDayItem:
-        return FeedDayItem(
-            film_ref=film_ref(row.tmdb_id, row.title),
-            film_title=row.title,
-            release_year=_release_year(row.release_date),
-            poster_path=row.poster_path,
-            arc_stage=derive_arc_stage(row.status),
-            production_countries=countries_by_film.get(row.film_id, []),
-            directors=directors_by_film.get(row.film_id, []),
-            day=row.day,
-            top_event_type=most_significant_event_type([e.event_type for e in events]),
-            event_types=ordered_event_types([e.event_type for e in events]),
-            event_count=len(events),
-            news_backed=news_backed,
-            events=events,
-        )
-
     items: list[FeedDayItem] = []
     for row in rows:
-        news_events = news_events_by_film_day.get((row.film_id, row.day), [])
-        catalog_events = catalog_events_by_film_day.get((row.film_id, row.day), [])
-
-        if news_events:
-            items.append(_make_item(row, news_events, True))
-        if catalog_events:
-            items.append(_make_item(row, catalog_events, False))
+        for events, news_backed in (
+            (news_events_by_film_day.get((row.film_id, row.day), []), True),
+            (catalog_events_by_film_day.get((row.film_id, row.day), []), False),
+        ):
+            if events:
+                items.append(
+                    _feed_day_item(
+                        row,
+                        day=row.day,
+                        events=events,
+                        news_backed=news_backed,
+                        countries_by_film=countries_by_film,
+                        directors_by_film=directors_by_film,
+                    )
+                )
 
     # Within a day, the bigger beat leads (D-7): a casting burst outranks a status change,
     # and a trailer outranks both. Sorted here rather than in SQL because the ranking is
@@ -1550,47 +1522,163 @@ async def get_feed_grouped(
     # first and title still breaks its ties — the day axis is untouched, it is only re-keyed
     # here because every row of every windowed day is already in hand.
     items.sort(key=lambda item: (item.day, event_stage_rank(item.top_event_type)), reverse=True)
-    return FeedDayResponse(items=items, total=total_days or 0, limit=limit, offset=offset)
+    return items
+
+
+async def _entity_day_items(
+    session: AsyncSession, *, user_id: UUID, days: list[date]
+) -> list[FeedDayItem]:
+    """The timeline's entity rows over `days`: one per (followed entity, film, day, section),
+    each holding only the cards that reached the user through that entity (FB-13).
+
+    Read from `entity_attribution_pairs` — the pairs the digest reads — joined to `news.event`
+    under the feed's visibility terms (FB-14); the builder carries none of its own. A card two
+    followed entities reached is a row under each (FB-5).
+
+    Ordered `day DESC`, then entity type (person, company, franchise), name, film title. The
+    frontend re-sorts within a day (FB-6); this order is for stable output.
+    """
+    if not days:
+        return []
+    reach = entity_attribution_pairs(user_id).subquery("reach")
+    day = _publication_day()
+    event_rows = (
+        await session.execute(
+            select(
+                reach.c.entity_type,
+                reach.c.entity_id,
+                *_feed_event_columns(),
+                Film.tmdb_id,
+                Film.title,
+                Film.release_date,
+                Film.poster_path,
+                Film.status.label("film_status"),
+            )
+            .select_from(reach)
+            .join(Event, Event.id == reach.c.event_id)
+            .join(EventSummary, EventSummary.event_id == Event.id)
+            .join(Film, Film.id == Event.film_id)
+            .where(*feed_visible(), day.in_(days))
+            .order_by(Event.occurred_at.asc(), Event.created_at.asc(), Event.id.asc())
+        )
+    ).all()
+    if not event_rows:
+        return []
+
+    sources_by_event = await _sources_by_event(session, list({e.id for e in event_rows}))
+    film_ids = {e.film_id for e in event_rows}
+    countries_by_film = await _production_countries_for_films(session, film_ids)
+    directors_by_film = await _directors_for_films(session, film_ids)
+    names = await entity_names(session, {(e.entity_type, e.entity_id) for e in event_rows})
+
+    groups: dict[tuple[str, str, UUID, date, bool], list[Any]] = {}
+    for e in event_rows:
+        key = (e.entity_type, e.entity_id, e.film_id, e.event_day, e.has_story)
+        groups.setdefault(key, []).append(e)
+
+    items: list[FeedDayItem] = []
+    for (entity_type, entity_id, _film_id, event_day, has_story), grouped in groups.items():
+        resolved = names[(entity_type, entity_id)]
+        items.append(
+            _feed_day_item(
+                grouped[0],
+                day=event_day,
+                events=[
+                    _event_out(e, e.summary, e.edited_at, sources_by_event.get(e.id, []))
+                    for e in grouped
+                ],
+                news_backed=has_story,
+                countries_by_film=countries_by_film,
+                directors_by_film=directors_by_film,
+                # Validated rather than constructed: `entity_type` is the pair builder's text,
+                # and the model's `Literal` is what holds it to the three entity words.
+                via=FeedVia.model_validate(
+                    {
+                        "entity_type": entity_type,
+                        "entity_id": entity_id,
+                        "name": None if resolved is None else resolved.name,
+                        "ref": None if resolved is None else resolved.ref,
+                    }
+                ),
+            )
+        )
+
+    def order(item: FeedDayItem) -> tuple[Any, ...]:
+        assert item.via is not None
+        name = item.via.name
+        return (
+            -item.day.toordinal(),
+            ENTITY_TYPES.index(item.via.entity_type),
+            name is None,
+            (name or "").casefold(),
+            item.via.entity_id,
+            item.film_title.casefold(),
+            item.film_ref,
+            not item.news_backed,
+        )
+
+    return sorted(items, key=order)
+
+
+async def get_feed_grouped(session: AsyncSession, *, limit: int, offset: int) -> FeedDayResponse:
+    """The grouped feed: one row per (film, publication day, section), a page of days at a time
+    (ADR-0016, NEU-1199). Every row's `via` is null — the feed reaches nobody through a follow
+    (FB-12)."""
+    total, days = await _feed_day_window(session, (), limit=limit, offset=offset)
+    items = await _film_day_items(session, days)
+    return FeedDayResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 async def get_timeline(
     session: AsyncSession, *, user_id: UUID, limit: int, offset: int
 ) -> FeedDayResponse:
-    """The grouped feed restricted to what this user's follows deliver (EF-3, D-12).
+    """The grouped feed restricted to what this user's follows deliver (EF-3, D-12), one row per
+    **reach** (FB-13, ADR-0022).
 
-    Two filters, OR-ed by `get_feed_grouped`, because a follow delivers at two grains
-    (ADR-0019): a **title** follow delivers every beat on its film, and a person, studio or
-    franchise follow delivers the cards in which that entity attaches to or detaches from a
-    film, plus that film's cancellation. The second is event-grained on purpose — an attachment
-    makes its own event timeline-worthy and says nothing about the rest of the film's history.
-    Which is the one way a timeline row is not its feed row: a film-day reached by an attachment
-    alone carries that event and not the film's others, so `event_count`, `event_types` and
-    `top_event_type` can read lower here than on `/feed` for the same film and day. The shape
-    and the ordering are the feed's; the contents are what this user follows.
+    A timeline row is a feed row with a reach: (reach, film, day, section). A follow delivers at
+    two grains (ADR-0019), and each grain gives its own rows:
 
-    **Nothing subtracts from either half** (EF-14). A mute used to, from inside the two
-    builders; it went with the watchlist it corrected, and the only way off this timeline now
-    is to unfollow — which takes the film out of the builder itself, so the digest section that
-    summarises this timeline still cannot disagree with it about what the user asked for.
+    - **Title rows** (`via` null) — a title follow delivers every beat on its film, so these are
+      the feed's own rows for the followed films, built by the same `_film_day_items` the feed's
+      are, in the feed's order.
+    - **Entity rows** (`via` names the entity) — a person, studio or franchise follow delivers the
+      cards in which that entity attaches to or detaches from a film, plus that film's
+      cancellation (`entity_attribution_pairs`). An entity row holds only the cards that reached
+      the user through *that* entity, so its `event_count`, `event_types` and `top_event_type`
+      can read lower than the film's feed row for the same day.
 
-    Deliberately `get_feed_grouped` with a filter rather than a query of its own: the timeline
-    and the feed are the same product surface — same DTO, same `created_at` day grouping, same
-    day pagination (ADR-0016) — and the client swaps one for the other on `/` as soon as `me`
-    resolves. Two queries would be two things to keep in step.
+    The two sets are not de-duplicated against each other (FB-5): a casting card on a film the
+    user follows by title and whose director they follow is a line in the title row *and* in the
+    director's row, and a cancellation reaching two followed entities is in both of theirs. Each
+    row says how it arrived.
 
-    Takes a `user_id` rather than a `User` so nothing request-scoped reaches the filter, which
-    the notify pass (NEU-1379) runs from `pipeline_run`. Entitlement is the route's gate (D-39),
-    not this function's: an unentitled user gets 403 from `require_entitled()` and never arrives
-    here, because an empty timeline would read as "nothing happened" rather than "you do not
-    have access" (D-41).
+    **The day window is the union of both reaches** — `follow_reach`'s two halves OR-ed — so
+    `total`, `limit` and `offset` count the days on which *either* reach published something, and
+    a page is still "N days", exactly as on `/feed/grouped`. Both row sets are then built over
+    those days; a day reached only through a followed director is a page of the timeline holding
+    only entity rows. Rows run `day DESC`, title rows before entity rows within a day.
+
+    **Nothing subtracts from either half** (EF-14). The only way off this timeline is to unfollow
+    — which takes the film or the entity out of the builders themselves, so the digest that
+    reproduces this timeline still cannot disagree with it about what the user asked for.
+
+    The same DTO, the same `created_at` day grouping and the same row builder as the feed, so the
+    client renders either and a title row is byte-for-byte its feed row.
+
+    Takes a `user_id` rather than a `User` so nothing request-scoped reaches the builders.
+    Entitlement is the route's gate (D-39), not this function's: an unentitled user gets 403
+    from `require_entitled()` and never arrives here, because an empty timeline would read as
+    "nothing happened" rather than "you do not have access" (D-41).
     """
-    return await get_feed_grouped(
-        session,
-        limit=limit,
-        offset=offset,
-        film_filter=title_follow_film_ids(user_id),
-        event_filter=entity_attachment_event_ids(user_id),
+    by_title, by_entity = follow_reach(user_id)
+    total, days = await _feed_day_window(
+        session, (or_(by_title, by_entity),), limit=limit, offset=offset
     )
+    title_items = await _film_day_items(session, days, (by_title,))
+    entity_items = await _entity_day_items(session, user_id=user_id, days=days)
+    # Stable, so each day keeps its title rows (in the feed's order) ahead of its entity rows.
+    items = sorted([*title_items, *entity_items], key=lambda item: item.day, reverse=True)
+    return FeedDayResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 async def _directors_for_films(session: AsyncSession, film_ids: set[UUID]) -> dict[UUID, list[str]]:
@@ -1890,10 +1978,22 @@ async def get_my_films_calendar(
     """
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
     governing = _calendar_governing_cte(name="my_films_governing", title_follow_user_id=user_id)
-    visible = (governing.c.governing_date >= today, Film.slug.is_not(None))
     return await _calendar_page(
-        session, governing=governing, visible=visible, limit=limit, offset=offset
+        session,
+        governing=governing,
+        visible=_my_films_visible(governing, today=today),
+        limit=limit,
+        offset=offset,
     )
+
+
+def _my_films_visible(governing: CTE, *, today: date) -> tuple[ColumnElement[bool], ...]:
+    """The my-films calendar's cuts over its governing CTE: upcoming, and a page to link to.
+
+    Spelled once because the digest's slate (`digest_sender.load_slate`, FB-26) is this page
+    over a 30-day window, and a slate whose cuts drifted from the page's would name a date the
+    calendar does not — or miss one it does."""
+    return (governing.c.governing_date >= today, Film.slug.is_not(None))
 
 
 async def get_ical_feed(

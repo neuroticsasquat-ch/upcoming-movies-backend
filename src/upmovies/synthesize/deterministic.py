@@ -39,7 +39,7 @@ DETERMINISTIC_MODEL = "deterministic"
 # Written to `event_summary.prompt_version`. Namespaced so it can never be confused with the
 # summarizer's own version counter (`SUMMARY_PROMPT_VERSION`, a bare integer). Bump it whenever
 # a template below changes wording, so a body can be traced back to the phrasing that produced it.
-TEMPLATE_VERSION = "deterministic-9"
+TEMPLATE_VERSION = "deterministic-10"
 
 
 @dataclass(frozen=True)
@@ -134,11 +134,13 @@ class CreditDetached:
 
 @dataclass(frozen=True)
 class CreditsDetached:
-    """Every credit one observation detached, rendered as one body (NEU-1200).
+    """Every credit of one role class one observation detached, rendered as one body
+    (NEU-1200, NR-10).
 
-    Mirrors `CreditsAttached`: one removal card per observation, all roles in one body
-    since `credit_removed` is a single type and `uq_event_catalog_change` allows one
-    catalog event per film, type and timestamp.
+    Mirrors `CreditsAttached`: one removal card per observation and class — a `cast_removed`
+    body holds only `cast` credits, a `crew_removed` body only `director` / `writer` / `crew`
+    ones. The renderer itself is class-blind and renders whatever roles it is handed, which is
+    what lets the NEU-1518 migration re-render each half of a split card from its own subset.
     """
 
     credits: tuple[CreditDetached, ...]
@@ -545,39 +547,40 @@ def _render_collection_detachments(change: CollectionsDetached) -> str:
     return f"The film leaves the {names}."
 
 
-# Keyed on the monetization types the poll stores (`catalog.models.MONETIZATION_TYPES`), which
-# a CHECK constraint holds the ledger to — so unlike a TMDB status an unrecognised key here is a
-# bug in the caller, not new data from upstream, and `_render_now_available` raises on it.
+# The monetization types the poll stores (`catalog.models.MONETIZATION_TYPES`), which a CHECK
+# constraint holds the ledger to — so unlike a TMDB status an unrecognised key here is a bug in
+# the caller, not new data from upstream, and `_render_now_available` raises on it.
 # "Now streaming" rather than "Now available to stream": it is what the beat is called, and the
 # card sits under the film's own title so the title is not named again.
-_AVAILABILITY_BODIES = {
-    "flatrate": "Now streaming on {providers}.",
-    "rent": "Available to rent on {providers}.",
-    "buy": "Available to buy on {providers}.",
-}
+_STREAMING_BODY = "Now streaming on {providers}."
+# Rent and buy are store offers, and they name no store: which service streams a film decides
+# whether a reader can watch it on what they already pay for, but any store will rent or sell
+# it, so the list was noise. Both share one sentence when one observation first sees both.
+_STORE_TYPES = ("rent", "buy")
 
 
 def _render_now_available(change: NowAvailable) -> str:
-    """One clause per monetization type, in the order the where-to-watch box lists them (D-29)
-    rather than in whichever order the poll's payload emitted — a card that first saw a film to
-    rent and to stream reads the same way whatever TMDB put first.
+    """At most two sentences, in the order the where-to-watch box lists the types (D-29) rather
+    than in whichever order the poll's payload emitted — a card that first saw a film to rent and
+    to stream reads the same way whatever TMDB put first.
 
-    Services are named with `_join_names`, the same clause-joiner the credit bodies use: this
-    module exists to keep one phrasing, and a second way of writing a list of names is the
-    drift it is here to prevent."""
-    unknown = [
-        o.monetization_type
-        for o in change.offers
-        if o.monetization_type not in _AVAILABILITY_BODIES
-    ]
+    Streaming names its services with `_join_names`, the same clause-joiner the credit bodies
+    use: this module exists to keep one phrasing, and a second way of writing a list of names is
+    the drift it is here to prevent. Rent and buy name none, and read as one sentence
+    ("Available to rent or buy.") when the observation first saw both."""
+    known = ("flatrate", *_STORE_TYPES)
+    unknown = [o.monetization_type for o in change.offers if o.monetization_type not in known]
     if unknown:
         raise ValueError(f"unknown monetization type: {unknown[0]!r}")
     by_type = {o.monetization_type: o for o in change.offers}
-    return " ".join(
-        _AVAILABILITY_BODIES[kind].format(providers=_join_names(list(by_type[kind].providers)))
-        for kind in MONETIZATION_TYPES
-        if kind in by_type
-    )
+    sentences: list[str] = []
+    if "flatrate" in by_type:
+        providers = _join_names(list(by_type["flatrate"].providers))
+        sentences.append(_STREAMING_BODY.format(providers=providers))
+    store = [kind for kind in MONETIZATION_TYPES if kind in _STORE_TYPES and kind in by_type]
+    if store:
+        sentences.append(f"Available to {' or '.join(store)}.")
+    return " ".join(sentences)
 
 
 # The trailer card's whole body (D-35). "A new trailer" rather than "the trailer": a film

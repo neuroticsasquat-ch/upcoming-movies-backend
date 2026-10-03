@@ -21,10 +21,11 @@ The timeline and the digest both spell the same clause over the two:
 
     Event.film_id IN title_follow_film_ids(u)  OR  Event.id IN entity_attachment_event_ids(u)
 
-`get_timeline` hands them to `get_feed_grouped` as `film_filter` and `event_filter`, which OR-s
-the two grains itself; the notify pass OR-s them in its own statement. Reusing the builders
-rather than restating the rule is the point — a digest that quietly covered less than the
-timeline it summarises is the drift this module exists to prevent.
+`get_timeline` takes the two halves apart (`follow_reach`): their OR bounds its day window, and
+each half gives its own rows — a title row per followed film, an entity row per followed entity
+through `entity_attribution_pairs` (FB-13). The notify pass OR-s them in its own statement.
+Reusing the builders rather than restating the rule is the point — a digest that quietly covered
+less than the timeline it summarises is the drift this module exists to prevent.
 
 **Neither kind of follow has a window, an in-play term or a mute** (EF-14). An entity follow
 selects events, published now, one per attachment, so there is nothing to bound; a title follow
@@ -67,6 +68,7 @@ from sqlalchemy import (
     Select,
     Text,
     any_,
+    case,
     cast,
     false,
     func,
@@ -100,8 +102,9 @@ from upmovies.news.catalog_events import (
     COMPANY_ATTACHED_EVENT_TYPE,
     COMPANY_EVENT_TYPES,
     COMPANY_REMOVED_EVENT_TYPE,
+    CREDIT_ATTACHMENT_EVENT_TYPES,
+    CREDIT_DETACHMENT_EVENT_TYPES,
     CREDIT_EVENT_TYPES,
-    CREDIT_REMOVED_EVENT_TYPE,
     PERSON_ATTACHMENT_EVENT_TYPES,
 )
 from upmovies.news.models import (
@@ -151,7 +154,7 @@ association."""
 STORY_PERSON_DETACH_MENTION_TYPES: tuple[str, ...] = ()
 """The `story_person` mention types that name somebody in connection with a *detachment*.
 
-**Still empty after M4, deliberately.** The story vocabulary has no `credit_removed` type — the
+**Still empty after M4, deliberately.** The story vocabulary has no person removal type — the
 four types EF-12 added are all organisation beats — so no story-formed person detach card
 exists and `_first_detachment_arm` selects nothing. The arm is spelled anyway, and pinned empty
 by a test: it is the seam any later prompt change fills, and the contract is that all six arms
@@ -382,11 +385,10 @@ def follow_reach(user_id: UUID) -> tuple[ColumnElement[bool], ColumnElement[bool
     """The two halves of `follow_scope`, kept apart: `(via a title follow, via an entity
     follow)` over `news.event`.
 
-    Every reader today asks only *whether* a card reaches this user, and wants them OR-ed: that
-    is `follow_scope`, and it is the one caller. The split outlived the notify pass's alert
-    branch, which asked *why* a card reached them (EF-7) and decided per reach — ADR-0021
-    retired it. Kept rather than inlined because the pair is the clause's own decomposition,
-    and the next reader that needs the reach should not have to rediscover it.
+    The notify pass asks only *whether* a card reaches this user, and wants them OR-ed: that is
+    `follow_scope`. The timeline asks *how* (FB-13, ADR-0022): the OR bounds its day window, and
+    the title half alone selects its title rows. Kept as one decomposition because the pair is
+    the clause's own, and a reader that took the halves from separate builders could drift.
 
     Returned as a pair rather than as two builders because they are one decomposition and
     reading one without the other is how the OR silently loses a term."""
@@ -401,10 +403,8 @@ def follow_scope(user_id: UUID) -> ColumnElement[bool]:
 
     The clause the module docstring states, spelled once for the readers that need it as a
     predicate rather than as two builders — the notify pass's digest branch. The
-    timeline instead hands `title_follow_film_ids` and `entity_attachment_event_ids` to
-    `get_feed_grouped`, which OR-s them into the same shape itself, because its scope has to
-    apply to four statements (the day count, the day window, the film-day rows and the event
-    fetch) rather than one.
+    timeline takes `follow_reach` instead and OR-s it itself, because it also needs the title
+    half on its own.
 
     `or_` over `follow_reach` rather than its own pair of `IN`s, so the scope and the reach can
     never come to different answers about what a follow delivers.
@@ -487,8 +487,8 @@ def entity_attachment_event_ids(
 
     Five branches, UNION-ed (`_entity_event_pairs`):
 
-    - `_person_attachment_pairs` — `casting` / `crew_attached` / `credit_removed` cards whose
-      `subject_key` names a followed person (D-1437.3);
+    - `_person_attachment_pairs` — `casting` / `crew_attached` / `cast_removed` /
+      `crew_removed` cards whose `subject_key` names a followed person (D-1437.3);
     - `_organisation_attachment_pairs` twice — `company_attached` / `company_removed` and
       `collection_attached` / `collection_removed` cards carrying a followed id token
       (D-1437.4);
@@ -588,29 +588,55 @@ def _entity_event_pairs(
     return union_all(*branches)
 
 
+def entity_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
+    """`(entity_type, entity_id, event_id)` — which of this user's person, studio and franchise
+    follows reached which published card: `follow_attribution_pairs`' entity arms on their own.
+
+    What the timeline groups its entity rows by (FB-13). The timeline and the digest read the
+    same pairs — this builder is the digest's entity arm — so the page and the mail cannot come
+    to different answers about which entity a card arrived through.
+
+    **De-duplicated**, for the reason `follow_attribution_pairs` gives: a writer-director's
+    `canceled` card comes out of `_canceled_pairs` once per credit, and a catalog casting card
+    matched by name is matched again by the resolved mention of the story that promoted it. A
+    pair is a reason, not a count; two follows reaching one card stay two rows.
+
+    No visibility term, as on every builder here.
+    """
+    pairs = _entity_event_pairs(user_id=user_id, only=None)
+    # `only=None` wants every type, so the person branch alone makes this non-empty.
+    assert pairs is not None
+    reached = pairs.subquery("reached")
+    return (
+        select(reached.c.entity_type, reached.c.entity_id, reached.c.event_id)
+        .distinct()
+        .correlate(None)
+    )
+
+
 def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
     """`(entity_type, entity_id, event_id)` — which of this user's follows reached which
     published card (DC-6), across both grains.
 
-    The one builder the digest reads for its "Following:" line. The sender joins it to the
-    batch's event ids and names the entity rows; `_entity_event_pairs` stays private behind it,
-    so the line and the timeline cannot come to different answers about what an entity follow
-    delivers.
+    The one builder the digest reads for each card's reach (FB-25): the sender joins it to the
+    batch's event ids and makes one line per pair, so a card two follows reached is a line under
+    each. `_entity_event_pairs` stays private behind it and `entity_attribution_pairs`, which the
+    timeline's entity rows read, so the mail and the timeline cannot come to different answers
+    about what an entity follow delivers.
 
     Two arms:
 
-    - every row `_entity_event_pairs` yields for this user's person, studio and franchise
-      follows (all five branches, EF-15's attribution), with `created_at` dropped;
+    - `entity_attribution_pairs` — every row `_entity_event_pairs` yields for this user's
+      person, studio and franchise follows (all five branches, EF-15's attribution), with
+      `created_at` dropped;
     - a **title** arm, `('title', film_id, event_id)` for every published card whose film is
       in `title_follow_film_ids` — `status = 'published'` on the entity branches' terms, as in
       `follow_last_activity`. Keyed by the card's own `film_id`, so the id is the canonical
       UUID text whatever case the follow row was stored in.
 
-    **The title arm is not for the line.** The mail renders only the entity rows, and omits the
-    line when an entry has none: a reader who followed the film by name asked for it, and does
-    not need telling why it arrived. The arm is here so the preview and the tests can assert an
-    entry's *full* reach — a film reached by a title follow and a director follow yields both
-    rows, and the director is still named.
+    **The title arm is the Films block.** A card with a title pair is a line under its film's
+    row; a card with only entity pairs is under those entities' rows and not under Films at all
+    — a film reached by a title follow and a director follow yields both rows, and both lines.
 
     **De-duplicated** (`UNION`, not `UNION ALL`): a writer-director's `canceled` card comes out
     of `_canceled_pairs` once per credit, and a pair is a reason, not a count. Two follows
@@ -628,12 +654,7 @@ def follow_attribution_pairs(user_id: UUID) -> Select[tuple[str, str, UUID]]:
         .where(Event.status == _PUBLISHED, Event.film_id.in_(title_follow_film_ids(user_id)))
         .correlate(None)
     )
-    pairs = _entity_event_pairs(user_id=user_id, only=None)
-    # `only=None` wants every type, so the person branch alone makes this non-empty.
-    assert pairs is not None
-    reached = pairs.subquery("reached")
-    entity = select(reached.c.entity_type, reached.c.entity_id, reached.c.event_id)
-    attributed = union(entity, title).subquery("attributed")
+    attributed = union(entity_attribution_pairs(user_id), title).subquery("attributed")
     return select(attributed.c.entity_type, attributed.c.entity_id, attributed.c.event_id)
 
 
@@ -643,9 +664,9 @@ def _person_attachment_pairs(
     """The person branch: every published credit attach or detach card naming one of the people
     in scope, keyed to the person it names.
 
-    `credit_removed` cards name the removed person exactly as the attach cards name the
-    arriving one — the sweep's removal path writes `subject_key` from the same
-    `normalize_name` — so the three types are one test rather than two.
+    `cast_removed` / `crew_removed` cards name the removed person exactly as the attach cards
+    name the arriving one — the sweep's removal path writes `subject_key` from the same
+    `normalize_name` — so the four types are one test rather than two.
 
     A join on `sql_normalized_name(person.name) = ANY(event.subject_key)` where this used to
     hold an `EXISTS` of the same test, because the key has to come *out*. It is the same
@@ -956,7 +977,7 @@ def first_association_clause(
     attach card at all** it still selects, provided no detach card precedes `E`: a story
     reporting a studio's exit from a film we only ever held it on as a baseline is the first
     detachment we have heard of. The *person* detach arm is the same rule and still selects
-    nothing at all, because the story vocabulary has no `credit_removed` type — see
+    nothing at all, because the story vocabulary has no person removal type — see
     `STORY_PERSON_DETACH_MENTION_TYPES` and `_first_detachment_arm`.
 
     The organisation arms do **not** re-check the mention against `E.subject_key` either, and
@@ -1144,9 +1165,11 @@ def _first_detachment_arm(
     in their head. M4 filled the *organisation* half of the vocabulary and left this one empty
     (NEU-1446); `_organisation_association_arm` is where the live detach rule runs.
 
-    "First detachment" is "no published `credit_removed` card for this person on this film since
-    the last attach card for them", not "no `credit_removed` card ever": a person who joins,
-    leaves, rejoins and leaves again has detached twice, and both are news."""
+    "First detachment" is "no published removal card of this card's class for this person on
+    this film since the last attach card of that class for them", not "no removal card ever": a
+    person who joins, leaves, rejoins and leaves again has detached twice, and both are news.
+    Per class (NR-10), as the sweep's gates are: an actor-director leaving the cast and later
+    the director's chair has made two first detachments, one from each."""
     mention = aliased(StoryPerson)
     person = aliased(Person)
     attach = aliased(Event)
@@ -1156,7 +1179,7 @@ def _first_detachment_arm(
         .where(
             attach.film_id == Event.film_id,
             attach.status == _PUBLISHED,
-            attach.event_type.in_(_ATTACH_CARD_TYPES),
+            attach.event_type == case(CREDIT_ATTACHMENT_EVENT_TYPES, value=Event.event_type),
             _card_names_person(
                 attach,
                 mention=mention,
@@ -1173,7 +1196,7 @@ def _first_detachment_arm(
         .where(
             removal.film_id == Event.film_id,
             removal.status == _PUBLISHED,
-            removal.event_type == CREDIT_REMOVED_EVENT_TYPE,
+            removal.event_type == Event.event_type,
             removal.created_at < Event.created_at,
             _card_names_person(
                 removal,
@@ -1195,7 +1218,7 @@ def _first_detachment_arm(
     return _mentioning_pairs(
         user_id=user_id,
         entity_id=entity_id,
-        card_types=(CREDIT_REMOVED_EVENT_TYPE,),
+        card_types=CREDIT_DETACHMENT_EVENT_TYPES,
         mention_types=STORY_PERSON_DETACH_MENTION_TYPES,
         mention=mention,
         person=person,

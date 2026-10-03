@@ -789,7 +789,7 @@ async def test_a_first_rent_observation_cards_its_own_event(
     assert first.subject_key == ["US:flatrate"]
     assert second.subject_key == ["US:rent"]
     assert second.occurred_at == LATER
-    assert await _body(session, second) == "Available to rent on Apple TV and Prime Video."
+    assert await _body(session, second) == "Available to rent."
 
 
 @respx.mock
@@ -816,9 +816,7 @@ async def test_types_first_seen_in_one_observation_share_a_card(
     assert result.cards == 1
     (card,) = await _cards(session, film)
     assert card.subject_key == ["US:flatrate", "US:rent"]
-    assert await _body(session, card) == (
-        "Now streaming on Netflix. Available to rent on Apple TV."
-    )
+    assert await _body(session, card) == "Now streaming on Netflix. Available to rent."
 
 
 @respx.mock

@@ -71,6 +71,12 @@ thousands of false "attached to direct" events on day one.
 > indistinguishable from a trigger-written one on purpose — one carding rule, not two — and
 > the coupling is the documented cost: if the trigger is ever rewritten to fire on insert, that
 > row becomes a duplicate and goes with it. See `docs/specs/NEU-1436-admission-is-an-attachment.md`.
+>
+> **Amendment — 2026-09-27 (NEU-1505).** The exception holds **only while the film is
+> unreleased** (primary date NULL or on/after today; status not `Released`/`Canceled`). A
+> Letterboxd import first-observed four long-released Fincher films and the exception carded
+> them as attachments; the baseline rule is back to unconditional for any released film,
+> followed entities included. See `docs/specs/NEU-1505-imports-decline-released-films.md`.
 
 **Presentation.** `EventOut.summary` is a required `str` and every read path joins `EventSummary`,
 so an event without a summary row is invisible everywhere. A catalog-sourced event therefore
@@ -271,6 +277,32 @@ this needs no special path.
 > as not yet reported, carries a `rumored` → `unconfirmed` confidence badge on every such card,
 > and is ordered after trade news. That is the demotion; hiding is no longer part of it. See the spec at `docs/specs/NEU-1467-not-yet-reported-uncollapsed.md` in
 > upcoming-movies-frontend.
+>
+> **Amendment — 2026-10-01 (NEU-1518).** NEU-1200's single
+> `credit_removed` type is **split by role class** into `cast_removed` (a cast credit) and
+> `crew_removed` (director, writer or other crew), mirroring the attachment pair `casting` /
+> `crew_attached`. The feed's "Not yet reported" section is now laid out by **update type**
+> (Cast, Crew, Release date, …) rather than by film, and a removal belongs under the same heading
+> as the attachment it corrects. A single `credit_removed` card can name a writer and two cast
+> members in one body, so it has no heading to sit under.
+>
+> Two types, not a role column on `credit_removed`: `uq_event_catalog_change` allows one
+> catalog card per `(film, event_type, occurred_at)`, so splitting one observation into a cast
+> card and a crew card needs either distinct types or a wider unique index plus a column only one
+> type uses. Distinct types keep the update-type grouping a pure function of `event_type`, which
+> is what lets the frontend group without a DTO change. The cost is registering two types
+> wherever the vocabulary is enumerated (`ck_event_type`, `_EVENT_STAGE` (both unmapped, as
+> `credit_removed` was), the LLM/story-dedup exclusions, removal-aware suppression, the follow
+> queries, the digest labels).
+>
+> Detachments now group per `(film, changed_at, role class)`. Existing `credit_removed` cards
+> are migrated, not left behind: a single-class card is retyped in place, a mixed card is split
+> into a `cast_removed` + `crew_removed` pair with re-rendered summaries, and each attachment card
+> it superseded is re-pointed to the half of its own class. `credit_removed` then leaves
+> `ck_event_type`. The migration is one-way in practice: a downgrade cannot rejoin a split pair
+> without re-rendering. Everything else in NEU-1200 and NEU-1205 (the prior-attachment gate, the
+> forward-dwell hold, the `rumored` confidence, the demotion) applies per class, unchanged. See
+> `docs/specs/bl-not-yet-reported-by-type-project-spec.md`.
 
 ## Considered alternatives
 

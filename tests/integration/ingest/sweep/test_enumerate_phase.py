@@ -985,7 +985,9 @@ async def test_a_followed_seed_person_is_enumerated_once_and_keeps_both_roles(
     assert result.seed_people == 1
     assert result.role_histogram == {"director": 1, "followed": 1}
     assert (result.admitted, result.withheld) == (1, 1)
-    assert [f.tmdb_id for f in (await session.execute(select(Film))).scalars()] == [1, 100]
+    assert [
+        f.tmdb_id for f in (await session.execute(select(Film).order_by(Film.tmdb_id))).scalars()
+    ] == [1, 100]
 
 
 @respx.mock

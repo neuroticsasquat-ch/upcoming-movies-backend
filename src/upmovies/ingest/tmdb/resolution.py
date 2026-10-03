@@ -12,6 +12,7 @@ require the folded title to be *equal*, not similar and not a substring — this
 not `link.retrieval`'s job, where a story mentioning a film is a substring question scored
 against a threshold. The two use the same fold and ask different things of it."""
 
+from datetime import date
 from typing import NamedTuple
 
 from upmovies.ingest.tmdb.schemas import TMDBMovieSummary
@@ -36,10 +37,15 @@ TMDB's own regional disagreements rather than a general widening, which is the r
 class ResolvedTitle(NamedTuple):
     """The film a row was placed on. `title` is TMDB's, not the CSV's — it is what a later
     reader of the logs needs to see, because the two differing is exactly what a bad match
-    would look like."""
+    would look like.
+
+    `release_date` is the hit's primary date, so an import can decline a film outside the alert
+    window before it spends a `/movie/{id}` on it (NEU-1505). Never None in practice: a hit with
+    no date cannot pass the year rule."""
 
     tmdb_id: int
     title: str
+    release_date: date | None
 
 
 def resolve(hits: list[TMDBMovieSummary], *, name: str, year: int | None) -> ResolvedTitle | None:
@@ -60,7 +66,7 @@ def resolve(hits: list[TMDBMovieSummary], *, name: str, year: int | None) -> Res
         matches = [h for h in hits if _matches(h, folded=folded, year=year, slack=slack)]
         if matches:
             best = max(matches, key=lambda h: (h.popularity or 0.0, h.id))
-            return ResolvedTitle(tmdb_id=best.id, title=best.title)
+            return ResolvedTitle(tmdb_id=best.id, title=best.title, release_date=best.release_date)
     return None
 
 

@@ -201,7 +201,9 @@ class Follow(Base):
     the DTO normalises the value on the way in so `"012"` and `"12"` cannot become two follows.
     The cost is that
     the catalog cannot cascade a deletion into this table — acceptable, because films are never
-    deleted (spec §4.4) and people, companies and collections are only ever upserted."""
+    deleted once announced (spec §4.4) and people, companies and collections are only ever
+    upserted. NEU-1508 removed, once, the films pre-NEU-1505 imports had admitted already outside
+    the alert window, which were never announced, and deleted their title follows with them."""
 
     __tablename__ = "follow"
     __table_args__ = (
@@ -246,9 +248,6 @@ IMPORT_SUPERSEDED = "superseded"
 started another import instead of confirming it (EF-22). `failed` plus this, rather than a
 sixth status, because every client already renders `failed` as terminal and nothing about a
 superseded list needs rendering differently — the user is looking at its replacement."""
-
-IMPORT_SKIP_REASONS = ("outside_window",)
-"""`import_candidate.skip_reason`: why a matched film is listed but not selectable (EF-21)."""
 
 
 class ImportJob(Base):
@@ -344,10 +343,9 @@ class ImportCandidate(Base):
     answered the follows are the record. A superseded or failed job loses them the same way, so
     the table only ever holds lists somebody could still confirm.
 
-    `selected` is the tick the review list opens with: true for a film inside the alert window,
-    false with a `skip_reason` for one outside it (EF-21), which is listed so the user can see
-    what the import declined rather than wonder where the title went. A skipped row is never
-    selectable, whatever the client sends.
+    **Every row is followable** (NEU-1505, D-1505.3). A film outside the alert window is
+    declined before it is fetched and reported in `import_job.unmatched` as `outside_window`, so
+    it never reaches this table; `selected` is the tick the list opens with, true on write.
 
     **Matched films only.** A title the import could not place has no film to point at, and
     stays in `import_job.unmatched` exactly as NEU-1448 left it: that list tells the user to go
@@ -360,13 +358,6 @@ class ImportCandidate(Base):
 
     __tablename__ = "import_candidate"
     __table_args__ = (
-        CheckConstraint(
-            f"skip_reason IS NULL OR skip_reason IN ({_in_list(IMPORT_SKIP_REASONS)})",
-            name="ck_import_candidate_skip_reason",
-        ),
-        CheckConstraint(
-            "skip_reason IS NULL OR NOT selected", name="ck_import_candidate_skipped_unselected"
-        ),
         # One row per film per job: two export rows that resolve to the same film are one
         # proposal, and one follow if confirmed. Also the index the confirm and the read use.
         Index("uq_import_candidate_job_film", "job_id", "film_id", unique=True),
@@ -387,7 +378,6 @@ class ImportCandidate(Base):
     # `app.dto.HeadlineReleaseOut` as JSON, or NULL for a film with no date to lead with.
     headline_release: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     selected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TmdbAuthRequest(Base):

@@ -42,8 +42,12 @@ thousands of false "attached to direct" rows the first day the expansion ran.
 decision 4, NEU-1436). Somebody follows a director to hear about the director's *next* film,
 and that film enters the catalog with the director already on it — so the rule that protects
 the other tens of thousands of credits swallows the single beat the follow was made for. On a
-first observation, every recorded credit whose person somebody follows *at that moment* is
-written as `added`; everything else on the new film is still a baseline. It lives in
+first observation **of a film that has yet to open**, every recorded credit whose person
+somebody follows *at that moment* is written as `added`; everything else on the new film is
+still a baseline. A released film's first observation is a baseline outright (NEU-1505,
+D-1505.1): an import that brings a 2008 film into the catalog has not seen anybody attach to
+it. The caller asks `ingest.tmdb.filters.is_unreleased` once per upsert and does not reach for
+this function when the answer is no. It lives in
 `admission_attachments` rather than in a `previous is None` branch of the diff, so the
 baseline rule stays one unconditional statement that a reader can check at a glance and every
 test that pins it stays green — the exception is then a choice the caller makes, in one
@@ -178,9 +182,10 @@ def diff_recorded_credits(
 def admission_attachments(
     current: Collection[RecordedCredit], *, followed: Collection[int]
 ) -> list[CreditChange]:
-    """The `added` rows a **first** observation writes: every recorded credit whose person
-    somebody follows at that moment (EF-4, D-1436.1). Everything else in `current` is the
-    baseline it has always been.
+    """The `added` rows a **first** observation of an unreleased film writes: every recorded
+    credit whose person somebody follows at that moment (EF-4, D-1436.1). Everything else in
+    `current` is the baseline it has always been. The release gate is the caller's
+    (`upsert_film`, D-1505.1), so this stays pure.
 
     The one exception to "first observation is a baseline" (ADR-0014), and deliberately a
     separate function rather than a branch inside `diff_recorded_credits`: the baseline rule

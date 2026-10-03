@@ -386,6 +386,22 @@ class FeedResponse(BaseModel):
     offset: int
 
 
+class FeedVia(BaseModel):
+    """The followed entity a timeline row reached its reader through (FB-12, ADR-0022).
+
+    The follow graph's words: `company` is a studio and `franchise` a TMDB collection, as on
+    `FollowOut` — the frontend maps them to its `/studio` and `/franchise` routes. `entity_id` is
+    the follow graph's id text (the TMDB id). `name` and `ref` are null together, for an entity
+    the catalog can no longer name; the row still ships (FB-10)."""
+
+    entity_type: Literal["person", "company", "franchise"]
+    entity_id: str
+    name: str | None
+    # `<id>-<slug>`, built by the helpers the entity pages' canonical redirects use, so a link
+    # to it never 301s.
+    ref: str | None
+
+
 class FeedDayItem(BaseModel):
     film_ref: str
     film_title: str
@@ -423,6 +439,11 @@ class FeedDayItem(BaseModel):
     # like a news row ships its news events, just with empty `sources` (NEU-1467 reversed
     # NEU-1208's empty list).
     events: list[EventOut] = []
+    # Which follow put this row on the timeline: null for a title follow — and on the global
+    # feed, which reaches nobody through a follow — or the person, studio or franchise whose
+    # cards these are (FB-12). A film-day reached both ways is a row per reach, each holding
+    # its own events (FB-13).
+    via: FeedVia | None = None
 
 
 class FeedDayResponse(BaseModel):

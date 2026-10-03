@@ -146,7 +146,10 @@ Numbered `EF-n` so tickets can cite them. Each names the accepted decision it co
   fabricates an `added`. *Exception to ADR-0014's "first observation is a baseline, never a
   change" (spec §5.3), for followed entities only.* This is the case that matters most: a
   director's next project being announced is why anyone follows a director, and it enters the
-  catalog with the director already on it.
+  catalog with the director already on it. *Narrowed by NEU-1505 (2026-09-27): the exception
+  applies only while the film is unreleased — primary date NULL or on/after today, status not
+  `Released`/`Canceled` (`filters.is_unreleased`). A released film first-observed by an import
+  writes nothing.*
 - **EF-5 Studios and franchises are observed.** New `catalog.film_company_change (film_id,
   company_id, change ∈ added|removed, changed_at, carded_by_event_id)`, diffed in
   `_rebuild_joins` with the same first-observation rule as credits (a
@@ -285,8 +288,14 @@ Numbered `EF-n` so tickets can cite them. Each names the accepted decision it co
   row.*
 - **EF-21 Only films inside the alert window are candidates:** any status but `Canceled`,
   primary release date in the future or within `PROVIDER_POLL_MAX_AGE_DAYS` (365) of today
-  (D-46's window, `alert_window_clause`). A matched film outside it is listed as skipped with
-  reason `outside_window`; an unmatched title as today.
+  (D-46's window, `alert_window_clause`). ~~A matched film outside it is listed as skipped with
+  reason `outside_window`; an unmatched title as today.~~ *Superseded by NEU-1505
+  (2026-09-27): a film outside the window is **declined before it is fetched** (Letterboxd off
+  the row's year, then the search hit's date; TMDB off the summary's date), never upserted, and
+  reported under `unmatched` as kind `outside_window`. The review list holds followable films
+  only and states the counts it left out; `import_candidate.skip_reason` is retired. The
+  out-of-window films earlier imports had already admitted were purged once by NEU-1508
+  (2026-09-28), title follows and events with them.*
 - **EF-22 The import is two-phase.** The job resolves titles and upserts films as today, then
   stops at a new status **`awaiting_review`** with its candidates in `app.import_candidate
   (job_id, film_id, tmdb_id, title, headline_release, selected DEFAULT true, skip_reason

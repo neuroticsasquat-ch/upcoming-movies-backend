@@ -208,7 +208,7 @@ async def test_a_superseded_card_is_not_listed(client, session, make_person, mak
     withdrawn = await add_event(
         film=film, event_type="casting", subject_key=token, status="superseded"
     )
-    correction = await add_event(film=film, event_type="credit_removed", subject_key=token)
+    correction = await add_event(film=film, event_type="cast_removed", subject_key=token)
     withdrawn.superseded_by = correction.id
     await session.commit()
 

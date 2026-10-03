@@ -503,12 +503,17 @@ _Avoid_: casting event (that is one of the two types, not the pair), crew change
 (that is the history row it reads).
 
 **Credit detachment event**:
-The catalog-sourced card raised when a seed-grade credit leaves a film's credit set — a single
-new type `credit_removed` covering director, writer and cast alike, at `rumored`. It is the
+The catalog-sourced card raised when a seed-grade credit leaves a film's credit set, at
+`rumored`. It comes in two types that mirror the attachment pair: `cast_removed` for a cast
+credit and `crew_removed` for a director, writer or other crew credit (NEU-1518). Until
+then it was one type, `credit_removed`, for every role; the split exists
+because the feed files a removal under the same **update type** heading as the attachment it
+corrects (Cast or Crew), and one card covering both roles has nowhere to go. It is the
 correction half of the credit-attachment beat: a brief attachment that TMDB later retracts would
 otherwise live uncorrected forever, and a future notification system needs a removal event to
 tell a user the attachment they were told about is gone. It is gated on a **prior visible
-attachment card** (`crew_attached` or `casting`, any provenance, `occurred_at` before the
+attachment card** of the matching role class (`casting` for `cast_removed`, `crew_attached` for
+`crew_removed`; any provenance, `occurred_at` before the
 detachment): a first-observation baseline credit that was never carded has no published beat to
 correct, so its departure emits no card. **Forward-dwell gate (NEU-1205):** a removal also cards
 only if the person does *not* re-attach within `SWEEP_CREDIT_DWELL_DAYS` (default 3, 0 disables)
@@ -517,17 +522,18 @@ than carded as a real departure; the removal is held until it is ≥ N days old 
 re-attach window is fully observed. The forward gate reads raw `catalog.film_credit_change` (not
 `news.event`), because the flap's re-attachment is itself suppressed by removal-aware suppression
 and so is never carded; it is scoped to the same seed-grade role so a cast→director move is two
-events, not a flap. Like attachments it is keyed on the observation — one `credit_removed` card
-per `(film, changed_at)`, all roles in one body — and it sits beside the attachment card (which
+events, not a flap. Like attachments it is keyed on the observation — one card per `(film, changed_at,
+role class)`, every person of that class in one body — and it sits beside the attachment card (which
 stays visible) in the "Not yet reported" section, so the later "no longer attached" card *is*
-the correction. `credit_removed` is deliberately unmapped in `_EVENT_STAGE` (a removal is not
+the correction. Both removal types are deliberately unmapped in `_EVENT_STAGE` (a removal is not
 forward progress and should not headline a day) and excluded from the LLM and story-dedup
-vocabularies: the model cannot emit it, and a trade "X exits" story does not yet attach to it.
-Reverses the original ADR-0014 decision that detachments were "recorded as history but never
+vocabularies: the model cannot emit them, and a trade "X exits" story does not yet attach to
+them. Reverses the original ADR-0014 decision that detachments were "recorded as history but never
 carded" — NEU-1201's collapsed catalog section (now headed "Not yet reported"; it did not exist
 when that decision was made) made the clutter concern moot.
-_Avoid_: crew detached, cast departed (those imply the old split that only existed because
-`casting` pre-existed), credit removal (too generic — a release date disappearing is also a
+_Avoid_: crew detached, cast departed (the on-screen labels are **Cast departure** / **Crew
+departure**; in code use the type names), `credit_removed` (the retired single type; existing
+cards were retyped or split by the migration), credit removal (too generic — a release date disappearing is also a
 removal, and is out of scope), retraction, cancellation (those are about the *film*, not a
 person).
 
@@ -801,15 +807,42 @@ _Avoid_: series, universe, saga, collection (on screen; fine in code).
 
 **Timeline**:
 The signed-in home surface: the publication log filtered to the user's follows. Same axis as
-the feed (**publication**), same day grouping, same "what's new since I last looked" reading —
-it is the feed with a where-clause, not a different kind of surface. The where-clause is
-`film IN (titles you follow) OR event IN (attachments of entities you follow)` (EF-3); it is
-the same clause the digest and the notify pass read. A story mention reaches an entity
+the feed (**publication**), same day grouping, same "what's new since I last looked" reading.
+The where-clause is `film IN (titles you follow) OR event IN (attachments of entities you
+follow)` (EF-3); it is the same clause the digest and the notify pass read. Unlike the feed,
+a timeline row remembers its **reach**: a day is laid out in **follow blocks**, and a card
+that reached the reader two ways appears in each of them. A story mention reaches an entity
 follower only as the entity's first association with, or first detachment from, the film
 (EF-13, `first_association_clause`); every other mention is nothing to them. Anonymous readers
 see the global feed in its place.
 _Avoid_: personalized feed, my feed, stream, dashboard, watchlist (retired: the set of films
-you follow is just the Films filter of the follows page).
+you follow is just the Films filter of the follows page), "the feed with a where-clause" (true
+of what it selects, no longer of what a row is).
+
+**Reach** (of a timeline row):
+The follow that delivered the row: a title follow, or one person, studio or franchise follow.
+A row has exactly one reach; a card reached by a director follow and a studio follow is two
+rows, and a card on a film the reader also follows by title is a third, in the Films block.
+The feed has no reach — nothing filtered it. `via` in the API and the code.
+_Avoid_: attribution (the digest's old word for the same fact, retired with its "Following:"
+line), source (that is an outlet), origin, provenance (that is where an event was born).
+
+**Follow block**:
+One of the four groups a timeline day is laid out in, by the kind of follow that reached its
+rows: **Films** (title follows, the film's whole day as the feed shows it), **People**,
+**Studios** and **Franchises** (one **entity row** per followed entity). Always in that order;
+a block with nothing in it is silence. Each block splits into In the news and Not yet reported
+exactly as a feed day does. The same four blocks shape the digest.
+_Avoid_: section (that is In the news / Not yet reported, one level finer), group, tab, filter
+(nothing is hidden; every block renders), entity section.
+
+**Entity row** (on the timeline) / **entity entry** (in a digest):
+One followed person, studio or franchise's row under its follow block for one day (or, in the
+weekly digest, for the week): the entity's name linked to its page as the headline, then one
+line per card the follow delivered — the film's title and parenthetical, linked, followed by
+the summary. The film is named on the line because the entity, not the film, is the row.
+_Avoid_: entity card (that is the entity page's own card list), via line (retired, ADR-0019),
+film row (that is a Films-block row, headed by the film).
 
 **Last activity** (of a follow):
 The publication time of the newest card that would reach this user through this follow — any
@@ -823,7 +856,7 @@ How long a film stays *interesting* after release: from announcement until
 `Canceled` (D-46; `catalog.queries.ALERT_WINDOW_DEAD_STATUSES`). It no longer governs what an
 entity follow covers — nothing does, an entity follow covers events, not films (EF-3). It
 still bounds the provider poll, an entity page's "recently released" list and which films an
-**import** may propose (EF-21). A **title** follow ignores it entirely — the user asked for
+**import** may propose (EF-21; a film outside it is declined before it is fetched, NEU-1505). A **title** follow ignores it entirely — the user asked for
 that film, in any state, at any age. The name outlived the alerts it once bounded (ADR-0021):
 it is kept because the poll, the entity page and the import all key on it.
 _Avoid_: in play (the working set's term, ending on release day), coverage window (retired
@@ -833,8 +866,14 @@ with coverage), active, upcoming.
 A user's one-off request to bring a library in — a Letterboxd export or a TMDB account's
 watchlist — tracked as a job. It reads the watchlist only, proposes the films inside the
 **alert window** as a review list, and writes one **title** follow per film the user confirms
-(EF-20 to EF-22). It follows no people. An import that is not confirmed follows nothing, and
-the user's next import discards it.
+(EF-20 to EF-22). It follows no people. A film outside the window never enters the catalog
+through an import and never appears on the list: one whose list or search date already says so
+is not even fetched, and one only its fetched details give away is dropped before anything is
+written (NEU-1505, NEU-1510). The list holds followable films only and states how many titles it
+left out. The out-of-window films that imports admitted
+before that gate were purged once, follows and all (NEU-1508): a film first observed outside
+the window was never announced, so "films are never deleted" did not protect it. An import
+that is not confirmed follows nothing, and the user's next import discards it.
 _Avoid_: sync, link (nothing stays connected; the TMDB session is dropped when the job ends),
 migration.
 
@@ -860,20 +899,26 @@ calendar, personal feed (that is the timeline), subscription calendar (that is t
 **Digest**:
 The one delivery of a user's timeline by mail — daily or weekly, their choice, never both, and
 nothing arrives outside it (ADR-0021). It carries every card the timeline carries, `rumored`
-ones included (EF-7; NEU-1437), each as a dated line under its film. A digest reads by
-**film entry**, not by day: one entry per film, its beats in the order they were published,
-entries ranked by their most significant beat — the day grouping is the feed's, not the mail's.
-On the **slate day** either cadence carries the **slate** in front. How soon a reader hears
-about a beat is the cadence they chose; there is no faster channel.
+ones included (EF-7; NEU-1437), and nothing is cut: there is no cap and no lead card. The
+**daily is the timeline day, reproduced in mail** — the day heading, its poster strip, its
+**follow blocks**, their sections and update types, its film and entity rows — one feed day
+per publication day the batch spans. The **weekly reads by entry, not by day**: the same
+blocks and sections, but one **film entry** or **entity entry** per film or entity across
+the week, its lines in publication order. On the **slate day** either cadence carries the
+**slate** in front. How soon a reader hears about a beat is the cadence they chose; there is
+no faster channel.
 _Avoid_: newsletter, summary email, notification, "the weekly slate mail" (the slate is a
 section, not a cadence), alert (retired: the per-beat interrupt mail D-32 whitelisted, removed
-by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody).
+by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody), highlights
+(nothing is selected out).
 
 **Slate**:
 The upcoming US dates — theatrical, digital and physical — for the films a user follows by
 title, over the next 30 days, soonest first. The same set the my-films calendar and the `.ics`
-feed list (EF-14): a slate cannot name a date the calendar would not. A date set or moved since
-the previous slate day is marked as such.
+feed list (EF-14): a slate cannot name a date the calendar would not, and in the mail it is
+**the my-films calendar reproduced** for those days — date heading, release-type bucket, the
+calendar's film row. A date set or moved since the previous slate day is marked as such; the
+marker is the one thing the slate shows that the calendar page does not.
 _Avoid_: calendar (that is the surface), upcoming releases (that is the public page), watchlist.
 
 **Slate day**:
@@ -882,17 +927,18 @@ send day, and the daily cadence's one slate-bearing morning. Thursday.
 _Avoid_: digest day, send day.
 
 **Lead film** (of a digest):
-The film entry ranked first — the most significant beat in the mail, by the feed's beat
-significance, title breaking ties. It names the subject line and renders as the mail's lead
-card; every other entry is compact.
-_Avoid_: hero, headline (that is a release date), top story.
+The film carrying the most significant beat in the mail, by the feed's beat significance,
+title breaking ties. It names the subject line and the preheader, and nothing else: it is
+not rendered differently from any other film, and the mail has no lead card.
+_Avoid_: hero, headline (that is a release date), top story, lead card (retired).
 
 **Film entry** (in a digest):
-One film's block in a digest: the film's header (title, parenthetical, headline release),
-which follows put it in the mail, and its beat lines. A digest shows at most a fixed number of
-entries and links to the timeline for the rest; the cut is presentation, the queue is still
-sent.
-_Avoid_: card (that is one beat on screen), item, row.
+One film's block under the Films follow block of a digest: the film's header (title,
+parenthetical, headline release) and its beat lines. Title follows only, so it never says
+which follow put it there. In the daily it is one film-day, as on the timeline; in the weekly
+it is the film's whole week. Every entry renders; nothing is cut.
+_Avoid_: card (that is one beat on screen), item, row, "Following:" line (retired: a film
+entry is always a title follow, and an entity's cards are the entity entry's).
 
 **Home-release date**:
 A US digital (TMDB type 4) or physical (type 5) release date. Part of the displayable set beside

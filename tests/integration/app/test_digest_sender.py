@@ -1,6 +1,7 @@
-"""The digest sender (NEU-1381, NEU-1460, NEU-1462): who gets a digest on which cadence, what
-the slate carries and on which day the daily carries it, how the film entries read, and what
-every row's status says afterwards.
+"""The digest sender (NEU-1381, NEU-1460, NEU-1462, NEU-1528): who gets a digest on which
+cadence, what the slate carries and on which day the daily carries it, how the cards a user's
+follows reached are laid out as the timeline lays them out, and what every row's status says
+afterwards.
 
 The decision pass is `test_notify_pass.py`'s subject, so the backlog here is seeded directly: a
 `queued` digest row is the contract between the two passes.
@@ -18,10 +19,10 @@ from sqlalchemy import select, update
 from upmovies.app.models import Follow, Notification, UserSettings
 from upmovies.app.services.digest_sender import (
     DIGEST_BEAT_LABELS,
-    DIGEST_MAX_ENTRIES,
     SLATE_WINDOW_DAYS,
     digest_beat_label,
     digest_detail,
+    load_slate,
     render_digest,
     send_digests,
 )
@@ -31,6 +32,7 @@ from upmovies.ingest.runs import create_run
 from upmovies.mail import MailError, MailGateway, MessageId, NoopTransport
 from upmovies.news.models import Event
 from upmovies.news.subject_key import company_subject_token, normalize_name
+from upmovies.public.service import get_my_films_calendar
 
 TODAY = date(2026, 9, 18)
 """A Friday — off the default `SLATE_WEEKDAY`, so a daily send on it carries no slate."""
@@ -96,7 +98,29 @@ def set_cadence(session):
 
 @pytest.fixture
 def queue_digest(session):
-    async def _queue(*, user_id: UUID, event_id: UUID):
+    """A `queued` digest row — and, unless `follow_title=False`, the title follow that reaches
+    it: a card no follow reaches is not a line in the mail (FB-25), and most tests here are
+    about a followed film's card, not about how it was reached."""
+
+    async def _queue(*, user_id: UUID, event_id: UUID, follow_title: bool = True):
+        if follow_title:
+            film_id = await session.scalar(select(Event.film_id).where(Event.id == event_id))
+            followed = await session.scalar(
+                select(Follow.user_id).where(
+                    Follow.user_id == user_id,
+                    Follow.entity_type == "title",
+                    Follow.entity_id == str(film_id),
+                )
+            )
+            if followed is None:
+                session.add(
+                    Follow(
+                        user_id=user_id,
+                        entity_type="title",
+                        entity_id=str(film_id),
+                        source="manual",
+                    )
+                )
         row = Notification(
             user_id=user_id, event_id=event_id, kind="digest", channel="email", status="queued"
         )
@@ -172,6 +196,11 @@ def _timeline(part: str) -> str:
     return part[part.index(heading) :]
 
 
+def _slate_rows(text: str) -> list[str]:
+    """The text part's lines with each slate row's trailing ` — {url}` cut off."""
+    return [line.split(" — ")[0] for line in text.splitlines()]
+
+
 async def _rows(session) -> list[Notification]:
     return list(
         (
@@ -197,15 +226,16 @@ class BrokenTransport:
         pass
 
 
-# --- the ticket's "done when": the weekly digest, slate and film entries ------
+# --- the weekly digest: the slate, then the timeline -------------------------
 
 
-async def test_the_weekly_digest_carries_the_slate_and_one_ranked_entry_per_film(
+async def test_the_weekly_digest_carries_the_slate_and_the_timeline_under_follow_blocks(
     session, subscriber, make_film, add_event, add_release_date, queue_digest, watchlist, send
 ):
     """One mail: the slate first (the two upcoming US dates for the watchlisted film), then
-    one entry per film — the trailer outranks the production start, so Dune leads and names
-    the subject — each film's beats dated, in publication order, with no day headings."""
+    the timeline — the trailer outranks the production start, so Dune leads and names the
+    subject — laid out under Films by update type, with no day headings and every line
+    dated (the weekly reads by entry, FB-19)."""
     user = await subscriber()
     dune = await make_film(slug="dune", title="Dune: Part Three", poster_path="/dune.jpg")
     heat = await make_film(slug="heat-2", title="Heat 2")
@@ -235,26 +265,29 @@ async def test_the_weekly_digest_carries_the_slate_and_one_ranked_entry_per_film
     assert envelope.to == "sub@example.com"
     assert envelope.subject == "Dune: Part Three — new trailer, + 1 more film · your slate"
     text = envelope.text
-    # The slate: both dates, soonest first, each naming its release kind and the film.
-    assert text.index("Friday, September 25, 2026") < text.index("Friday, October 9, 2026")
-    assert text.index("Friday, September 25, 2026") < text.index("Wide release")
-    assert text.index("Friday, October 9, 2026") < text.index("Digital release")
-    # The entries: ranked, each film once, beats dated and in publication order even though
-    # the later-published one happened first.
+    # The slate: both dates, soonest first, each with its bucket and the film under it — and,
+    # crossing into October, under month headings (FB-26).
+    assert text.index("SEPTEMBER") < text.index("Friday, September 25, 2026")
+    assert text.index("Friday, September 25, 2026") < text.index("OCTOBER")
+    assert text.index("OCTOBER") < text.index("Friday, October 9, 2026")
+    assert text.index("Friday, September 25, 2026") < text.index("  Wide\n")
+    assert text.index("Friday, October 9, 2026") < text.index("  Digital\n")
+    # The timeline: Not yet reported's headings in the feed's order (NR-3), each line dated
+    # and with no beat label under a heading that names its type.
     timeline = _timeline(text)
-    assert timeline.index("Dune: Part Three (") < timeline.index("Heat 2 (")
-    assert timeline.count("Heat 2") == 1
-    assert timeline.index("17 Sep · Casting · Ada joined the cast.") < timeline.index(
-        "17 Sep · Production started · Cameras are rolling."
-    )
-    assert "15 Sep · New trailer · A trailer landed." in timeline
+    assert "FILMS\n\nNot yet reported (unconfirmed)\n" in timeline
+    assert timeline.index("-- Trailer --") < timeline.index("-- Production status --")
+    assert timeline.index("-- Production status --") < timeline.index("-- Cast --")
+    assert "  15 Sep · A trailer landed.\n" in timeline
+    assert "  17 Sep · Cameras are rolling.\n" in timeline
+    assert "  17 Sep · Ada joined the cast.\n" in timeline
     assert "September 17, 2026" not in timeline
     assert "September 15, 2026" not in timeline
     assert f"{BASE_URL}/film/{dune.tmdb_id}-dune-part-three" in text
     assert f"{BASE_URL}/settings" in text
-    # Dune is on the slate as a 62px row and leads the timeline as the 92px lead card (DC-14).
-    assert f'<img src="{IMAGE_BASE}/w154/dune.jpg" width="62"' in envelope.html
-    assert f'<img src="{IMAGE_BASE}/w185/dune.jpg" width="92"' in envelope.html
+    # Dune is on the slate as the calendar's 48px w92 row and in the timeline's strip at 52px.
+    assert f'<img src="{IMAGE_BASE}/w92/dune.jpg" width="48"' in envelope.html
+    assert f'<img src="{IMAGE_BASE}/w154/dune.jpg" width="52"' in envelope.html
     assert [row.status for row in await _rows(session)] == ["sent"] * 3
     assert all(row.sent_at is not None for row in await _rows(session))
 
@@ -477,13 +510,13 @@ async def test_a_slate_row_is_marked_new_or_moved_by_the_change_that_carded_it(
 
     assert result.slate_dates == 6
     (envelope,) = mailbox.sent
-    lines = envelope.text.splitlines()
-    assert "  Arrival — Wide release [new]" in lines
-    assert "  Blade — Wide release [moved]" in lines
-    assert "  Casino — Wide release" in lines
-    assert "  Dune — Wide release" in lines
-    assert "  Edge — Wide release" in lines
-    assert "  Edge — Digital release [moved]" in lines
+    lines = _slate_rows(envelope.text)
+    assert "    Arrival (2026) [new]" in lines
+    assert "    Blade (2026) [moved]" in lines
+    assert "    Casino (2026)" in lines
+    assert "    Dune (2026)" in lines
+    assert lines.count("    Edge (2026)") == 1  # the wide date: untouched
+    assert "    Edge (2026) [moved]" in lines  # the digital date
     assert envelope.html.count(">New</span>") == 1
     assert envelope.html.count(">Moved</span>") == 2
 
@@ -502,7 +535,7 @@ async def test_a_date_set_and_then_moved_since_the_last_slate_is_new(
 
     _result, mailbox = await send("weekly")
 
-    assert "  Arrival — Wide release [new]" in mailbox.sent[0].text.splitlines()
+    assert "    Arrival (2026) [new]" in _slate_rows(mailbox.sent[0].text)
 
 
 async def test_an_unpersisted_change_falls_back_to_the_summarys_verb(
@@ -531,9 +564,9 @@ async def test_an_unpersisted_change_falls_back_to_the_summarys_verb(
 
     _result, mailbox = await send("weekly")
 
-    lines = mailbox.sent[0].text.splitlines()
-    assert "  Arrival — Wide release [new]" in lines
-    assert "  Blade — Wide release [moved]" in lines
+    lines = _slate_rows(mailbox.sent[0].text)
+    assert "    Arrival (2026) [new]" in lines
+    assert "    Blade (2026) [moved]" in lines
 
 
 async def test_only_a_published_us_release_date_card_marks_a_slate_row(
@@ -561,18 +594,19 @@ async def test_only_a_published_us_release_date_card_marks_a_slate_row(
     _result, mailbox = await send("weekly")
 
     (envelope,) = mailbox.sent
-    assert "  Arrival — Wide release" in envelope.text.splitlines()
+    assert "    Arrival (2026)" in _slate_rows(envelope.text)
     assert "[new]" not in envelope.text and "[moved]" not in envelope.text
 
 
-# --- film entries (NEU-1460) ---------------------------------------------------
+# --- the timeline in mail (NEU-1528) -------------------------------------------
 
 
-async def test_entries_rank_by_their_lead_beat_then_title(
+async def test_films_rank_for_the_subject_by_their_lead_beat_then_title(
     session, subscriber, make_film, add_event, queue_digest, send
 ):
-    """DC-3: the release date outranks two castings, and the tie between those is the
-    casefolded title's."""
+    """DC-7: the release date outranks two castings, and the tie between those is the
+    casefolded title's. In the body each sits under its own update type, in the feed's
+    heading order."""
     user = await subscriber()
     cobra = await make_film(slug="cobra", title="Cobra")
     alpha = await make_film(slug="alpha", title="alpha")
@@ -585,48 +619,56 @@ async def test_entries_rank_by_their_lead_beat_then_title(
 
     (envelope,) = mailbox.sent
     assert envelope.subject == "Zed — release date, + 2 more films"
-    for part in (_timeline(envelope.text), _timeline(envelope.html)):
+    # The HTML from the Films heading on: the poster strip above it names films in its own
+    # (natural title) order.
+    html = envelope.html[envelope.html.index(">Films</h4>") :]
+    for part in (_timeline(envelope.text), html):
         assert part.index("Zed") < part.index("alpha") < part.index("Cobra")
 
 
-async def test_a_rumored_beat_is_marked_unconfirmed(
-    session, subscriber, make_film, add_event, queue_digest, send
+async def test_the_daily_is_one_timeline_day_per_publication_day_newest_first(
+    session, subscriber, make_film, add_event, queue_digest, set_cadence, send
 ):
+    """FB-18: a batch after a missed send spans two days and renders two, each under the
+    feed's day heading, and the lines carry no date — the heading says it."""
     user = await subscriber()
-    film = await make_film(slug="heat-2", title="Heat 2")
-    rumor = await add_event(
-        film=film,
-        event_type="casting",
-        confidence="rumored",
-        created_at=NEWER_DAY,
-        summary="Ada is in talks.",
+    await set_cadence(user.id, "daily")
+    heat = await make_film(slug="heat-2", title="Heat 2")
+    older = await add_event(
+        film=heat, event_type="casting", created_at=OLDER_DAY, summary="Ada joined the cast."
     )
-    fact = await add_event(
-        film=film, event_type="trailer", created_at=NEWER_DAY, summary="A trailer landed."
+    newer = await add_event(
+        film=heat, event_type="trailer", created_at=NEWER_DAY, summary="A trailer landed."
     )
-    for event in (rumor, fact):
+    for event in (older, newer):
         await queue_digest(user_id=user.id, event_id=event.id)
 
-    _result, mailbox = await send("weekly")
+    result, mailbox = await send("daily")
 
-    (envelope,) = mailbox.sent
-    assert "17 Sep · Casting [unconfirmed] · Ada is in talks." in envelope.text
-    assert "17 Sep · New trailer · A trailer landed." in envelope.text
-    assert envelope.html.count("Unconfirmed") == 1
+    assert (result.mails_sent, result.sent) == (1, 2)
+    text = _timeline(mailbox.sent[0].text)
+    assert text.index("Thursday, September 17, 2026") < text.index("A trailer landed.")
+    assert text.index("A trailer landed.") < text.index("Tuesday, September 15, 2026")
+    assert text.index("Tuesday, September 15, 2026") < text.index("Ada joined the cast.")
+    assert "  Ada joined the cast.\n" in text
+    assert "17 Sep" not in text
 
 
-async def test_a_story_card_names_its_first_outlet_and_a_catalog_card_reads_via_tmdb(
+async def test_a_story_covered_card_is_in_the_news_with_its_marker_and_first_outlet(
     session, subscriber, make_film, add_event, queue_digest, send
 ):
-    """The first source in `EventOut.sources` order — newest distinct outlet — linked by its
-    resolved URL; a catalog card unlinked; a story card with no story left, no line at all."""
+    """The feed's split (`EXISTS(event_story)`, not provenance): a story-covered card is In the
+    news, with its beat label, its Unconfirmed marker when rumored and the first source in
+    `EventOut.sources` order — newest distinct outlet — linked by its resolved URL. A catalog
+    card is Not yet reported, where neither the marker nor "via TMDB" is repeated (FB-20)."""
     user = await subscriber()
     film = await make_film(slug="heat-2", title="Heat 2")
     story = await add_event(
         film=film,
         event_type="casting",
+        confidence="rumored",
         created_at=NEWER_DAY,
-        summary="Ada joined the cast.",
+        summary="Ada is in talks.",
         sources=(
             {
                 "source": "Deadline",
@@ -646,32 +688,32 @@ async def test_a_story_card_names_its_first_outlet_and_a_catalog_card_reads_via_
         film=film,
         event_type="release_date",
         provenance="catalog",
+        confidence="rumored",
         created_at=NEWER_DAY + timedelta(hours=1),
         summary="US wide release date set.",
     )
-    sourceless = await add_event(
-        film=film,
-        event_type="trailer",
-        created_at=NEWER_DAY + timedelta(hours=2),
-        summary="A trailer landed.",
-    )
-    for event in (story, catalog, sourceless):
+    for event in (story, catalog):
         await queue_digest(user_id=user.id, event_id=event.id)
 
     _result, mailbox = await send("weekly")
 
     (envelope,) = mailbox.sent
-    text = envelope.text
-    assert "Ada joined the cast.\n  via Variety — https://variety.example/b\n" in text
+    text = _timeline(envelope.text)
+    assert text.index("In the news") < text.index("Ada is in talks.")
+    assert text.index("Ada is in talks.") < text.index("Not yet reported (unconfirmed)")
+    assert (
+        "  17 Sep · Casting [unconfirmed] · Ada is in talks.\n"
+        "    via Variety — https://variety.example/b\n"
+    ) in text
+    assert "  17 Sep · US wide release date set.\n" in text
     assert "Deadline" not in text
-    assert "US wide release date set.\n  via TMDB\n" in text
-    assert "A trailer landed.\n" in text
-    assert text.count("  via ") == 2
+    assert "via TMDB" not in envelope.text
+    assert text.count("[unconfirmed]") == 1
     assert '<a href="https://variety.example/b"' in envelope.html
-    assert "via TMDB" in envelope.html
+    assert envelope.html.count(">Unconfirmed</span>") == 1
 
 
-async def test_the_header_reads_like_the_feed_row_and_the_film_page(
+async def test_a_film_row_is_headed_by_its_parenthetical_and_no_status_line(
     session,
     subscriber,
     make_film,
@@ -683,7 +725,8 @@ async def test_the_header_reads_like_the_feed_row_and_the_film_page(
     send,
 ):
     """The parenthetical from credits, countries and the release year, spelled as
-    `filmParenthetical`; the status line the film page's headline release, a US wide date."""
+    `filmParenthetical`, linked with the title; the status line is gone (FB-20) — the feed row
+    carries none."""
     user = await subscriber()
     heat = await make_film(slug="heat-2", title="Heat 2", release_date=date(2026, 8, 14))
     await attach_credits(heat, crew=[{"id": 77, "name": "Michael Mann", "job": "Director"}])
@@ -695,13 +738,16 @@ async def test_the_header_reads_like_the_feed_row_and_the_film_page(
     _result, mailbox = await send("weekly")
 
     (envelope,) = mailbox.sent
-    header = "Heat 2 (USA, Dir: Michael Mann, 2026)\nWide release · 2 October 2026\n"
-    assert header in envelope.text
+    url = f"{BASE_URL}/film/{heat.tmdb_id}-heat-2"
+    assert f"Heat 2 (USA, Dir: Michael Mann, 2026) — {url}\n" in envelope.text
     assert "(USA, Dir: Michael Mann, 2026)" in envelope.html
-    assert "Wide release · 2 October 2026" in envelope.html
+    # The timeline only: the film's US date is on the slate above it, as it should be.
+    for part in (_timeline(envelope.text), _timeline(envelope.html)):
+        assert "Wide release" not in part
+        assert "See the film page" not in part
 
 
-async def test_following_names_the_entity_follows_and_never_the_title_follow(
+async def test_a_card_three_follows_reached_is_a_line_in_each_of_their_blocks(
     session,
     subscriber,
     make_film,
@@ -710,12 +756,16 @@ async def test_following_names_the_entity_follows_and_never_the_title_follow(
     attach_companies,
     follow,
     queue_digest,
+    set_cadence,
     send,
 ):
-    """DC-6: a film reached by a director follow, a studio follow *and* a title follow names
-    the director and the studio, linked to their pages — and not the film, which the reader
-    asked for by name."""
+    """FB-5, FB-25: a film followed by title whose director and studio are followed too. The
+    director's attachment is a line under the film's row in Films *and* under the director's
+    row in People; the studio's attachment under the film and under the studio in Studios. Each
+    entity row is headed by the entity, linked to its page, and names the film on the line.
+    No "Following:" line; two rows queued, two rows sent."""
     user = await subscriber()
+    await set_cadence(user.id, "daily")
     heat = await make_film(slug="heat-2", title="Heat 2")
     await attach_credits(heat, crew=[{"id": 900, "name": "A Director", "job": "Director"}])
     await attach_companies(heat, [(711, "A Studio")])
@@ -724,51 +774,105 @@ async def test_following_names_the_entity_follows_and_never_the_title_follow(
         event_type="crew_attached",
         created_at=NEWER_DAY,
         subject_key=[normalize_name("A Director")],
+        summary="A Director will direct.",
     )
     studio = await add_event(
         film=heat,
         event_type="company_attached",
         created_at=NEWER_DAY,
         subject_key=[company_subject_token(711)],
+        summary="A Studio joins.",
     )
     for event in (crew, studio):
         await queue_digest(user_id=user.id, event_id=event.id)
     await follow(user_id=user.id, entity_type="person", entity_id="900")
     await follow(user_id=user.id, entity_type="company", entity_id="711")
-    await follow(user_id=user.id, entity_type="title", entity_id=str(heat.id))
 
-    _result, mailbox = await send("weekly")
+    result, mailbox = await send("daily")
 
+    assert result.sent == 2
     (envelope,) = mailbox.sent
+    text = _timeline(envelope.text)
+    film_url = f"{BASE_URL}/film/{heat.tmdb_id}-heat-2"
+    films, people = text.index("\nFILMS\n"), text.index("\nPEOPLE\n")
+    studios = text.index("\nSTUDIOS\n")
+    assert films < people < studios
+    assert text[films:people].count("A Director will direct.") == 1
+    assert text[films:people].count("A Studio joins.") == 1
     assert (
-        f"Following: A Director <{BASE_URL}/person/900-a-director>, "
-        f"A Studio <{BASE_URL}/studio/711-a-studio>\n"
-    ) in envelope.text
+        f"A Director — {BASE_URL}/person/900-a-director\n"
+        f"  Heat 2 (Dir: A Director, 2026) · A Director will direct. — {film_url}\n"
+    ) in text[people:studios]
+    assert (
+        f"A Studio — {BASE_URL}/studio/711-a-studio\n"
+        f"  Heat 2 (Dir: A Director, 2026) · A Studio joins. — {film_url}\n"
+    ) in text[studios:]
     assert f'<a href="{BASE_URL}/person/900-a-director"' in envelope.html
-    following = envelope.html[envelope.html.index("Following:") :]
-    assert "Heat 2" not in following[: following.index("</p>")]
-
-
-async def test_a_film_reached_only_by_its_title_follow_has_no_following_line(
-    session, subscriber, make_film, add_event, watchlist, queue_digest, send
-):
-    user = await subscriber()
-    heat = await make_film(slug="heat-2", title="Heat 2")
-    await watchlist(user_id=user.id, film_id=heat.id)
-    event = await add_event(film=heat, event_type="casting", created_at=NEWER_DAY)
-    await queue_digest(user_id=user.id, event_id=event.id)
-
-    _result, mailbox = await send("weekly")
-
-    (envelope,) = mailbox.sent
     for part in (envelope.text, envelope.html):
         assert "Following:" not in part
+
+
+async def test_a_film_reached_only_through_a_studio_is_an_entity_row_and_can_lead(
+    session,
+    subscriber,
+    make_film,
+    add_event,
+    attach_companies,
+    follow,
+    queue_digest,
+    send,
+):
+    """FB-22: the lead film is ranked over every reach. A cancellation reaching the reader only
+    through a followed studio names the subject, and sits under Studios → Canceled, not under
+    Films."""
+    user = await subscriber()
+    heat = await make_film(slug="heat-2", title="Heat 2")
+    zodiac = await make_film(slug="zodiac", title="Zodiac")
+    await attach_companies(zodiac, [(711, "A Studio")])
+    casting = await add_event(film=heat, event_type="casting", created_at=NEWER_DAY)
+    canceled = await add_event(
+        film=zodiac,
+        event_type="canceled",
+        created_at=NEWER_DAY,
+        summary="The film has been canceled.",
+    )
+    await queue_digest(user_id=user.id, event_id=casting.id)
+    await queue_digest(user_id=user.id, event_id=canceled.id, follow_title=False)
+    await follow(user_id=user.id, entity_type="company", entity_id="711")
+
+    _result, mailbox = await send("weekly")
+
+    (envelope,) = mailbox.sent
+    assert envelope.subject == "Zodiac — canceled, + 1 more film"
+    text = _timeline(envelope.text)
+    studios = text.index("\nSTUDIOS\n")
+    assert text.index("Zodiac") > studios
+    assert text.index("-- Canceled --", studios) < text.index("The film has been canceled.")
+
+
+async def test_a_card_no_follow_reaches_any_more_fails_with_the_reason(
+    session, subscriber, make_film, add_event, queue_digest, send
+):
+    """The reader unfollowed between the decision pass and the send: the timeline no longer
+    shows the card, so the mail does not, and the row is failed rather than left `queued`."""
+    user = await subscriber()
+    film = await make_film(slug="heat-2", title="Heat 2")
+    event = await add_event(film=film, event_type="casting", created_at=NEWER_DAY)
+    await queue_digest(user_id=user.id, event_id=event.id, follow_title=False)
+
+    result, mailbox = await send("weekly")
+
+    assert (result.mails_sent, result.failed) == (0, 1)
+    assert mailbox.sent == []
+    (row,) = await _rows(session)
+    assert (row.status, row.error) == ("failed", "no follow reaches the event any more")
 
 
 async def test_a_now_available_beat_credits_justwatch(
     session, subscriber, make_film, add_event, queue_digest, send
 ):
-    """DC-17: TMDB's condition on the provider data, once under the entry, in both parts."""
+    """NR-8: TMDB's condition on the provider data, once at the foot of Now available, in both
+    parts."""
     user = await subscriber()
     zodiac = await make_film(slug="zodiac", title="Zodiac")
     heat = await make_film(slug="heat-2", title="Heat 2")
@@ -793,13 +897,12 @@ async def test_a_now_available_beat_credits_justwatch(
     assert text.index("Availability from JustWatch") < text.index("Heat 2")
 
 
-async def test_past_the_cap_the_rest_are_one_line_and_every_row_is_sent(
+async def test_nothing_is_cut_and_every_row_is_sent(
     session, subscriber, make_film, add_event, queue_digest, send
 ):
-    """DC-8: 21 films, 20 entries, the 21st one line pointing at the timeline — and all 21
-    rows `sent`, because the timeline is where the rest lives."""
+    """FB-21: no cap and no overflow line — 25 films, 25 rows in the mail, 25 rows `sent`."""
     user = await subscriber()
-    for n in range(DIGEST_MAX_ENTRIES + 1):
+    for n in range(25):
         film = await make_film(slug=f"film-{n:02}", title=f"Film {n:02}")
         event = await add_event(film=film, event_type="casting", created_at=NEWER_DAY)
         await queue_digest(user_id=user.id, event_id=event.id)
@@ -807,13 +910,11 @@ async def test_past_the_cap_the_rest_are_one_line_and_every_row_is_sent(
     result, mailbox = await send("weekly")
 
     (envelope,) = mailbox.sent
-    assert envelope.subject == f"Film 00 — casting, + {DIGEST_MAX_ENTRIES} more films"
-    assert "Film 19 (" in envelope.text
-    assert "Film 20" not in envelope.text
-    assert f"and 1 more film on your timeline\n{BASE_URL}/\n" in envelope.text
-    assert f'<a href="{BASE_URL}/"' in envelope.html
-    assert result.sent == DIGEST_MAX_ENTRIES + 1
-    assert [row.status for row in await _rows(session)] == ["sent"] * (DIGEST_MAX_ENTRIES + 1)
+    assert envelope.subject == "Film 00 — casting, + 24 more films"
+    assert "Film 24 (" in envelope.text
+    assert "more film" not in _timeline(envelope.text)
+    assert result.sent == 25
+    assert [row.status for row in await _rows(session)] == ["sent"] * 25
 
 
 # --- render_digest: the one render path (D-1460.1) -----------------------------
@@ -1065,7 +1166,9 @@ async def test_a_second_run_sends_nothing_because_the_rows_are_sent(
 
     result, mailbox = await send("weekly")
 
-    assert (result.users_considered, result.mails_sent) == (0, 0)
+    # Still considered — the title follow puts them in the weekly slate's working set — but
+    # with nothing queued and nothing dated there is no mail.
+    assert (result.users_considered, result.mails_sent) == (1, 0)
     assert mailbox.sent == []
 
 
@@ -1107,12 +1210,77 @@ async def test_the_slate_is_the_governing_us_date_per_release_type_inside_the_wi
     assert "Friday, September 18, 2026" in text  # today, wide
     assert "Monday, September 28, 2026" in text  # dune's earliest US wide row
     assert "Saturday, October 17, 2026" in text  # today + 29, digital
-    assert "Physical release" not in text  # today + 30
+    assert "Physical" not in text  # today + 30
     assert "Thursday, September 17, 2026" not in text  # yesterday
     assert "Sunday, September 20, 2026" not in text  # GB
     assert "Tuesday, September 22, 2026" not in text  # premiere
     assert "Thursday, October 8, 2026" not in text  # dune's later US wide row
     assert "Other" not in text
+
+
+async def test_the_slate_is_the_my_films_calendar_over_its_window(
+    session,
+    subscriber,
+    make_film,
+    add_release_date,
+    watchlist,
+    attach_credits,
+    attach_genres,
+    record_date_change,
+):
+    """FB-26: the slate's rows are `GET /me/calendar`'s for the window — the same films, dates,
+    buckets, within-date order and fields — and nothing past the window's end; the marker rides
+    beside the row, not in it."""
+    today = datetime.now(tz=UTC).date()  # `get_my_films_calendar` reads the wall clock
+    user = await subscriber()
+    dune = await make_film(slug="dune", title="Dune", popularity=5.0)
+    edge = await make_film(slug="edge", title="Edge", popularity=9.0)
+    heat = await make_film(slug="heat", title="Heat", poster_path=None)
+    other = await make_film(slug="other", title="Other")
+    for film in (dune, edge, heat):
+        await watchlist(user_id=user.id, film_id=film.id)
+    await attach_credits(
+        dune,
+        cast=[
+            {"id": 901 + n, "name": name, "character": "X", "credit_order": n}
+            for n, name in enumerate(("Ada", "Bea", "Cy", "Di"))
+        ],
+        crew=[{"id": 900, "name": "Vee", "job": "Director", "department": "Directing"}],
+    )
+    await attach_genres(dune, [(1, "War"), (2, "Drama"), (3, "Action"), (4, "Sci-Fi")])
+    # Two films on one date and bucket: the calendar's popularity order holds inside it.
+    await add_release_date(film=dune, release_type=3, release_date=_on(today + timedelta(days=5)))
+    await add_release_date(film=edge, release_type=3, release_date=_on(today + timedelta(days=5)))
+    await add_release_date(film=dune, release_type=4, release_date=_on(today + timedelta(days=5)))
+    # Not `today`: the calendar reads the clock again, and a UTC midnight between the two reads
+    # would drop a today-dated row from one side only. The governing-date test pins today.
+    await add_release_date(film=heat, release_type=2, release_date=_on(today + timedelta(days=1)))
+    await add_release_date(
+        film=heat, release_type=5, release_date=_on(today + timedelta(days=SLATE_WINDOW_DAYS))
+    )
+    await add_release_date(film=other, release_type=3, release_date=_on(today + timedelta(days=2)))
+    await record_date_change(film=edge, created_at=_on(today, 0), changes=[(3, "moved")])
+
+    slate = await load_slate(session, user_id=user.id, today=today)
+    calendar = await get_my_films_calendar(session, user_id=user.id, limit=100, offset=0)
+
+    window_end = today + timedelta(days=SLATE_WINDOW_DAYS)
+    in_window = [item for item in calendar.items if item.release_date < window_end]
+    rows = [item for day in slate for bucket in day.buckets for item in bucket.items]
+    assert [row.calendar for row in rows] == in_window
+    assert (len(rows), len(calendar.items)) == (4, 5)
+    assert [(r.calendar.film_title, r.calendar.release_type, r.marker) for r in rows] == [
+        ("Heat", "limited", None),
+        ("Edge", "wide", "moved"),
+        ("Dune", "wide", None),
+        ("Dune", "digital", None),
+    ]
+    dune_row = rows[2].calendar
+    assert (dune_row.director, dune_row.stars, dune_row.genres) == (
+        "Vee",
+        ["Ada", "Bea", "Cy"],
+        ["Action", "Drama", "Sci-Fi"],
+    )
 
 
 async def test_unfollowing_takes_a_film_off_the_slate(
@@ -1468,13 +1636,14 @@ def test_every_visible_event_type_has_a_digest_label_and_an_unknown_one_still_re
     visible = (
         "announced",
         "canceled",
+        "cast_removed",
         "casting",
         "collection_attached",
         "collection_removed",
         "company_attached",
         "company_removed",
-        "credit_removed",
         "crew_attached",
+        "crew_removed",
         "now_available",
         "production_start",
         "production_wrap",
@@ -1486,4 +1655,6 @@ def test_every_visible_event_type_has_a_digest_label_and_an_unknown_one_still_re
     for event_type in visible:
         assert digest_beat_label(event_type) != "Update"
     assert digest_beat_label("release_date") == "Release date"
+    assert digest_beat_label("cast_removed") == "Cast departure"
+    assert digest_beat_label("crew_removed") == "Crew departure"
     assert digest_beat_label("bogus") == "Update"

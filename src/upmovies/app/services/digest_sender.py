@@ -10,17 +10,32 @@ when, which is what `user_settings.digest_cadence` answers. A user with no setti
 never opened the settings screen and holds the default, which is weekly (D-33), so the cadence
 is read through a `COALESCE` rather than an inner join that would drop them.
 
-**One mail per user per run, one film entry per film (DC-3).** The mail is the user's
-timeline since their last digest, but it does not repeat the feed's day grouping: a beat line
-is only legible under its film's header (catalog summaries never name the film), so each film
-appears once, as a **film entry** — a header (poster, title, the feed's parenthetical, a status
-line), the follows that reached it ("Following:", DC-6), and its beats in the order they were
-published (`event.created_at`, ADR-0016; `occurred_at` breaks ties). Entries are ranked by
-their most significant beat on the film arc (`public.arc`), then title, then `tmdb_id`, and the
-top one — the **lead film** — names the subject. Every beat line carries its publication date,
-an **Unconfirmed** marker when rumored, and its first source (DC-5). At most
-`DIGEST_MAX_ENTRIES` entries are rendered; the rest are one line pointing at the timeline,
-and every row is still marked `sent` (DC-8).
+**One mail per user per run, and the daily is the timeline day, reproduced (FB-18,
+ADR-0022).** Each queued row is a card; `follow_attribution_pairs` says which of the user's
+follows reached it — the title arm a title follow, the entity arms a person, studio or
+franchise follow — and the card becomes one **line** per reach, exactly as the timeline makes
+it one row per reach (FB-5, FB-13). The lines are then laid out as the timeline lays out a day
+(`group_days`): publication day (UTC `created_at`, ADR-0016) newest first, its poster strip,
+then the follow blocks (Films, People, Studios, Franchises), each split into In the news and
+Not yet reported, the latter by update type — the feed's map (NR-3) under Films, Attached /
+Detached / Canceled / Other updates under the others (FB-4). Under Films a row is a **film
+row** headed by the film (title and parenthetical, linked); under the other three it is an
+**entity row** headed by the followed entity, each line naming its film (FB-20). Nothing is
+cut and nothing leads: every row renders, and every row is marked `sent` (FB-21).
+
+**The weekly reads by entry, not by day (FB-19, `group_week`).** The same blocks, sections and
+update types, but no day headings: one **film entry** per film and one **entity entry** per
+entity across the week, under each section and update type it touched, its lines in
+publication order and each dated; one poster strip over the week's films. A film with cards in
+both sections is an entry in both.
+
+A card no follow reaches any more — the reader unfollowed between the decision pass and this
+one — is not a line: the timeline no longer shows it, so the mail does not either, and its row
+is failed with the reason rather than left `queued` (see below).
+
+The subject and preheader (DC-7, DC-10) are computed over every line of every reach: the
+**lead film** is the film carrying the most significant beat in the mail (a film reached
+only through a studio can lead), and it is not rendered differently anywhere (FB-22).
 
 **One render path (D-1460.1).** `render_batch` turns a batch into an `Envelope`; `send_batch`
 hands that to `Mailer.deliver`, and `render_digest` — what the admin preview and test-send
@@ -30,15 +45,14 @@ built, so the three cannot disagree about what the mail says.
 **The weekly send is the "your slate" mail (D-33), and so is the daily one on the slate day
 (DC-2).** The weekly always carries the slate; the daily carries it only when the run's `today`
 falls on `SLATE_WEEKDAY`, so a daily reader sees upcoming dates once a week, on the day the
-weekly readers do. Before the timeline section it lists the upcoming US dates — theatrical,
-digital and physical — for every film the user follows by
-title in the next `SLATE_WINDOW_DAYS` (`app.follow_queries.title_follow_film_ids`, EF-14),
-joined to `film_release_date` directly rather than to notification
-rows: a date that has not *moved* produces
-no event, and the slate's job is to say what is coming, not what changed. Each film's date per
-release type is the governing one — the earliest row in the (film, US, type) subject, the same
-collapse `public.service.get_calendar` and `catalog.headline_release` apply — so the slate
-cannot name a date the calendar would not. A date **set or moved since the previous slate
+weekly readers do. Before the timeline section it is **the my-films calendar reproduced** for
+the next `SLATE_WINDOW_DAYS` (FB-26): the rows `public.service._calendar_page` builds for this
+user's title follows (EF-14), read from `film_release_date` directly rather than from
+notification rows — a date that has not *moved* produces no event, and the slate's job is to say
+what is coming, not what changed — and laid out as the calendar page lays them out: date →
+release-type bucket → film row, under month headings only across a month boundary. The rows
+are the calendar's own, so the slate cannot name a date, or describe a film, differently from
+it. A date **set or moved since the previous slate
 day** carries a `new` or `moved` marker (DC-9), read from the release-date card that set or
 moved it — see `load_slate_markers`.
 
@@ -80,19 +94,21 @@ turns the digest off for a year and back on will get a tall first digest.
 """
 
 import logging
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
 import httpx
-from sqlalchemy import Date, Row, and_, cast, exists, func, or_, select, update
+from sqlalchemy import Row, and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.app import tokens
 from upmovies.app.entitlements import entitled_user_clause
-from upmovies.app.follow_queries import follow_attribution_pairs, title_follow_film_ids
+from upmovies.app.entity_names import entity_names
+from upmovies.app.follow_queries import follow_attribution_pairs
 from upmovies.app.models import (
     DEFAULT_DIGEST_CADENCE,
     Follow,
@@ -103,16 +119,11 @@ from upmovies.app.models import (
 from upmovies.app.repos import user_settings_repo
 from upmovies.app.services.notify_service import EMAIL_CHANNEL
 from upmovies.app.verification import verified_user_clause
-from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
-    Collection,
     Film,
-    FilmReleaseDate,
     FilmReleaseDateChange,
-    Person,
-    ProductionCompany,
 )
-from upmovies.catalog.ref import collection_ref, company_ref, film_ref, person_ref
+from upmovies.catalog.ref import film_ref, parse_film_ref
 from upmovies.catalog.release_grade import PRIMARY_REGION, RELEASE_TYPE_BUCKETS
 from upmovies.config import WEEKDAYS, Settings
 from upmovies.ingest.runs import record_progress
@@ -130,9 +141,15 @@ from upmovies.mail import (
 )
 from upmovies.news.models import Event, EventSummary
 from upmovies.public.arc import derive_arc_stage, event_stage_rank, most_significant_event_type
+from upmovies.public.dto import CalendarItem
 from upmovies.public.release import RELEASE_BUCKET_LABELS
 from upmovies.public.service import (
+    _CALENDAR_BUCKET_ORDER,
+    _calendar_governing_cte,
+    _calendar_page,
     _directors_for_films,
+    _has_story,
+    _my_films_visible,
     _production_countries_for_films,
     _release_year,
     _sources_by_event,
@@ -157,10 +174,9 @@ POSTER_SIZE = "w154"
 connection and its images are fetched before the reader has decided they want them, so the
 poster is a thumbnail beside the copy rather than the artwork it is on the film page."""
 
-LEAD_POSTER_SIZE = "w185"
-"""The poster width for the lead film's card, shown at 92px (DC-14). `w154` is under two
-device pixels per CSS pixel at that size, so the one poster a mail leads with would be the one
-that renders soft on a phone."""
+MAX_DAY_POSTERS = 8
+"""How many posters a day's strip carries at most — the feed's `MAX_DAY_POSTERS`
+(`lib/feed-groups.ts`), so a backfill-tall day does not fetch dozens of images (FB-18)."""
 
 JUSTWATCH_EVENT_TYPE = "now_available"
 """The beat whose data is JustWatch's, via TMDB's watch-provider endpoint — the condition on
@@ -175,15 +191,9 @@ SLATE_WINDOW_DAYS = 30
 """How many dates the slate covers: today and the 29 after it. "The next 30 days" is
 thirty dates, not a 31-day span with both ends in."""
 
-DIGEST_MAX_ENTRIES = 20
-"""How many film entries one digest renders (DC-8). The rest are one line pointing at the
-timeline, where they already are — and their rows are still marked `sent`, because the
-timeline is where the rest lives and nothing is re-queued."""
-
-SLATE_RELEASE_TYPES: tuple[int, ...] = tuple(sorted(RELEASE_TYPE_BUCKETS))
-"""TMDB release types the slate lists: the theatrical arc and the US home release — every
-displayable bucket, US only, which is the region the home release is displayable in at all
-(`catalog.release_grade`)."""
+SLATE_POSTER_SIZE = "w92"
+"""The my-films calendar row's poster (`CalendarFilmRow`): the slate is that row (FB-26), so it
+fetches the image the calendar page fetches, not the timeline's `POSTER_SIZE`."""
 
 SLATE_MARKER_DAYS = 7
 """How far back a slate row looks for the release-date card that set or moved it (DC-9): the
@@ -197,10 +207,6 @@ same move news two weeks running."""
 
 SlateMarker = Literal["new", "moved"]
 
-_SLATE_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical")
-"""Two rows sharing a date: the theatrical arc first, then the home release in the order it
-happens — the calendar's rule (`public.service._CALENDAR_BUCKET_ORDER`)."""
-
 DIGEST_BEAT_LABELS: dict[str, str] = {
     "release_date": "Release date",
     "now_available": "Now available",
@@ -208,7 +214,8 @@ DIGEST_BEAT_LABELS: dict[str, str] = {
     "announced": "Announced",
     "casting": "Casting",
     "crew_attached": "Crew attached",
-    "credit_removed": "Credit removed",
+    "cast_removed": "Cast departure",
+    "crew_removed": "Crew departure",
     "company_attached": "Studio attached",
     "company_removed": "Studio removed",
     "collection_attached": "Franchise attached",
@@ -222,6 +229,94 @@ DIGEST_BEAT_LABELS: dict[str, str] = {
 digest is the timeline: the decision pass queues a digest line for every visible type.
 `digest_beat_label` falls back rather than raising, for the reason `_render_status` does in
 `synthesize.deterministic`: a new type must read plainly in one mail, not fail the batch."""
+
+OTHER_UPDATES = "other"
+"""The update type any `event_type` a map does not know files under, in both maps — and the
+one named heading under which the beat label stays on the line (NR-5)."""
+
+FILM_UPDATE_TYPES: tuple[tuple[str, str], ...] = (
+    ("now_available", "Now available"),
+    ("trailer", "Trailer"),
+    ("release_date", "Release date"),
+    ("production_status", "Production status"),
+    ("cast", "Cast"),
+    ("crew", "Crew"),
+    ("studios", "Studios"),
+    ("franchise", "Franchise"),
+    (OTHER_UPDATES, "Other updates"),
+)
+"""The Films block's Not yet reported headings, in render order, with their labels — the
+frontend's `UPDATE_TYPES` and `UPDATE_TYPE_LABELS` (NR-3), word for word, because the daily
+is the timeline day reproduced."""
+
+_FILM_UPDATE_TYPE_OF_EVENT: dict[str, str] = {
+    "now_available": "now_available",
+    "trailer": "trailer",
+    "release_date": "release_date",
+    "production_start": "production_status",
+    "production_wrap": "production_status",
+    "canceled": "production_status",
+    "casting": "cast",
+    "cast_removed": "cast",
+    "crew_attached": "crew",
+    "crew_removed": "crew",
+    "company_attached": "studios",
+    "company_removed": "studios",
+    "collection_attached": "franchise",
+    "collection_removed": "franchise",
+}
+
+ENTITY_UPDATE_TYPES: tuple[tuple[str, str], ...] = (
+    ("attached", "Attached"),
+    ("detached", "Detached"),
+    ("canceled", "Canceled"),
+    (OTHER_UPDATES, "Other updates"),
+)
+"""The People, Studios and Franchises blocks' Not yet reported headings (FB-4) — the
+frontend's `ENTITY_UPDATE_TYPES`. A second map beside `FILM_UPDATE_TYPES`, never merged with
+it: `casting` is Cast under Films and Attached under People."""
+
+_ENTITY_UPDATE_TYPE_OF_EVENT: dict[str, str] = {
+    "casting": "attached",
+    "crew_attached": "attached",
+    "company_attached": "attached",
+    "collection_attached": "attached",
+    "cast_removed": "detached",
+    "crew_removed": "detached",
+    "company_removed": "detached",
+    "collection_removed": "detached",
+    "canceled": "canceled",
+}
+
+FILMS_BLOCK = "films"
+FOLLOW_BLOCKS: tuple[tuple[str, str], ...] = (
+    (FILMS_BLOCK, "Films"),
+    ("people", "People"),
+    ("studios", "Studios"),
+    ("franchises", "Franchises"),
+)
+"""The follow blocks a day is laid out in, in their fixed order, with their headings (FB-1) —
+the frontend's `FOLLOW_BLOCKS` and `FOLLOW_BLOCK_LABELS`."""
+
+_BLOCK_OF_ENTITY_TYPE: dict[str, str] = {
+    "person": "people",
+    "company": "studios",
+    "franchise": "franchises",
+}
+
+ENTITY_FALLBACK_NAMES: dict[str, str] = {
+    "person": "A person you follow",
+    "company": "A studio you follow",
+    "franchise": "A franchise you follow",
+}
+"""An entity row's headline when the catalog can no longer name the entity (FB-10) — the
+frontend's `ENTITY_FALLBACK_NAMES`. Rendered unlinked: there is no ref to link."""
+
+IN_THE_NEWS_LABEL = "In the news"
+NOT_YET_REPORTED_LABEL = "Not yet reported"
+NOT_YET_REPORTED_QUALIFIER = "(unconfirmed)"
+"""The section headings, as the feed spells them (`components/film/labels.ts`): the qualifier
+is said once for the section, which is why its lines carry no Unconfirmed marker (NR-5)."""
 
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _MONTHS = (
@@ -261,7 +356,12 @@ def film_url(tmdb_id: int, title: str, base_url: str) -> str:
     """The film's public page — the same `/film/{ref}` the sitemap emits, built from the same
     `film_ref`, so a link in a mail cannot address a film differently from a link on the site
     (and cannot land on the 301 a bare id would)."""
-    return f"{base_url.rstrip('/')}/film/{film_ref(tmdb_id, title)}"
+    return ref_url(film_ref(tmdb_id, title), base_url)
+
+
+def ref_url(ref: str, base_url: str) -> str:
+    """The film page for a ref already minted — a calendar row carries its own (FB-26)."""
+    return f"{base_url.rstrip('/')}/film/{ref}"
 
 
 def settings_url(base_url: str) -> str:
@@ -307,12 +407,6 @@ def carries_slate(cadence: DigestCadence, today: date, settings: Settings) -> bo
     return today.weekday() == WEEKDAYS.index(settings.slate_weekday)
 
 
-def release_label(release_type: int) -> str:
-    """The slate's name for a release type: the bucket's display label plus the word the film
-    page's section heading supplies and a mail has to spell out."""
-    return f"{RELEASE_BUCKET_LABELS[RELEASE_TYPE_BUCKETS[release_type]]} release"
-
-
 ARC_STAGE_LABELS: dict[str, str] = {
     "announced": "Announced",
     "shooting": "Shooting",
@@ -325,9 +419,9 @@ parenthetical falls back to one of these, and it has to read as the feed row rea
 _COUNTRY_CAP = 3
 _DIRECTOR_CAP = 2
 """`filmParenthetical`'s caps (`lib/format.ts`): the feed row has the width for three
-countries and two directors, and the mail's header is that row."""
+countries and two directors, and the mail's film row is that row."""
 
-_FOLLOWING_ROUTES: dict[str, str] = {
+_ENTITY_ROUTES: dict[str, str] = {
     "person": "person",
     "company": "studio",
     "franchise": "franchise",
@@ -335,7 +429,14 @@ _FOLLOWING_ROUTES: dict[str, str] = {
 """Follow `entity_type` → the frontend route segment its page lives under. The follow graph's
 words (`company`, `franchise`) are not the reader's (EF-19)."""
 
-_FOLLOWING_ORDER: tuple[str, ...] = ("person", "company", "franchise", "title")
+_LEADING_ARTICLE = re.compile(r"^(a|an|the)\s+", re.IGNORECASE)
+
+
+def natural_title(title: str) -> str:
+    """The feed's natural sort key for a title or an organisation's name: leading "A", "An",
+    "The" stripped, casefolded (`public.service._natural_title_col`, the frontend's
+    `naturalSortKey`)."""
+    return _LEADING_ARTICLE.sub("", title).casefold()
 
 
 def arc_stage_label(stage: str) -> str:
@@ -380,11 +481,6 @@ def film_parenthetical(
     return ", ".join(parts)
 
 
-def long_date(d: date) -> str:
-    """ "14 August 2026" — the status line's date: no weekday, no ordinal, no zero-pad."""
-    return f"{d.day} {_MONTHS[d.month - 1]} {d.year}"
-
-
 def short_date(d: date, *, today: date) -> str:
     """ "22 Sep" — a beat's publication day (DC-5, DC-12). The year is appended only when it is
     not the run's year, which a tall digest after months of `off` can span. `today` is the
@@ -393,36 +489,65 @@ def short_date(d: date, *, today: date) -> str:
     return day if d.year == today.year else f"{day} {d.year}"
 
 
-def status_line(release: HeadlineRelease | None, arc_stage: str) -> str:
-    """The film header's one status line (D-1460.2): the headline release the film page leads
-    with, or the arc stage when there is none.
+@dataclass(frozen=True)
+class DigestSource:
+    """Where a beat came from, as one line under it (DC-5): the first story's outlet, linked.
+    A card no story covers has none — under Not yet reported the section heading says where it
+    came from, and "via TMDB" is not repeated on every line (FB-20)."""
 
-    `headline_releases` is theatrical-only, so the dated forms are a theatrical bucket and a
-    date, tense-free ("Wide release · 14 August 2026") — or, for the `primary` fallback that
-    belongs to no bucket, the date marked unconfirmed, as the feed row marks it."""
-    if release is None:
-        return arc_stage_label(arc_stage)
-    if release.bucket is None:  # `kind == "primary"`, by `HeadlineRelease`'s own contract
-        return f"{long_date(release.date)} (unconfirmed)"
-    return f"{RELEASE_BUCKET_LABELS[release.bucket]} release · {long_date(release.date)}"
+    name: str
+    url: str | None
 
 
 @dataclass(frozen=True)
-class DigestSource:
-    """Where a beat came from, as one line under it (DC-5)."""
+class DigestFilm:
+    """The film a beat is about, resolved to what its row or line links and shows."""
 
-    name: str
-    """The outlet's label for a story card; "TMDB" for a catalog card."""
+    film_id: UUID
+    tmdb_id: int
+    title: str
+    film_url: str
+    poster_url: str | None
+    """The poster strip's (`w154`); None for a film with no poster, which the strip skips."""
+    parenthetical: str
+
+    @property
+    def sort_key(self) -> tuple[str, str, int]:
+        """Natural title, then the raw title casefolded, then `tmdb_id` — so two films equal
+        under the natural key still sort the same way twice."""
+        return natural_title(self.title), self.title.casefold(), self.tmdb_id
+
+
+@dataclass(frozen=True)
+class DigestReach:
+    """A person, studio or franchise follow that reached a card — an entity row's headline.
+    A card a title follow reached has no `DigestReach`: its reach is the film itself."""
+
+    entity_type: str
+    """`person`, `company` or `franchise` — the follow graph's words."""
+    entity_id: str
+    name: str | None
+    """The catalog's current name; None for an entity it cannot name (FB-10)."""
     url: str | None
-    """The story's link; None for a catalog card, which reads "via TMDB", unlinked."""
+    """The entity's page; None exactly when `name` is."""
 
+    @property
+    def headline(self) -> str:
+        return self.name if self.name is not None else ENTITY_FALLBACK_NAMES[self.entity_type]
 
-CATALOG_SOURCE = DigestSource(name="TMDB", url=None)
+    @property
+    def sort_key(self) -> tuple[bool, str, str]:
+        """FB-6: by name — a person's as written, casefolded ("The" is not how a person's name
+        starts), a studio's or franchise's as a title sorts. An entity with no name trails, and
+        `entity_id` breaks ties."""
+        name = self.name or ""
+        key = name.casefold() if self.entity_type == "person" else natural_title(name)
+        return self.name is None, key, self.entity_id
 
 
 @dataclass(frozen=True)
 class DigestBeat:
-    """One beat line in a film entry."""
+    """One queued card, as the mail shows it on any line it lands on."""
 
     notification_id: UUID
     event_id: UUID
@@ -430,10 +555,14 @@ class DigestBeat:
     created_at: datetime
     occurred_at: datetime
     confidence: str
-    """`confirmed` or `rumored`; a rumored beat carries the Unconfirmed marker."""
+    """`confirmed` or `rumored`; a rumored beat carries the Unconfirmed marker where the
+    section shows markers at all."""
     summary: str
     source: DigestSource | None
-    """None for a story card with no story row left — no source line, and no invented one."""
+    news_backed: bool
+    """Whether a story covers the card — the feed's section split (`EXISTS(event_story)`),
+    deliberately not `provenance`."""
+    film: DigestFilm
 
     @property
     def day(self) -> date:
@@ -446,107 +575,395 @@ class DigestBeat:
 
 
 @dataclass(frozen=True)
-class DigestFollowing:
-    """One follow that reached a beat in an entry."""
+class DigestLine:
+    """A card as one reach delivered it: the timeline's row grain (FB-13), one level finer. A
+    card two follows reached is two lines."""
 
-    entity_type: str
-    """`person`, `company`, `franchise` or `title` — the follow graph's words."""
-    name: str
-    url: str | None
-    """The entity's page; None for the title row, whose link is the entry's own."""
+    beat: DigestBeat
+    reach: DigestReach | None
+    """None for a title follow — the line belongs to a film row in the Films block."""
+
+    @property
+    def block(self) -> str:
+        if self.reach is None:
+            return FILMS_BLOCK
+        return _BLOCK_OF_ENTITY_TYPE[self.reach.entity_type]
+
+
+def event_order_key(beat: DigestBeat) -> tuple[datetime, datetime, str]:
+    """The feed's event order within a row — `occurred_at`, `created_at`, id (FB-6) — which is
+    the daily's: its day heading already says when each line was published."""
+    return beat.occurred_at, beat.created_at, str(beat.event_id)
+
+
+def film_then_event_order_key(beat: DigestBeat) -> tuple[Any, ...]:
+    """A daily entity row's line order: its film's natural title, then the feed's event order
+    (FB-6) — the timeline's entity row."""
+    return *beat.film.sort_key, *event_order_key(beat)
+
+
+def beat_order_key(beat: DigestBeat) -> tuple[datetime, datetime, str]:
+    """**Publication** order — `created_at`, then `occurred_at`, then the event id so two beats
+    published together still sort the same way twice (DC-3). The weekly's: an entry's lines
+    span days, so they run in the order the reader could have seen them (FB-19)."""
+    return beat.created_at, beat.occurred_at, str(beat.event_id)
+
+
+BeatKey = Callable[[DigestBeat], tuple[Any, ...]]
 
 
 @dataclass(frozen=True)
-class DigestFilm:
-    """The film an entry is about, resolved to what the header links and shows."""
+class LineOrder:
+    """How the lines under a row run — a film row's and an entity row's. The one thing a
+    daily row and a weekly entry lay out differently below the update type."""
 
-    film_id: UUID
-    tmdb_id: int
-    title: str
-    film_url: str
-    poster_url: str | None
-    """The compact row's poster (`w154`, shown at 62px)."""
-    lead_poster_url: str | None
-    """The lead card's poster (`w185`, shown at 92px, DC-14). Built for every film because
-    which film leads is decided by ranking the whole batch, after the lookups."""
+    film_row: BeatKey
+    entity_row: BeatKey
 
 
-@dataclass(frozen=True)
-class DigestHeader:
-    """The two lines of a film entry's header that are computed rather than looked up."""
+DAY_LINE_ORDER = LineOrder(film_row=event_order_key, entity_row=film_then_event_order_key)
+"""The daily's (FB-6): the timeline day's rows, whose day heading already dates every line."""
 
-    parenthetical: str
-    status: str
+ENTRY_LINE_ORDER = LineOrder(film_row=beat_order_key, entity_row=beat_order_key)
+"""The weekly's (FB-19): an entry's lines in publication order, film and entity entries alike
+— an entity entry spanning two films reads as the week went, not film by film."""
 
 
 @dataclass(frozen=True)
-class DigestEntry:
-    """One **film entry**: a film, its header, the follows that reached it and its beats in
-    publication order (DC-3)."""
+class DigestRow:
+    """A **film row** (`reach` None: one film, headed by it) or an **entity row** (one
+    followed entity, headed by it, each beat naming its own film) under one section or update
+    type."""
 
-    film: DigestFilm
-    header: DigestHeader
-    following: tuple[DigestFollowing, ...]
-    """Every attribution row, the title row included — `entity_following` is what the mail
-    shows; the title row is there so a preview can state the entry's full reach (DC-6)."""
+    reach: DigestReach | None
     beats: tuple[DigestBeat, ...]
 
     @property
+    def film(self) -> DigestFilm:
+        """A film row's film. Meaningless on an entity row, whose beats name several."""
+        return self.beats[0].film
+
+    @property
     def lead_type(self) -> str:
-        """The entry's most significant beat type on the film arc."""
         return most_significant_event_type(beat.event_type for beat in self.beats)
-
-    @property
-    def lead_label(self) -> str:
-        return digest_beat_label(self.lead_type)
-
-    @property
-    def rank_key(self) -> tuple[int, str, int]:
-        """Most significant lead beat first, then title, then `tmdb_id` (DC-3)."""
-        return (-event_stage_rank(self.lead_type), self.film.title.casefold(), self.film.tmdb_id)
-
-    @property
-    def entity_following(self) -> tuple[DigestFollowing, ...]:
-        """The rows the "Following:" line names: entity follows only. A title follow is the
-        reader having asked for the film by name, which needs no telling (DC-6)."""
-        return tuple(f for f in self.following if f.entity_type != "title")
 
     @property
     def credits_justwatch(self) -> bool:
         return any(beat.event_type == JUSTWATCH_EVENT_TYPE for beat in self.beats)
 
 
-def rank_entries(entries: Iterable[DigestEntry]) -> tuple[DigestEntry, ...]:
-    """Film entries in mail order: by `DigestEntry.rank_key` (DC-3). The top one is the lead
-    film, which names the subject."""
-    return tuple(sorted(entries, key=lambda entry: entry.rank_key))
+def film_row_key(row: DigestRow) -> tuple[int, str, str, int]:
+    """Film rows under a section or update type: the more significant beat first, then the
+    film's natural title — the timeline day's own order for its title rows."""
+    return (-event_stage_rank(row.lead_type), *row.film.sort_key)
 
 
-def beat_order_key(beat: DigestBeat) -> tuple[datetime, datetime, str]:
-    """A film entry's beats in **publication** order — `created_at`, then `occurred_at`, then
-    the event id so two beats published together still sort the same way twice (DC-3)."""
-    return beat.created_at, beat.occurred_at, str(beat.event_id)
+def entity_row_key(row: DigestRow) -> tuple[bool, str, str]:
+    assert row.reach is not None
+    return row.reach.sort_key
+
+
+@dataclass(frozen=True)
+class DigestUpdateType:
+    """One update-type heading under a Not yet reported section, holding only its own beats."""
+
+    key: str
+    label: str
+    rows: tuple[DigestRow, ...]
+
+
+@dataclass(frozen=True)
+class DigestSection:
+    """In the news (`news_backed`), laid out by row, or Not yet reported, laid out by update
+    type. Exactly one of `rows` and `update_types` is filled."""
+
+    news_backed: bool
+    rows: tuple[DigestRow, ...] = ()
+    update_types: tuple[DigestUpdateType, ...] = ()
+
+
+@dataclass(frozen=True)
+class DigestBlock:
+    key: str
+    label: str
+    sections: tuple[DigestSection, ...]
+
+
+@dataclass(frozen=True)
+class DigestDay:
+    """One timeline day of the daily (FB-18): its heading's day, its poster strip, its
+    blocks."""
+
+    day: date
+    posters: tuple[DigestFilm, ...]
+    blocks: tuple[DigestBlock, ...]
+
+
+@dataclass(frozen=True)
+class DigestWeek:
+    """The weekly's timeline (FB-19): no day, one poster strip over the week's films, and the
+    blocks, whose rows are **entries** — one film or entity across the whole week under each
+    section and update type it touched."""
+
+    posters: tuple[DigestFilm, ...]
+    blocks: tuple[DigestBlock, ...]
+
+
+def group_rows(lines: Iterable[DigestLine], *, order: LineOrder) -> tuple[DigestRow, ...]:
+    """One block's lines (of one section) as its rows. Title lines make one film row per film,
+    ordered by `film_row_key`, beats by `order.film_row`; entity lines one entity row per
+    entity, ordered by name (`entity_row_key`), beats by `order.entity_row` (FB-6). A block
+    holds one kind or the other, never both. Over one day's lines a row is a timeline row;
+    over a week's, an entry."""
+    by_reach: dict[tuple[str, str], tuple[DigestReach | None, list[DigestBeat]]] = {}
+    for line in lines:
+        key = (
+            ("title", str(line.beat.film.film_id))
+            if line.reach is None
+            else (line.reach.entity_type, line.reach.entity_id)
+        )
+        by_reach.setdefault(key, (line.reach, []))[1].append(line.beat)
+    rows = [
+        DigestRow(
+            reach=reach,
+            beats=tuple(sorted(beats, key=order.film_row if reach is None else order.entity_row)),
+        )
+        for reach, beats in by_reach.values()
+    ]
+    return tuple(sorted(rows, key=_row_key(rows)))
+
+
+def _row_key(rows: Sequence[DigestRow]) -> Callable[[DigestRow], tuple[Any, ...]]:
+    if rows and rows[0].reach is not None:
+        return entity_row_key
+    return film_row_key
+
+
+def group_update_types(rows: Sequence[DigestRow], *, block: str) -> tuple[DigestUpdateType, ...]:
+    """A Not yet reported section's rows laid out by update type: the block's headings in
+    their order, each holding one row per film or entity that changed that way, each row only
+    that heading's beats (NR-4, per entity). A row with beats of two types sits under both;
+    headings with nothing under them are left out. Rows are re-ordered under each heading by
+    their own beats, so a film's significance there is the significance of what is listed."""
+    types, of_event = (
+        (FILM_UPDATE_TYPES, _FILM_UPDATE_TYPE_OF_EVENT)
+        if block == FILMS_BLOCK
+        else (ENTITY_UPDATE_TYPES, _ENTITY_UPDATE_TYPE_OF_EVENT)
+    )
+    split: dict[str, list[DigestRow]] = {}
+    for row in rows:
+        by_type: dict[str, list[DigestBeat]] = {}
+        for beat in row.beats:
+            by_type.setdefault(of_event.get(beat.event_type, OTHER_UPDATES), []).append(beat)
+        for key, beats in by_type.items():
+            split.setdefault(key, []).append(DigestRow(reach=row.reach, beats=tuple(beats)))
+    return tuple(
+        DigestUpdateType(
+            key=key, label=label, rows=tuple(sorted(split[key], key=_row_key(split[key])))
+        )
+        for key, label in types
+        if key in split
+    )
+
+
+def group_blocks(lines: Iterable[DigestLine], *, order: LineOrder) -> tuple[DigestBlock, ...]:
+    """One day's (or the week's) lines as follow blocks in `FOLLOW_BLOCKS` order, each split
+    into In the news and Not yet reported (FB-1). A block or a section with nothing in it is
+    left out."""
+    by_block: dict[str, list[DigestLine]] = {}
+    for line in lines:
+        by_block.setdefault(line.block, []).append(line)
+    blocks: list[DigestBlock] = []
+    for key, label in FOLLOW_BLOCKS:
+        if key not in by_block:
+            continue
+        sections: list[DigestSection] = []
+        for news_backed in (True, False):
+            rows = group_rows(
+                (line for line in by_block[key] if line.beat.news_backed is news_backed),
+                order=order,
+            )
+            if not rows:
+                continue
+            if news_backed:
+                sections.append(DigestSection(news_backed=True, rows=rows))
+            else:
+                sections.append(
+                    DigestSection(
+                        news_backed=False, update_types=group_update_types(rows, block=key)
+                    )
+                )
+        blocks.append(DigestBlock(key=key, label=label, sections=tuple(sections)))
+    return tuple(blocks)
+
+
+def day_posters(lines: Iterable[DigestLine]) -> tuple[DigestFilm, ...]:
+    """The poster strip over every block of a day (FB-7) — or of the week (FB-19): the films
+    with a poster, news-backed first, each by natural title, de-duplicated, at most
+    `MAX_DAY_POSTERS` — the feed's `dayPosterLeads`. A film reached twice is one poster, and so
+    is a film news-backed on one day and not on another: its news-backed line leads it."""
+    candidates = sorted(
+        (line.beat for line in lines if line.beat.film.poster_url is not None),
+        key=lambda beat: (not beat.news_backed, beat.film.sort_key),
+    )
+    posters: dict[UUID, DigestFilm] = {}
+    for beat in candidates:
+        posters.setdefault(beat.film.film_id, beat.film)
+    return tuple(posters.values())[:MAX_DAY_POSTERS]
+
+
+def group_days(lines: Iterable[DigestLine]) -> tuple[DigestDay, ...]:
+    """The daily's timeline (FB-18): one day per publication day, newest first, each laid out
+    as the timeline lays that day out, its rows' lines in the feed's order (`DAY_LINE_ORDER`)."""
+    by_day: dict[date, list[DigestLine]] = {}
+    for line in lines:
+        by_day.setdefault(line.beat.day, []).append(line)
+    return tuple(
+        DigestDay(
+            day=day,
+            posters=day_posters(day_lines),
+            blocks=group_blocks(day_lines, order=DAY_LINE_ORDER),
+        )
+        for day, day_lines in sorted(by_day.items(), reverse=True)
+    )
+
+
+def group_week(lines: Sequence[DigestLine]) -> DigestWeek:
+    """The weekly's timeline (FB-19): the daily's blocks, sections and update types, but read
+    by entry rather than by day — one film entry per film under Films and one entity entry per
+    entity under the other three, across every day the batch spans, under each section and
+    update type it touched. A film with cards in both sections is an entry in both, as it
+    would be on two feed days. Film entries rank by their most significant beat, then title
+    (DC-3, `film_row_key`); entity entries by name (FB-6). An entry's lines run in publication
+    order (`ENTRY_LINE_ORDER`), and the template dates each one. One poster strip, over the
+    week's films."""
+    return DigestWeek(
+        posters=day_posters(lines), blocks=group_blocks(lines, order=ENTRY_LINE_ORDER)
+    )
+
+
+@dataclass(frozen=True)
+class RankedFilm:
+    film: DigestFilm
+    lead_type: str
+
+    @property
+    def lead_label(self) -> str:
+        return digest_beat_label(self.lead_type)
+
+
+def rank_films(beats: Iterable[DigestBeat]) -> tuple[RankedFilm, ...]:
+    """Every distinct film in the mail, by its most significant beat on the film arc, then
+    casefolded title, then `tmdb_id` (DC-7, FB-22). Over every beat of every reach, so a film
+    reached only through a studio can lead. The first is the **lead film**."""
+    by_film: dict[UUID, tuple[DigestFilm, list[str]]] = {}
+    for beat in beats:
+        by_film.setdefault(beat.film.film_id, (beat.film, []))[1].append(beat.event_type)
+    ranked = [
+        RankedFilm(film=film, lead_type=most_significant_event_type(types))
+        for film, types in by_film.values()
+    ]
+    return tuple(
+        sorted(
+            ranked,
+            key=lambda r: (-event_stage_rank(r.lead_type), r.film.title.casefold(), r.film.tmdb_id),
+        )
+    )
 
 
 @dataclass(frozen=True)
 class SlateItem:
-    """One (film, release type) with a US date inside the slate window."""
+    """One my-films calendar row inside the slate window — a (film, release type) with a US
+    date — and its marker (FB-26)."""
 
-    title: str
-    release_label: str
-    film_url: str
-    poster_url: str | None
+    calendar: CalendarItem
+    """The row exactly as `GET /me/calendar` serves it: the slate shows these fields and no
+    others, so it cannot describe a film differently from the calendar page."""
     marker: SlateMarker | None = None
     """`new` or `moved` when the date was set or moved since the previous slate day (DC-9);
     None for a date that has not changed, which carries nothing."""
 
 
 @dataclass(frozen=True)
+class SlateBucket:
+    """One release type's rows on one slate date, under the calendar's sub-heading."""
+
+    bucket: str
+    items: tuple[SlateItem, ...]
+
+    @property
+    def label(self) -> str:
+        """The calendar's bucket label (`components/calendar/release-labels.ts`): the date
+        heading above it says "release", so the bucket does not."""
+        return RELEASE_BUCKET_LABELS.get(self.bucket, self.bucket.title())
+
+
+@dataclass(frozen=True)
 class SlateDay:
-    """One date on the slate and everything the user's followed films have on it."""
+    """One date on the slate and everything the user's followed films have on it, by bucket."""
 
     day: date
-    items: tuple[SlateItem, ...]
+    buckets: tuple[SlateBucket, ...]
+
+    @property
+    def count(self) -> int:
+        return sum(len(bucket.items) for bucket in self.buckets)
+
+
+@dataclass(frozen=True)
+class SlateMonth:
+    """The slate's dates in one month, under a month heading only when the slate spans more
+    than one (FB-26)."""
+
+    heading: str | None
+    days: tuple[SlateDay, ...]
+
+
+def _bucket_rank(bucket: str) -> int:
+    """`_calendar_type_rank`'s order in Python: wide, limited, digital, physical; a bucket
+    nobody ranked last, as the calendar sorts it."""
+    if bucket in _CALENDAR_BUCKET_ORDER:
+        return _CALENDAR_BUCKET_ORDER.index(bucket)
+    return len(_CALENDAR_BUCKET_ORDER)
+
+
+def group_slate(items: Iterable[SlateItem]) -> tuple[SlateDay, ...]:
+    """The calendar's date → bucket nesting (`lib/calendar-groups.ts::groupByReleaseDate`):
+    dates soonest first, buckets in the calendar's order, rows in the order given — which is
+    `_calendar_page`'s, so within a bucket the slate orders films as the calendar page does.
+    Pure."""
+    by_day: dict[date, dict[str, list[SlateItem]]] = {}
+    for item in items:
+        by_day.setdefault(item.calendar.release_date, {}).setdefault(
+            item.calendar.release_type, []
+        ).append(item)
+    return tuple(
+        SlateDay(
+            day=day,
+            buckets=tuple(
+                SlateBucket(bucket=bucket, items=tuple(rows))
+                for bucket, rows in sorted(buckets.items(), key=lambda kv: _bucket_rank(kv[0]))
+            ),
+        )
+        for day, buckets in sorted(by_day.items())
+    )
+
+
+def slate_months(days: Sequence[SlateDay]) -> tuple[SlateMonth, ...]:
+    """The slate's days under month headings — the calendar's month level, which a 30-day
+    window only needs when it crosses a month boundary. One heading-less group when every date
+    is in one month (the long date headings already name it); otherwise a group per month,
+    each headed by the month's name, as the calendar heads its months. No year level: a
+    30-day window that crosses one is still read by its months. Pure."""
+    groups: list[tuple[tuple[int, int], list[SlateDay]]] = []
+    for day in days:
+        key = (day.day.year, day.day.month)
+        if not groups or groups[-1][0] != key:
+            groups.append((key, []))
+        groups[-1][1].append(day)
+    if len(groups) <= 1:
+        return tuple(SlateMonth(heading=None, days=tuple(g)) for _, g in groups)
+    return tuple(SlateMonth(heading=_MONTHS[month - 1], days=tuple(g)) for (_, month), g in groups)
 
 
 @dataclass(frozen=True)
@@ -568,36 +985,33 @@ class DigestBatch:
     """Everything one user's digest would carry."""
 
     recipient: DigestRecipient
-    entries: tuple[DigestEntry, ...]
-    """Ranked and **uncapped**: the subject's count and `item_ids` both need the whole batch,
-    and only the rendering stops at `DIGEST_MAX_ENTRIES`."""
+    lines: tuple[DigestLine, ...]
+    """Every queued card once per reach that delivered it, unordered — `group_days` (daily) or
+    `group_week` (weekly) lays them out, `rank_films` ranks them. Nothing is capped (FB-21)."""
     unsendable: tuple[tuple[UUID, str], ...]
-    """`(notification id, why)` for rows this pass can never send — the event lost its summary
-    or is no longer the published card — marked `failed` with the reason, so a permanently
-    un-sendable row cannot stall silently in a backlog read nightly."""
+    """`(notification id, why)` for rows this pass can never send — the event lost its summary,
+    is no longer the published card, or no follow reaches it any more — marked `failed` with
+    the reason, so a permanently un-sendable row cannot stall silently in a backlog read
+    nightly."""
     slate: tuple[SlateDay, ...] = ()
 
     @property
-    def rendered_entries(self) -> tuple[DigestEntry, ...]:
-        return self.entries[:DIGEST_MAX_ENTRIES]
-
-    @property
-    def overflow(self) -> int:
-        """Entries past the cap — the N in "and N more films on your timeline"."""
-        return max(0, len(self.entries) - DIGEST_MAX_ENTRIES)
+    def beats(self) -> tuple[DigestBeat, ...]:
+        """Each card once, however many reaches delivered it."""
+        return tuple({line.beat.notification_id: line.beat for line in self.lines}.values())
 
     @property
     def item_ids(self) -> list[UUID]:
-        """Every beat's row, rendered or past the cap: all of them are marked `sent` (DC-8)."""
-        return [beat.notification_id for entry in self.entries for beat in entry.beats]
+        """Every card's row: all of them are marked `sent`, because every one renders."""
+        return [beat.notification_id for beat in self.beats]
 
     @property
     def slate_count(self) -> int:
-        return sum(len(d.items) for d in self.slate)
+        return sum(d.count for d in self.slate)
 
     @property
     def has_content(self) -> bool:
-        return bool(self.entries) or bool(self.slate)
+        return bool(self.lines) or bool(self.slate)
 
 
 @dataclass
@@ -700,22 +1114,22 @@ async def load_recipients(
     ]
 
 
-async def load_entries(
-    session: AsyncSession, *, user_id: UUID, today: date, settings: Settings
-) -> tuple[tuple[DigestEntry, ...], tuple[tuple[UUID, str], ...]]:
-    """This user's `queued` digest rows as ranked film entries, plus the rows that can never
-    be sent.
+async def load_lines(
+    session: AsyncSession, *, user_id: UUID, settings: Settings
+) -> tuple[tuple[DigestLine, ...], tuple[tuple[UUID, str], ...]]:
+    """This user's `queued` digest rows as lines — one per (card, reach) — plus the rows that
+    can never be sent.
 
-    The join is the mail's beat half — the film, the event's type, confidence, provenance and
-    summary — and the event's status and summary are re-read rather
-    than trusted from the queue, because the queue outlives the run that wrote it.
-    `EventSummary` is the one outer join so a missing summary comes back as a row to fail
-    rather than a row that quietly disappears.
+    The join is the mail's beat half — the film, the event's type, confidence, summary and
+    whether a story covers it (the feed's section split, `_has_story`) — and the event's status
+    and summary are re-read rather than trusted from the queue, because the queue outlives the
+    run that wrote it. `EventSummary` is the one outer join so a missing summary comes back as
+    a row to fail rather than a row that quietly disappears.
 
-    Then one batched lookup per header input, one for the sources and one for the attribution,
-    each over the whole batch rather than per entry: the parenthetical's directors and
-    countries and the status line's headline release come from the helpers the feed and the
-    film page use, so the mail cannot describe a film differently from the site."""
+    Then one batched lookup per film-header input, one for the sources and one for the reaches
+    (`_load_reaches`), each over the whole batch rather than per line: the parenthetical's
+    directors and countries come from the helpers the feed uses, so the mail cannot describe a
+    film differently from the site."""
     rows = await session.execute(
         select(
             Notification.id,
@@ -723,9 +1137,9 @@ async def load_entries(
             Event.event_type,
             Event.status.label("event_status"),
             Event.confidence,
-            Event.provenance,
             Event.created_at,
             Event.occurred_at,
+            _has_story().label("has_story"),
             EventSummary.summary,
             Film.id.label("film_id"),
             Film.tmdb_id,
@@ -745,80 +1159,67 @@ async def load_entries(
         )
     )
     unsendable: list[tuple[UUID, str]] = []
-    by_film: dict[UUID, list[Row[Any]]] = {}
+    sendable: list[Row[Any]] = []
     for row in rows:
         if row.event_status != "published":
             unsendable.append((row.id, "the event is no longer published"))
         elif row.summary is None:
             unsendable.append((row.id, "the event has no summary"))
         else:
-            by_film.setdefault(row.film_id, []).append(row)
-    if not by_film:
+            sendable.append(row)
+    if not sendable:
         return (), tuple(unsendable)
 
-    film_ids = set(by_film)
-    film_of = {row.event_id: film_id for film_id, rs in by_film.items() for row in rs}
-    titles = {film_id: rs[0].title for film_id, rs in by_film.items()}
+    reaches = await _load_reaches(
+        session, user_id=user_id, event_ids=[row.event_id for row in sendable], settings=settings
+    )
+    film_ids = {row.film_id for row in sendable}
     directors = await _directors_for_films(session, film_ids)
     countries = await _production_countries_for_films(session, film_ids)
-    releases = await headline_releases(session, film_ids, today=today)
-    story_events = [
-        row.event_id for rs in by_film.values() for row in rs if row.provenance == "story"
-    ]
-    sources = await _first_sources(session, story_events)
-    following = await _load_following(
-        session, user_id=user_id, film_of=film_of, titles=titles, settings=settings
-    )
+    sources = await _first_sources(session, [row.event_id for row in sendable if row.has_story])
 
-    entries: list[DigestEntry] = []
-    for film_id, film_rows in by_film.items():
-        film = film_rows[0]
-        arc_stage = derive_arc_stage(film.film_status)
-        beats = [
-            DigestBeat(
-                notification_id=row.id,
-                event_id=row.event_id,
-                event_type=row.event_type,
-                created_at=row.created_at,
-                occurred_at=row.occurred_at,
-                confidence=row.confidence,
-                summary=row.summary,
-                source=sources.get(row.event_id) if row.provenance == "story" else CATALOG_SOURCE,
-            )
-            for row in film_rows
-        ]
-        entries.append(
-            DigestEntry(
-                film=DigestFilm(
-                    film_id=film_id,
-                    tmdb_id=film.tmdb_id,
-                    title=film.title,
-                    film_url=film_url(film.tmdb_id, film.title, settings.public_base_url),
-                    poster_url=poster_url(film.poster_path, settings.tmdb_image_base),
-                    lead_poster_url=poster_url(
-                        film.poster_path, settings.tmdb_image_base, size=LEAD_POSTER_SIZE
-                    ),
+    films: dict[UUID, DigestFilm] = {}
+    lines: list[DigestLine] = []
+    for row in sendable:
+        reached = reaches.get(row.event_id)
+        if not reached:
+            unsendable.append((row.id, "no follow reaches the event any more"))
+            continue
+        film = films.get(row.film_id)
+        if film is None:
+            film = films[row.film_id] = DigestFilm(
+                film_id=row.film_id,
+                tmdb_id=row.tmdb_id,
+                title=row.title,
+                film_url=film_url(row.tmdb_id, row.title, settings.public_base_url),
+                poster_url=poster_url(row.poster_path, settings.tmdb_image_base),
+                parenthetical=film_parenthetical(
+                    production_countries=countries.get(row.film_id, []),
+                    directors=directors.get(row.film_id, []),
+                    release_year=_release_year(row.release_date),
+                    arc_stage=derive_arc_stage(row.film_status),
                 ),
-                header=DigestHeader(
-                    parenthetical=film_parenthetical(
-                        production_countries=countries.get(film_id, []),
-                        directors=directors.get(film_id, []),
-                        release_year=_release_year(film.release_date),
-                        arc_stage=arc_stage,
-                    ),
-                    status=status_line(releases.get(film_id), arc_stage),
-                ),
-                following=following.get(film_id, ()),
-                beats=tuple(sorted(beats, key=beat_order_key)),
             )
+        beat = DigestBeat(
+            notification_id=row.id,
+            event_id=row.event_id,
+            event_type=row.event_type,
+            created_at=row.created_at,
+            occurred_at=row.occurred_at,
+            confidence=row.confidence,
+            summary=row.summary,
+            source=sources.get(row.event_id),
+            news_backed=row.has_story,
+            film=film,
         )
-    return rank_entries(entries), tuple(unsendable)
+        lines.extend(DigestLine(beat=beat, reach=reach) for reach in reached)
+    return tuple(lines), tuple(unsendable)
 
 
 async def _first_sources(session: AsyncSession, event_ids: list[UUID]) -> dict[UUID, DigestSource]:
-    """Each story card's first source in the order `EventOut.sources` lists them — newest
-    distinct outlet first (`cap_sources`) — named by outlet and linked (DC-5). A card with no
-    story row left is absent, and gets no source line."""
+    """Each story-covered card's first source in the order `EventOut.sources` lists them —
+    newest distinct outlet first (`cap_sources`) — named by outlet and linked (DC-5). A card
+    with no story row left is absent, and gets no source line."""
     first: dict[UUID, DigestSource] = {}
     for event_id, stories in (await _sources_by_event(session, event_ids)).items():
         capped = cap_sources(stories)
@@ -827,154 +1228,108 @@ async def _first_sources(session: AsyncSession, event_ids: list[UUID]) -> dict[U
     return first
 
 
-_ENTITY_TABLES: dict[str, type[Person] | type[ProductionCompany] | type[Collection]] = {
-    "person": Person,
-    "company": ProductionCompany,
-    "franchise": Collection,
-}
-_ENTITY_REFS = {"person": person_ref, "company": company_ref, "franchise": collection_ref}
-
-
-async def _load_following(
+async def _load_reaches(
     session: AsyncSession,
     *,
     user_id: UUID,
-    film_of: dict[UUID, UUID],
-    titles: dict[UUID, str],
+    event_ids: list[UUID],
     settings: Settings,
-) -> dict[UUID, tuple[DigestFollowing, ...]]:
-    """Per film, the follows that reached any of its beats in this batch (DC-6), named and
-    linked: `follow_attribution_pairs` narrowed to the batch's event ids, then one name lookup
-    per entity table. Person, studio, franchise, then by name; the title row last.
-
-    An entity id the catalog no longer holds is dropped from the line rather than rendered as
-    a bare number — a name nobody can read is worse than one fewer name."""
+) -> dict[UUID, tuple[DigestReach | None, ...]]:
+    """Per card, every follow of this user's that reached it (FB-25): `follow_attribution_pairs`
+    narrowed to the batch's event ids — the same pairs the timeline's rows are built from, so
+    the page and the mail cannot disagree — with the title arm as `None` and each entity arm
+    named and linked through `entity_names`, one lookup per entity table. An entity the catalog
+    cannot name keeps its line under the type's fallback headline (FB-10)."""
     pairs = follow_attribution_pairs(user_id).subquery("pairs")
-    rows = await session.execute(
-        select(pairs.c.entity_type, pairs.c.entity_id, pairs.c.event_id).where(
-            pairs.c.event_id.in_(list(film_of))
-        )
-    )
-    reached: dict[UUID, set[tuple[str, str]]] = {}
-    for entity_type, entity_id, event_id in rows:
-        reached.setdefault(film_of[event_id], set()).add((entity_type, entity_id))
-
-    wanted: dict[str, set[int]] = {}
-    for pairs_of_film in reached.values():
-        for entity_type, entity_id in pairs_of_film:
-            if entity_type in _ENTITY_TABLES and entity_id.isdigit():
-                wanted.setdefault(entity_type, set()).add(int(entity_id))
-    names: dict[tuple[str, int], str] = {}
-    for entity_type, ids in wanted.items():
-        table = _ENTITY_TABLES[entity_type]
-        for entity_id, name in await session.execute(
-            select(table.id, table.name).where(table.id.in_(ids))
-        ):
-            names[(entity_type, entity_id)] = name
-
-    base = settings.public_base_url.rstrip("/")
-    following: dict[UUID, tuple[DigestFollowing, ...]] = {}
-    for film_id, pairs_of_film in reached.items():
-        rows_of_film: list[DigestFollowing] = []
-        for entity_type, entity_id in pairs_of_film:
-            if entity_type == "title":
-                rows_of_film.append(DigestFollowing("title", titles[film_id], None))
-                continue
-            name = names.get((entity_type, int(entity_id))) if entity_id.isdigit() else None
-            if name is None:
-                continue
-            ref = _ENTITY_REFS[entity_type](int(entity_id), name)
-            url = f"{base}/{_FOLLOWING_ROUTES[entity_type]}/{ref}"
-            rows_of_film.append(DigestFollowing(entity_type, name, url))
-        following[film_id] = tuple(
-            sorted(
-                rows_of_film,
-                key=lambda f: (_FOLLOWING_ORDER.index(f.entity_type), f.name.casefold()),
-            )
-        )
-    return following
-
-
-async def load_slate(
-    session: AsyncSession, *, user_id: UUID, today: date, settings: Settings
-) -> tuple[SlateDay, ...]:
-    """The upcoming US dates for the films this user follows, soonest first (D-33).
-
-    The set is `follow_queries.title_follow_film_ids` — the films they asked for by name, and
-    only those (EF-14). A followed director contributes nothing: an entity follow delivers that
-    entity's attachment cards, not a place on a date list (EF-3). The same set the my-films
-    calendar and the `.ics` feed read, so the three cannot disagree about what is coming.
-
-    One governing date per (film, release type): the earliest `film_release_date` row in the
-    subject, cast to a UTC calendar date — the same collapse `public.service.get_calendar`
-    makes, restricted to `PRIMARY_REGION` because that is the only region every displayable
-    bucket is displayable in (`catalog.release_grade`). The window is `SLATE_WINDOW_DAYS`
-    dates starting today: a date that is today is still a date to know about, and the day
-    the count runs out is the first one left off.
-
-    The calendar's popularity, runtime and adult cuts are deliberately absent. Those keep noise
-    off a public listing; a film the user followed by name is not noise to them. A film with no
-    slug is skipped for the reason the decision pass skips it — no page to link.
-
-    Each row's marker is `load_slate_markers`' answer for its (film, bucket).
-    """
-    governing = (
-        select(
-            FilmReleaseDate.film_id.label("film_id"),
-            FilmReleaseDate.release_type.label("release_type"),
-            func.min(cast(func.timezone("UTC", FilmReleaseDate.release_date), Date)).label(
-                "governing_date"
-            ),
-        )
-        .where(
-            FilmReleaseDate.film_id.in_(title_follow_film_ids(user_id)),
-            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
-            FilmReleaseDate.release_type.in_(SLATE_RELEASE_TYPES),
-        )
-        .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
-        .cte("governing")
-    )
     rows = (
         await session.execute(
-            select(
-                governing.c.governing_date,
-                governing.c.release_type,
-                Film.id.label("film_id"),
-                Film.tmdb_id,
-                Film.title,
-                Film.poster_path,
-            )
-            .select_from(governing)
-            .join(Film, Film.id == governing.c.film_id)
-            .where(
-                governing.c.governing_date >= today,
-                governing.c.governing_date < today + timedelta(days=SLATE_WINDOW_DAYS),
-                Film.slug.is_not(None),
+            select(pairs.c.entity_type, pairs.c.entity_id, pairs.c.event_id).where(
+                pairs.c.event_id.in_(event_ids)
             )
         )
     ).all()
-    ordered = sorted(
-        rows,
-        key=lambda r: (
-            r.governing_date,
-            _SLATE_BUCKET_ORDER.index(RELEASE_TYPE_BUCKETS[r.release_type]),
-            r.title.casefold(),
-            r.tmdb_id,
-        ),
+    names = await entity_names(
+        session,
+        {(row.entity_type, row.entity_id) for row in rows if row.entity_type != "title"},
     )
-    markers = await load_slate_markers(session, film_ids={row.film_id for row in rows}, today=today)
-    by_day: dict[date, list[SlateItem]] = {}
-    for row in ordered:
-        by_day.setdefault(row.governing_date, []).append(
-            SlateItem(
-                title=row.title,
-                release_label=release_label(row.release_type),
-                film_url=film_url(row.tmdb_id, row.title, settings.public_base_url),
-                poster_url=poster_url(row.poster_path, settings.tmdb_image_base),
-                marker=markers.get((row.film_id, RELEASE_TYPE_BUCKETS[row.release_type])),
+    base = settings.public_base_url.rstrip("/")
+    reached: dict[UUID, list[DigestReach | None]] = {}
+    for entity_type, entity_id, event_id in rows:
+        if entity_type == "title":
+            reached.setdefault(event_id, []).append(None)
+            continue
+        resolved = names[(entity_type, entity_id)]
+        reached.setdefault(event_id, []).append(
+            DigestReach(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                name=None if resolved is None else resolved.name,
+                url=(
+                    None
+                    if resolved is None
+                    else f"{base}/{_ENTITY_ROUTES[entity_type]}/{resolved.ref}"
+                ),
             )
         )
-    return tuple(SlateDay(day=day, items=tuple(items)) for day, items in by_day.items())
+    return {event_id: tuple(reaches) for event_id, reaches in reached.items()}
+
+
+async def load_slate(session: AsyncSession, *, user_id: UUID, today: date) -> tuple[SlateDay, ...]:
+    """The my-films calendar for the slate window: the upcoming US dates for the films this
+    user follows by title, soonest first (D-33), as the calendar page builds them (FB-26).
+
+    Not a query of its own: `public.service._calendar_page` over the my-films governing CTE
+    (`title_follow_user_id`) and the my-films cuts (`_my_films_visible`), with the window's end
+    added. So the set, the governing-date collapse, the region, the slug rule, the within-date
+    order and every field a row shows are the calendar page's — the slate cannot name a date,
+    or describe a film, differently from it. The window is `SLATE_WINDOW_DAYS` dates starting
+    today: a date that is today is still a date to know about, and the day the count runs out
+    is the first one left off. The calendar pages by *date*, so a page of that many dates holds
+    the whole window.
+
+    Each row's marker is `load_slate_markers`' answer for its (film, bucket) — the one thing
+    the slate shows that the calendar page does not.
+    """
+    governing = _calendar_governing_cte(name="slate_governing", title_follow_user_id=user_id)
+    page = await _calendar_page(
+        session,
+        governing=governing,
+        visible=(
+            *_my_films_visible(governing, today=today),
+            governing.c.governing_date < today + timedelta(days=SLATE_WINDOW_DAYS),
+        ),
+        limit=SLATE_WINDOW_DAYS,
+        offset=0,
+    )
+    if not page.items:
+        return ()
+    # The calendar row addresses its film by ref, which `_calendar_page` mints from the tmdb id;
+    # the markers are keyed by the film's own id.
+    tmdb_by_ref = {item.film_ref: parse_film_ref(item.film_ref) for item in page.items}
+    id_by_tmdb = dict(
+        (
+            await session.execute(
+                select(Film.tmdb_id, Film.id).where(Film.tmdb_id.in_(set(tmdb_by_ref.values())))
+            )
+        )
+        .tuples()
+        .all()
+    )
+    film_id_by_ref = {
+        ref: id_by_tmdb[tmdb_id] for ref, tmdb_id in tmdb_by_ref.items() if tmdb_id in id_by_tmdb
+    }
+    markers = await load_slate_markers(session, film_ids=set(film_id_by_ref.values()), today=today)
+    return group_slate(
+        SlateItem(
+            calendar=item,
+            marker=(
+                markers.get((film_id, item.release_type))
+                if (film_id := film_id_by_ref.get(item.film_ref)) is not None
+                else None
+            ),
+        )
+        for item in page.items
+    )
 
 
 def slate_marker(changes: Iterable[str]) -> SlateMarker | None:
@@ -1023,7 +1378,7 @@ async def load_slate_markers(
         today - timedelta(days=SLATE_MARKER_DAYS - 1), time.min, tzinfo=UTC
     )
     window_end = datetime.combine(today + timedelta(days=1), time.min, tzinfo=UTC)
-    tokens = [f"{PRIMARY_REGION}:{bucket}" for bucket in _SLATE_BUCKET_ORDER]
+    tokens = [f"{PRIMARY_REGION}:{bucket}" for bucket in _CALENDAR_BUCKET_ORDER]
     rows = await session.execute(
         select(
             Event.id,
@@ -1091,40 +1446,39 @@ async def load_batch(
     section that must not be sent (D-39). `include_slate` overrides that rule when given —
     `render_digest` uses it to show a lapsed user's slate to an admin without touching the
     send path."""
-    entries, unsendable = await load_entries(
-        session, user_id=recipient.user_id, today=today, settings=settings
-    )
+    lines, unsendable = await load_lines(session, user_id=recipient.user_id, settings=settings)
     if include_slate is None:
         include_slate = carries_slate(cadence, today, settings) and recipient.deliverable
     slate: tuple[SlateDay, ...] = ()
     if include_slate:
-        slate = await load_slate(session, user_id=recipient.user_id, today=today, settings=settings)
-    return DigestBatch(recipient=recipient, entries=entries, unsendable=unsendable, slate=slate)
+        slate = await load_slate(session, user_id=recipient.user_id, today=today)
+    return DigestBatch(recipient=recipient, lines=lines, unsendable=unsendable, slate=slate)
 
 
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _headline(entry: DigestEntry) -> str:
-    """ "Heat 2 — casting": an entry as the subject and the preheader name it."""
-    return f"{entry.film.title} — {entry.lead_label.lower()}"
+def _headline(ranked: RankedFilm) -> str:
+    """ "Heat 2 — casting": a film as the subject and the preheader name it."""
+    return f"{ranked.film.title} — {ranked.lead_label.lower()}"
 
 
 def digest_subject(batch: DigestBatch) -> str:
-    """The subject line (DC-7): the lead film and its lead beat, how many more films, and
-    whether the slate is in — or, for a slate alone, how many dates. `N` counts every entry
-    past the lead, those past the cap included, so the subject and the cap line agree. Never
-    a count of beats.
+    """The subject line (DC-7, FB-22): the lead film and its lead beat, how many more films,
+    and whether the slate is in — or, for a slate alone, how many dates. `N` counts the other
+    distinct **films** across every reach — a film under two entity rows is one film — never
+    rows and never beats.
 
     Raises on an empty batch: `render_batch` never builds one, and a caller that skipped that
     check should fail loudly rather than send a subject about nothing."""
-    if not batch.entries:
+    ranked = rank_films(batch.beats)
+    if not ranked:
         if not batch.slate:
-            raise ValueError("a digest with no entries and no slate has no subject")
+            raise ValueError("a digest with no lines and no slate has no subject")
         return f"Your slate: {_plural(batch.slate_count, 'upcoming date')}"
-    subject = _headline(batch.entries[0])
-    more = len(batch.entries) - 1
+    subject = _headline(ranked[0])
+    more = len(ranked) - 1
     if more:
         subject += f", + {_plural(more, 'more film')}"
     if batch.slate:
@@ -1134,46 +1488,218 @@ def digest_subject(batch: DigestBatch) -> str:
 
 def digest_preheader(batch: DigestBatch) -> str:
     """The inbox preview text (DC-10): what the subject had no room for — the slate's size,
-    then up to two entries after the lead. Empty when there is nothing to add, and the
-    template then omits the element rather than rendering it empty."""
+    then up to two films after the lead, by the subject's ranking. Empty when there is nothing
+    to add, and the template then omits the element rather than rendering it empty."""
     parts: list[str] = []
     if batch.slate:
         parts.append(
             f"Your slate: {_plural(batch.slate_count, 'date')} in the next "
             f"{SLATE_WINDOW_DAYS} days."
         )
-    also = batch.entries[1:3]
+    also = rank_films(batch.beats)[1:3]
     if also:
-        parts.append("Also: " + "; ".join(_headline(entry) for entry in also))
+        parts.append("Also: " + "; ".join(_headline(ranked) for ranked in also))
     return " ".join(parts)
 
 
-def _entry_context(entry: DigestEntry, *, poster_url: str | None, today: date) -> dict[str, object]:
-    """One film entry as the template renders it, lead card and compact row alike — they
-    differ in layout and poster size only, and the size is the caller's choice."""
+def _film_context(film: DigestFilm) -> dict[str, object]:
+    return {"title": film.title, "parenthetical": film.parenthetical, "url": film.film_url}
+
+
+def _line_context(
+    beat: DigestBeat,
+    *,
+    names_film: bool,
+    show_label: bool,
+    show_marker: bool,
+    with_dates: bool,
+    today: date,
+) -> dict[str, object]:
+    """One line as the template renders it (FB-20). `prefix` is the bold lead — the date
+    (weekly only: the daily's day heading says it) and the beat label where the heading above
+    does not already name the type. `film` is set on an entity row's lines, which name their
+    film; a film row's lines do not, the row is headed by it."""
+    prefix = [short_date(beat.day, today=today)] if with_dates else []
+    if show_label:
+        prefix.append(beat.label)
     return {
-        "title": entry.film.title,
-        "film_url": entry.film.film_url,
-        "poster_url": poster_url,
-        "parenthetical": entry.header.parenthetical,
-        "status": entry.header.status,
-        "following": [{"name": f.name, "url": f.url} for f in entry.entity_following],
-        "beats": [
-            {
-                "date": short_date(beat.day, today=today),
-                "label": beat.label,
-                "unconfirmed": beat.confidence == "rumored",
-                "summary": beat.summary,
-                "source": (
-                    {"name": beat.source.name, "url": beat.source.url}
-                    if beat.source is not None
-                    else None
-                ),
-            }
-            for beat in entry.beats
-        ],
-        "credits_justwatch": entry.credits_justwatch,
+        "prefix": " · ".join(prefix) or None,
+        "unconfirmed": show_marker and beat.confidence == "rumored",
+        "film": _film_context(beat.film) if names_film else None,
+        "summary": beat.summary,
+        "source": (
+            {"name": beat.source.name, "url": beat.source.url} if beat.source is not None else None
+        ),
     }
+
+
+def _row_context(
+    row: DigestRow, *, news_backed: bool, show_label: bool, with_dates: bool, today: date
+) -> dict[str, object]:
+    """A film row (headed by the film, linked) or an entity row (headed by the entity, linked
+    when it has a page). Under In the news a film row credits JustWatch after its lines when
+    one of them is `now_available` (DC-17); under Not yet reported the Now available heading
+    does, once (NR-8), and an entity row never does (FB-3)."""
+    lines = [
+        _line_context(
+            beat,
+            names_film=row.reach is not None,
+            show_label=show_label,
+            # Not yet reported's heading carries "(unconfirmed)" for the whole section (NR-5).
+            show_marker=news_backed,
+            with_dates=with_dates,
+            today=today,
+        )
+        for beat in row.beats
+    ]
+    if row.reach is None:
+        return {
+            "film": _film_context(row.film),
+            "entity": None,
+            "lines": lines,
+            "credits_justwatch": news_backed and row.credits_justwatch,
+        }
+    return {
+        "film": None,
+        "entity": {"name": row.reach.headline, "url": row.reach.url},
+        "lines": lines,
+        "credits_justwatch": False,
+    }
+
+
+def _section_context(
+    section: DigestSection, *, block: str, with_dates: bool, today: date
+) -> dict[str, object]:
+    if section.news_backed:
+        return {
+            "label": IN_THE_NEWS_LABEL,
+            "qualifier": None,
+            "rows": [
+                _row_context(
+                    row, news_backed=True, show_label=True, with_dates=with_dates, today=today
+                )
+                for row in section.rows
+            ],
+            "update_types": [],
+        }
+    return {
+        "label": NOT_YET_REPORTED_LABEL,
+        "qualifier": NOT_YET_REPORTED_QUALIFIER,
+        "rows": [],
+        "update_types": [
+            {
+                "label": update_type.label,
+                "rows": [
+                    _row_context(
+                        row,
+                        news_backed=False,
+                        # A named heading says the type; Other updates names nothing (NR-5).
+                        show_label=update_type.key == OTHER_UPDATES,
+                        with_dates=with_dates,
+                        today=today,
+                    )
+                    for row in update_type.rows
+                ],
+                "credits_justwatch": block == FILMS_BLOCK and update_type.key == "now_available",
+            }
+            for update_type in section.update_types
+        ],
+    }
+
+
+def _posters_context(posters: Sequence[DigestFilm]) -> list[dict[str, object]]:
+    return [
+        {"title": film.title, "url": film.film_url, "poster_url": film.poster_url}
+        for film in posters
+    ]
+
+
+def _blocks_context(
+    blocks: Sequence[DigestBlock], *, with_dates: bool, today: date
+) -> list[dict[str, object]]:
+    return [
+        {
+            "label": block.label,
+            "sections": [
+                _section_context(section, block=block.key, with_dates=with_dates, today=today)
+                for section in block.sections
+            ],
+        }
+        for block in blocks
+    ]
+
+
+def _timeline_context(
+    lines: Sequence[DigestLine], *, cadence: DigestCadence, today: date
+) -> dict[str, object]:
+    """The "New on your timeline" half of the context: `days` for the daily (FB-18), `week`
+    for the weekly (FB-19), the other empty. A line carries its date exactly when no day
+    heading above it does — so in the weekly, always."""
+    if cadence == "daily":
+        return {
+            "days": [
+                {
+                    "heading": day_heading(d.day),
+                    "posters": _posters_context(d.posters),
+                    "blocks": _blocks_context(d.blocks, with_dates=False, today=today),
+                }
+                for d in group_days(lines)
+            ],
+            "week": None,
+        }
+    if not lines:
+        return {"days": [], "week": None}
+    week = group_week(lines)
+    return {
+        "days": [],
+        "week": {
+            "posters": _posters_context(week.posters),
+            "blocks": _blocks_context(week.blocks, with_dates=True, today=today),
+        },
+    }
+
+
+def _slate_context(days: Sequence[SlateDay], *, settings: Settings) -> list[dict[str, object]]:
+    """The slate half of the context (FB-26): month (headed only across a boundary) → date →
+    bucket → the calendar's film row, its fields as `CalendarFilmRow` shows them, plus the
+    marker. `films`, not `items`: Jinja resolves `bucket.items` to the dict method."""
+    return [
+        {
+            "heading": month.heading,
+            "days": [
+                {
+                    "heading": day_heading(d.day),
+                    "buckets": [
+                        {
+                            "label": bucket.label,
+                            "films": [
+                                {
+                                    "title": item.calendar.film_title,
+                                    "year": item.calendar.release_year,
+                                    "url": ref_url(
+                                        item.calendar.film_ref, settings.public_base_url
+                                    ),
+                                    "poster_url": poster_url(
+                                        item.calendar.poster_path,
+                                        settings.tmdb_image_base,
+                                        size=SLATE_POSTER_SIZE,
+                                    ),
+                                    "director": item.calendar.director,
+                                    "stars": " · ".join(item.calendar.stars),
+                                    "genres": " · ".join(item.calendar.genres),
+                                    "marker": item.marker,
+                                }
+                                for item in bucket.items
+                            ],
+                        }
+                        for bucket in d.buckets
+                    ],
+                }
+                for d in month.days
+            ],
+        }
+        for month in slate_months(days)
+    ]
 
 
 def digest_context(
@@ -1182,13 +1708,10 @@ def digest_context(
     """The `digest` template's context for one batch — the only place it is built. Every
     string the mail shows is decided here; the templates lay it out and compute nothing.
 
+    The daily is laid out by day (FB-18); the weekly by entry, its lines dated (FB-19).
+
     Raises `ValueError` (through `digest_subject`) for a batch with nothing to say:
     `render_batch` never builds one, so a caller that does has skipped that check."""
-    # The lead film renders as the lead card, every other entry as a compact row (DC-14).
-    # Split here rather than on `loop.first` in the template, so which entry leads is decided
-    # in the one place the subject's lead film is (DC-7).
-    rendered = batch.rendered_entries
-    lead = rendered[0] if rendered else None
     return {
         "product_name": settings.product_name,
         "display_name": batch.recipient.display_name,
@@ -1197,37 +1720,8 @@ def digest_context(
         "slate_window_days": SLATE_WINDOW_DAYS,
         "subject": digest_subject(batch),
         "preheader": digest_preheader(batch),
-        "slate": [
-            {
-                "heading": day_heading(d.day),
-                # `entries`, not `items`: Jinja resolves `day.items` to the dict method.
-                "entries": [
-                    {
-                        "title": item.title,
-                        "release_label": item.release_label,
-                        "film_url": item.film_url,
-                        "poster_url": item.poster_url,
-                        "marker": item.marker,
-                    }
-                    for item in d.items
-                ],
-            }
-            for d in batch.slate
-        ],
-        "lead": (
-            _entry_context(lead, poster_url=lead.film.lead_poster_url, today=today)
-            if lead is not None
-            else None
-        ),
-        "entries": [
-            _entry_context(entry, poster_url=entry.film.poster_url, today=today)
-            for entry in rendered[1:]
-        ],
-        "overflow": batch.overflow,
-        "overflow_line": (
-            f"and {_plural(batch.overflow, 'more film')} on your timeline" if batch.overflow else ""
-        ),
-        "timeline_url": f"{settings.public_base_url.rstrip('/')}/",
+        "slate": _slate_context(batch.slate, settings=settings),
+        **_timeline_context(batch.lines, cadence=cadence, today=today),
         "unsubscribe_url": recipient_unsubscribe_url(batch.recipient, settings),
     }
 
@@ -1384,7 +1878,7 @@ async def send_batch(
     catches, for the same reason: the two `RuntimeError`s are raised when the gateway *builds*
     its transport, on the first send of the process, and an unlikely configuration fault should
     mark a batch `failed` with a reason rather than crash the run that would have reported it.
-    Every row is marked `sent`, the ones past the cap included (DC-8)."""
+    Every row the mail carried is marked `sent`: nothing is cut (FB-21)."""
     unsendable_ids = [row_id for row_id, _ in batch.unsendable]
     item_ids = batch.item_ids
     if not batch.recipient.deliverable:

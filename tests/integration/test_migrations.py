@@ -10,15 +10,19 @@ schema. A missing constraint reads as one line of the assertion message, not a 3
 The head revision is also round-tripped (``downgrade -1`` → ``upgrade head``) so its
 ``downgrade()`` is proven to undo exactly what ``upgrade()`` did. Older downgrades are frozen
 history and not covered (``26f140c4f334`` cannot downgrade at all).
+
+Alembic runs in-process against each scratch database (``_alembic``), the same ``env.py`` the
+CLI runs, pointed at the scratch URL through ``Config.attributes``.
 """
 
+import asyncio
 import os
-import subprocess
-import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -29,19 +33,19 @@ _SCHEMAS = "'app', 'catalog', 'news', 'ingest'"
 Snapshot = set[tuple[object, ...]]
 
 
-def _alembic(url: str, *args: str) -> None:
-    # Alembic runs as a subprocess, never in-process: `migrations/env.py` calls `asyncio.run()`,
-    # which fails under pytest-asyncio's running session loop, and reads the URL from the
-    # lru-cached `get_settings()`, which conftest has already pointed at the test DB.
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", *args],
-        cwd=_REPO_ROOT,
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"alembic {' '.join(args)} failed:\n{result.stderr}")
+async def _alembic(url: str, cmd: str, revision: str) -> None:
+    # In-process, not a `python -m alembic` subprocess: each of those paid ~2.4 s of interpreter
+    # startup and model import that pytest has already paid (NEU-1507). Two things make that safe:
+    # - No config file name, so `env.py` skips `fileConfig(...)`, which would replace pytest's
+    #   log handlers and disable the app's loggers for the rest of the run.
+    # - `env.py` calls `asyncio.run()`, which fails under pytest-asyncio's running loop, so the
+    #   command runs in a worker thread, which has no running loop of its own.
+    # `env.py` prefers `attributes["url"]` to the lru-cached settings, which point at app_test.
+    config = Config()
+    config.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
+    config.attributes["url"] = url
+    run = {"upgrade": command.upgrade, "downgrade": command.downgrade}[cmd]
+    await asyncio.to_thread(run, config, revision)
 
 
 @pytest.fixture(scope="session")
@@ -59,7 +63,7 @@ async def migrated_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", "head")
+            await _alembic(url, "upgrade", "head")
             yield url
         finally:
             # Also on a failed upgrade -- the case this fixture exists to catch -- so a broken
@@ -131,8 +135,8 @@ async def test_migrations_build_the_model_schema(test_engine: AsyncEngine, migra
 async def test_head_migration_round_trips(test_engine: AsyncEngine, migrated_db_url: str):
     # The round-trip NEU-1346 had to do by hand: the head revision's downgrade must run, and
     # re-upgrading must land back on the model's schema. Ends at head, so test order is moot.
-    _alembic(migrated_db_url, "downgrade", "-1")
-    _alembic(migrated_db_url, "upgrade", "head")
+    await _alembic(migrated_db_url, "downgrade", "-1")
+    await _alembic(migrated_db_url, "upgrade", "head")
     model = await _snapshot(test_engine)
     migrated = await _migrated_snapshot(migrated_db_url)
     _assert_parity(model, migrated)
@@ -163,7 +167,7 @@ async def m8_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_M8)
+            await _alembic(url, "upgrade", _BEFORE_M8)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -237,7 +241,7 @@ async def test_the_m8_migration_turns_chosen_watchlist_rows_into_title_follows(m
                 """)
             )
 
-        _alembic(m8_db_url, "upgrade", "head")
+        await _alembic(m8_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             follows = (
@@ -308,7 +312,7 @@ async def binary_follows_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_BINARY_FOLLOWS)
+            await _alembic(url, "upgrade", _BEFORE_BINARY_FOLLOWS)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -361,7 +365,7 @@ async def test_the_binary_follow_migration_deletes_exactly_the_imported_person_f
                 """)
             )
 
-        _alembic(binary_follows_db_url, "upgrade", "head")
+        await _alembic(binary_follows_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             rows = (
@@ -414,7 +418,7 @@ async def dismissal_drop_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_DISMISSAL_DROP)
+            await _alembic(url, "upgrade", _BEFORE_DISMISSAL_DROP)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -464,7 +468,7 @@ async def test_the_dismissal_drop_takes_the_mutes_and_leaves_every_follow(
                 """)
             )
 
-        _alembic(dismissal_drop_db_url, "upgrade", "head")
+        await _alembic(dismissal_drop_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             exists = await conn.scalar(
@@ -508,7 +512,7 @@ async def credits_backfill_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_CREDITS_BACKFILL)
+            await _alembic(url, "upgrade", _BEFORE_CREDITS_BACKFILL)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -552,7 +556,7 @@ async def test_the_backfill_stamps_only_films_that_hold_credits(credits_backfill
                 """)
             )
 
-        _alembic(credits_backfill_db_url, "upgrade", "head")
+        await _alembic(credits_backfill_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             rows = (
@@ -595,7 +599,7 @@ async def unsubscribe_token_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_UNSUBSCRIBE_TOKEN)
+            await _alembic(url, "upgrade", _BEFORE_UNSUBSCRIBE_TOKEN)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -628,7 +632,7 @@ async def test_the_migration_gives_every_existing_settings_row_its_own_unsubscri
                 """)
             )
 
-        _alembic(unsubscribe_token_db_url, "upgrade", "head")
+        await _alembic(unsubscribe_token_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             tokens = (
@@ -666,7 +670,7 @@ async def digest_only_db_url() -> AsyncIterator[str]:
             await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
         url = scratch_url.render_as_string(hide_password=False)
         try:
-            _alembic(url, "upgrade", _BEFORE_DIGEST_ONLY)
+            await _alembic(url, "upgrade", _BEFORE_DIGEST_ONLY)
             yield url
         finally:
             async with admin.connect() as conn:
@@ -721,7 +725,7 @@ async def test_the_digest_only_migration_keeps_exactly_the_digest_email_rows(
                 """)
             )
 
-        _alembic(digest_only_db_url, "upgrade", "head")
+        await _alembic(digest_only_db_url, "upgrade", "head")
 
         async with engine.connect() as conn:
             rows = (await conn.execute(text("SELECT kind, channel FROM app.notification"))).all()
@@ -740,5 +744,326 @@ async def test_the_digest_only_migration_keeps_exactly_the_digest_email_rows(
                         ),
                         {"kind": kind, "channel": channel},
                     )
+    finally:
+        await engine.dispose()
+
+
+# --- the credit_removed split (NEU-1518) ----------------------------------------------------
+
+_BEFORE_REMOVAL_SPLIT = "b3e1c5a7d905"
+"""The revision immediately before `feb127488dae`, which splits every `credit_removed` card by
+role class into `cast_removed` / `crew_removed` and retires the type (NR-12)."""
+
+_FILM = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_MIXED = "11111111-1111-1111-1111-111111111111"
+_CAST_ONLY = "22222222-2222-2222-2222-222222222222"
+_CREW_ONLY = "33333333-3333-3333-3333-333333333333"
+_CASTING = "44444444-4444-4444-4444-444444444444"
+_CREW_ATTACHED = "55555555-5555-5555-5555-555555555555"
+_USER = "99999999-9999-9999-9999-999999999999"
+
+
+@pytest.fixture
+async def removal_split_db_url() -> AsyncIterator[str]:
+    """A scratch database stopped one revision short of the split, on the
+    `credits_backfill_db_url` pattern: the thing under test is the transition."""
+    test_url = make_url(os.environ["TEST_DATABASE_URL"])
+    scratch_url = test_url.set(database=f"{test_url.database}_removal_split")
+    scratch_db = scratch_url.database
+    admin = create_async_engine(test_url).execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+            await conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        url = scratch_url.render_as_string(hide_password=False)
+        try:
+            await _alembic(url, "upgrade", _BEFORE_REMOVAL_SPLIT)
+            yield url
+        finally:
+            async with admin.connect() as conn:
+                await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+    finally:
+        await admin.dispose()
+
+
+async def _seed_removal_cards(conn) -> None:
+    """Three `credit_removed` cards, carded the way the sweep carded them before the split:
+    one mixed (a writer and two actors at one observation, with a third actor the
+    prior-attachment gate dropped), one cast-only and one crew-only."""
+    await conn.execute(
+        text(f"INSERT INTO catalog.film (id, tmdb_id, title) VALUES ('{_FILM}', 1, 'Mixed')")
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO catalog.person (id, name) VALUES (1, 'D.C. Shen'), (2, 'Alan Bell'), "
+            "(3, 'Jack Black'), (4, 'Gated Out'), (5, 'Solo Director')"
+        )
+    )
+    await conn.execute(
+        text(f"""
+        INSERT INTO catalog.film_credit_change
+            (film_id, person_id, credit_type, job, change, changed_at)
+        VALUES ('{_FILM}', 1, 'crew', 'Screenplay', 'removed', '2026-08-01T00:00:00+00:00'),
+               ('{_FILM}', 2, 'cast', NULL, 'removed', '2026-08-01T00:00:00+00:00'),
+               ('{_FILM}', 3, 'cast', NULL, 'removed', '2026-08-01T00:00:00+00:00'),
+               ('{_FILM}', 4, 'crew', 'Director', 'removed', '2026-08-01T00:00:00+00:00'),
+               ('{_FILM}', 2, 'cast', NULL, 'removed', '2026-08-05T00:00:00+00:00'),
+               ('{_FILM}', 5, 'crew', 'Director', 'removed', '2026-08-09T00:00:00+00:00')
+        """)
+    )
+    await conn.execute(
+        text(f"""
+        INSERT INTO news.event (id, film_id, event_type, confidence, provenance, subject_key,
+                                occurred_at, created_at, updated_at)
+        VALUES ('{_MIXED}', '{_FILM}', 'credit_removed', 'rumored', 'catalog',
+                ARRAY['d.c. shen', 'alan bell', 'jack black'], '2026-08-01T00:00:00+00:00',
+                '2026-08-02T00:00:00+00:00', '2026-08-02T00:00:00+00:00'),
+               ('{_CAST_ONLY}', '{_FILM}', 'credit_removed', 'rumored', 'catalog',
+                ARRAY['alan bell'], '2026-08-05T00:00:00+00:00',
+                '2026-08-06T00:00:00+00:00', '2026-08-06T00:00:00+00:00'),
+               ('{_CREW_ONLY}', '{_FILM}', 'credit_removed', 'rumored', 'catalog',
+                ARRAY['solo director'], '2026-08-09T00:00:00+00:00',
+                '2026-08-10T00:00:00+00:00', '2026-08-10T00:00:00+00:00')
+        """)
+    )
+    await conn.execute(
+        text(f"""
+        INSERT INTO news.event (id, film_id, event_type, confidence, provenance, subject_key,
+                                occurred_at, status, superseded_by)
+        VALUES ('{_CASTING}', '{_FILM}', 'casting', 'rumored', 'catalog',
+                ARRAY['alan bell', 'jack black'], '2026-07-01T00:00:00+00:00',
+                'superseded', '{_MIXED}'),
+               ('{_CREW_ATTACHED}', '{_FILM}', 'crew_attached', 'rumored', 'catalog',
+                ARRAY['d.c. shen'], '2026-07-01T00:00:00+00:00', 'superseded', '{_MIXED}')
+        """)
+    )
+    await conn.execute(
+        text(f"""
+        INSERT INTO news.event_summary (event_id, summary, model, prompt_version,
+                                        source_updated_at)
+        VALUES ('{_MIXED}', :mixed_summary, 'deterministic', 'deterministic-8',
+                '2026-08-02T00:00:00+00:00'),
+               ('{_CAST_ONLY}', 'Alan Bell departs the cast.', 'deterministic',
+                'deterministic-8', '2026-08-06T00:00:00+00:00'),
+               ('{_CREW_ONLY}', 'Solo Director is no longer attached to direct.',
+                'deterministic', 'deterministic-8', '2026-08-10T00:00:00+00:00')
+        """),
+        {
+            "mixed_summary": (
+                "D.C. Shen is no longer attached to write. "
+                "Alan Bell and Jack Black depart the cast."
+            )
+        },
+    )
+    await conn.execute(
+        text(
+            f'INSERT INTO app."user" (id, email, password_hash, display_name) '
+            f"VALUES ('{_USER}', 'ada@example.com', 'x', 'Ada')"
+        )
+    )
+    await conn.execute(
+        text(f"""
+        INSERT INTO app.notification (user_id, event_id, kind, channel, status, sent_at)
+        VALUES ('{_USER}', '{_MIXED}', 'digest', 'email', 'sent', '2026-08-03T00:00:00+00:00')
+        """)
+    )
+
+
+async def test_the_split_retypes_single_class_cards_and_splits_a_mixed_one(
+    removal_split_db_url: str,
+):
+    """NR-12. The single-class cards keep everything but their type. The mixed card keeps its
+    id as the cast half; the crew half is new, with the original's timestamps, each half's body
+    re-rendered from its own class — names read from the credit rows, so "D.C. Shen" survives
+    the period a summary parse would have split on — and the person the gate dropped (on the
+    same observation's rows but not on the card) is on neither. The crew attachment the
+    original corrected now points at the crew half, and the sent digest row is sent for both."""
+    from upmovies.synthesize.deterministic import DETERMINISTIC_MODEL, TEMPLATE_VERSION
+
+    engine = create_async_engine(removal_split_db_url)
+    try:
+        async with engine.begin() as conn:
+            await _seed_removal_cards(conn)
+
+        await _alembic(removal_split_db_url, "upgrade", "head")
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT e.id::text, e.event_type, e.subject_key, e.occurred_at, "
+                        "e.created_at, s.summary, s.model, s.prompt_version "
+                        "FROM news.event e JOIN news.event_summary s ON s.event_id = e.id "
+                        "WHERE e.event_type IN ('cast_removed', 'crew_removed') "
+                        "ORDER BY e.occurred_at, e.event_type"
+                    )
+                )
+            ).all()
+            assert [(r.id, r.event_type, r.subject_key, r.summary) for r in rows] == [
+                (
+                    _MIXED,
+                    "cast_removed",
+                    ["alan bell", "jack black"],
+                    "Alan Bell and Jack Black depart the cast.",
+                ),
+                (
+                    rows[1].id,
+                    "crew_removed",
+                    ["d.c. shen"],
+                    "D.C. Shen is no longer attached to write.",
+                ),
+                (_CAST_ONLY, "cast_removed", ["alan bell"], "Alan Bell departs the cast."),
+                (
+                    _CREW_ONLY,
+                    "crew_removed",
+                    ["solo director"],
+                    "Solo Director is no longer attached to direct.",
+                ),
+            ]
+            crew_half = rows[1]
+            assert crew_half.id not in {_MIXED, _CAST_ONLY, _CREW_ONLY}
+            assert (crew_half.occurred_at, crew_half.created_at) == (
+                rows[0].occurred_at,
+                rows[0].created_at,
+            )
+            for half in rows[:2]:
+                assert (half.model, half.prompt_version) == (DETERMINISTIC_MODEL, TEMPLATE_VERSION)
+            # A single-class card's summary is untouched, down to its template version.
+            assert rows[2].prompt_version == "deterministic-8"
+
+            attachments = (
+                await conn.execute(
+                    text(
+                        "SELECT id::text, superseded_by::text FROM news.event "
+                        "WHERE event_type IN ('casting', 'crew_attached')"
+                    )
+                )
+            ).all()
+            links = {row.id: row.superseded_by for row in attachments}
+            assert links == {_CASTING: _MIXED, _CREW_ATTACHED: crew_half.id}
+
+            notifications = (
+                await conn.execute(
+                    text("SELECT event_id::text, status, sent_at FROM app.notification")
+                )
+            ).all()
+            assert sorted((n.event_id, n.status) for n in notifications) == sorted(
+                [(_MIXED, "sent"), (crew_half.id, "sent")]
+            )
+            assert len({n.sent_at for n in notifications}) == 1
+
+        with pytest.raises(Exception, match="ck_event_type"):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO news.event (film_id, event_type, confidence, occurred_at) "
+                        f"VALUES ('{_FILM}', 'credit_removed', 'rumored', now())"
+                    )
+                )
+
+        # The downgrade is lossy for the split pair: the crew half folds back into the cast
+        # half's id, names and references, and its summary is gone.
+        await _alembic(removal_split_db_url, "downgrade", _BEFORE_REMOVAL_SPLIT)
+
+        async with engine.connect() as conn:
+            removals = (
+                await conn.execute(
+                    text(
+                        "SELECT id::text, event_type, subject_key FROM news.event "
+                        "WHERE event_type NOT IN ('casting', 'crew_attached') ORDER BY occurred_at"
+                    )
+                )
+            ).all()
+            assert [tuple(r) for r in removals] == [
+                (_MIXED, "credit_removed", ["alan bell", "jack black", "d.c. shen"]),
+                (_CAST_ONLY, "credit_removed", ["alan bell"]),
+                (_CREW_ONLY, "credit_removed", ["solo director"]),
+            ]
+            crew_link = await conn.scalar(
+                text(f"SELECT superseded_by::text FROM news.event WHERE id = '{_CREW_ATTACHED}'")
+            )
+            assert crew_link == _MIXED
+            notified = (
+                await conn.execute(text("SELECT event_id::text FROM app.notification"))
+            ).all()
+            assert [n.event_id for n in notified] == [_MIXED]
+    finally:
+        await engine.dispose()
+
+
+async def test_the_split_fails_naming_a_card_whose_name_has_no_credit_row(
+    removal_split_db_url: str,
+):
+    """The history table is the only record of who was which class, so a name it cannot place
+    stops the migration rather than being guessed at from the summary."""
+    ghost = "66666666-6666-6666-6666-666666666666"
+    engine = create_async_engine(removal_split_db_url)
+    try:
+        async with engine.begin() as conn:
+            await _seed_removal_cards(conn)
+            await conn.execute(
+                text(f"""
+                INSERT INTO news.event (id, film_id, event_type, confidence, provenance,
+                                        subject_key, occurred_at)
+                VALUES ('{ghost}', '{_FILM}', 'credit_removed', 'rumored', 'catalog',
+                        ARRAY['nobody recorded'], '2026-08-20T00:00:00+00:00')
+                """)
+            )
+
+        with pytest.raises(RuntimeError, match=ghost):
+            await _alembic(removal_split_db_url, "upgrade", "head")
+
+        # Transactional DDL: nothing the failed run did is left behind.
+        async with engine.connect() as conn:
+            remaining = await conn.scalar(
+                text("SELECT count(*) FROM news.event WHERE event_type = 'credit_removed'")
+            )
+            assert remaining == 4
+    finally:
+        await engine.dispose()
+
+
+async def test_the_split_fails_on_a_mixed_reading_its_summary_never_said(
+    removal_split_db_url: str,
+):
+    """The old flap gate dropped credits per (person, role), which the name filter cannot see:
+    an actor-director whose director credit flapped back while their cast exit stuck is on the
+    card, so both of their rows match. The card the sweep wrote only ever said they left the
+    cast, so splitting it would invent a crew departure; the migration stops instead."""
+    flapped = "77777777-7777-7777-7777-777777777777"
+    engine = create_async_engine(removal_split_db_url)
+    try:
+        async with engine.begin() as conn:
+            await _seed_removal_cards(conn)
+            await conn.execute(
+                text("INSERT INTO catalog.person (id, name) VALUES (6, 'Greta Gerwig')")
+            )
+            await conn.execute(
+                text(f"""
+                INSERT INTO catalog.film_credit_change
+                    (film_id, person_id, credit_type, job, change, changed_at)
+                VALUES ('{_FILM}', 6, 'cast', NULL, 'removed', '2026-08-20T00:00:00+00:00'),
+                       ('{_FILM}', 6, 'crew', 'Director', 'removed', '2026-08-20T00:00:00+00:00')
+                """)
+            )
+            await conn.execute(
+                text(f"""
+                INSERT INTO news.event (id, film_id, event_type, confidence, provenance,
+                                        subject_key, occurred_at)
+                VALUES ('{flapped}', '{_FILM}', 'credit_removed', 'rumored', 'catalog',
+                        ARRAY['greta gerwig'], '2026-08-20T00:00:00+00:00')
+                """)
+            )
+            await conn.execute(
+                text(f"""
+                INSERT INTO news.event_summary (event_id, summary, model, prompt_version,
+                                                source_updated_at)
+                VALUES ('{flapped}', 'Greta Gerwig departs the cast.', 'deterministic',
+                        'deterministic-8', '2026-08-20T00:00:00+00:00')
+                """)
+            )
+
+        with pytest.raises(RuntimeError, match=flapped):
+            await _alembic(removal_split_db_url, "upgrade", "head")
     finally:
         await engine.dispose()

@@ -30,8 +30,9 @@ sweep pass)**, not per observation: six cast members whose holds expire in the s
 one `casting` card naming all six, dated at the latest `changed_at` among them.
 `uq_event_catalog_change` — one catalog event per film, type and timestamp — still holds,
 because the group carries exactly one timestamp. Detachments are *not* collapsed this way:
-they never pass through quarantine, so they keep the per-observation discipline of one
-`credit_removed` card per (film, changed_at).
+they never pass through quarantine, so they keep the per-observation discipline of one card
+per (film, changed_at, role class) — `cast_removed` for the cast, `crew_removed` for everyone
+else (NR-10, NEU-1518).
 
 **An attachment is quarantined before it cards** (ADR-0017, D-3). A `change='added'` row is
 eligible only once it has survived `SWEEP_CREDIT_QUARANTINE_HOURS` *and* the credit is still
@@ -55,12 +56,12 @@ exactly the kind a human has to be able to point at and override. Birth and deat
 fetched lazily from `/person/{id}`, once, only for people a card is about to name.
 
 **A removal card supersedes the attachment card it corrects** (ADR-0017, D-2). Carding a
-`credit_removed` event marks, for each person it names, their most recent published
-attachment card (`crew_attached`/`casting`, any provenance, occurred before the removal)
-`superseded` and points its `superseded_by` at the removal. The original stays on every
-surface; the marker is the only change. A re-attachment after that is a fresh `published`
-card — removal-aware suppression already lets it through — so attach → remove → re-attach
-reads superseded, published, published.
+`cast_removed` / `crew_removed` event marks, for each person it names, their most recent published
+attachment card *of the same class* (`casting` / `crew_attached`, any provenance, occurred before
+the removal) `superseded` and points its `superseded_by` at the removal. The original stays on every
+surface; the marker is the only change. A re-attachment after that is a fresh `published` card —
+removal-aware suppression already lets it through — so attach → remove → re-attach reads superseded,
+published, published.
 
 Contract with the pipeline conventions, matching the other phases: one session per item
 so a failure never rolls back the others, `record_progress` against the run id, abort after N
@@ -100,9 +101,11 @@ from upmovies.ingest.tmdb.credit_history import CREDIT_ADDED, CREDIT_REMOVED
 from upmovies.ingest.tmdb.upsert import ensure_person_details
 from upmovies.news.attachment_confirm import stamp_prior_story_cards
 from upmovies.news.catalog_events import (
-    CREDIT_EVENT_TYPES,
-    CREDIT_REMOVED_EVENT_TYPE,
+    CREDIT_ATTACHMENT_EVENT_TYPES,
+    CREDIT_DETACHMENT_EVENT_TYPES,
+    CREDIT_REMOVAL_EVENT_TYPES,
     CREDIT_ROLE_EVENT_TYPES,
+    credit_removal_event_type,
 )
 from upmovies.news.models import PERSON_KIND, Event
 from upmovies.news.subject_key import normalize_name
@@ -237,9 +240,12 @@ class DetachedCredit:
 
 @dataclass(frozen=True)
 class DetachmentGroup:
-    """The credits one observation of one film detached, and the single event they card as."""
+    """The credits of one role class one observation of one film detached, and the single
+    event they card as."""
 
     film_id: UUID
+    event_type: str
+    """`cast_removed` or `crew_removed` — the class every credit in the group shares."""
     changed_at: datetime
     credits: tuple[DetachedCredit, ...]
 
@@ -882,9 +888,10 @@ async def _already_carded(
 async def _latest_credit_event_types(
     session: AsyncSession, *, film_id: UUID, event_type: str
 ) -> dict[str, str]:
-    """Per-person latest event type among `(event_type, 'credit_removed')`, keyed by
-    normalized name. One query, no per-person roundtrips."""
-    types = (event_type, CREDIT_REMOVED_EVENT_TYPE)
+    """Per-person latest event type among `event_type` and the removal type of its class
+    (`casting` / `cast_removed`, `crew_attached` / `crew_removed`), keyed by normalized name.
+    One query, no per-person roundtrips."""
+    types = (event_type, CREDIT_REMOVAL_EVENT_TYPES[event_type])
     stmt = (
         select(Event.subject_key, Event.event_type, Event.occurred_at, Event.created_at)
         .where(
@@ -912,8 +919,8 @@ async def _uncarded_attachments(
     """The attachments in a group that should still be carded for this beat.
 
     Removal-aware (NEU-1200): for each person, look up the most recent event among
-    their own attachment type and `credit_removed`. Suppress only if it's an attachment —
-    a removal or no prior card means the re-attachment is news.
+    their own attachment type and that type's removal (NR-10). Suppress only if it's an
+    attachment — a removal or no prior card means the re-attachment is news.
 
     Invariant: *the latest card for a person reflects their current attachment state.*
 
@@ -928,7 +935,7 @@ async def _uncarded_attachments(
     kept: list[AttachedCredit] = []
     for a in attachments:
         latest = latest_types.get(normalize_name(a.name))
-        if latest is None or latest == CREDIT_REMOVED_EVENT_TYPE:
+        if latest is None or latest in CREDIT_DETACHMENT_EVENT_TYPES:
             kept.append(a)
     return tuple(kept)
 
@@ -1183,28 +1190,41 @@ async def load_detachment_backlog(
 
 
 def group_detachments(detachments: list[DetachedCredit]) -> list[DetachmentGroup]:
-    """One group — and so one event — per (film, observation). Pure.
+    """One group — and so one event — per (film, observation, role class). Pure.
 
-    All roles share one group because `credit_removed` is a single event type and
-    `uq_event_catalog_change` allows one catalog event per film, type and timestamp.
+    The class is the removal type the role cards as (NR-10): a director and a writer departing
+    in one observation share a `crew_removed` card, as they would share a `crew_attached` one,
+    while an actor departing in the same observation gets a `cast_removed` card of their own.
+    `uq_event_catalog_change` allows one catalog event per film, type and timestamp, so the two
+    classes can only both card because they are different types.
     """
-    groups: dict[tuple[UUID, datetime], list[DetachedCredit]] = {}
+    groups: dict[tuple[UUID, datetime, str], list[DetachedCredit]] = {}
     for detached in detachments:
-        groups.setdefault((detached.film_id, detached.changed_at), []).append(detached)
+        key = (detached.film_id, detached.changed_at, credit_removal_event_type(detached.role))
+        groups.setdefault(key, []).append(detached)
     return [
-        DetachmentGroup(film_id=film_id, changed_at=changed_at, credits=tuple(credits))
-        for (film_id, changed_at), credits in groups.items()
+        DetachmentGroup(
+            film_id=film_id, event_type=event_type, changed_at=changed_at, credits=tuple(credits)
+        )
+        for (film_id, changed_at, event_type), credits in groups.items()
     ]
 
 
 async def _has_prior_attachment_card(
-    session: AsyncSession, *, film_id: UUID, person_name: str, before: datetime
+    session: AsyncSession,
+    *,
+    film_id: UUID,
+    attachment_type: str,
+    person_name: str,
+    before: datetime,
 ) -> bool:
-    """Whether a visible attachment card exists for this person before `before`."""
+    """Whether a visible attachment card of `attachment_type` — the type the removal being
+    carded corrects — exists for this person before `before`. Per class (NR-10): an actor who
+    was only ever carded as a director has no cast departure to report."""
     norm = normalize_name(person_name)
     carded = exists().where(
         Event.film_id == film_id,
-        Event.event_type.in_(CREDIT_EVENT_TYPES),
+        Event.event_type == attachment_type,
         Event.subject_key.any(norm),  # pyright: ignore[reportArgumentType]
         Event.occurred_at < before,
     )
@@ -1214,8 +1234,9 @@ async def _has_prior_attachment_card(
 async def supersede_prior_attachment_cards(session: AsyncSession, *, removal: Event) -> int:
     """Mark the attachment card each person named on `removal` was current on (D-2).
 
-    Per name on the removal's `subject_key`: the most recent *published* attachment card
-    (`crew_attached`/`casting`, any provenance) that occurred before the removal is set
+    Per name on the removal's `subject_key`: the most recent *published* attachment card of
+    the removal's class (`casting` for `cast_removed`, `crew_attached` for `crew_removed`, any
+    provenance; NR-10) that occurred before the removal is set
     `superseded` with `superseded_by` pointing at the removal. Only the most recent one — an
     older card the same person is on (a trade-story casting card before the catalog carded
     them, say) was already the earlier claim, not the one this removal corrects. Nothing is
@@ -1231,13 +1252,14 @@ async def supersede_prior_attachment_cards(session: AsyncSession, *, removal: Ev
     # first UPDATE ahead of the next name's query, and a card two departing people share
     # would then fail the `published` filter for the second — handing back an *older* card
     # that person is on, which is not the one this removal corrects.
+    attachment_type = CREDIT_ATTACHMENT_EVENT_TYPES[removal.event_type]
     targets: dict[UUID, Event] = {}
     for name in removal.subject_key or []:
         stmt = (
             select(Event)
             .where(
                 Event.film_id == removal.film_id,
-                Event.event_type.in_(CREDIT_EVENT_TYPES),
+                Event.event_type == attachment_type,
                 Event.subject_key.any(name),  # pyright: ignore[reportArgumentType]
                 Event.status == "published",
                 Event.occurred_at < removal.occurred_at,
@@ -1303,7 +1325,7 @@ async def _card_detachment_group(
     if await _already_carded(
         session,
         film_id=group.film_id,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=group.event_type,
         changed_at=group.changed_at,
     ):
         return False
@@ -1313,11 +1335,17 @@ async def _card_detachment_group(
     if dwell_days > 0 and eligible_at > now:
         return False
 
-    # Gate 1: keep only people with a prior visible attachment card before this detachment.
+    # Gate 1: keep only people with a prior visible attachment card of this class before this
+    # detachment.
+    attachment_type = CREDIT_ATTACHMENT_EVENT_TYPES[group.event_type]
     prior_attached: list[DetachedCredit] = []
     for c in group.credits:
         if await _has_prior_attachment_card(
-            session, film_id=group.film_id, person_name=c.name, before=group.changed_at
+            session,
+            film_id=group.film_id,
+            attachment_type=attachment_type,
+            person_name=c.name,
+            before=group.changed_at,
         ):
             prior_attached.append(c)
 
@@ -1343,7 +1371,7 @@ async def _card_detachment_group(
 
     event = Event(
         film_id=group.film_id,
-        event_type=CREDIT_REMOVED_EVENT_TYPE,
+        event_type=group.event_type,
         confidence="rumored",
         provenance="catalog",
         occurred_at=group.changed_at,

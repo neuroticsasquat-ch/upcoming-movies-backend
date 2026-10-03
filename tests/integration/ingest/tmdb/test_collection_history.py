@@ -24,8 +24,15 @@ DUNE = {"id": 726871, "name": "Dune Collection"}
 ALIEN = {"id": 8091, "name": "Alien Collection"}
 
 
+# Undated and unreleased, because admission writes attachments for an unreleased film only
+# (NEU-1505); `make_details` defaults to a released one.
+UNRELEASED = {"status": "Planned", "release_date": None}
+
+
 def _details(tmdb_id: int, collection: dict | None = None) -> TMDBMovieDetails:
-    return TMDBMovieDetails.model_validate(make_details(tmdb_id, belongs_to_collection=collection))
+    return TMDBMovieDetails.model_validate(
+        make_details(tmdb_id, **UNRELEASED, belongs_to_collection=collection)
+    )
 
 
 async def _collection_changes(session, tmdb_id: int) -> list[FilmFieldChange]:

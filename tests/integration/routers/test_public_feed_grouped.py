@@ -752,7 +752,7 @@ async def test_feed_grouped_day_key_still_created_at(client, make_film, add_even
     film = await make_film(slug="feed-day-2026")
     await add_event(
         film=film,
-        event_type="credit_removed",
+        event_type="cast_removed",
         summary="Maya Boyd departs the cast.",
         created_at=datetime(2026, 6, 3, 20, tzinfo=UTC),  # carded June 3
         occurred_at=datetime(2026, 6, 1, 9, tzinfo=UTC),  # happened June 1
@@ -1010,7 +1010,7 @@ async def test_grouped_events_carry_status_superseded_by_and_occurred_at(
     day = datetime(2026, 6, 1, tzinfo=UTC)
     removal = await add_event(
         film=film,
-        event_type="credit_removed",
+        event_type="crew_removed",
         summary="No longer directing.",
         created_at=day,
         occurred_at=datetime(2026, 5, 2, tzinfo=UTC),
@@ -1035,8 +1035,8 @@ async def test_grouped_events_carry_status_superseded_by_and_occurred_at(
     assert attachment["superseded_by"] == str(removal.id)
     assert attachment["occurred_at"] == "2026-05-01T00:00:00Z"
 
-    assert events["credit_removed"]["status"] == "published"
-    assert events["credit_removed"]["superseded_by"] is None
+    assert events["crew_removed"]["status"] == "published"
+    assert events["crew_removed"]["superseded_by"] is None
 
 
 async def test_a_news_backed_trailer_row_carries_the_video_key(client, make_film, add_event):
