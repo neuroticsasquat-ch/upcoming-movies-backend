@@ -29,6 +29,12 @@ updates:
       prefix: build
       prefix-development: build
       include: scope
+    ignore:
+      # SQLAlchemy 2.1 types Select/Row with TypeVarTuple, which breaks pyright repo-wide
+      # (Select[int] vs Select[tuple[int]]). pyproject pins <2.1; drop this once the 2.1
+      # typing migration is done on purpose.
+      - dependency-name: sqlalchemy
+        versions: [">=2.1.0"]
     groups:
       minor-and-patch:
         update-types:
