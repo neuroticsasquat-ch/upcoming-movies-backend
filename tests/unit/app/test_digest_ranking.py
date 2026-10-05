@@ -29,7 +29,6 @@ from upmovies.app.services.digest_sender import (
     beat_order_key,
     carries_slate,
     change_from_summary,
-    day_posters,
     digest_context,
     digest_preheader,
     digest_subject,
@@ -243,16 +242,19 @@ def test_film_entries_rank_by_significance_then_title_and_entity_entries_by_name
     assert _titles(people.sections[0].rows) == ["Bea", "Zed"]
 
 
-def test_the_week_has_one_poster_strip_over_its_films_news_backed_first():
+def test_the_week_has_one_poster_strip_in_its_reading_order():
+    """NEU-1533: a film with cards on two days is one entry under each update type it touched,
+    and one poster, at its first; a People news film follows every Films entry."""
     week = group_week(
         [
-            _title(_beat("Arrival", created_at=T0)),
-            _title(_beat("Zodiac", news=True, created_at=T0 - timedelta(days=3))),
-            _via(_reach("company", "A24"), _beat("Arrival", created_at=T0 - timedelta(days=1))),
+            _via(_reach("person", "Ada"), _beat("Zodiac", news=True, created_at=T0)),
+            _title(_beat("Arrival", "casting", created_at=T0)),
+            _title(_beat("Heat 2", "casting", created_at=T0)),
+            _title(_beat("Heat 2", "release_date", created_at=T0 - timedelta(days=3))),
         ]
     )
 
-    assert [film.title for film in week.posters] == ["Zodiac", "Arrival"]
+    assert [film.title for film in week.posters] == ["Heat 2", "Arrival", "Zodiac"]
 
 
 def test_blocks_come_in_their_fixed_order_and_an_empty_one_is_left_out():
@@ -436,21 +438,27 @@ def test_entities_use_attached_detached_canceled_other():
 # --- the poster strip (FB-7) -------------------------------------------------------------
 
 
-def test_the_strip_leads_with_news_backed_films_de_duplicated_and_capped():
+def test_the_strip_follows_the_days_reading_order_de_duplicated_and_capped():
+    """NEU-1533: each film at its first appearance as the day reads — a Films-block Not yet
+    reported film ahead of a People-block news film, Release date ahead of Cast whatever the
+    titles, a film reached twice once."""
     _film("No Poster", poster=False)
-    lines = [
-        _title(_beat("Zodiac", news=True)),
-        _title(_beat("Arrival", news=False)),
-        _via(_reach("person", "Ada"), _beat("Arrival", news=False)),
-        _title(_beat("No Poster")),
-        *(_title(_beat(f"Film {n}")) for n in range(10)),
-    ]
+    ada = _reach("person", "Ada")
+    (day,) = group_days(
+        [
+            _via(ada, _beat("Zodiac", news=True)),
+            _title(_beat("Arrival", "casting")),
+            _title(_beat("Heat 2", "release_date")),
+            _via(ada, _beat("Arrival")),
+            _title(_beat("No Poster", "release_date")),
+            *(_via(_reach("company", "A24"), _beat(f"Film {n}")) for n in range(10)),
+        ]
+    )
 
-    posters = day_posters(lines)
-
-    assert len(posters) == MAX_DAY_POSTERS
-    assert [p.title for p in posters[:3]] == ["Zodiac", "Arrival", "Film 0"]
-    assert "No Poster" not in [p.title for p in posters]
+    titles = [p.title for p in day.posters]
+    assert titles[:3] == ["Heat 2", "Arrival", "Zodiac"]
+    assert len(titles) == MAX_DAY_POSTERS == len(set(titles))
+    assert "No Poster" not in titles
 
 
 def test_a_day_of_only_entity_rows_still_has_a_strip():
