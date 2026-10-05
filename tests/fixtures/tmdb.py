@@ -232,3 +232,26 @@ def make_videos(tmdb_id: int, videos: list[dict[str, Any]] | None = None) -> dic
     """A `/movie/{id}/videos` payload. No videos yields an empty `results` — TMDB's 200 for a
     film with nothing to watch yet, which is the ordinary answer for an unreleased title."""
     return {"id": tmdb_id, "results": videos or []}
+
+
+def make_release_dates(tmdb_id: int, *releases: tuple[str, int, str]) -> dict[str, Any]:
+    """A `/movie/{id}/release_dates` payload, one `(iso_3166_1, type, "YYYY-MM-DD")` per
+    release, grouped by country the way TMDB groups them. No releases yields an empty
+    `results`."""
+    by_country: dict[str, list[dict[str, Any]]] = {}
+    for country, release_type, when in releases:
+        by_country.setdefault(country, []).append(
+            {
+                "certification": "",
+                "iso_639_1": "",
+                "note": "",
+                "release_date": f"{when}T00:00:00.000Z",
+                "type": release_type,
+            }
+        )
+    return {
+        "id": tmdb_id,
+        "results": [
+            {"iso_3166_1": country, "release_dates": rows} for country, rows in by_country.items()
+        ],
+    }

@@ -203,6 +203,66 @@ async def test_separate_observations_stay_separate_cards(session, session_factor
     assert len(await _events(session, film)) == 2
 
 
+# --- a date already past when observed is not news (D-1532.6) ----------------
+
+
+async def test_a_date_already_past_when_observed_cards_nothing(session, session_factory, run_id):
+    """A released film's theatrical catch-up, entered months late: true, and not news."""
+    film = await add_film(session, 1)
+    await _change(session, film, new=NOW.date() - timedelta(days=1), changed_at=NOW)
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert (result.events_created, result.past, result.skipped) == (0, 1, 0)
+    assert await _events(session, film) == []
+
+
+async def test_a_date_set_for_the_day_it_was_observed_still_cards(session, session_factory, run_id):
+    film = await add_film(session, 1)
+    await _change(session, film, new=NOW.date(), changed_at=NOW)
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert (result.events_created, result.past) == (1, 0)
+
+
+async def test_a_mixed_observation_cards_only_its_upcoming_moves(session, session_factory, run_id):
+    """A released film read for the first time since it opened: the US wide date it opened on
+    moved in the same observation as a US digital date still to come. Only the digital date is
+    news, and the card must not name the other."""
+    film = await add_film(session, 1)
+    await _change(session, film, release_type=3, new=date(2026, 7, 29), changed_at=NOW)
+    await _change(session, film, release_type=4, new=date(2026, 10, 14), changed_at=NOW)
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert (result.events_created, result.past) == (1, 0)
+    (event,) = await _events(session, film)
+    assert event.subject_key == ["US:digital"]
+    summary = await _summary(session, event)
+    assert summary.summary == "US digital release date set to 14 October 2026."
+
+
+async def test_a_change_is_judged_as_of_its_observation_not_the_carding_day(
+    session, session_factory, run_id
+):
+    """A backlog worked through after an outage must not lose a beat to the delay: a date
+    still to come when TMDB recorded it cards, even if it has passed by the time we card."""
+    film = await add_film(session, 1)
+    seen = NOW - timedelta(days=4)
+    await _change(session, film, new=NOW.date() - timedelta(days=2), changed_at=seen)
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert (result.events_created, result.past) == (1, 0)
+    (event,) = await _events(session, film)
+    assert event.occurred_at == seen
+
+
 async def test_an_origin_country_date_is_tagged_with_its_own_region(
     session, session_factory, run_id
 ):

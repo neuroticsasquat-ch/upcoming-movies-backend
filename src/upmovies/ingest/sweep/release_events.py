@@ -1,7 +1,19 @@
 """The sweep phase that cards displayable release-date changes (NEU-1121, ADR-0014).
 
 Reads `catalog.film_release_date_change` — the history `ingest.tmdb.release_date_history`
-writes from the release-date rebuild — and turns each observation into one event.
+writes from the release-date rebuild — and turns each observation into one event. Two passes
+write those rows through the same `rebuild_release_dates`: the full upsert, for a film still in
+play, and the providers run's release-date poll (`ingest.release_dates`, NEU-1532), for one
+that has opened — the only reader a US digital or physical date set after release has (D-26).
+
+**A date already past when observed is not news** (D-1532.6). A move whose new governing date
+is before the UTC day of its own observation (`changed_at`, not the carding day — a backlog
+worked through after an outage judges each change as of when it was seen) cards nothing. A
+group left empty is counted as `past`; a mixed group cards its surviving moves only. The rule
+is vacuous for an in-play film — every displayable date is on or after the primary date, which
+is on or after today — and on a released film it sorts exactly the right way: a theatrical
+catch-up entered months late and a digital date the film is already streaming under stay
+silent, an upcoming US home release cards.
 
 **Why this exists as its own phase.** Release-date events used to come free from
 `sweep.field_events`, off the `film_field_change` trigger on `catalog.film.release_date`. Free
@@ -30,8 +42,8 @@ consecutive failures, and **no `finalize_run`** — every phase shares one `inge
 """
 
 import logging
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, exists, or_, select
@@ -107,6 +119,10 @@ class ReleaseEventResult:
     events_created: int = 0
     skipped: int = 0
     """Observations already carded — the rolling window's re-read doing its job."""
+    past: int = 0
+    """Observations every move of which named a date already past when it was observed
+    (D-1532.6), so they carded nothing. Where a released film's late theatrical catch-ups and
+    already-streaming digital dates land."""
     failures: int = 0
     aborted: bool = False
     abort_error: str | None = None
@@ -165,6 +181,21 @@ def group_moves(moves: list[ReleaseDateMove]) -> list[ReleaseDateGroup]:
         ReleaseDateGroup(film_id=film_id, changed_at=changed_at, moves=tuple(items))
         for (film_id, changed_at), items in grouped.items()
     ]
+
+
+def without_past_moves(group: ReleaseDateGroup) -> ReleaseDateGroup | None:
+    """The group cut to the moves whose new date had not passed when it was observed, or None
+    if none had not (D-1532.6). Pure.
+
+    Judged against the UTC day of `changed_at` — the observation's own day, so a change
+    worked through late is not penalised for the delay — and inclusive of it: a date set for
+    the day it was seen is still news that morning.
+    """
+    observed_on = group.changed_at.astimezone(UTC).date()
+    upcoming = tuple(m for m in group.moves if m.new_date >= observed_on)
+    if not upcoming:
+        return None
+    return group if len(upcoming) == len(group.moves) else replace(group, moves=upcoming)
 
 
 def render_change(move: ReleaseDateMove) -> ReleaseDateChanged:
@@ -276,7 +307,11 @@ async def run_release_date_events(
         since.isoformat(),
     )
 
-    for group in groups:
+    for observed in groups:
+        group = without_past_moves(observed)
+        if group is None:
+            result.past += 1
+            continue
         await heartbeat.tick()
         try:
             async with owned_session(session_factory) as s:
@@ -311,10 +346,11 @@ async def run_release_date_events(
             result.skipped += 1
 
     log.info(
-        "release events: %d carded from %d changes, %d skipped, %d failed, markets %s",
+        "release events: %d carded from %d changes, %d skipped, %d past, %d failed, markets %s",
         result.events_created,
         result.changes_read,
         result.skipped,
+        result.past,
         result.failures,
         sorted(result.markets),
     )

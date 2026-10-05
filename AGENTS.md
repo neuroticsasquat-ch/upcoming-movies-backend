@@ -34,7 +34,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `hourly` | hourly | the light feeds pass (`per_film=false`) |
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
-| `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
+| `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-26 release-date poll (released films) and the D-35 video poll (unreleased films) (NEU-1374, NEU-1385, NEU-1532) |
 | `notify` | daily, **after** `daily` | the M7 decision pass: queues digest rows, sends nothing (D-31, NEU-1379, ADR-0021) |
 | `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user, with the slate on `SLATE_WEEKDAY` (D-33, DC-2, NEU-1381/1462) |
 | `digest weekly` | weekly on `SLATE_WEEKDAY`, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
@@ -48,14 +48,22 @@ working set the sweep has already dropped — films *past* their theatrical rele
 stops running is invisible. The `PROVIDER_POLL_*` window is seeded in `docker-compose.prod.yml`
 and turned in the UI, per the gotcha below.
 
-**The `providers` slot runs two passes, not one (NEU-1385).** The watch-provider poll and
-then the video poll, over the same scoped set and under the same run row and deadman — so
-there is no second slot to create and no new environment variable, and `ingest_run.detail`
-carries a `videos:` clause beside the `providers:` one. Two consequences worth knowing:
+**The `providers` slot runs three passes, not one (NEU-1385, NEU-1532).** The watch-provider
+poll over the whole scoped set, then the release-date poll over its *released* half and the
+video poll over its *unreleased* half (split on `in_play_clause`, so each film is read by
+exactly one of the two) — all under the same run row and deadman, so there is no second slot
+to create and no new environment variable, and `ingest_run.detail` carries `providers:`,
+`release dates:` and `videos:` clauses. Consequences worth knowing:
 
-- **It doubles the slot's TMDB traffic**, one extra request per film in the set, and the two
+- **It doubles the slot's TMDB traffic**, one extra request per film in the set, and the
   passes share this process's one outbound window (see the rate-limiter gotcha below), so the
-  slot takes roughly twice as long as it did. Watch the deadman's grace period after merging.
+  slot takes roughly twice as long as the providers poll alone. Watch the deadman's grace
+  period.
+- **The release-date poll cards nothing itself.** It writes `film_release_date_change` rows,
+  and the next sweep's release-dates phase cards them — so a US digital date set after release
+  reaches the digest a day after the poll sees it. Its first run after NEU-1532 deployed read
+  every released in-window film for the first time since each opened: expect a one-time spike
+  in `changes`, and the sweep's `past` counter is where dates already gone by when seen land.
 - **The first run after deploy cards nothing and that is correct.** Every film's first video
   read is its baseline (ADR-0014) — it records whatever TMDB already holds and stays silent,
   so a catalogue with years of trailers behind it does not empty itself onto the feed. Expect

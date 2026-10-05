@@ -1,7 +1,7 @@
 """`catalog.film_release_date_change` written through a real `upsert_film` round trip.
 
 The unit tests cover the diff in isolation; these cover what can actually go wrong in
-production — that the rule survives `_rebuild_release_dates`, which unconditionally destroys
+production — that the rule survives `rebuild_release_dates`, which unconditionally destroys
 and recreates every release row on every ingest (NEU-1121).
 """
 

@@ -14,6 +14,7 @@ from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.providers import ProvidersResult
+from upmovies.ingest.release_dates import ReleaseDatesResult
 from upmovies.ingest.runs import create_run, finalize_run
 from upmovies.ingest.sweep import (
     AdmissionTranches,
@@ -977,38 +978,46 @@ async def test_sweep_stage_fails_the_run_when_the_credit_phase_aborted(session, 
     assert row.error and "credits phase" in row.error
 
 
-# --- the watch-provider poll (D-27) and the video poll (D-35) ------------------
+# --- the watch-provider poll (D-27), release dates (D-26) and videos (D-35) ----
 
 
 def _stub_poll(
     monkeypatch,
     result: ProvidersResult | None = None,
     videos: VideosResult | None = None,
+    dated: ReleaseDatesResult | None = None,
 ) -> dict:
-    """Replace both phases with fakes that record their kwargs and return the given results."""
+    """Replace all three phases with fakes that record their kwargs and return the given
+    results."""
     captured: dict = {}
 
     async def fake_poll(**kwargs):
         captured.update(kwargs)
         return result if result is not None else ProvidersResult(selected=2, polled=2)
 
+    async def fake_release_dates(**kwargs):
+        captured.update({f"dates_{k}": v for k, v in kwargs.items()})
+        return dated if dated is not None else ReleaseDatesResult(selected=1, polled=1)
+
     async def fake_videos(**kwargs):
         captured.update({f"videos_{k}": v for k, v in kwargs.items()})
-        return videos if videos is not None else VideosResult(selected=2, polled=2)
+        return videos if videos is not None else VideosResult(selected=1, polled=1)
 
     monkeypatch.setattr("upmovies.pipeline_run.run_provider_poll", fake_poll)
+    monkeypatch.setattr("upmovies.pipeline_run.run_release_date_poll", fake_release_dates)
     monkeypatch.setattr("upmovies.pipeline_run.run_video_poll", fake_videos)
     return captured
 
 
-async def test_providers_stage_finalizes_the_run_with_both_detail_lines(session, monkeypatch):
-    """Neither phase finalizes — the status, the error and the detail line belong to whoever
-    opened the run, the same division of labour the sweep uses. Both clauses are reported so a
-    green providers pass cannot hide a video pass that gave up."""
+async def test_providers_stage_finalizes_the_run_with_every_detail_clause(session, monkeypatch):
+    """No phase finalizes — the status, the error and the detail line belong to whoever
+    opened the run, the same division of labour the sweep uses. Every clause is reported so a
+    green providers pass cannot hide a later pass that gave up."""
     _stub_poll(
         monkeypatch,
         ProvidersResult(selected=9, polled=8, offers=31, first_seen=2, cards=1, missing=1),
-        VideosResult(selected=9, polled=9, videos=22, recorded=3, baselined=1, cards=2),
+        VideosResult(selected=3, polled=3, videos=22, recorded=3, baselined=1, cards=2),
+        ReleaseDatesResult(selected=6, polled=6, changes=2, baselined=1),
     )
     run_id = await create_run(session, kind="providers")
     await session.commit()
@@ -1020,7 +1029,8 @@ async def test_providers_stage_finalizes_the_run_with_both_detail_lines(session,
     assert row.error is None
     assert row.detail == (
         "providers: 8/9 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed; "
-        "videos: 9/9 polled, 22 videos, 3 recorded, 1 baselined, 2 carded, 0 missing, 0 failed"
+        "release dates: 6/6 polled, 2 changes, 1 baselined, 0 missing, 0 failed; "
+        "videos: 3/3 polled, 22 videos, 3 recorded, 1 baselined, 2 carded, 0 missing, 0 failed"
     )
 
 
@@ -1037,9 +1047,11 @@ async def test_providers_stage_passes_the_poll_window_from_settings(session, mon
     assert (captured["min_age_days"], captured["max_age_days"]) == (7, 120)
 
 
-async def test_both_phases_select_from_the_same_window_and_the_same_day(session, monkeypatch):
-    """One working set, read twice. A run straddling midnight must not poll providers over
-    yesterday's films and videos over today's and report them as one pass."""
+async def test_every_phase_selects_from_the_same_window_and_the_same_day(session, monkeypatch):
+    """One working set, read whole and then in halves. A run straddling midnight must not poll
+    providers over yesterday's films and videos over today's and report them as one pass — nor
+    split the set on two different days, which would let a film fall in both halves or
+    neither."""
     captured = _stub_poll(monkeypatch)
     settings = get_settings().model_copy(
         update={"provider_poll_min_age_days": 7, "provider_poll_max_age_days": 120}
@@ -1049,9 +1061,24 @@ async def test_both_phases_select_from_the_same_window_and_the_same_day(session,
 
     await pipeline_run.run_providers_stage(run_id, settings)
 
-    assert captured["videos_today"] == captured["today"]
+    assert captured["videos_today"] == captured["dates_today"] == captured["today"]
     assert (captured["videos_min_age_days"], captured["videos_max_age_days"]) == (7, 120)
-    assert captured["videos_run_id"] == captured["run_id"] == run_id
+    assert (captured["dates_min_age_days"], captured["dates_max_age_days"]) == (7, 120)
+    assert captured["videos_run_id"] == captured["dates_run_id"] == captured["run_id"] == run_id
+
+
+async def test_both_halves_split_on_the_in_play_statuses_from_settings(session, monkeypatch):
+    """The halves are the refresh phase's notion of released (D-1532.2), so they take
+    `TMDB_EXCLUDED_STATUSES` exactly as it does."""
+    captured = _stub_poll(monkeypatch)
+    settings = get_settings()
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, settings)
+
+    assert captured["videos_excluded_statuses"] == settings.tmdb_excluded_statuses
+    assert captured["dates_excluded_statuses"] == settings.tmdb_excluded_statuses
 
 
 async def test_providers_stage_fails_the_run_when_the_poll_aborted(session, monkeypatch):
@@ -1085,6 +1112,24 @@ async def test_providers_stage_fails_the_run_when_the_video_poll_aborted(session
     assert row.status == "failed"
     assert row.error == "videos gave up"
     assert row.detail and "videos aborted: videos gave up" in row.detail
+
+
+async def test_providers_stage_fails_the_run_when_the_release_date_poll_aborted(
+    session, monkeypatch
+):
+    _stub_poll(
+        monkeypatch,
+        dated=ReleaseDatesResult(selected=9, polled=3, aborted=True, abort_error="dates gave up"),
+    )
+    run_id = await create_run(session, kind="providers")
+    await session.commit()
+
+    await pipeline_run.run_providers_stage(run_id, get_settings())
+
+    row = await _run_row(session, run_id)
+    assert row.status == "failed"
+    assert row.error == "dates gave up"
+    assert row.detail and "release dates aborted: dates gave up" in row.detail
 
 
 async def test_providers_stage_marks_run_failed_on_crash(session, monkeypatch):

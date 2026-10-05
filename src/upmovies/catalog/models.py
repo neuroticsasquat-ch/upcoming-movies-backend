@@ -128,8 +128,8 @@ class Film(Base):
     """When the catalog first held an observation of this film's videos — NULL until it has.
 
     `credits_observed_at` for the promo reel (D-35), and needed for the same reason
-    `release_dates_observed_at` is, at its sharpest: the video poll's scoped set deliberately
-    includes in-play films somebody follows, *because* trailers precede a theatrical date by
+    `release_dates_observed_at` is, at its sharpest: the video poll's scoped set is in-play
+    films somebody follows (NEU-1532), *because* trailers precede a theatrical date by
     months — so the ordinary first read of a followed film returns no videos at all. Inferring
     "never looked" from "holds nothing" would re-baseline that film on every poll and swallow
     the teaser it eventually gets, which is the single beat the poll exists to catch. Ingest

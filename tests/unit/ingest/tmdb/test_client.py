@@ -13,6 +13,7 @@ from tests.fixtures.tmdb import (
     make_person_movie_credits,
     make_person_search_hit,
     make_person_search_page,
+    make_release_dates,
     make_video,
     make_videos,
     make_watch_providers,
@@ -944,6 +945,34 @@ async def test_movie_videos_keeps_types_it_does_not_card():
         payload = await c.movie_videos(562)
 
     assert [v.type for v in payload.results] == ["Teaser", "Clip"]
+
+
+@respx.mock
+async def test_movie_release_dates_parses_the_payload_the_rebuild_reads():
+    """The same schema `movie_details` appends, read on its own for a released film
+    (NEU-1532); the payload's top-level `id` is dropped by `extra="ignore"`."""
+    respx.get(f"{BASE_URL}/movie/563/release_dates").mock(
+        return_value=httpx.Response(
+            200, json=make_release_dates(563, ("US", 3, "2026-07-29"), ("US", 4, "2026-10-14"))
+        )
+    )
+    async with _client() as c:
+        payload = await c.movie_release_dates(563)
+
+    (us,) = payload.results
+    assert us.iso_3166_1 == "US"
+    assert [(r.type, r.release_date) for r in us.release_dates] == [
+        (3, datetime(2026, 7, 29, tzinfo=UTC)),
+        (4, datetime(2026, 10, 14, tzinfo=UTC)),
+    ]
+
+
+@respx.mock
+async def test_movie_release_dates_raises_tmdb_not_found_on_404():
+    respx.get(f"{BASE_URL}/movie/9997/release_dates").mock(return_value=httpx.Response(404))
+    async with _client() as c:
+        with pytest.raises(TMDBNotFound):
+            await c.movie_release_dates(9997)
 
 
 @respx.mock

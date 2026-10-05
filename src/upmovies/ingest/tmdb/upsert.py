@@ -50,7 +50,7 @@ from upmovies.ingest.tmdb.credit_history import (
 from upmovies.ingest.tmdb.filters import is_unreleased
 from upmovies.ingest.tmdb.release_date_history import (
     diff_release_dates,
-    displayable_from_details,
+    displayable_from_payload,
     load_displayable_releases,
     mark_release_dates_observed,
     record_release_date_changes,
@@ -62,6 +62,7 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBCrewMember,
     TMDBMovieDetails,
     TMDBPersonSearchHit,
+    TMDBReleaseDates,
 )
 
 
@@ -267,7 +268,7 @@ async def upsert_film(session: AsyncSession, details: TMDBMovieDetails) -> None:
     )
     await _upsert_references(session, details)
     await _rebuild_joins(session, film_id, details, attachable=attachable)
-    await _rebuild_release_dates(session, film_id, details)
+    await rebuild_release_dates(session, film_id, details.release_dates)
     await _rebuild_alternative_titles(session, film_id, details)
     await _upsert_credits(session, film_id, details, attachable=attachable)
 
@@ -491,16 +492,23 @@ async def _rebuild_joins(
     await mark_companies_observed(session, film_id)
 
 
-async def _rebuild_release_dates(
-    session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
-) -> None:
+async def rebuild_release_dates(
+    session: AsyncSession, film_id: UUID, release_dates: TMDBReleaseDates | None
+) -> int:
     """Rebuild `catalog.film_release_date`, capturing the displayable diff on the way through.
+    Returns how many change rows it wrote. Caller commits.
 
     The rebuild is the only place both sides of that diff exist: the stored rows are about to
     be deleted and the incoming ones are in the payload. `catalog.film_release_date_change` is
     written from them first, so a US wide date moving survives as history rather than being
     overwritten into silence. First observation is a baseline, never a change — see
     `ingest.tmdb.release_date_history`.
+
+    Takes the release-dates payload rather than the whole details, because it reads nothing
+    else: `upsert_film` hands it the appended `release_dates`, and the release-date poll
+    (`ingest.release_dates`, NEU-1532) the answer from `/movie/{id}/release_dates` — so a
+    released film, which no longer gets a full upsert, has its home-release dates diffed by
+    exactly the rule an in-play film's are.
     """
     origin_country = (
         await session.execute(select(Film.origin_country).where(Film.id == film_id))
@@ -509,7 +517,7 @@ async def _rebuild_release_dates(
     previous = await load_displayable_releases(session, film_id, origin_country=origin_country)
     changes = diff_release_dates(
         previous=previous,
-        current=displayable_from_details(details, origin_country=origin_country),
+        current=displayable_from_payload(release_dates, origin_country=origin_country),
     )
     await record_release_date_changes(session, film_id, changes)
     await mark_release_dates_observed(session, film_id)
@@ -519,8 +527,8 @@ async def _rebuild_release_dates(
     # is unconditional and only the insert is guarded.
     await session.execute(delete(FilmReleaseDate).where(FilmReleaseDate.film_id == film_id))
 
-    if not details.release_dates or not details.release_dates.results:
-        return
+    if not release_dates or not release_dates.results:
+        return len(changes)
 
     # Every type TMDB returns, filtered by nothing but a missing date. Narrowing this to the
     # displayable cut would look like a saving and would cost the no-backfill property
@@ -536,18 +544,19 @@ async def _rebuild_release_dates(
             "note": entry.note,
             "iso_639_1": entry.iso_639_1,
         }
-        for country in details.release_dates.results
+        for country in release_dates.results
         for entry in country.release_dates
         if entry.release_date is not None  # skip entries TMDB returned with empty date
     ]
     if rows:
         await session.execute(insert(FilmReleaseDate).values(rows))
+    return len(changes)
 
 
 async def _rebuild_alternative_titles(
     session: AsyncSession, film_id: UUID, details: TMDBMovieDetails
 ) -> None:
-    # Delete-then-reinsert, mirroring `_rebuild_release_dates`: a film that drops its
+    # Delete-then-reinsert, mirroring `rebuild_release_dates`: a film that drops its
     # alternative_titles between runs must have its stale rows cleared, so the delete is
     # unconditional and only the insert is guarded.
     await session.execute(

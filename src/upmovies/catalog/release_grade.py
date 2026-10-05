@@ -29,10 +29,10 @@ becomes listable, carded and calendar-visible in one edit.
 
 **Widening it does not backfill**, and the reason is not ADR-0014's baseline rule: that covers
 a film the catalog has never observed, and every film already in the catalog is observed.
-What holds instead is that `_rebuild_release_dates` stores **every** TMDB type in
+What holds instead is that `rebuild_release_dates` stores **every** TMDB type in
 `catalog.film_release_date`, filtered by nothing — so a US digital date this cut newly admits
 is already sitting there, and `load_displayable_releases` reads it through the widened
-predicate on the *stored* side of the diff exactly as `displayable_from_details` reads it on
+predicate on the *stored* side of the diff exactly as `displayable_from_payload` reads it on
 the incoming side. Same date both sides, no change, no card. That unfiltered insert is
 load-bearing for this property: narrowing it to the displayable types would make the first
 ingest after any future widening card the whole catalog at once.

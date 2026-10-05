@@ -1,4 +1,4 @@
-"""The displayable-release diff: what `_rebuild_release_dates` throws away (NEU-1121)."""
+"""The displayable-release diff: what `rebuild_release_dates` throws away (NEU-1121)."""
 
 from datetime import UTC, date, datetime
 

@@ -272,7 +272,10 @@ Numbered so tickets can cite them (`D-n`).
   in place. Token rotatable from settings.
 - **D-35 Trailers:** poll `/movie/{id}/videos` on the same scoped set as D-27; a new
   YouTube video of type `Trailer` cards a `trailer` event (type exists; `confirmed`), which is
-  on the push whitelist *(removed by ADR-0021)*.
+  on the push whitelist *(removed by ADR-0021)*. *(Narrowed 2026-10-05 by NEU-1532: the video
+  poll reads only the in-play half of the D-27 set — a trailer for a film that has opened is
+  not a beat. The released half is read by a third pass for its release dates instead, which
+  is what finally lets D-26's post-release home-date card fire.)*
 - **D-36 Web Push** *(superseded 2026-09-26 by ADR-0021: removed with the alert mail)* ships last: service worker, VAPID keys, `app.push_subscription`, same queue
   as email with `channel=push`. iOS requires home-screen install; documented, not worked around.
 
@@ -350,7 +353,8 @@ lands.
   franchise follow covers a film from announcement until `PROVIDER_POLL_MAX_AGE_DAYS` (365)
   after its primary release date, in every TMDB status but `Canceled`. `Released` is the state
   the home-release beats (D-26, D-28, D-35) land in, so a window that ended there delivered
-  none of them to an indirect follower. `TMDB_EXCLUDED_STATUSES` keeps governing admission and
+  none of them to an indirect follower. *(NEU-1532, 2026-10-05: D-35 is no longer one of
+  them — a released film is not polled for trailers. The home-release beats are D-26 and D-28.)* `TMDB_EXCLUDED_STATUSES` keeps governing admission and
   the in-play working set; the window's own term is a constant
   (`catalog.queries.ALERT_WINDOW_DEAD_STATUSES`), because TMDB's vocabulary is closed and there
   is nothing to tune. Title follows are unchanged: any state. (NEU-1417, 2026-09-20.)

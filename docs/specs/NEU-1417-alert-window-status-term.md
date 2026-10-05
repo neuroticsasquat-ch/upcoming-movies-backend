@@ -55,7 +55,9 @@ Three things this settles:
   `now_available` cards (D-28), the `US:digital` / `US:physical` `release_date` events (D-26)
   and late trailers (D-35) all land on films TMDB has marked `Released`. Those are the beats
   the alert window exists to deliver, and the 380 `Released` films are precisely the ones with
-  real US releases. The 539 status-lagging films the window did reach are the festival and
+  real US releases. *(NEU-1532, 2026-10-05: the late trailer is no longer a beat — a released
+  film is not polled for videos. The home-release beats are D-26 and D-28, and D-26's
+  post-release card is read by a third pass of the providers run from that ticket on.)* The 539 status-lagging films the window did reach are the festival and
   foreign titles TMDB has not caught up on.
 - **Rule 1 already polls `Released` films with no status filter.** The provider poll is not
   a place where `Released` means "stop looking"; it is the state in which looking pays.

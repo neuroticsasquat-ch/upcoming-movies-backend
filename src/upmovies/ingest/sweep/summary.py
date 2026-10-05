@@ -175,7 +175,7 @@ def sweep_detail(
         f"{detached.skipped} already carded, {detached.failures} failed",
         f"release dates: {released.events_created} carded from "
         f"{released.changes_read} changes, "
-        f"{released.skipped} already carded, {released.failures} failed",
+        f"{released.skipped} already carded, {released.past} past, {released.failures} failed",
         f"companies: {companies.events_created} carded from "
         f"{companies.changes_read} changes, "
         f"{companies.skipped} already carded, {companies.held} held, "

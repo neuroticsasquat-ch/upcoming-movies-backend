@@ -23,6 +23,7 @@ from upmovies.ingest.tmdb.schemas import (
     TMDBPersonMovieCredits,
     TMDBPersonSearchHit,
     TMDBPersonSearchResponse,
+    TMDBReleaseDates,
     TMDBRequestToken,
     TMDBSearchResponse,
     TMDBSessionResponse,
@@ -357,6 +358,21 @@ class TMDBClient:
         url = f"{self._base_url}/movie/{tmdb_id}/videos"
         resp = await self._request("GET", url)
         return TMDBVideos.model_validate(resp.json())
+
+    async def movie_release_dates(self, tmdb_id: int) -> TMDBReleaseDates:
+        """Every release date TMDB holds for a film, from `/movie/{id}/release_dates` — the
+        release-date poll's one request per released film (D-26, NEU-1532).
+
+        The same payload `movie_details` appends as `release_dates`, read on its own for
+        `movie_videos`' reason: the films this serves have left the refresh set, and a full
+        detail payload would be a credits-and-companies read nobody asked for. `extra="ignore"`
+        drops the payload's top-level `id`.
+
+        A 404 raises `TMDBNotFound` like every other id-addressed method here.
+        """
+        url = f"{self._base_url}/movie/{tmdb_id}/release_dates"
+        resp = await self._request("GET", url)
+        return TMDBReleaseDates.model_validate(resp.json())
 
     # --- v3 user authorization and the account lists (D-16) ---------------------------------
     #

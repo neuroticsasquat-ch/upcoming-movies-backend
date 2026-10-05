@@ -305,7 +305,10 @@ _Avoid_: false merge, collision.
 An event recording that a film's release date became known or moved. It is grounded in
 **TMDB state**, not in a story's wording: it may exist only when TMDB's own release date has
 actually changed (a first date being assigned counts as a change from "none"). A story is the
-*trigger and the colour* for a release-date event — never the source of truth for the date.
+*trigger and the colour* for a release-date event — never the source of truth for the date. A
+date that had already passed on the day it was observed is not news and forms no event, in any
+market or bucket (NEU-1532): on a film that has opened, that is what separates TMDB catching up
+on a theatrical date from a home-release date still to come.
 _Avoid_: date announcement, release news.
 
 **Corroboration**:
@@ -626,10 +629,13 @@ _Avoid_: in-window, discoverable, indexed.
 
 **In play**:
 A film that has neither released nor been called off — `active_film_clause` without its
-dormancy term (`in_play_clause`). It exists for exactly one caller: the sweep's refresh phase,
-which spans **both** sides of dormancy and so cannot ask the composed question. Everywhere the
-working set is being *spent* — the retrieval index, the per-film query list, the seed-person
-query — the word is **active**, and dormancy is part of what it means.
+dormancy term (`in_play_clause`). Three callers ask it: the sweep's refresh phase, which spans
+**both** sides of dormancy and so cannot ask the composed question; the video poll, which reads
+only in-play films because a trailer for a film that has opened is not news (NEU-1532); and the
+release-date pass, which reads exactly the films that are *not* in play, because an upcoming
+home-release date is the one beat an opened film still owes. Everywhere the working set is
+being *spent* — the retrieval index, the per-film query list, the seed-person query — the word
+is **active**, and dormancy is part of what it means.
 _Avoid_: active (that's the composed predicate), live, current, open.
 
 **Discover watermark**:

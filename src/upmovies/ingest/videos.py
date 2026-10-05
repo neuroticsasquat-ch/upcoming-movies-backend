@@ -1,21 +1,25 @@
-"""The video poll: what a film has to watch, read once a day for the films anyone could
-plausibly be waiting on, and the `trailer` card a new one raises (D-35).
+"""The video poll: what a film has to watch, read once a day for the unreleased films
+somebody is waiting on, and the `trailer` card a new one raises (D-35).
 
-**A second phase of the providers run, not a run of its own.** `/movie/{id}/videos` shares
-`/movie/{id}/watch/providers`' working set, so the two passes want exactly the same selection
-query and the same daily slot; giving videos its own `ingest_run.kind` would open a second run
-row that says the same thing about the same films, and a second Coolify slot to forget to
-create. They stay two passes rather than one loop because a TMDB outage on one endpoint must
-not cost the other its whole pass — the abort guards are per phase, the way the sweep's are.
+**A phase of the providers run, not a run of its own.** `/movie/{id}/videos` reads half of
+`/movie/{id}/watch/providers`' working set in the same daily slot; giving videos its own
+`ingest_run.kind` would open a second run row about the same films, and a second Coolify slot
+to forget to create. They stay separate passes rather than one loop because a TMDB outage on
+one endpoint must not cost the other its whole pass — the abort guards are per phase, the way
+the sweep's are.
 
-**The scoped set is `providers.load_poll_set`, unchanged**, and it already carries D-35's
-"plus films somebody is waiting on": that set's second rule is "somebody follows this film by
-title", asked of every user at once (`follow_queries.title_followed_by_any_user_clause`,
-D-1414.3, EF-14), which has no release-date floor and no ceiling, so a followed film two years
-from release is in it and so is one that came out last year. This matters more here than it
-does for providers — a trailer precedes a theatrical date by months, so for videos the
-followed-but-unreleased film is the *typical* subject rather than the exception, and the poll
-would be pointless without it.
+**The scoped set is the unreleased half of the provider poll's** (`providers.load_poll_half`,
+D-1532.3): the poll set *and* `in_play_clause`. Once a film has opened, the only beats left for
+it are home media and streaming, so a trailer dropped after release is not news and the film is
+not read at all — its `film_video` ledger simply freezes, and nothing can card it later. What
+is left in practice is the poll set's second rule, "somebody follows this film by title"
+(`follow_queries.title_followed_by_any_user_clause`, D-1414.3, EF-14), which has no
+release-date floor, so a followed film two years from release is in it: the
+followed-but-unreleased film is the *only* subject, and the poll would be pointless without
+that rule. Rule 1's films are past their theatrical date by construction, so none of them is
+here. "Released" is the refresh phase's own in-play rule — primary date passed, or TMDB
+status `Released` / `Canceled` — so the two passes that read TMDB for an unreleased film stop
+on the same day.
 
 EF-14 narrowed that rule back to title follows. A film reached only through a followed person,
 company or franchise is no longer polled for its trailer, because an entity follow delivers
@@ -49,7 +53,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmVideo
-from upmovies.ingest.providers import load_poll_set
+from upmovies.ingest.providers import load_poll_half
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
@@ -344,21 +348,24 @@ async def run_video_poll(
     today: date,
     min_age_days: int,
     max_age_days: int,
+    excluded_statuses: frozenset[str],
     now: datetime | None = None,
     failure_threshold: int = 10,
     log_every: int = 250,
 ) -> VideosResult:
-    """Read `/movie/{id}/videos` for every film in the scoped set, one at a time."""
+    """Read `/movie/{id}/videos` for every unreleased film in the scoped set, one at a time."""
     result = VideosResult()
     guard = AbortGuard(session_factory, run_id, failure_threshold)
     heartbeat = Heartbeat(session_factory, run_id)
 
     async with owned_session(session_factory) as s:
-        targets = await load_poll_set(
+        targets = await load_poll_half(
             s,
+            released=False,
             today=today,
             min_age_days=min_age_days,
             max_age_days=max_age_days,
+            excluded_statuses=excluded_statuses,
         )
     result.selected = len(targets)
     log.info("videos: %d films due", result.selected)
@@ -399,8 +406,8 @@ async def run_video_poll(
         except TMDBNotFound:
             # Terminal, not an outage — tombstoned rather than retried, and it touches `guard`
             # in neither direction, for the reasons `refresh_phase` gives at the same call.
-            # Rarely reached in practice: the provider poll runs first over the same set and
-            # tombstones there, and `load_poll_set` drops a tombstoned film.
+            # Rarely reached in practice: the provider poll runs first over the whole set and
+            # tombstones there, and `poll_set_clause` drops a tombstoned film.
             async with owned_session(session_factory) as s:
                 await mark_film_missing(s, target.tmdb_id)
                 await record_progress(s, run_id, processed_delta=1)

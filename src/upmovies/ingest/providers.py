@@ -27,6 +27,14 @@ Rule 2 is not an optimisation of rule 1, it is the reason the feature feels aliv
 film that went straight to streaming has no theatrical date to age, and rule 1 alone would
 never poll it.
 
+**The run is three passes over that set, and only this one reads all of it** (NEU-1532).
+`poll_half_clause` splits the set on `in_play_clause`: the films that have opened go to the
+release-date poll (`ingest.release_dates`, the D-26 home-release dates the refresh phase stopped
+reading at release), the ones that have not go to the video poll (`ingest.videos`, D-35's
+trailers — which stop being news once the film is out). Where-to-watch is the one question
+worth asking either way, so the provider pass keeps the whole set. Same number of reads per
+film as before: providers plus whichever half it falls in.
+
 **Insert-only ledger, delete-and-rebuild snapshot.** Each poll writes new
 `availability_first_seen` rows for offers it has never seen before and rebuilds
 `film_availability_current` for the region wholesale. The first is what `now_available` cards
@@ -49,7 +57,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
-from sqlalchemy import ColumnElement, Date, and_, cast, delete, func, literal, or_, select
+from sqlalchemy import ColumnElement, Date, and_, cast, delete, func, literal, not_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +70,7 @@ from upmovies.catalog.models import (
     FilmReleaseDate,
     WatchProvider,
 )
+from upmovies.catalog.queries import in_play_clause
 from upmovies.catalog.release_grade import PRIMARY_REGION, THEATRICAL_RELEASE_TYPES
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
@@ -193,6 +202,61 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
     )
 
 
+def poll_half_clause(
+    *,
+    released: bool,
+    today: date,
+    min_age_days: int,
+    max_age_days: int,
+    excluded_statuses: frozenset[str],
+) -> ColumnElement[bool]:
+    """WHERE predicate selecting one half of the poll set: the films that have opened
+    (`released=True`, the release-date poll's) or the ones that have not (the video poll's).
+
+    Both halves are spelled from the same two clauses, `poll_set_clause` and `in_play_clause`,
+    so they partition the set exactly — no film is in both and none falls between them. The
+    `NOT` is safe because `in_play_clause` never evaluates to NULL: its NULL guards turn an
+    undated film or an unknown status into a plain true.
+
+    "Released" is the in-play rule (D-1532.2): primary date before `today`, or a status in
+    `excluded_statuses` (`TMDB_EXCLUDED_STATUSES`, handed in exactly as the refresh phase gets
+    it). The video poll therefore stops reading a film the same day the refresh phase does.
+    """
+    in_play = in_play_clause(today=today, excluded_statuses=excluded_statuses)
+    return and_(
+        poll_set_clause(today=today, min_age_days=min_age_days, max_age_days=max_age_days),
+        not_(in_play) if released else in_play,
+    )
+
+
+async def _poll_targets(session: AsyncSession, where: ColumnElement[bool]) -> list[PollTarget]:
+    rows = await session.execute(select(Film.id, Film.tmdb_id).where(where).order_by(Film.id))
+    return [PollTarget(film_id=film_id, tmdb_id=tmdb_id) for film_id, tmdb_id in rows]
+
+
+async def load_poll_half(
+    session: AsyncSession,
+    *,
+    released: bool,
+    today: date,
+    min_age_days: int,
+    max_age_days: int,
+    excluded_statuses: frozenset[str],
+) -> list[PollTarget]:
+    """One half of the poll set (`poll_half_clause`), in `load_poll_set`'s order and for its
+    reasons."""
+    return await _poll_targets(
+        session,
+        poll_half_clause(
+            released=released,
+            today=today,
+            min_age_days=min_age_days,
+            max_age_days=max_age_days,
+            excluded_statuses=excluded_statuses,
+        ),
+    )
+
+
 async def load_poll_set(
     session: AsyncSession,
     *,
@@ -210,19 +274,10 @@ async def load_poll_set(
     instead of a reshuffled sample — and what it costs is that a *sustained* outage never
     reaches the tail of the set, which is the abort guard working as intended (the films it
     never reaches are still due tomorrow)."""
-    stmt = (
-        select(Film.id, Film.tmdb_id)
-        .where(
-            poll_set_clause(
-                today=today,
-                min_age_days=min_age_days,
-                max_age_days=max_age_days,
-            )
-        )
-        .order_by(Film.id)
+    return await _poll_targets(
+        session,
+        poll_set_clause(today=today, min_age_days=min_age_days, max_age_days=max_age_days),
     )
-    rows = await session.execute(stmt)
-    return [PollTarget(film_id=film_id, tmdb_id=tmdb_id) for film_id, tmdb_id in rows]
 
 
 def offers_for_region(region: TMDBWatchProviderRegion | None) -> list[Offer]:
