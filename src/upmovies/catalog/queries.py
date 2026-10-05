@@ -64,8 +64,12 @@ def in_play_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnE
     ``active_film_clause`` without its dormancy term.
 
     Split out for the sweep's refresh phase, which covers dormant films too and so cannot
-    use the composed predicate (§4.5). Nothing else should reach for it: dormancy is part
-    of what "active" means everywhere the working set is being *spent* on.
+    use the composed predicate (§4.5). Its other callers are the two halves of the
+    providers run's poll set (NEU-1532, `providers.poll_half_clause`): the video poll reads
+    the films still in play, the release-date poll the ones that have opened, so the passes
+    that read TMDB for a film agree with the refresh phase about when it was released.
+    Nothing else should reach for it: dormancy is part of what "active" means everywhere the
+    working set is being *spent* on.
 
     The NULL guards keep undated films and films with an unknown status in the set —
     without them SQL's ``NULL NOT IN (...)`` evaluates to NULL and would wrongly drop
@@ -81,8 +85,9 @@ ALERT_WINDOW_DEAD_STATUSES: frozenset[str] = frozenset({"Canceled"})
 """The one TMDB status past which no follow is owed anything about a film (D-46).
 
 `Released` is deliberately **not** here: it is the state the home-release beats happen in —
-`now_available` (D-28), the `US:digital` / `US:physical` release dates (D-26), the late trailer
-(D-35) — so a window that ended there delivered none of them to an indirect follower.
+`now_available` (D-28) and the `US:digital` / `US:physical` release dates (D-26) — so a window
+that ended there delivered none of them to an indirect follower. A trailer is not one of them:
+the video poll stops at release (NEU-1532).
 """
 
 

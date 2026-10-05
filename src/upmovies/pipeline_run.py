@@ -66,6 +66,7 @@ from upmovies.config import Settings, get_settings
 from upmovies.db import SessionLocal
 from upmovies.ingest.models import IngestRun
 from upmovies.ingest.providers import providers_detail, run_provider_poll
+from upmovies.ingest.release_dates import release_dates_detail, run_release_date_poll
 from upmovies.ingest.runs import create_run, finalize_run, mark_stale_runs_cancelled
 from upmovies.ingest.sweep import (
     AdmissionTranches,
@@ -449,31 +450,38 @@ async def _finalize_sweep(
 
 
 async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
-    """The daily catalog poll against one run row: the watch-provider pass (D-27) and then the
-    video pass (D-35) over the same scoped set, then the run's terminal status.
+    """The daily catalog poll against one run row: the watch-provider pass (D-27) over the
+    whole scoped set, then the release-date pass (D-26) over its released half and the video
+    pass (D-35) over its unreleased half, then the run's terminal status.
 
-    Two phases, sequenced here the way the sweep's are, and *not* folded into one loop over the
-    films: each carries its own abort guard, so a TMDB outage on one endpoint costs that
-    endpoint's pass and leaves the other's work committed. Sequential rather than concurrent
+    Three phases, sequenced here the way the sweep's are, and *not* folded into one loop over
+    the films: each carries its own abort guard, so a TMDB outage on one endpoint costs that
+    endpoint's pass and leaves the others' work committed. Sequential rather than concurrent
     because they share this process's one TMDB window (NEU-1399) — overlapping them would buy
     no throughput and would interleave two films' writes under one run.
 
-    Videos runs second deliberately: the provider pass tombstones the ids TMDB has deleted, and
-    `load_poll_set` drops a tombstoned film, so the second pass does not re-ask for them.
+    **Why the halves differ** (NEU-1532, D-1532.3). Once a film has opened, the only beats left
+    for it are home media and streaming: a trailer is no longer news, and a US digital or
+    physical date is — but the refresh phase stopped reading the film at release, so nothing
+    else would ever see one arrive. The split is `in_play_clause`, the refresh phase's own
+    notion of released, so each film is read by exactly one of the two.
 
-    Neither phase finalizes — the status, the error and the detail line belong to whoever
-    opened the run (§6.2). The run fails if *either* phase aborted, and reports both clauses
-    whatever happened, so a green providers pass never hides a video pass that gave up.
+    The provider pass runs first deliberately: it tombstones the ids TMDB has deleted, and
+    `poll_set_clause` drops a tombstoned film, so the later passes do not re-ask for them.
 
-    Note that both phases call `record_progress` against the one run row, so this run's
+    No phase finalizes — the status, the error and the detail line belong to whoever opened the
+    run (§6.2). The run fails if *any* phase aborted, and reports every clause whatever
+    happened, so a green providers pass never hides a later pass that gave up.
+
+    Note that every phase calls `record_progress` against the one run row, so this run's
     `items_processed` counts *reads* rather than films — roughly twice the size of the working
     set. That is what the counter is for (it is the heartbeat's liveness signal, and each read
     is a unit of work that can fail on its own); the per-phase totals are on the detail line.
     """
     try:
         async with TMDBClient.from_settings(settings) as client:
-            # One `today` for both phases, read once: a run that straddles midnight must not
-            # select two different working sets and report them as one pass.
+            # One `today` for every phase, read once: a run that straddles midnight must not
+            # select two different working sets, or split one set into halves that overlap.
             today = date.today()
             polled = await run_provider_poll(
                 session_factory=_session_factory,
@@ -484,6 +492,16 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
                 max_age_days=settings.provider_poll_max_age_days,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )
+            dated = await run_release_date_poll(
+                session_factory=_session_factory,
+                client=client,
+                run_id=run_id,
+                today=today,
+                min_age_days=settings.provider_poll_min_age_days,
+                max_age_days=settings.provider_poll_max_age_days,
+                excluded_statuses=settings.tmdb_excluded_statuses,
+                failure_threshold=settings.ingest_consecutive_failure_threshold,
+            )
             videos = await run_video_poll(
                 session_factory=_session_factory,
                 client=client,
@@ -491,18 +509,25 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
                 today=today,
                 min_age_days=settings.provider_poll_min_age_days,
                 max_age_days=settings.provider_poll_max_age_days,
+                excluded_statuses=settings.tmdb_excluded_statuses,
                 failure_threshold=settings.ingest_consecutive_failure_threshold,
             )
         # Inside the `try`, for the reason `run_sweep_stage` gives: the write that finalizes
         # has to be covered by the same net as the work it reports on.
-        aborted = polled.aborted or videos.aborted
+        aborted = polled.aborted or dated.aborted or videos.aborted
         async with SessionLocal() as s:
             await finalize_run(
                 s,
                 run_id,
                 status="failed" if aborted else "succeeded",
-                error=polled.abort_error or videos.abort_error,
-                detail="; ".join((providers_detail(polled), videos_detail(videos))),
+                error=polled.abort_error or dated.abort_error or videos.abort_error,
+                detail="; ".join(
+                    (
+                        providers_detail(polled),
+                        release_dates_detail(dated),
+                        videos_detail(videos),
+                    )
+                ),
             )
             await s.commit()
     except Exception as e:

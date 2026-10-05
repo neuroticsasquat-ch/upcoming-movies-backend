@@ -303,6 +303,22 @@ this needs no special path.
 > without re-rendering. Everything else in NEU-1200 and NEU-1205 (the prior-attachment gate, the
 > forward-dwell hold, the `rumored` confidence, the demotion) applies per class, unchanged. See
 > `docs/specs/bl-not-yet-reported-by-type-project-spec.md`.
+>
+> **Amendment — 2026-10-05 (NEU-1532).** Two refinements for a film that has **opened**
+> (`in_play_clause` false: primary date past, or status `Released` / `Canceled`). First, the
+> video poll no longer reads it: a trailer for a released film is not a beat, whatever D-35 and
+> D-46 said about "the late trailer", so the poll's set is the in-play half of the provider
+> poll's. Second, the release-date half gains the rule **a date already past on the day it was
+> observed is silent**: the carder drops any move whose new governing date is before its
+> `changed_at` day, cards a mixed group's surviving moves only, and writes nothing for a group
+> left empty. The rule is vacuous for an in-play film (every displayable date is on or after
+> the primary date), and on an opened film it sorts TMDB catching up on a theatrical date and a
+> home date the film is already streaming on (silent; `now_available` carried that) from an
+> upcoming US digital or physical date (D-26's card, which until now could not fire — nothing
+> re-read a released film's dates). Those dates are now read by a third pass of the providers
+> run over the released half of the poll set, which writes `film_release_date_change` rows and
+> nothing else, so no other card can come of it. See
+> `docs/specs/NEU-1532-released-films-card-home-release-beats-only.md`.
 
 ## Considered alternatives
 
