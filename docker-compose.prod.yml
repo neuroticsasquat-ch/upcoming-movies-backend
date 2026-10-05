@@ -194,6 +194,9 @@ services:
       # exist in the file when the app is first deployed is one somebody has to add by hand.
       MAIL_PROVIDER: "${MAIL_PROVIDER:-noop}"
       MAIL_FROM: "${MAIL_FROM:-}"
+      # Optional (NEU-1534): where replies land, since MAIL_FROM cannot receive. Seeded empty
+      # for the Coolify reason above; empty keeps today's behaviour (no reply-to on the wire).
+      MAIL_REPLY_TO: "${MAIL_REPLY_TO:-}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
       # Email verification (NEU-1339). Both repeat the code default rather than being left
       # out, for the Coolify reason above: a variable absent from the file at first deploy is

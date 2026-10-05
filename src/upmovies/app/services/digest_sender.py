@@ -1777,6 +1777,7 @@ def render_batch(
         digest_context(batch, cadence=cadence, today=today, settings=settings),
         sender=settings.mail_from,
         to=batch.recipient.email,
+        reply_to=settings.mail_reply_to or None,
     )
     link = recipient_unsubscribe_url(batch.recipient, settings)
     if link is None:
