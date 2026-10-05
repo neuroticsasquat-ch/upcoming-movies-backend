@@ -454,4 +454,10 @@ All six are `loop-ready`.
 
 ## 9. Revisions
 
-*(none yet)*
+- **2026-10-05, NEU-1533.** FB-7's "orders news-backed first, and nothing about that changes",
+  and FB-19's "news-backed first" for the weekly strip, are superseded: the strip's order is
+  the day's (or the week's) **reading order**, each film at its first appearance, block by
+  block, In the news before Not yet reported, update type by update type, row by row and line
+  by line. `FeedDayPosters` takes the day's layout (`layoutTimelineDay`), not its flat items,
+  and the digest's `day_posters` walks the blocks. On the timeline a Films-block film's poster
+  now leads a People-block news film's. See `frontend/docs/specs/NEU-1533-poster-strip-reading-order.md`.

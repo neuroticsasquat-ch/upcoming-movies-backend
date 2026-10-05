@@ -797,19 +797,27 @@ def group_blocks(lines: Iterable[DigestLine], *, order: LineOrder) -> tuple[Dige
     return tuple(blocks)
 
 
-def day_posters(lines: Iterable[DigestLine]) -> tuple[DigestFilm, ...]:
-    """The poster strip over every block of a day (FB-7) — or of the week (FB-19): the films
-    with a poster, news-backed first, each by natural title, de-duplicated, at most
-    `MAX_DAY_POSTERS` — the feed's `dayPosterLeads`. A film reached twice is one poster, and so
-    is a film news-backed on one day and not on another: its news-backed line leads it."""
-    candidates = sorted(
-        (line.beat for line in lines if line.beat.film.poster_url is not None),
-        key=lambda beat: (not beat.news_backed, beat.film.sort_key),
-    )
+def day_posters(blocks: Iterable[DigestBlock]) -> tuple[DigestFilm, ...]:
+    """The poster strip over every block of a day (FB-7) — or of the week (FB-19): each film
+    with a poster once, at its first appearance in reading order (NEU-1533), at most
+    `MAX_DAY_POSTERS` — the feed's `dayPosterLeads`. Reading order is the template's: block by
+    block, In the news before Not yet reported, update type by update type, row by row, and an
+    entity row beat by beat, each beat naming its own film. The strip has no order of its own,
+    so whatever reorders the blocks reorders it; a film reached twice, or on two days of the
+    week, is one poster where it is first met."""
     posters: dict[UUID, DigestFilm] = {}
-    for beat in candidates:
-        posters.setdefault(beat.film.film_id, beat.film)
-    return tuple(posters.values())[:MAX_DAY_POSTERS]
+    for block in blocks:
+        for section in block.sections:
+            rows = section.rows or tuple(
+                row for update_type in section.update_types for row in update_type.rows
+            )
+            for row in rows:
+                for beat in row.beats:
+                    if beat.film.poster_url is not None:
+                        posters.setdefault(beat.film.film_id, beat.film)
+                    if len(posters) == MAX_DAY_POSTERS:
+                        return tuple(posters.values())
+    return tuple(posters.values())
 
 
 def group_days(lines: Iterable[DigestLine]) -> tuple[DigestDay, ...]:
@@ -818,14 +826,11 @@ def group_days(lines: Iterable[DigestLine]) -> tuple[DigestDay, ...]:
     by_day: dict[date, list[DigestLine]] = {}
     for line in lines:
         by_day.setdefault(line.beat.day, []).append(line)
-    return tuple(
-        DigestDay(
-            day=day,
-            posters=day_posters(day_lines),
-            blocks=group_blocks(day_lines, order=DAY_LINE_ORDER),
-        )
-        for day, day_lines in sorted(by_day.items(), reverse=True)
-    )
+    days: list[DigestDay] = []
+    for day, day_lines in sorted(by_day.items(), reverse=True):
+        blocks = group_blocks(day_lines, order=DAY_LINE_ORDER)
+        days.append(DigestDay(day=day, posters=day_posters(blocks), blocks=blocks))
+    return tuple(days)
 
 
 def group_week(lines: Sequence[DigestLine]) -> DigestWeek:
@@ -836,10 +841,9 @@ def group_week(lines: Sequence[DigestLine]) -> DigestWeek:
     would be on two feed days. Film entries rank by their most significant beat, then title
     (DC-3, `film_row_key`); entity entries by name (FB-6). An entry's lines run in publication
     order (`ENTRY_LINE_ORDER`), and the template dates each one. One poster strip, over the
-    week's films."""
-    return DigestWeek(
-        posters=day_posters(lines), blocks=group_blocks(lines, order=ENTRY_LINE_ORDER)
-    )
+    week's films, each at its first entry."""
+    blocks = group_blocks(lines, order=ENTRY_LINE_ORDER)
+    return DigestWeek(posters=day_posters(blocks), blocks=blocks)
 
 
 @dataclass(frozen=True)
