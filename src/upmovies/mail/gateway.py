@@ -105,6 +105,13 @@ def validate_mail_configuration(settings: Settings) -> None:
                 f"MAIL_PROVIDER is {provider!r} but MAIL_FROM is {settings.mail_from!r}, "
                 f"which is not an email address"
             )
+        # Optional (NEU-1534 D-1534.2) — unset means no reply-to, which is the status quo —
+        # but a value that is set gets `MAIL_FROM`'s check, for `MAIL_FROM`'s reason.
+        if settings.mail_reply_to and "@" not in settings.mail_reply_to:
+            problems.append(
+                f"MAIL_PROVIDER is {provider!r} but MAIL_REPLY_TO is "
+                f"{settings.mail_reply_to!r}, which is not an email address"
+            )
         # The digest's `List-Unsubscribe` link is built on it (DC-10). The default is the dev
         # API, so a deploy that forgot the variable would mail every reader an unsubscribe
         # link to localhost — which a mailbox provider's one-click POST cannot reach.
@@ -167,7 +174,13 @@ class MailGateway:
         Rendering happens before the transport is touched, so a template fault costs no
         connection and no provider call — and, more to the point, cannot half-send."""
         self._check_open()
-        envelope = templates.render(template, dict(context), sender=self._settings.mail_from, to=to)
+        envelope = templates.render(
+            template,
+            dict(context),
+            sender=self._settings.mail_from,
+            to=to,
+            reply_to=self._settings.mail_reply_to or None,
+        )
         return await self._resolve().send(envelope)
 
     async def deliver(self, envelope: Envelope) -> MessageId:

@@ -611,6 +611,13 @@ class Settings(BaseSettings):
     # nobody notices is wrong until mail bounces, whereas empty is refused at boot for any
     # provider that actually transmits (`mail.gateway.validate_mail_configuration`).
     mail_from: str = Field(default="", alias="MAIL_FROM")
+    # Where a reader's reply lands, in either of `MAIL_FROM`'s two forms (NEU-1534). Exists
+    # because the sender is a sending-only address: without it, hitting reply on any mail the
+    # app sends bounces. Optional, unlike `MAIL_FROM`: empty puts no reply-to on the wire,
+    # which is the behaviour before it existed, so a deploy without it is not worth a failed
+    # boot — whereas a value that is set but is not an address is refused at boot for any
+    # provider that transmits (`mail.gateway.validate_mail_configuration`).
+    mail_reply_to: str = Field(default="", alias="MAIL_REPLY_TO")
     # Optional, deliberately unlike ADMIN_TOKEN above and for the same reason the two
     # non-Anthropic LLM keys are: requiring it would break every deploy that is not sending
     # mail. Boot-time validation is what makes optional safe — it asserts a credential exists

@@ -41,7 +41,11 @@ class Envelope:
     digest's `List-Unsubscribe` pair (DC-10). Empty by default: every other mail is
     transactional and owes no header beyond the ones the provider writes itself. They ride on
     the envelope for `sender`'s reason — what the transport was handed is the whole
-    description of what was sent."""
+    description of what was sent.
+
+    `reply_to` is where a reader's reply should go, because `sender` is an address nobody
+    reads (NEU-1534). It rides on the envelope for `sender`'s reason too; `None` means the
+    provider sets none and a reply goes to `sender`."""
 
     sender: str
     to: str
@@ -49,6 +53,7 @@ class Envelope:
     text: str
     html: str
     headers: Mapping[str, str] = field(default_factory=dict)
+    reply_to: str | None = None
 
 
 class MailError(RuntimeError):

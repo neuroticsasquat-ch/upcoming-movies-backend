@@ -182,7 +182,7 @@ ALL_BLOCKS = (
 reached; an entity the catalog cannot name; a `now_available` under Not yet reported."""
 
 
-def _mail(*lines: DigestLine, cadence: str = "daily") -> Envelope:
+def _mail(*lines: DigestLine, cadence: str = "daily", mail_reply_to: str = "") -> Envelope:
     batch = DigestBatch(
         recipient=DigestRecipient(
             user_id=uuid4(),
@@ -198,7 +198,9 @@ def _mail(*lines: DigestLine, cadence: str = "daily") -> Envelope:
         batch,
         cadence=cadence,  # type: ignore[arg-type]
         today=TODAY,
-        settings=get_settings().model_copy(update={"product_name": "Backlotter"}),
+        settings=get_settings().model_copy(
+            update={"product_name": "Backlotter", "mail_reply_to": mail_reply_to}
+        ),
     )
     assert envelope is not None
     return envelope
@@ -324,6 +326,15 @@ def test_an_entity_the_catalog_cannot_name_is_its_fallback_unlinked():
 
     fallback = html.index("A franchise you follow")
     assert html.rindex("<p", 0, fallback) > html.rindex("<a ", 0, fallback)
+
+
+def test_the_digest_carries_the_configured_reply_to():
+    """NEU-1534 D-1534.4: `render_batch` is the digest's render seam, so it stamps the
+    setting the same way `MailGateway.send` does for transactional mail."""
+    assert _mail(*ALL_BLOCKS, mail_reply_to="Tom <hello@example.com>").reply_to == (
+        "Tom <hello@example.com>"
+    )
+    assert _mail(*ALL_BLOCKS).reply_to is None
 
 
 def test_the_retired_furniture_is_gone_from_both_parts():

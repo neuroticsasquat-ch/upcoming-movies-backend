@@ -99,6 +99,8 @@ mail, so they carry the mail prerequisites:
   exactly what a staging environment wants and exactly what production must not be left on.
   `PUBLIC_BASE_URL` and `TMDB_IMAGE_BASE` are load-bearing too: a mail carries absolute links
   and absolute image URLs, with no page around them to resolve a relative path against.
+  `MAIL_REPLY_TO` is optional but should be set in prod, since `MAIL_FROM` cannot receive and
+  a reply to any mail bounces without it.
 - **A `failed` notification row is terminal.** The sender reads only `queued` rows and the
   decision pass will not re-queue them, so rows lost to a provider refusal need a hand-written
   re-queue (`UPDATE app.notification SET status = 'queued' WHERE …`) to go out. The blast radius

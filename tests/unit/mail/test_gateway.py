@@ -154,6 +154,26 @@ async def test_deliver_hands_the_envelope_to_the_transport_as_it_stands():
     assert transport.sent == [envelope]
 
 
+async def test_send_stamps_the_configured_reply_to_on_the_envelope():
+    """NEU-1534 D-1534.3: `MailGateway.send` is the transactional render seam."""
+    transport = NoopTransport()
+    settings = settings_with(**NOOP_CONFIG, mail_reply_to="Tom <hello@example.com>")
+    async with MailGateway(settings, transport=transport) as mail:
+        await mail.send(to="ada@example.com", template="verify", context=VERIFY_CONTEXT)
+
+    assert transport.sent[0].reply_to == "Tom <hello@example.com>"
+
+
+async def test_an_unset_reply_to_reaches_the_envelope_as_none_not_empty():
+    transport = NoopTransport()
+    async with MailGateway(
+        settings_with(**NOOP_CONFIG, mail_reply_to=""), transport=transport
+    ) as mail:
+        await mail.send(to="ada@example.com", template="verify", context=VERIFY_CONTEXT)
+
+    assert transport.sent[0].reply_to is None
+
+
 async def test_noop_keeps_an_envelopes_headers_for_a_test_to_read():
     """DC-10: the digest's `List-Unsubscribe` pair rides on the envelope, and the recording
     transport is where a test asserts it."""
@@ -231,16 +251,43 @@ def test_the_bare_and_named_sender_forms_are_both_accepted():
     validate_mail_configuration(settings_with(**{**RESEND_CONFIG, "mail_from": "A <a@b.co>"}))
 
 
+def test_resend_without_a_reply_to_boots():
+    """NEU-1534 D-1534.2: optional — unset is today's behaviour, not a broken product."""
+    validate_mail_configuration(settings_with(**RESEND_CONFIG, mail_reply_to=""))
+
+
+def test_resend_with_an_undeliverable_reply_to_fails_the_boot():
+    with pytest.raises(MailConfigurationError, match="MAIL_REPLY_TO"):
+        validate_mail_configuration(settings_with(**RESEND_CONFIG, mail_reply_to="Backlotter"))
+
+
+def test_the_bare_and_named_reply_to_forms_are_both_accepted():
+    validate_mail_configuration(settings_with(**RESEND_CONFIG, mail_reply_to="a@b.co"))
+    validate_mail_configuration(settings_with(**RESEND_CONFIG, mail_reply_to="A <a@b.co>"))
+
+
+def test_noop_never_checks_the_reply_to():
+    validate_mail_configuration(settings_with(**NOOP_CONFIG, mail_reply_to="Backlotter"))
+
+
 def test_every_fault_is_reported_from_one_failed_boot():
     """A deploy turning mail on for the first time should learn about its missing key *and*
     its missing sender at once, not one boot at a time."""
     with pytest.raises(MailConfigurationError) as exc:
         validate_mail_configuration(
-            settings_with(**{**RESEND_CONFIG, "resend_api_key": "", "mail_from": ""})
+            settings_with(
+                **{
+                    **RESEND_CONFIG,
+                    "resend_api_key": "",
+                    "mail_from": "",
+                    "mail_reply_to": "Backlotter",
+                }
+            )
         )
 
     assert "RESEND_API_KEY" in str(exc.value)
     assert "MAIL_FROM" in str(exc.value)
+    assert "MAIL_REPLY_TO" in str(exc.value)
 
 
 def test_resend_on_the_default_api_base_url_fails_the_boot():

@@ -94,6 +94,37 @@ async def test_an_envelope_without_headers_sends_no_headers_key():
 
 
 @respx.mock
+async def test_an_envelope_reply_to_goes_on_the_wire_as_resends_top_level_field():
+    """NEU-1534: Resend takes the reply-to as its own top-level `reply_to` field — not inside
+    `headers`, and not as an HTTP request header."""
+    import json
+
+    route = respx.post(EMAILS_URL).mock(return_value=httpx.Response(200, json={"id": "re-1"}))
+
+    async with ResendClient(api_key="re_x") as client:
+        await client.send(replace(ENVELOPE, reply_to="Tom <hello@backlotter.com>"))
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["reply_to"] == "Tom <hello@backlotter.com>"
+    assert "headers" not in sent
+    assert "reply-to" not in route.calls.last.request.headers
+
+
+@respx.mock
+async def test_an_envelope_without_a_reply_to_sends_no_reply_to_key():
+    """With `MAIL_REPLY_TO` unset the wire body is exactly what it was before the field
+    existed."""
+    import json
+
+    route = respx.post(EMAILS_URL).mock(return_value=httpx.Response(200, json={"id": "re-1"}))
+
+    async with ResendClient(api_key="re_x") as client:
+        await client.send(ENVELOPE)
+
+    assert "reply_to" not in json.loads(route.calls.last.request.content)
+
+
+@respx.mock
 async def test_a_rate_limited_send_is_retried():
     """Resend rate-limits at a couple of requests a second and says so in `Retry-After`; the
     verdict comes from the same `retry_for_status` the LLM adapters use."""
