@@ -973,11 +973,16 @@ date, Blu-ray date.
 
 **Now-available event**:
 The catalog-sourced event raised the first time a title is observed on any provider for a
-monetization type (`flatrate` / `rent` / `buy`), from the watch-providers poll. Insert-only: the
-first observation cards it; the title then goes quiet for that type forever, so a move
-between services produces nothing. That silence is deliberate — service-to-service churn is a
-non-goal, and the upstream data cannot give advance warning of a title *leaving*.
-_Avoid_: availability change, provider change, streaming update.
+monetization type (`flatrate` / `rent` / `buy`), from the watch-providers poll, **on or after
+its US digital date**. An observation before that date — or on a film with no US digital date
+at all — is a **hold**: TMDB lists pre-orders as plain `buy` offers with no flag, so the poll
+believes an offer only once the announced home-release date has landed, and writes nothing
+until then (NEU-1538, D-1538.1–2). Insert-only: the first believed observation cards it; the
+title then goes quiet for that type forever, so a move between services produces nothing.
+That silence is deliberate — service-to-service churn is a non-goal, and the upstream data
+cannot give advance warning of a title *leaving*.
+_Avoid_: availability change, provider change, streaming update, pre-order (a held offer is
+not an event of any kind).
 
 **Where to watch** (retired):
 D-29's film-page box of a film's *current* US carriers, from a snapshot the provider poll

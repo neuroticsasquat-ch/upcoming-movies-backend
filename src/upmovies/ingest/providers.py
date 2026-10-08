@@ -41,6 +41,18 @@ availability. The current-carriers snapshot the where-to-watch box rendered (D-2
 box in NEU-1542 (ADR-0023): the site follows a film to its first home availability, not where it
 streams today. Nothing tracks churn: a provider dropping a film leaves the ledger untouched.
 
+**An offer is believed only from the US digital date** (NEU-1538, D-1538.1–2). Fandango At Home
+lists films for purchase weeks before they can be watched, and TMDB passes the pre-order on as
+an ordinary `buy` offer — the payload has no flag and no date to tell the two apart. What does
+tell them apart is the announced home-release date: a pre-order arrives before it, or on a film
+TMDB has not dated at all. So a film whose US type-4 governing date is not on or before `today`
+(`catalog.queries.home_release_landed_clause`) has its whole observation **held** — no ledger
+row, no card, nothing remembered — and the next daily pass judges it again; the first pass on
+or after the date inserts and cards with that pass's stamp. The ledger is why a hold cannot be
+a suppressed card instead: a pre-order row under `buy` would leave the real release nothing new
+to card, ever. The date is the catalog's, and the release-date pass runs after this one, so a
+date TMDB first enters on the day it lands is seen a day late (D-1538.3).
+
 **The card is per monetization type, not per provider or per row** (D-28). A new ledger row is
 necessary but not sufficient: Netflix handing a film to Hulu writes a row — Hulu has never
 carried it — and must card nothing, because the *type* was first seen months ago and
@@ -69,7 +81,7 @@ from upmovies.catalog.models import (
     FilmReleaseDate,
     WatchProvider,
 )
-from upmovies.catalog.queries import in_play_clause
+from upmovies.catalog.queries import home_release_landed_clause, in_play_clause
 from upmovies.catalog.release_grade import PRIMARY_REGION, THEATRICAL_RELEASE_TYPES
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
@@ -123,6 +135,10 @@ class ProvidersResult:
     first_seen: int = 0
     """Rows newly inserted into the ledger. In steady state this is near zero, which is why it
     is reported apart from `offers` rather than folded into it."""
+    held: int = 0
+    """Films whose offers were observed before their US digital date and so held — no ledger
+    row, no card (D-1538.1–2). Films, not offers; a film with no offers is never held. A count
+    that jumps to the whole set means the release-date pass stopped writing dates (D-1538.6)."""
     cards: int = 0
     """`now_available` events raised (D-28). Never more than one per film per poll and always
     at most `first_seen`, and the gap between the two is the churn this product declines to
@@ -336,6 +352,14 @@ async def _upsert_providers(session: AsyncSession, offers: list[Offer]) -> None:
     )
 
 
+async def _home_release_landed(session: AsyncSession, *, film_id: UUID, as_of: date) -> bool:
+    """Whether this film's offers count as availability as of `as_of` (D-1538.1)."""
+    landed = await session.execute(
+        select(home_release_landed_clause(as_of=as_of)).where(Film.id == film_id)
+    )
+    return bool(landed.scalar_one())
+
+
 async def _ledger_types(session: AsyncSession, *, film_id: UUID, region_code: str) -> set[str]:
     """The monetization types this film already has a ledger row under, in this region.
 
@@ -500,31 +524,40 @@ async def run_provider_poll(
             # has to say when this film was seen, not when the run began. `now` pins it for
             # tests.
             seen_at = now if now is not None else datetime.now(UTC)
+            new_offers: list[Offer] = []
+            carded = held = False
             async with owned_session(session_factory) as s:
+                # Held offers still name their providers: `watch_provider` is a name/logo table,
+                # not a fact about this film (D-1538.2).
                 await _upsert_providers(s, offers)
-                known_types = await _ledger_types(
-                    s, film_id=target.film_id, region_code=region_code
+                held = bool(offers) and not await _home_release_landed(
+                    s, film_id=target.film_id, as_of=today
                 )
-                new_offers = await _insert_first_seen(
-                    s,
-                    film_id=target.film_id,
-                    region_code=region_code,
-                    offers=offers,
-                    now=seen_at,
-                )
-                carded = await _card_now_available(
-                    s,
-                    film_id=target.film_id,
-                    region_code=region_code,
-                    new_offers=new_offers,
-                    known_types=known_types,
-                    first_seen_at=seen_at,
-                )
+                if not held:
+                    known_types = await _ledger_types(
+                        s, film_id=target.film_id, region_code=region_code
+                    )
+                    new_offers = await _insert_first_seen(
+                        s,
+                        film_id=target.film_id,
+                        region_code=region_code,
+                        offers=offers,
+                        now=seen_at,
+                    )
+                    carded = await _card_now_available(
+                        s,
+                        film_id=target.film_id,
+                        region_code=region_code,
+                        new_offers=new_offers,
+                        known_types=known_types,
+                        first_seen_at=seen_at,
+                    )
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
             result.polled += 1
             result.offers += len(offers)
             result.first_seen += len(new_offers)
+            result.held += 1 if held else 0
             result.cards += 1 if carded else 0
             guard.succeeded()
             if i % log_every == 0:
@@ -553,10 +586,11 @@ async def run_provider_poll(
             break
 
     log.info(
-        "providers: %d polled, %d offers, %d first seen, %d carded, %d missing, %d failed",
+        "providers: %d polled, %d offers, %d first seen, %d held, %d carded, %d missing, %d failed",
         result.polled,
         result.offers,
         result.first_seen,
+        result.held,
         result.cards,
         result.missing,
         result.failures,
@@ -573,11 +607,13 @@ def providers_detail(result: ProvidersResult) -> str:
     questions — a gap between them is churn the product deliberately swallowed, and a `first
     seen` that climbs while `carded` stays flat is exactly what a healthy catalogue looks like.
     `missing` sits apart from `failed` here for the same reason it does on the sweep's line —
-    one is catalog hygiene, the other is an outage.
+    one is catalog hygiene, the other is an outage. `held` sits beside `first seen` because it
+    is the other answer to an offer (D-1538.6): a `held` that jumps to the whole set against a
+    `first seen` of zero is the release-date pass having stopped writing dates, not a quiet day.
     """
     line = (
         f"providers: {result.polled}/{result.selected} polled, "
-        f"{result.offers} offers, {result.first_seen} first seen, "
+        f"{result.offers} offers, {result.first_seen} first seen, {result.held} held, "
         f"{result.cards} carded, {result.missing} missing, {result.failures} failed"
     )
     if result.aborted:

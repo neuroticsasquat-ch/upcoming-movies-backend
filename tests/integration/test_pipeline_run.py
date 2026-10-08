@@ -1028,7 +1028,8 @@ async def test_providers_stage_finalizes_the_run_with_every_detail_clause(sessio
     assert row.status == "succeeded"
     assert row.error is None
     assert row.detail == (
-        "providers: 8/9 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed; "
+        "providers: 8/9 polled, 31 offers, 2 first seen, 0 held, 1 carded, 1 missing, "
+        "0 failed; "
         "release dates: 6/6 polled, 2 changes, 1 baselined, 0 missing, 0 failed; "
         "videos: 3/3 polled, 22 videos, 3 recorded, 1 baselined, 2 carded, 0 missing, 0 failed"
     )
