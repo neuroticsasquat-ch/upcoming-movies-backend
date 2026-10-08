@@ -455,7 +455,7 @@ def record_date_change(session, add_event):
                         changed_at=changed_at,
                     )
                 )
-        buckets = {2: "limited", 3: "wide", 4: "digital", 5: "physical"}
+        buckets = {2: "limited", 3: "wide", 4: "digital"}
         return await add_event(
             film=film,
             event_type="release_date",
@@ -1179,8 +1179,8 @@ async def test_the_slate_is_the_governing_us_date_per_release_type_inside_the_wi
     session, subscriber, make_film, add_release_date, watchlist, send
 ):
     """Thirty dates, today first: today and today + 29 are in; yesterday and today + 30 are
-    out. A non-US date, a premiere and a film not on the watchlist never appear; of two US
-    wide rows the earliest governs (NEU-1206)."""
+    out. A non-US date, a premiere, a physical date (NEU-1542) and a film not on the watchlist
+    never appear; of two US wide rows the earliest governs (NEU-1206)."""
     user = await subscriber()
     edge = await make_film(slug="edge", title="Edge")
     dune = await make_film(slug="dune", title="Dune")
@@ -1192,8 +1192,9 @@ async def test_the_slate_is_the_governing_us_date_per_release_type_inside_the_wi
         film=edge, release_type=4, release_date=_on(TODAY + timedelta(days=SLATE_WINDOW_DAYS - 1))
     )
     await add_release_date(
-        film=edge, release_type=5, release_date=_on(TODAY + timedelta(days=SLATE_WINDOW_DAYS))
+        film=edge, release_type=2, release_date=_on(TODAY + timedelta(days=SLATE_WINDOW_DAYS))
     )
+    await add_release_date(film=edge, release_type=5, release_date=_on(TODAY + timedelta(days=3)))
     await add_release_date(film=dune, release_type=2, release_date=_on(TODAY - timedelta(days=1)))
     await add_release_date(film=dune, release_type=3, release_date=_on(TODAY + timedelta(days=20)))
     await add_release_date(film=dune, release_type=3, release_date=_on(TODAY + timedelta(days=10)))
@@ -1210,7 +1211,9 @@ async def test_the_slate_is_the_governing_us_date_per_release_type_inside_the_wi
     assert "Friday, September 18, 2026" in text  # today, wide
     assert "Monday, September 28, 2026" in text  # dune's earliest US wide row
     assert "Saturday, October 17, 2026" in text  # today + 29, digital
-    assert "Physical" not in text  # today + 30
+    assert "Sunday, October 18, 2026" not in text  # today + 30
+    assert "Monday, September 21, 2026" not in text  # physical
+    assert "Physical" not in text
     assert "Thursday, September 17, 2026" not in text  # yesterday
     assert "Sunday, September 20, 2026" not in text  # GB
     assert "Tuesday, September 22, 2026" not in text  # premiere
@@ -1256,8 +1259,10 @@ async def test_the_slate_is_the_my_films_calendar_over_its_window(
     # would drop a today-dated row from one side only. The governing-date test pins today.
     await add_release_date(film=heat, release_type=2, release_date=_on(today + timedelta(days=1)))
     await add_release_date(
-        film=heat, release_type=5, release_date=_on(today + timedelta(days=SLATE_WINDOW_DAYS))
+        film=heat, release_type=4, release_date=_on(today + timedelta(days=SLATE_WINDOW_DAYS))
     )
+    # Physical is on neither the calendar nor the slate (NEU-1542).
+    await add_release_date(film=heat, release_type=5, release_date=_on(today + timedelta(days=3)))
     await add_release_date(film=other, release_type=3, release_date=_on(today + timedelta(days=2)))
     await record_date_change(film=edge, created_at=_on(today, 0), changes=[(3, "moved")])
 

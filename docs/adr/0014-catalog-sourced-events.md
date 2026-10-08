@@ -314,7 +314,7 @@ this needs no special path.
 > left empty. The rule is vacuous for an in-play film (every displayable date is on or after
 > the primary date), and on an opened film it sorts TMDB catching up on a theatrical date and a
 > home date the film is already streaming on (silent; `now_available` carried that) from an
-> upcoming US digital or physical date (D-26's card, which until now could not fire — nothing
+> upcoming US digital date (D-26's card, which until now could not fire — nothing
 > re-read a released film's dates). Those dates are now read by a third pass of the providers
 > run over the released half of the poll set, which writes `film_release_date_change` rows and
 > nothing else, so no other card can come of it. See

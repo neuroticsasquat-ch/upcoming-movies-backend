@@ -924,7 +924,7 @@ class SlateMonth:
 
 
 def _bucket_rank(bucket: str) -> int:
-    """`_calendar_type_rank`'s order in Python: wide, limited, digital, physical; a bucket
+    """`_calendar_type_rank`'s order in Python: wide, limited, digital; a bucket
     nobody ranked last, as the calendar sorts it."""
     if bucket in _CALENDAR_BUCKET_ORDER:
         return _CALENDAR_BUCKET_ORDER.index(bucket)

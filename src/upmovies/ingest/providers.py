@@ -31,15 +31,15 @@ never poll it.
 `poll_half_clause` splits the set on `in_play_clause`: the films that have opened go to the
 release-date poll (`ingest.release_dates`, the D-26 home-release dates the refresh phase stopped
 reading at release), the ones that have not go to the video poll (`ingest.videos`, D-35's
-trailers — which stop being news once the film is out). Where-to-watch is the one question
+trailers — which stop being news once the film is out). First availability is the one question
 worth asking either way, so the provider pass keeps the whole set. Same number of reads per
 film as before: providers plus whichever half it falls in.
 
-**Insert-only ledger, delete-and-rebuild snapshot.** Each poll writes new
-`availability_first_seen` rows for offers it has never seen before and rebuilds
-`film_availability_current` for the region wholesale. The first is what `now_available` cards
-off (D-28); the second is what the where-to-watch box renders (D-29). Nothing tracks churn: a
-provider dropping a film removes a current row and leaves the ledger untouched.
+**Insert-only ledger, no snapshot.** Each poll writes new `availability_first_seen` rows for
+offers it has never seen before — what `now_available` cards off (D-28) — and nothing else about
+availability. The current-carriers snapshot the where-to-watch box rendered (D-29) went with the
+box in NEU-1542 (ADR-0023): the site follows a film to its first home availability, not where it
+streams today. Nothing tracks churn: a provider dropping a film leaves the ledger untouched.
 
 **The card is per monetization type, not per provider or per row** (D-28). A new ledger row is
 necessary but not sufficient: Netflix handing a film to Hulu writes a row — Hulu has never
@@ -57,7 +57,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
-from sqlalchemy import ColumnElement, Date, and_, cast, delete, func, literal, not_, or_, select
+from sqlalchemy import ColumnElement, Date, and_, cast, func, literal, not_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,7 +66,6 @@ from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     AvailabilityFirstSeen,
     Film,
-    FilmAvailabilityCurrent,
     FilmReleaseDate,
     WatchProvider,
 )
@@ -90,7 +89,7 @@ log = logging.getLogger(__name__)
 
 # The monetization types are also the TMDB response keys they are read from, so the tables'
 # CHECK constraint and this loop are one list rather than two that can drift. The order is the
-# order the where-to-watch box lists them in (D-29), and so the order rows are written in.
+# order a `now_available` body names them in, and so the order rows are written in.
 MONETIZATION_FIELDS: tuple[str, ...] = MONETIZATION_TYPES
 
 
@@ -285,15 +284,14 @@ def offers_for_region(region: TMDBWatchProviderRegion | None) -> list[Offer]:
 
     `None` — TMDB holding no entry for the region at all — flattens to no offers rather than
     raising, and is the ordinary answer for a film nobody carries in the US. The caller treats
-    it exactly like an empty list, which is what makes a film leaving every provider empty its
-    where-to-watch box instead of freezing it at the last poll that found something.
+    it exactly like an empty list: no offers, so nothing new for the ledger and no card.
 
     **Deduplicated on `(provider_id, monetization_type)`**, keeping the first sighting. That
-    pair is the natural key of both tables, so a provider TMDB happens to list twice inside one
+    pair is the natural key of the ledger, so a provider TMDB happens to list twice inside one
     monetization list — regional duplicates do occur in the JustWatch data — would otherwise
-    reach the snapshot rebuild as two rows with the same key, raise a unique violation, fail
-    the film, and spend the abort budget on a payload that was never ambiguous. Deduplicating
-    once here rather than at each of the three writes keeps one definition of "an offer".
+    reach the ledger insert as two rows with the same key, raise a unique violation, fail the
+    film, and spend the abort budget on a payload that was never ambiguous. Deduplicating once
+    here rather than at each write keeps one definition of "an offer".
     """
     if region is None:
         return []
@@ -314,7 +312,8 @@ async def _upsert_providers(session: AsyncSession, offers: list[Offer]) -> None:
     """Record every provider named by this film's offers. Caller commits.
 
     Upsert rather than insert-if-absent: TMDB renames services and moves their logos, and the
-    box renders whatever is stored, so a name observed today is the name to hold. Deduplicated
+    names are held for the `now_available` body and for `rerender_now_available_summaries`, so
+    a name observed today is the name to hold. Deduplicated
     on the way in because one provider commonly appears under two monetization types, and a
     statement that names the same key twice raises `CardinalityViolation` rather than folding.
     """
@@ -461,46 +460,6 @@ async def _card_now_available(
     return True
 
 
-async def _rebuild_current(
-    session: AsyncSession,
-    *,
-    film_id: UUID,
-    region_code: str,
-    offers: list[Offer],
-    link: str | None,
-) -> None:
-    """Replace this film's current availability in this region with what the poll just saw.
-    Caller commits.
-
-    Delete-and-rebuild rather than a diff: the snapshot has no history to preserve — that is
-    the ledger's job — and a rebuild is the only write that cannot leave a stale row behind
-    when a provider drops the film. Scoped to the one region so a later region's rows are not
-    collateral of a US poll.
-    """
-    await session.execute(
-        delete(FilmAvailabilityCurrent).where(
-            FilmAvailabilityCurrent.film_id == film_id,
-            FilmAvailabilityCurrent.region == region_code,
-        )
-    )
-    if not offers:
-        return
-    await session.execute(
-        insert(FilmAvailabilityCurrent).values(
-            [
-                {
-                    "film_id": film_id,
-                    "region": region_code,
-                    "provider_id": o.provider_id,
-                    "monetization_type": o.monetization_type,
-                    "link": link,
-                }
-                for o in offers
-            ]
-        )
-    )
-
-
 async def run_provider_poll(
     *,
     session_factory: SessionFactory,
@@ -560,13 +519,6 @@ async def run_provider_poll(
                     new_offers=new_offers,
                     known_types=known_types,
                     first_seen_at=seen_at,
-                )
-                await _rebuild_current(
-                    s,
-                    film_id=target.film_id,
-                    region_code=region_code,
-                    offers=offers,
-                    link=region.link if region is not None else None,
                 )
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()

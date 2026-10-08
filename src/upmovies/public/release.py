@@ -2,18 +2,17 @@ from upmovies.catalog.release_grade import release_bucket
 
 # TMDB release_dates `type` ints (per /movie/{id}/release_dates):
 #   1 Premiere · 2 Theatrical (limited) · 3 Theatrical (wide) · 4 Digital · 5 Physical · 6 TV
-# This site surfaces the theatrical arc — wide (3) + limited (2), US or origin country — plus
-# the US home release, digital (4) + physical (5) (D-26). Premiere (1) is excluded — TMDB has no
-# distinct "festival" type (type 1 lumps real festival screenings with ordinary premieres,
-# distinguishable only by free-text `note`), so we drop it rather than mislabel; TV (6) is
-# nobody's release date. Membership — including the home release's US-only region rule — is
-# `catalog.release_grade`'s to decide; this module only labels what it admits. The same rule
-# drives both the movie page release list and the /calendar feed.
+# This site surfaces the theatrical arc — wide (3) + limited (2), US or origin country — plus the US
+# home release, digital (4) (D-26; physical (5) dropped by NEU-1542). Premiere (1) is excluded —
+# TMDB has no distinct "festival" type (type 1 lumps real festival screenings with ordinary
+# premieres, distinguishable only by free-text `note`), so we drop it rather than mislabel; TV (6)
+# is nobody's release date. Membership — including the home release's US-only region rule — is
+# `catalog.release_grade`'s to decide; this module only labels what it admits. The same rule drives
+# both the movie page release list and the /calendar feed.
 RELEASE_BUCKETS: tuple[str, ...] = (
     "limited",
     "wide",
     "digital",
-    "physical",
 )  # display + significance order
 
 # Human-readable label per bucket, for the movie page's "Release dates" section — where the
@@ -24,7 +23,6 @@ RELEASE_BUCKET_LABELS: dict[str, str] = {
     "limited": "Limited",
     "wide": "Wide",
     "digital": "Digital",
-    "physical": "Physical",
 }
 
 

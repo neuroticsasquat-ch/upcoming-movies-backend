@@ -898,9 +898,20 @@ same date-paged shape as the all-releases calendar, and none of the popularity/r
 that keep noise off the public listing. Following a director puts nothing on it (EF-14): only
 title follows do. The **iCal feed** is its subscribed form and holds the same films and dates;
 the only thing the feed adds is a bounded reach into the past, because a subscribed client
-drops whatever a feed stops publishing.
+drops whatever a feed stops publishing. It has both **calendar kinds**, and the iCal feed is
+their union: one subscription carries the theatrical arc and the digital date (D-1542.4).
 _Avoid_: watchlist calendar (the old name), my calendar (the nav item is "Calendar"), follow
 calendar, personal feed (that is the timeline), subscription calendar (that is the iCal feed).
+
+**Calendar kind**:
+Which of the two calendars a reader is looking at: **In theaters** (the US theatrical arc, wide
+and limited) or **At home** (the US digital date). The kind cuts across the calendar tab — My
+films and All releases each have both kinds — and `GET /calendar` / `GET /me/calendar` take it
+as `kind=theatrical|home` (omitted = both, for older clients). It is a view, not a place (no
+URL), and not a preference (not remembered). The home kind holds the announced digital date and
+nothing observed: a `now_available` observation never appears on any calendar (D-1542.1).
+_Avoid_: filter, mode, category, "rent/buy/stream view" (the view holds one announced date, not
+three observations), "digital tab" (it is not a tab).
 
 **Digest**:
 The one delivery of a user's timeline by mail — daily or weekly, their choice, never both, and
@@ -919,7 +930,7 @@ by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody
 (nothing is selected out).
 
 **Slate**:
-The upcoming US dates — theatrical, digital and physical — for the films a user follows by
+The upcoming US dates — theatrical and digital — for the films a user follows by
 title, over the next 30 days, soonest first. The same set the my-films calendar and the `.ics`
 feed list (EF-14): a slate cannot name a date the calendar would not, and in the mail it is
 **the my-films calendar reproduced** for those days — date heading, release-type bucket, the
@@ -947,11 +958,14 @@ _Avoid_: card (that is one beat on screen), item, row, "Following:" line (retire
 entry is always a title follow, and an entity's cards are the entity entry's).
 
 **Home-release date**:
-A US digital (TMDB type 4) or physical (type 5) release date. Part of the displayable set beside
-the theatrical arc: listed on the film page and the calendar, and carded as a `release_date`
-event when set or moved. It is the forward-looking half of home-release tracking — the only
-source that says "arrives October 14" *before* it happens.
-_Avoid_: streaming date (streaming is observed, not announced), VOD date.
+The US digital (TMDB type 4) release date, singular. Part of the displayable set beside the
+theatrical arc: listed on the film page and the At home calendar, and carded as a
+`release_date` event when set or moved. It is the forward-looking half of home-release
+tracking — the only source that says "arrives October 14" *before* it happens. The physical
+date (type 5) is stored and never displayed, carded or listed (NEU-1542, ADR-0023): the site
+follows a film to the first day you can watch it at home, and the disc lands after that.
+_Avoid_: streaming date (streaming is observed, not announced), VOD date, physical release, disc
+date, Blu-ray date.
 
 **Now-available event**:
 The catalog-sourced event raised the first time a title is observed on any provider for a
@@ -960,3 +974,11 @@ first observation cards it; the title then goes quiet for that type forever, so 
 between services produces nothing. That silence is deliberate — service-to-service churn is a
 non-goal, and the upstream data cannot give advance warning of a title *leaving*.
 _Avoid_: availability change, provider change, streaming update.
+
+**Where to watch** (retired):
+D-29's film-page box of a film's *current* US carriers, from a snapshot the provider poll
+rebuilt daily. Removed with its table by ADR-0023 (NEU-1542): it promised an accuracy across time
+the site does not provide. The phrase survives only as the label of the film page's chip that
+links out to TMDB's own watch page once the film is out.
+_Avoid_: describing anything on the site as "where to watch" data; providers box; availability
+box.

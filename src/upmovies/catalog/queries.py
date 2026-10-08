@@ -85,7 +85,7 @@ ALERT_WINDOW_DEAD_STATUSES: frozenset[str] = frozenset({"Canceled"})
 """The one TMDB status past which no follow is owed anything about a film (D-46).
 
 `Released` is deliberately **not** here: it is the state the home-release beats happen in —
-`now_available` (D-28) and the `US:digital` / `US:physical` release dates (D-26) — so a window
+`now_available` (D-28) and the `US:digital` release date (D-26) — so a window
 that ended there delivered none of them to an indirect follower. A trailer is not one of them:
 the video poll stops at release (NEU-1532).
 """

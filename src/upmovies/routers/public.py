@@ -7,6 +7,7 @@ from upmovies.deps import get_session
 from upmovies.pagination import InvalidCursor
 from upmovies.public import service
 from upmovies.public.dto import (
+    CalendarKind,
     CalendarResponse,
     CollectionDetailResponse,
     CollectionSearchResponse,
@@ -277,12 +278,15 @@ async def get_grouped_feed(
 
 @router.get("/calendar", response_model=CalendarResponse, dependencies=[_public_limit])
 async def get_calendar(
+    # Which calendar: the theatrical arc or the US digital date (D-1542.2). Omitted = both
+    # kinds, for older clients; paging and `total` are per kind when one is given.
+    kind: CalendarKind | None = Query(default=None),
     # limit/offset count distinct release dates (soonest first), not film rows.
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> CalendarResponse:
-    return await service.get_calendar(session, limit=limit, offset=offset)
+    return await service.get_calendar(session, kind=kind, limit=limit, offset=offset)
 
 
 # `{token}.ics` rather than a query parameter: a calendar client is handed one URL and asked to

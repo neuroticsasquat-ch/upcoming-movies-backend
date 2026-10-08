@@ -136,7 +136,6 @@ def test_a_trailing_slash_on_the_base_url_does_not_double():
         ("wide", "A Film — in theaters"),
         ("limited", "A Film — in theaters (limited)"),
         ("digital", "A Film — digital"),
-        ("physical", "A Film — physical"),
     ],
 )
 def test_the_summary_names_the_bucket(bucket, expected):

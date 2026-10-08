@@ -1,8 +1,8 @@
 """The release-date poll: a released film's release slate, re-read once a day so a US home
 release dated after the film opened can still card (D-26, NEU-1532).
 
-**Why it exists.** D-26 promised a `release_date` card when a US digital or physical date is set
-after release, and nothing could raise one: the sweep's refresh set is `in_play_clause`, which
+**Why it exists.** D-26 promised a `release_date` card when a US digital date is set after
+release, and nothing could raise one: the sweep's refresh set is `in_play_clause`, which
 drops a film the day it opens, and no other pass fetched `/movie/{id}` for it. The history this
 writes is the same `catalog.film_release_date_change` the full upsert writes, through the same
 `rebuild_release_dates`, so the sweep's `release_events` phase cards it on its next run exactly

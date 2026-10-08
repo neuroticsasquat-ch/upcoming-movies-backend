@@ -9,10 +9,9 @@ hear that it landed. Rule 2 is "somebody follows this film by title", asked of e
 once (EF-14): a film reached only through a followed director is not in it, because no surface
 delivers that film's beats to them, and a film leaves the set when its last follower unfollows.
 
-The write is the other half, and it is two tables with opposite lifetimes over one read: the
-ledger (`availability_first_seen`) is insert-only and is what `now_available` will card off
-(D-28), while the snapshot (`film_availability_current`) is rebuilt wholesale so a film leaving
-a service leaves the where-to-watch box (D-29) without disturbing the fact that it was there.
+The write is the other half: the ledger (`availability_first_seen`) is insert-only and is what
+`now_available` cards off (D-28). The current-carriers snapshot the where-to-watch box read
+(D-29) is gone with the box (NEU-1542, ADR-0023).
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -29,7 +28,6 @@ from upmovies.app.models import Follow
 from upmovies.catalog.models import (
     AvailabilityFirstSeen,
     Film,
-    FilmAvailabilityCurrent,
     FilmReleaseDate,
     WatchProvider,
 )
@@ -122,15 +120,6 @@ async def _first_seen(session, film: Film) -> list[tuple[int, str]]:
         select(AvailabilityFirstSeen.provider_id, AvailabilityFirstSeen.monetization_type)
         .where(AvailabilityFirstSeen.film_id == film.id)
         .order_by(AvailabilityFirstSeen.id)
-    )
-    return [(pid, kind) for pid, kind in rows]
-
-
-async def _current(session, film: Film) -> list[tuple[int, str]]:
-    rows = await session.execute(
-        select(FilmAvailabilityCurrent.provider_id, FilmAvailabilityCurrent.monetization_type)
-        .where(FilmAvailabilityCurrent.film_id == film.id)
-        .order_by(FilmAvailabilityCurrent.id)
     )
     return [(pid, kind) for pid, kind in rows]
 
@@ -374,9 +363,7 @@ async def test_a_film_matching_both_rules_is_polled_once(
 
 
 @respx.mock
-async def test_writes_the_ledger_the_snapshot_and_the_providers(
-    session, session_factory, tmdb_client, run_id
-):
+async def test_writes_the_ledger_and_the_providers(session, session_factory, tmdb_client, run_id):
     film = await _add_released_film(session, 300)
     await session.commit()
     _mock_providers(300, flatrate=[8], rent=[2], buy=[2], link="https://example.test/watch")
@@ -385,17 +372,10 @@ async def test_writes_the_ledger_the_snapshot_and_the_providers(
 
     assert (result.offers, result.first_seen) == (3, 3)
     assert await _first_seen(session, film) == [(8, "flatrate"), (2, "rent"), (2, "buy")]
-    assert await _current(session, film) == [(8, "flatrate"), (2, "rent"), (2, "buy")]
     providers = (
         await session.execute(select(WatchProvider.id).order_by(WatchProvider.id))
     ).scalars()
     assert list(providers) == [2, 8]
-    link = (
-        await session.execute(
-            select(FilmAvailabilityCurrent.link).where(FilmAvailabilityCurrent.film_id == film.id)
-        )
-    ).scalars()
-    assert set(link) == {"https://example.test/watch"}
 
 
 @respx.mock
@@ -485,7 +465,6 @@ async def test_a_duplicate_offer_in_one_payload_does_not_cost_the_film_its_poll(
     result = await _run(session_factory, tmdb_client, run_id)
 
     assert (result.polled, result.failures) == (1, 0)
-    assert await _current(session, film) == [(8, "flatrate")]
     assert await _first_seen(session, film) == [(8, "flatrate")]
 
 
@@ -505,43 +484,6 @@ async def test_a_new_offer_on_a_known_film_is_a_new_ledger_row(
 
     assert result.first_seen == 1
     assert await _first_seen(session, film) == [(8, "flatrate"), (2, "rent")]
-
-
-@respx.mock
-async def test_the_snapshot_is_rebuilt_and_the_ledger_is_not_disturbed(
-    session, session_factory, tmdb_client, run_id
-):
-    """A film leaving a service disappears from the where-to-watch box and stays in the ledger
-    — the product never tracks churn, and never forgets that it was once available."""
-    film = await _add_released_film(session, 303)
-    await session.commit()
-    route = _mock_providers(303, flatrate=[8], rent=[2])
-    await _run(session_factory, tmdb_client, run_id)
-    route.mock(return_value=httpx.Response(200, json=make_watch_providers(303, rent=[2])))
-
-    result = await _run(session_factory, tmdb_client, run_id)
-
-    assert await _current(session, film) == [(2, "rent")]
-    assert await _first_seen(session, film) == [(8, "flatrate"), (2, "rent")]
-    assert result.first_seen == 0
-
-
-@respx.mock
-async def test_a_film_nobody_carries_empties_its_snapshot(
-    session, session_factory, tmdb_client, run_id
-):
-    """TMDB answers an empty `results` for a film no provider holds. Treating that as "nothing
-    to do" would freeze the box at whatever the last poll found."""
-    film = await _add_released_film(session, 304)
-    await session.commit()
-    route = _mock_providers(304, flatrate=[8])
-    await _run(session_factory, tmdb_client, run_id)
-    route.mock(return_value=httpx.Response(200, json=make_watch_providers(304)))
-
-    result = await _run(session_factory, tmdb_client, run_id)
-
-    assert (await _current(session, film), result.polled) == ([], 1)
-    assert await _first_seen(session, film) == [(8, "flatrate")]
 
 
 @respx.mock
@@ -579,31 +521,6 @@ async def test_a_renamed_provider_is_updated_rather_than_duplicated(
     assert (provider.name, provider.logo_path) == ("Eight Plus", "/new.jpg")
 
 
-@respx.mock
-async def test_only_the_polled_region_is_rebuilt(session, session_factory, tmdb_client, run_id):
-    """v1 polls US, but the tables are keyed by region — a US poll must not be the thing that
-    deletes a later region's rows."""
-    film = await _add_released_film(session, 306)
-    session.add(WatchProvider(id=8, name="Eight"))
-    await session.flush()
-    session.add(
-        FilmAvailabilityCurrent(
-            film_id=film.id, region="GB", provider_id=8, monetization_type="flatrate"
-        )
-    )
-    await session.commit()
-    _mock_providers(306, rent=[2])
-
-    await _run(session_factory, tmdb_client, run_id)
-
-    rows = await session.execute(
-        select(FilmAvailabilityCurrent.region, FilmAvailabilityCurrent.provider_id)
-        .where(FilmAvailabilityCurrent.film_id == film.id)
-        .order_by(FilmAvailabilityCurrent.region)
-    )
-    assert list(rows) == [("GB", 8), ("US", 2)]
-
-
 # --- the per-item contract -----------------------------------------------------
 
 
@@ -620,7 +537,7 @@ async def test_one_failure_does_not_cost_the_films_around_it(
     result = await _run(session_factory, tmdb_client, run_id)
 
     assert (result.polled, result.failures) == (1, 1)
-    assert await _current(session, film) == [(8, "flatrate")]
+    assert await _first_seen(session, film) == [(8, "flatrate")]
 
 
 @respx.mock
@@ -845,42 +762,3 @@ async def test_a_film_nobody_carries_cards_nothing(session, session_factory, tmd
 
     assert result.cards == 0
     assert await _cards(session, film) == []
-
-
-@respx.mock
-async def test_the_snapshot_is_written_in_the_order_tmdb_listed_the_services(
-    session, session_factory, tmdb_client, run_id
-):
-    """The rebuild inserts a region's offers in the order the payload listed them, which is
-    JustWatch's own ranking.
-
-    Pinned here because the where-to-watch box (D-29, NEU-1376) reads the snapshot back
-    `ORDER BY id` and calls that ranking: `public.service._where_to_watch` has no ordering of
-    its own, so a dedup or grouping change in `offers_for_region` that reordered the insert
-    would silently reorder the box with that endpoint's own tests still green.
-    """
-    film = await _add_released_film(session, 507)
-    await session.commit()
-    respx.get(f"{BASE_URL}/movie/507/watch/providers").mock(
-        return_value=httpx.Response(
-            200,
-            json=make_watch_providers(
-                507,
-                regions=_named(
-                    {
-                        "flatrate": [(8, "Netflix"), (15, "Hulu"), (1, "AMC+")],
-                        "rent": [(2, "Apple TV")],
-                    }
-                ),
-            ),
-        )
-    )
-
-    await _run(session_factory, tmdb_client, run_id, now=NOW)
-
-    assert await _current(session, film) == [
-        (8, "flatrate"),
-        (15, "flatrate"),
-        (1, "flatrate"),
-        (2, "rent"),
-    ]

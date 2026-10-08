@@ -277,16 +277,18 @@ async def test_the_dates_are_the_ics_feeds_dates(
 ):
     """The claim the ticket exists to protect: the on-screen calendar and the subscribed one
     carry the same subjects on the same days, including the governing-date collapse."""
-    film = await make_film(slug="four-ways", title="Four Ways")
+    film = await make_film(slug="three-ways", title="Three Ways")
     # `limited` and `wide` share a day on purpose: the subject is (film, bucket), so a
     # comparison that dropped the bucket would let the two surfaces disagree about which
     # bucket landed on that date and still pass.
-    for release_type, when in ((2, _FUTURE), (3, _FUTURE), (4, _LATER)):
+    for release_type, when in ((2, _FUTURE), (3, _FUTURE)):
         await add_release_date(film=film, release_date=when, release_type=release_type)
-    # A second row in the physical bucket, earlier than the first: the governing date is the
+    # A second row in the digital bucket, earlier than the first: the governing date is the
     # earliest in the subject (NEU-1206), and both surfaces must collapse it the same way.
-    await add_release_date(film=film, release_date=_LATEST, release_type=5)
-    await add_release_date(film=film, release_date=_LATEST - timedelta(days=7), release_type=5)
+    await add_release_date(film=film, release_date=_LATEST, release_type=4)
+    await add_release_date(film=film, release_date=_LATEST - timedelta(days=7), release_type=4)
+    # A physical date is stored and on neither surface (NEU-1542).
+    await add_release_date(film=film, release_date=_LATER, release_type=5)
     await follow_film(user=entitled_client.user, film=film)
 
     token = (await entitled_client.get("/me/settings")).json()["ical_token"]
@@ -308,8 +310,9 @@ async def test_the_dates_are_the_ics_feeds_dates(
         (item["film_ref"], item["release_type"], date.fromisoformat(item["release_date"]))
         for item in body["items"]
     }
-    assert len(from_json) == 4
+    assert len(from_json) == 3
     assert from_json == from_feed
+    assert "physical" not in {bucket for _, bucket, _ in from_json}
 
 
 # --- paging and ordering ---------------------------------------------------------------------
@@ -343,18 +346,16 @@ async def test_paging_counts_dates_not_film_rows(
 async def test_ordering_within_a_date_is_the_public_routes(
     entitled_client, make_film, add_release_date, follow_film
 ):
-    # wide, limited, digital, physical; within a bucket, more popular first.
+    # wide, limited, digital; within a bucket, more popular first.
     wide = await make_film(slug="wide", title="Wide", popularity=1.0)
     limited_popular = await make_film(slug="limited-hit", title="Limited Hit", popularity=9.0)
     limited_quiet = await make_film(slug="limited-quiet", title="Limited Quiet", popularity=2.0)
     digital = await make_film(slug="digital", title="Digital", popularity=50.0)
-    physical = await make_film(slug="physical", title="Physical", popularity=99.0)
     for film, release_type in (
         (wide, 3),
         (limited_popular, 2),
         (limited_quiet, 2),
         (digital, 4),
-        (physical, 5),
     ):
         await add_release_date(film=film, release_date=_FUTURE, release_type=release_type)
         await follow_film(user=entitled_client.user, film=film)
@@ -366,7 +367,6 @@ async def test_ordering_within_a_date_is_the_public_routes(
         ref(limited_popular),
         ref(limited_quiet),
         ref(digital),
-        ref(physical),
     ]
 
 
@@ -410,3 +410,68 @@ async def test_an_item_carries_the_public_routes_decoration(
     assert mine["genres"] == ["Comedy", "Drama"]
     assert mine["release_year"] == 2099
     assert mine["poster_path"] == "/decorated.jpg"
+
+
+# --- the kind (NEU-1542, D-1542.2) -------------------------------------------------------------
+
+
+async def test_a_us_physical_date_is_not_on_my_calendar(
+    entitled_client, make_film, add_release_date, follow_film
+):
+    film = await make_film(slug="physical-only", title="Physical Only")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=5)
+    await follow_film(user=entitled_client.user, film=film)
+
+    for query in ("", "?kind=theatrical", "?kind=home"):
+        body = (await entitled_client.get(f"/me/calendar{query}")).json()
+        assert (body["items"], body["total"]) == ([], 0)
+
+
+async def _followed_wide_and_digital(entitled_client, make_film, add_release_date, follow_film):
+    film = await make_film(slug="two-kinds", title="Two Kinds")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=3)
+    await add_release_date(film=film, release_date=_LATER, release_type=4)
+    await follow_film(user=entitled_client.user, film=film)
+    return film
+
+
+async def test_kind_theatrical_lists_only_the_theatrical_arc(
+    entitled_client, make_film, add_release_date, follow_film
+):
+    film = await _followed_wide_and_digital(
+        entitled_client, make_film, add_release_date, follow_film
+    )
+
+    body = (await entitled_client.get("/me/calendar?kind=theatrical")).json()
+
+    assert [(i["film_ref"], i["release_type"]) for i in body["items"]] == [(ref(film), "wide")]
+    assert body["total"] == 1
+
+
+async def test_kind_home_lists_only_the_digital_date(
+    entitled_client, make_film, add_release_date, follow_film
+):
+    film = await _followed_wide_and_digital(
+        entitled_client, make_film, add_release_date, follow_film
+    )
+
+    body = (await entitled_client.get("/me/calendar?kind=home")).json()
+
+    assert [(i["film_ref"], i["release_type"]) for i in body["items"]] == [(ref(film), "digital")]
+    assert body["total"] == 1
+
+
+async def test_kind_omitted_lists_both_kinds(
+    entitled_client, make_film, add_release_date, follow_film
+):
+    await _followed_wide_and_digital(entitled_client, make_film, add_release_date, follow_film)
+
+    body = (await entitled_client.get("/me/calendar")).json()
+
+    assert [i["release_type"] for i in body["items"]] == ["wide", "digital"]
+    assert body["total"] == 2
+
+
+async def test_an_unknown_kind_is_422(entitled_client):
+    r = await entitled_client.get("/me/calendar?kind=physical")
+    assert r.status_code == 422

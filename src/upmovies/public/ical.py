@@ -38,16 +38,15 @@ its URL."""
 MAX_LINE_OCTETS = 75
 """The content line limit (§3.1), excluding the CRLF."""
 
-# What the summary calls each release bucket. Three phrasings for four buckets is deliberate:
-# the theatrical arc reads as one thing to a person putting it in their calendar, so both its
-# buckets say "in theaters" — but `limited` carries the parenthetical, because a film with both
-# dates would otherwise land two events with byte-identical summaries on two different days and
-# the user could not tell which was which from the notification alone.
+# What the summary calls each release bucket. The theatrical arc reads as one thing to a person
+# putting it in their calendar, so both its buckets say "in theaters" — but `limited` carries
+# the parenthetical, because a film with both dates would otherwise land two events with
+# byte-identical summaries on two different days and the user could not tell which was which
+# from the notification alone.
 BUCKET_SUMMARY_SUFFIX: dict[str, str] = {
     "wide": "in theaters",
     "limited": "in theaters (limited)",
     "digital": "digital",
-    "physical": "physical",
 }
 
 
