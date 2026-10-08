@@ -11,7 +11,9 @@ delivers that film's beats to them, and a film leaves the set when its last foll
 
 The write is the other half: the ledger (`availability_first_seen`) is insert-only and is what
 `now_available` cards off (D-28). The current-carriers snapshot the where-to-watch box read
-(D-29) is gone with the box (NEU-1542, ADR-0023).
+(D-29) is gone with the box (NEU-1542, ADR-0023). An offer is believed only from the film's US
+digital date (D-1538.1), so the fixture film carries one already landed, and the hold has its
+own section at the end.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -48,6 +50,8 @@ IN_WINDOW = TODAY - timedelta(days=60)
 TOO_RECENT = TODAY - timedelta(days=3)
 TOO_OLD = TODAY - timedelta(days=400)
 UPCOMING = TODAY + timedelta(days=30)
+LANDED = TODAY - timedelta(days=7)
+"""A US digital date already past, so the fixture film's offers are believed (D-1538.1)."""
 
 WIDE = 3
 LIMITED = 2
@@ -88,12 +92,22 @@ async def _add_release(
     await session.flush()
 
 
-async def _add_released_film(session, tmdb_id: int, *, on: date | None = IN_WINDOW, **overrides):
+async def _add_released_film(
+    session,
+    tmdb_id: int,
+    *,
+    on: date | None = IN_WINDOW,
+    digital: date | None = LANDED,
+    **overrides,
+):
     """A film past its US theatrical date — the poll's ordinary subject, and one the sweep's
-    `in_play_clause` has already dropped."""
+    `in_play_clause` has already dropped — and, unless `digital=None`, past its US digital date
+    too, so what the poll observes for it is believed rather than held (D-1538.1)."""
     film = await add_film(session, tmdb_id, status=overrides.pop("status", "Released"), **overrides)
     if on is not None:
         await _add_release(session, film, on=on)
+    if digital is not None:
+        await _add_release(session, film, on=digital, release_type=DIGITAL)
     return film
 
 
@@ -762,3 +776,145 @@ async def test_a_film_nobody_carries_cards_nothing(session, session_factory, tmd
 
     assert result.cards == 0
     assert await _cards(session, film) == []
+
+
+# --- pre-orders are held until the US digital date (NEU-1538) -------------------
+
+
+async def _first_seen_count(session, film: Film) -> int:
+    return len(await _first_seen(session, film))
+
+
+@respx.mock
+async def test_a_film_with_no_us_digital_date_is_held(
+    session, session_factory, tmdb_client, run_id
+):
+    """The pre-order's fingerprint (D-1538.1): a buy-only Fandango At Home listing on a film
+    TMDB has not dated yet. Held means nothing written — no ledger row to burn `buy` for the
+    real release, and no card (D-1538.2)."""
+    film = await _add_released_film(session, 601, digital=None)
+    await session.commit()
+    _mock_providers(601, buy=[7])
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert (result.held, result.first_seen, result.cards, result.offers) == (1, 0, 0, 1)
+    assert await _first_seen(session, film) == []
+    assert await _cards(session, film) == []
+    # The provider still gets its name row: that table is not a fact about the film.
+    assert await session.get(WatchProvider, 7) is not None
+    # And the film still counts as processed: a hold is a judgement, not a failure.
+    run = await session.get(IngestRun, run_id, populate_existing=True)
+    assert run.items_processed == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("digital", "held"),
+    [
+        (TODAY + timedelta(days=1), True),
+        (TODAY, False),
+        (TODAY - timedelta(days=1), False),
+    ],
+    ids=["tomorrow", "today", "yesterday"],
+)
+async def test_the_digital_date_is_inclusive_of_today(
+    session, session_factory, tmdb_client, run_id, digital, held
+):
+    film = await _add_released_film(session, 602, digital=digital)
+    await session.commit()
+    _mock_providers(602, buy=[7])
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert result.held == (1 if held else 0)
+    assert await _first_seen_count(session, film) == (0 if held else 1)
+    assert len(await _cards(session, film)) == (0 if held else 1)
+
+
+@respx.mock
+async def test_the_earliest_us_digital_row_governs(session, session_factory, tmdb_client, run_id):
+    """Governing date = earliest per (country, type) (NEU-1206): a later re-dated row in the
+    future does not hold a film whose first digital date has passed."""
+    film = await _add_released_film(session, 603)
+    await _add_release(session, film, on=TODAY + timedelta(days=20), release_type=DIGITAL)
+    await session.commit()
+    _mock_providers(603, buy=[7])
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert (result.held, result.cards) == (0, 1)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("region", "release_type"),
+    [("GB", DIGITAL), ("US", 5)],
+    ids=["non-us-digital", "us-physical"],
+)
+async def test_only_a_us_digital_date_releases_the_hold(
+    session, session_factory, tmdb_client, run_id, region, release_type
+):
+    """The home release is US type 4 alone: another region's digital date says nothing about
+    US availability, and the physical date is never displayed or carded (D-1542.5)."""
+    film = await _add_released_film(session, 604, digital=None)
+    await _add_release(session, film, on=LANDED, release_type=release_type, region=region)
+    await session.commit()
+    _mock_providers(604, buy=[7])
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert (result.held, result.first_seen, result.cards) == (1, 0, 0)
+
+
+@respx.mock
+async def test_a_held_film_cards_on_the_first_pass_after_its_date(
+    session, session_factory, tmdb_client, run_id
+):
+    """Nothing is remembered about a hold (D-1538.2): the next pass sees the same offers, the
+    date decides, and the card dates to the pass that believed it — not the one that held."""
+    film = await _add_released_film(session, 605, digital=None)
+    await _add_release(session, film, on=TODAY + timedelta(days=1), release_type=DIGITAL)
+    await session.commit()
+    _mock_providers(605, buy=[7])
+
+    first = await _run(session_factory, tmdb_client, run_id, now=NOW)
+    second = await _run(
+        session_factory, tmdb_client, run_id, today=TODAY + timedelta(days=1), now=LATER
+    )
+
+    assert (first.held, first.cards) == (1, 0)
+    assert (second.held, second.first_seen, second.cards) == (0, 1, 1)
+    assert await _first_seen(session, film) == [(7, "buy")]
+    (card,) = await _cards(session, film)
+    assert card.occurred_at == LATER
+    assert card.subject_key == ["US:buy"]
+
+
+@respx.mock
+async def test_a_streaming_offer_on_an_undated_film_is_held_too(
+    session, session_factory, tmdb_client, run_id
+):
+    """The rule has no per-type branch (D-1538.1): a rent/flatrate rescue would be a second
+    rule resting on today's habit that pre-orders are buy-only."""
+    film = await _add_released_film(session, 606, digital=None)
+    await session.commit()
+    _mock_providers(606, flatrate=[8])
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert (result.held, result.cards) == (1, 0)
+    assert await _first_seen(session, film) == []
+
+
+@respx.mock
+async def test_a_film_with_no_offers_is_not_held(session, session_factory, tmdb_client, run_id):
+    """Nothing to hold: `held` counts films whose observation was set aside, and an empty one
+    sets nothing aside."""
+    await _add_released_film(session, 607, digital=None)
+    await session.commit()
+    _mock_providers(607)
+
+    result = await _run(session_factory, tmdb_client, run_id, now=NOW)
+
+    assert (result.polled, result.held, result.first_seen) == (1, 0, 0)

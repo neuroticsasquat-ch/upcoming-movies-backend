@@ -70,6 +70,12 @@ to create and no new environment variable, and `ingest_run.detail` carries `prov
   a large `recorded` with `0 carded` and a `baselined` that matches the number polled; real
   trailer cards start on the second run. `film.videos_observed_at` is the marker, and it is
   deliberately never reset.
+- **A `held` count that jumps to the whole set means the release-date pass stopped writing
+  dates (NEU-1538).** The provider pass believes a film's offers only once its US digital date
+  is on or before the day (D-1538.1), reading the date from `film_release_date` — so a handful
+  `held` a day is pre-orders being ignored as designed, while `held` near `polled` against a
+  `first seen` of zero is every film looking undated. Look at the `release dates:` clause and
+  the sweep's refresh before suspecting the gate.
 
 **`notify` is a new slot and must be added in the Coolify UI**, on the same terms as
 `providers` above and with `HEALTHCHECK_NOTIFY_URL` set in the same edit. Three things are

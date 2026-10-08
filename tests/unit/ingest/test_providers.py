@@ -68,7 +68,9 @@ def test_detail_reports_first_seen_apart_from_offers():
         )
     )
 
-    assert line == "providers: 9/10 polled, 31 offers, 2 first seen, 1 carded, 1 missing, 0 failed"
+    assert line == (
+        "providers: 9/10 polled, 31 offers, 2 first seen, 0 held, 1 carded, 1 missing, 0 failed"
+    )
 
 
 def test_detail_reports_cards_apart_from_first_seen():
@@ -77,7 +79,15 @@ def test_detail_reports_cards_apart_from_first_seen():
     that to be readable rather than look like a lost card."""
     line = providers_detail(ProvidersResult(selected=1, polled=1, offers=1, first_seen=1))
 
-    assert "1 first seen, 0 carded" in line
+    assert "1 first seen, 0 held, 0 carded" in line
+
+
+def test_detail_reports_held_beside_first_seen():
+    """A `held` that jumps to the whole set against no `first seen` is the release-date pass
+    having stopped writing dates (D-1538.6), so it has to be on the line to be noticed."""
+    line = providers_detail(ProvidersResult(selected=5, polled=5, offers=5, held=5))
+
+    assert "5 offers, 0 first seen, 5 held, 0 carded" in line
 
 
 def test_detail_says_so_when_the_poll_gave_up():

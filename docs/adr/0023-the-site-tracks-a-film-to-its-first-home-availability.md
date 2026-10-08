@@ -85,5 +85,10 @@ film ceases to be updated beyond the window from theatrical to its first home av
   stops publishing). Theatrical and digital UIDs are unchanged, so nothing duplicates.
 - The provider poll's set, cadence and ledger are untouched; `watch_provider` stays for the
   bodies and the re-render script.
+- **Amended by NEU-1538 (2026-10-08):** an observed offer counts as first home availability
+  only from the film's US digital date. TMDB passes pre-orders on as plain `buy` offers, so the
+  poll holds a film's offers — no ledger row, no card — until its US type-4 governing date is on
+  or before the observation day (D-1538.1–2). The first-observation rule itself is unchanged;
+  what changed is when an observation is believed.
 - Anything that later wants "where is this film available *now*" must reopen this ADR, not
   add a reader to a ledger that was never meant to answer it.

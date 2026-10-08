@@ -4,10 +4,11 @@ from collections.abc import Collection
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, func, not_, or_, select
+from sqlalchemy import ColumnElement, Date, and_, cast, func, literal, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange
+from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange, FilmReleaseDate
+from upmovies.catalog.release_grade import HOME_RELEASE_TYPES, PRIMARY_REGION
 from upmovies.catalog.seed_grade import (
     DIRECTOR_JOB,
     TOP_BILLED_ORDER,
@@ -78,6 +79,37 @@ def in_play_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnE
     return and_(
         or_(Film.release_date.is_(None), Film.release_date >= today),
         or_(Film.status.is_(None), Film.status.not_in(excluded_statuses)),
+    )
+
+
+def home_release_landed_clause(*, as_of: date | ColumnElement[date]) -> ColumnElement[bool]:
+    """WHERE predicate selecting films whose **home-release date** — the US digital (type 4)
+    governing date — is on or before `as_of` (D-1538.1).
+
+    The gate on what the provider poll believes. TMDB passes a pre-order on as a plain `buy`
+    offer with no flag and no date, so an offer is only first home availability once the
+    announced date has landed; before that, or on a film TMDB has never dated, the poll holds
+    the observation and writes nothing (D-1538.2). One definition with two callers (D-1538.4):
+    the poll asks it of `today`, and `scripts/prune_preorder_availability.py` of each card's
+    UTC `occurred_at` day — so `as_of` is a plain date or a column expression.
+
+    The governing date is the earliest US type-4 row (NEU-1206), and "earliest is on or before
+    `as_of`" is exactly "some row is on or before `as_of`", so this is an EXISTS rather than a
+    `MIN` — which also makes it never NULL, so a caller can `NOT` it without an undated film
+    falling out of both sides. Dates are compared as UTC days, the way `poll_set_clause`
+    compares its theatrical ones. Type 5 and other regions are not consulted: the physical date
+    is never displayed or carded (D-1542.5), and the home release is US only.
+    """
+    return (
+        select(literal(1))
+        .select_from(FilmReleaseDate)
+        .where(
+            FilmReleaseDate.film_id == Film.id,
+            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
+            FilmReleaseDate.release_type.in_(tuple(sorted(HOME_RELEASE_TYPES))),
+            cast(func.timezone("UTC", FilmReleaseDate.release_date), Date) <= as_of,
+        )
+        .exists()
     )
 
 
