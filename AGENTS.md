@@ -114,7 +114,7 @@ And specific to their schedule and contents:
   decision pass queued; a slot that runs before it mails yesterday's.
 - **The weekly slot must run on `SLATE_WEEKDAY` (DC-2, NEU-1462).** That setting (default
   `thursday`, seeded in `docker-compose.prod.yml`) is the product's one slate day: the
-  `digest daily` slot reads it and puts the slate in front of a daily reader's cards on that
+  `digest daily` slot reads it and puts the slate after a daily reader's cards on that
   weekday — and mails a daily reader with an empty queue and a non-empty slate, as the weekly
   does. The weekly slot always carries the slate whatever day it runs, because the repo cannot
   see the Coolify schedule, so nothing fails if the two disagree: daily and weekly readers

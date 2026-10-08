@@ -35,7 +35,7 @@ writes `queued` digest rows and sends nothing, because the digest is the only de
 
 `run_digest` is the sixth and seventh: M7's digest sender (D-33), on one slot per cadence.
 It reads the `queued` digest rows the notify pass wrote for every user on that cadence and
-mails one digest each — weekly, with the "your slate" section in front. Two slots rather
+mails one digest each — weekly, with the "your slate" section after the timeline. Two slots rather
 than one arm with a day-of-week check because a Coolify schedule is the cadence, and a
 healthchecks.io check has one schedule: each cadence pings its own deadman.
 

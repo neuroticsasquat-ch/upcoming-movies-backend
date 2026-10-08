@@ -1960,7 +1960,7 @@ def _my_films_visible(governing: CTE, *, today: date) -> tuple[ColumnElement[boo
     """The my-films calendar's cuts over its governing CTE: upcoming, and a page to link to.
 
     Spelled once because the digest's slate (`digest_sender.load_slate`, FB-26) is this page
-    over a 30-day window, and a slate whose cuts drifted from the page's would name a date the
+    over a 7-day window, and a slate whose cuts drifted from the page's would name a date the
     calendar does not — or miss one it does."""
     return (governing.c.governing_date >= today, Film.slug.is_not(None))
 

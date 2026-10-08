@@ -62,18 +62,30 @@
           <p style="margin:0 0 24px;font-size:16px;">
             Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
           </p>
-          {% if slate %}
-          <h2 style="margin:0 0 4px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#555555;">Your slate</h2>
-          <p style="margin:0 0 16px;font-size:14px;color:#555555;">The next {{ slate_window_days }} days of films you follow.</p>
-          {% for month in slate %}
-          {% if month.heading %}
-          <h3 style="margin:20px 0 4px;font-size:15px;font-weight:700;line-height:1.3;color:#1a1a1a;">{{ month.heading }}</h3>
+          {% if days or week %}
+          <h2 style="margin:0 0 16px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#555555;">New on your timeline</h2>
+          {% if week %}
+          {{ poster_strip(week.posters) }}
+          {{ timeline_blocks(week.blocks) }}
           {% endif %}
-          {% for day in month.days %}
+          {% for day in days %}
+          <h3 style="margin:{% if loop.first %}0{% else %}28px{% endif %} 0 10px;font-size:17px;font-weight:700;line-height:1.3;color:#1a1a1a;">{{ day.heading }}</h3>
+          {{ poster_strip(day.posters) }}
+          {{ timeline_blocks(day.blocks) }}
+          {% endfor %}
+          {% endif %}
+          {% if slate %}
+          <h2 style="margin:{% if days or week %}24px{% else %}0{% endif %} 0 4px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#555555;">Your slate</h2>
+          <p style="margin:0 0 16px;font-size:14px;color:#555555;">The next {{ slate_window_days }} days of films you follow.</p>
+          {% for kind in slate %}
+          <h3 style="margin:20px 0 4px;font-size:15px;font-weight:700;line-height:1.3;color:#1a1a1a;">{{ kind.label }}</h3>
+          {% for day in kind.days %}
           <h4 style="margin:12px 0 6px;font-size:14px;font-weight:600;line-height:1.3;color:#555555;">{{ day.heading }}</h4>
           <div style="margin:0 0 8px;padding:0 0 0 12px;border-left:2px solid #eeeeee;">
           {% for bucket in day.buckets %}
+          {% if bucket.label %}
           <h5 style="margin:6px 0 4px;font-size:12px;font-weight:600;color:#777777;">{{ bucket.label }}</h5>
+          {% endif %}
           {% for film in bucket.films %}
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 10px;">
             <tr>
@@ -104,18 +116,6 @@
           {% endfor %}
           </div>
           {% endfor %}
-          {% endfor %}
-          {% endif %}
-          {% if days or week %}
-          <h2 style="margin:{% if slate %}24px{% else %}0{% endif %} 0 16px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#555555;">New on your timeline</h2>
-          {% if week %}
-          {{ poster_strip(week.posters) }}
-          {{ timeline_blocks(week.blocks) }}
-          {% endif %}
-          {% for day in days %}
-          <h3 style="margin:{% if loop.first %}0{% else %}28px{% endif %} 0 10px;font-size:17px;font-weight:700;line-height:1.3;color:#1a1a1a;">{{ day.heading }}</h3>
-          {{ poster_strip(day.posters) }}
-          {{ timeline_blocks(day.blocks) }}
           {% endfor %}
           {% endif %}
           <p style="margin:16px 0 0;padding:16px 0 0;border-top:1px solid #eeeeee;font-size:13px;line-height:1.5;color:#777777;">

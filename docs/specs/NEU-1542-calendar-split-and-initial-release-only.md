@@ -111,7 +111,9 @@ digest's structure.
   theatrical view keeps Wide / Limited. *Rejected:* two routes (`/calendar/home`) — a second
   indexable address for a view, against D-1412.1's reasoning and the glossary's "the tab is a
   view, not a place"; four flat tabs (crowded on a phone, and the two axes are independent).
-- **D-1542.4 The `.ics` feed and the slate stay unsplit; physical leaves both.** One
+- **D-1542.4 The `.ics` feed and the slate stay unsplit; physical leaves both.** *(Amended
+  2026-10-08 by NEU-1543: the slate is split by kind over a 7-day window; the `.ics` half
+  stands.)* One
   subscription URL and one slate, each carrying theatrical and digital dates under their bucket
   labels (the slate's headings: Wide / Limited / Digital). The glossary's "the slate is the
   my-films calendar reproduced" holds as the **union of the two views**. A subscriber's

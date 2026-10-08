@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from upmovies.app.models import Follow, Notification, UserSettings
+from upmovies.catalog.models import Film
 from upmovies.config import get_settings
 from upmovies.mail import MailError, MailGateway, MessageId
 from upmovies.main import app
@@ -205,6 +206,31 @@ async def test_preview_date_drives_the_daily_slate_day(
 
     assert "Arrival" in on_the_day.text
     assert off_the_day.text == "Nothing to send."
+
+
+async def test_preview_on_the_slate_day_renders_the_slate_after_the_timeline(
+    admin_authed_client, subscriber, queued, add_release_date, session
+):
+    """NEU-1543 reaches the preview with no change to the route: the slate follows the
+    timeline, in both parts."""
+    user = await subscriber()
+    await queued(user.id)
+    film_id = await session.scalar(select(Follow.entity_id).where(Follow.user_id == user.id))
+    dune = await session.get(Film, UUID(film_id))
+    on = SLATE_DAY + timedelta(days=2)
+    await add_release_date(
+        film=dune, release_date=datetime(on.year, on.month, on.day, 12, tzinfo=UTC)
+    )
+
+    for fmt, timeline, slate in (
+        ("text", "NEW ON YOUR TIMELINE", "YOUR SLATE"),
+        ("html", ">New on your timeline<", ">Your slate<"),
+    ):
+        r = await admin_authed_client.get(
+            PREVIEW, params=_preview_params(user.id, today=SLATE_DAY.isoformat(), format=fmt)
+        )
+        assert r.status_code == 200
+        assert r.text.index(timeline) < r.text.index(slate)
 
 
 async def test_preview_unknown_user_is_404(admin_authed_client):
