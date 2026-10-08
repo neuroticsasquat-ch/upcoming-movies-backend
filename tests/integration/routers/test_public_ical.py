@@ -380,7 +380,6 @@ async def test_the_window_does_not_cut_the_future(
         (2, "A Film — in theaters (limited)"),
         (3, "A Film — in theaters"),
         (4, "A Film — digital"),
-        (5, "A Film — physical"),
     ],
 )
 async def test_every_displayable_bucket_becomes_an_event(
@@ -392,6 +391,18 @@ async def test_every_displayable_bucket_becomes_an_event(
     await follow_film(user=user, film=film)
 
     assert _summaries((await _fetch(client, token)).text) == [expected]
+
+
+async def test_a_us_physical_date_becomes_no_event(
+    client, subscriber, make_film, add_release_date, follow_film
+):
+    # NEU-1542: physical (5) left the displayable set; a subscriber's client drops the event.
+    user, token = await subscriber()
+    film = await make_film(slug="a-film", title="A Film")
+    await add_release_date(film=film, release_date=_FUTURE, release_type=5)
+    await follow_film(user=user, film=film)
+
+    assert _summaries((await _fetch(client, token)).text) == []
 
 
 @pytest.mark.parametrize("release_type", [1, 6])

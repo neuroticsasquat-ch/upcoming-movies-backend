@@ -4,7 +4,7 @@ Reads `catalog.film_release_date_change` — the history `ingest.tmdb.release_da
 writes from the release-date rebuild — and turns each observation into one event. Two passes
 write those rows through the same `rebuild_release_dates`: the full upsert, for a film still in
 play, and the providers run's release-date poll (`ingest.release_dates`, NEU-1532), for one
-that has opened — the only reader a US digital or physical date set after release has (D-26).
+that has opened — the only reader a US digital date set after release has (D-26).
 
 **A date already past when observed is not news** (D-1532.6). A move whose new governing date
 is before the UTC day of its own observation (`changed_at`, not the carding day — a backlog
@@ -51,7 +51,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import FilmReleaseDateChange
-from upmovies.catalog.release_grade import release_bucket
+from upmovies.catalog.release_grade import RELEASE_TYPE_BUCKETS, release_bucket
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
 from upmovies.ingest.sweep.seeds import SessionFactory
@@ -139,6 +139,11 @@ async def load_release_change_backlog(
     A fixed rolling window rather than a watermark, for the reason the field phase documents:
     a watermark advances past changes a *failed* sweep never carded, losing them permanently,
     while re-reading a carded change is free.
+
+    Displayable *types* only: a change recorded before NEU-1542 narrowed the cut — a US
+    physical (5) move written in the days before deploy and not yet carded — stays history and
+    never cards as `US:5`. The history writer only records displayable rows, so this guard is
+    for that backlog and for any future narrowing alike.
     """
     stmt = (
         select(
@@ -150,7 +155,10 @@ async def load_release_change_backlog(
             FilmReleaseDateChange.change,
             FilmReleaseDateChange.changed_at,
         )
-        .where(FilmReleaseDateChange.changed_at >= since)
+        .where(
+            FilmReleaseDateChange.changed_at >= since,
+            FilmReleaseDateChange.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
+        )
         .order_by(FilmReleaseDateChange.changed_at, FilmReleaseDateChange.id)
     )
     return [

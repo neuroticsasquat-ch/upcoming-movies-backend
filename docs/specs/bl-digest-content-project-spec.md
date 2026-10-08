@@ -200,8 +200,9 @@ and a way to *look* at a digest without sending one.
 
 ### The slate
 
-- **DC-9 Scope as built, plus markers.** Title follows only (EF-14), US, the four displayable
-  buckets, `SLATE_WINDOW_DAYS = 30`, one governing date per `(film, type)`, soonest first —
+- **DC-9 Scope as built, plus markers.** *(Amended 2026-10-08 by NEU-1542: three displayable
+  buckets — limited, wide, digital; physical dropped.)* Title follows only (EF-14), US, the four
+  displayable buckets, `SLATE_WINDOW_DAYS = 30`, one governing date per `(film, type)`, soonest first —
   the calendar's and the `.ics` feed's set, unchanged. Each row gains a marker when its date
   was **set or moved since the previous slate day**: the film has a published `release_date`
   event whose subject covers `US:<bucket token>` (D-26's `subject_key` tokens) with

@@ -173,14 +173,35 @@ async def test_a_theatrical_and_a_home_date_in_one_observation_share_one_card(
 ):
     film = await add_film(session, 1)
     await _change(session, film, release_type=3, new=date(2026, 8, 14))
-    await _change(session, film, release_type=5, new=date(2026, 12, 1))
+    await _change(session, film, release_type=4, new=date(2026, 12, 1))
     await session.commit()
 
     result = await _run(session_factory, run_id)
 
     assert result.events_created == 1
     (event,) = await _events(session, film)
-    assert sorted(event.subject_key) == ["US:physical", "US:wide"]
+    assert sorted(event.subject_key) == ["US:digital", "US:wide"]
+
+
+async def test_a_recorded_physical_change_is_never_carded(session, session_factory, run_id):
+    """NEU-1542: a type-5 change written before physical left the displayable set and not yet
+    carded stays history — no event, no `US:5` token — and a type-5 move sharing an
+    observation with a wide one cards the wide move alone."""
+    physical_only = await add_film(session, 1, title="Disc")
+    await _change(session, physical_only, release_type=5, new=date(2026, 12, 1))
+    mixed = await add_film(session, 2, title="Mixed")
+    await _change(session, mixed, release_type=3, new=date(2026, 8, 14))
+    await _change(session, mixed, release_type=5, new=date(2026, 12, 1))
+    await session.commit()
+
+    result = await _run(session_factory, run_id)
+
+    assert result.events_created == 1
+    assert await _events(session, physical_only) == []
+    (event,) = await _events(session, mixed)
+    assert event.subject_key == ["US:wide"]
+    summary = await _summary(session, event)
+    assert summary.summary == "US wide release date set to 14 August 2026."
 
 
 async def test_separate_observations_stay_separate_cards(session, session_factory, run_id):

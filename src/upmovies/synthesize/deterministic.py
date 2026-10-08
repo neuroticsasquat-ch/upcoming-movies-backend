@@ -56,8 +56,8 @@ class ReleaseDateChanged:
     region: str
     """ISO 3166-1 alpha-2, e.g. `US`."""
     label: str
-    """`limited`, `wide`, `digital` or `physical` — `public.release.RELEASE_BUCKET_LABELS`
-    renders the display form. One template covers all four: "US digital release date set to
+    """`limited`, `wide` or `digital` — `public.release.RELEASE_BUCKET_LABELS` renders the
+    display form. One template covers all three: "US digital release date set to
     14 October 2026" needs no phrasing of its own, and a second one would be the drift this
     module exists to prevent."""
     new_date: date
@@ -231,7 +231,7 @@ class AvailableOn:
     """One monetization type a film was newly observed under, and the services carrying it.
 
     `providers` are display names in the order the poll observed them — TMDB's own ordering
-    within the monetization list, which is the order the where-to-watch box renders too.
+    within the monetization list.
     """
 
     monetization_type: str  # "flatrate" | "rent" | "buy"
@@ -560,7 +560,7 @@ _STORE_TYPES = ("rent", "buy")
 
 
 def _render_now_available(change: NowAvailable) -> str:
-    """At most two sentences, in the order the where-to-watch box lists the types (D-29) rather
+    """At most two sentences, in `MONETIZATION_TYPES` order (stream, rent, buy) rather
     than in whichever order the poll's payload emitted — a card that first saw a film to rent and
     to stream reads the same way whatever TMDB put first.
 

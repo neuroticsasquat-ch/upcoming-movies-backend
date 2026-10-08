@@ -57,7 +57,7 @@ def test_a_provider_listed_twice_in_one_tier_is_one_offer():
 
 def test_a_region_tmdb_holds_nothing_for_flattens_to_no_offers():
     """The ordinary answer for a film nobody carries in the US. It has to read as "no offers"
-    — which empties the where-to-watch box — rather than raise or be skipped."""
+    — nothing new for the ledger, no card — rather than raise or be skipped."""
     assert offers_for_region(None) == []
 
 

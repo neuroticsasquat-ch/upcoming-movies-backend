@@ -876,13 +876,13 @@ def test_the_context_carries_each_slate_rows_marker():
 
 
 def test_the_slate_groups_by_date_then_bucket_in_the_calendars_order():
-    """`_calendar_type_rank`'s order within a date — wide, limited, digital, physical — and the
+    """`_calendar_type_rank`'s order within a date — wide, limited, digital — and the
     rows of one bucket in the order the calendar page gave them, not re-sorted."""
     later = TODAY + timedelta(days=3)
     days = group_slate(
         (
-            _slate_item("Zodiac", day=later, bucket="physical"),
-            _slate_item("Edge", day=later, bucket="digital"),
+            _slate_item("Zodiac", day=later, bucket="digital"),
+            _slate_item("Edge", day=later, bucket="wide"),
             _slate_item("Casino", day=TODAY, bucket="limited"),
             _slate_item("Blade", day=TODAY, bucket="wide"),
             _slate_item("Arrival", day=TODAY, bucket="wide"),
@@ -895,7 +895,7 @@ def test_the_slate_groups_by_date_then_bucket_in_the_calendars_order():
         ("limited", "Limited"),
     ]
     assert [i.calendar.film_title for i in days[0].buckets[0].items] == ["Blade", "Arrival"]
-    assert [b.label for b in days[1].buckets] == ["Digital", "Physical"]
+    assert [b.label for b in days[1].buckets] == ["Wide", "Digital"]
     assert [d.count for d in days] == [3, 2]
 
 

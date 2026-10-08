@@ -251,8 +251,9 @@ async def test_detail_excludes_other_events(client, make_film, add_event):
 async def test_detail_exposes_displayable_release_dates(
     client, make_film, add_event, add_release_date
 ):
-    """The theatrical arc (limited + wide) and the US home release (digital + physical)
-    surface, labeled like the calendar; premiere (1) and TV (6) are dropped (D-26)."""
+    """The theatrical arc (limited + wide) and the US home release (digital) surface, labeled
+    like the calendar; premiere (1) and TV (6) are dropped (D-26), and so is physical (5)
+    since NEU-1542."""
     film = await make_film(slug="rd-us-2026", title="US Dates Film")
     await add_event(film=film, summary="Event.")
     await add_release_date(
@@ -290,7 +291,7 @@ async def test_detail_exposes_displayable_release_dates(
     await add_release_date(
         film=film,
         iso_3166_1="US",
-        release_type=5,  # physical
+        release_type=5,  # physical — excluded (NEU-1542)
         release_date=datetime(2026, 9, 15, tzinfo=UTC),
     )
 
@@ -298,9 +299,9 @@ async def test_detail_exposes_displayable_release_dates(
     assert r.status_code == 200
     body = r.json()
     rds = body["release_dates"]
-    assert len(rds) == 4
+    assert len(rds) == 3
     # ordered by release_type asc, which for one market reads as the release arc itself:
-    # limited (June 10), wide (July 17), digital (Aug 1), physical (Sept 15)
+    # limited (June 10), wide (July 17), digital (Aug 1)
     assert rds[0]["date"].startswith("2026-06-10")
     assert rds[0]["release_type"] == 2
     assert rds[0]["type_label"] == "Limited"
@@ -312,9 +313,7 @@ async def test_detail_exposes_displayable_release_dates(
     assert rds[2]["date"].startswith("2026-08-01")
     assert rds[2]["release_type"] == 4
     assert rds[2]["type_label"] == "Digital"
-    assert rds[3]["date"].startswith("2026-09-15")
-    assert rds[3]["release_type"] == 5
-    assert rds[3]["type_label"] == "Physical"
+    assert 5 not in {rd["release_type"] for rd in rds}
 
 
 async def test_detail_drops_an_origin_country_home_release_date(
@@ -1672,134 +1671,18 @@ async def test_detail_sparse_film_has_id_and_empty_companies(client, make_film, 
     assert body["collection"] is None
 
 
-# --- where to watch (D-29, NEU-1376) --------------------------------------------
+# --- where to watch is retired (ADR-0023, NEU-1542) ----------------------------
 
 
-async def test_detail_exposes_where_to_watch_by_monetization_type(
-    client, make_film, add_event, add_availability
-):
-    """The box is the current snapshot, bucketed the way a reader decides: what a subscription
-    already covers, what costs a rental, what costs a purchase."""
-    film = await make_film(slug="wtw-2026", title="Watchable")
+async def test_detail_has_no_where_to_watch_key(client, make_film, add_event):
+    """The D-29 box and its snapshot table are gone; the film page links out to TMDB's watch
+    page instead, which needs no data from here."""
+    film = await make_film(slug="wtw-gone-2026")
     await add_event(film=film, summary="Event.")
-    await add_availability(
-        film=film,
-        offers=[
-            (8, "Netflix", "flatrate"),
-            (2, "Apple TV", "rent"),
-            (10, "Prime Video", "rent"),
-            (2, "Apple TV", "buy"),
-        ],
-        link="https://www.themoviedb.org/movie/99/watch",
-    )
 
-    r = await client.get("/films/wtw-2026")
+    r = await client.get("/films/wtw-gone-2026")
     assert r.status_code == 200
-    box = r.json()["where_to_watch"]
-
-    assert box["region"] == "US"
-    assert box["link"] == "https://www.themoviedb.org/movie/99/watch"
-    assert box["flatrate"] == [{"id": 8, "name": "Netflix", "logo_path": "/provider8.jpg"}]
-    assert [p["name"] for p in box["rent"]] == ["Apple TV", "Prime Video"]
-    assert [p["name"] for p in box["buy"]] == ["Apple TV"]
-
-
-async def test_detail_where_to_watch_carries_justwatch_attribution(
-    client, make_film, add_event, add_availability
-):
-    """TMDB's terms for this endpoint require crediting JustWatch wherever the data renders, so
-    the field is part of the payload rather than something a client has to remember to add."""
-    film = await make_film(slug="wtw-attr-2026", title="Attributed")
-    await add_event(film=film, summary="Event.")
-    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")])
-
-    r = await client.get("/films/wtw-attr-2026")
-
-    assert r.json()["where_to_watch"]["attribution"] == "JustWatch"
-
-
-async def test_detail_where_to_watch_is_null_when_nobody_carries_the_film(
-    client, make_film, add_event
-):
-    """Not an empty box: a film nobody carries has nothing to say about where to watch it, and
-    the page should render no section at all rather than three empty lists."""
-    film = await make_film(slug="wtw-none-2026", title="Uncarried")
-    await add_event(film=film, summary="Event.")
-
-    r = await client.get("/films/wtw-none-2026")
-
-    assert r.json()["where_to_watch"] is None
-
-
-async def test_detail_where_to_watch_keeps_an_empty_bucket_for_a_type_nobody_offers(
-    client, make_film, add_event, add_availability
-):
-    """A film on a subscription service but not for sale still has a box; the untouched buckets
-    are present and empty, so a client can render "streaming" without guarding three keys."""
-    film = await make_film(slug="wtw-flatrate-2026", title="Stream Only")
-    await add_event(film=film, summary="Event.")
-    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")])
-
-    box = (await client.get("/films/wtw-flatrate-2026")).json()["where_to_watch"]
-
-    assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
-    assert box["rent"] == []
-    assert box["buy"] == []
-
-
-async def test_detail_where_to_watch_keeps_the_order_the_poll_observed(
-    client, make_film, add_event, add_availability
-):
-    """TMDB hands the services back in JustWatch's own ranking and the rebuild writes them in
-    that order, so the box must not re-sort them alphabetically — the head of the list is the
-    answer most readers want."""
-    film = await make_film(slug="wtw-order-2026", title="Ranked")
-    await add_event(film=film, summary="Event.")
-    await add_availability(
-        film=film,
-        offers=[
-            (8, "Netflix", "flatrate"),
-            (15, "Hulu", "flatrate"),
-            (1, "AMC+", "flatrate"),
-        ],
-    )
-
-    box = (await client.get("/films/wtw-order-2026")).json()["where_to_watch"]
-
-    assert [p["name"] for p in box["flatrate"]] == ["Netflix", "Hulu", "AMC+"]
-
-
-async def test_detail_where_to_watch_reads_only_the_us_region(
-    client, make_film, add_event, add_availability
-):
-    """Availability is US-only in v1 (D-27). A row for another region is data the box has no
-    place for, and must not leak into it once a later region is polled."""
-    film = await make_film(slug="wtw-region-2026", title="Two Regions")
-    await add_event(film=film, summary="Event.")
-    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")])
-    await add_availability(
-        film=film, offers=[(15, "Hulu", "flatrate")], region="GB", link="https://gb/watch"
-    )
-
-    box = (await client.get("/films/wtw-region-2026")).json()["where_to_watch"]
-
-    assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
-    assert box["region"] == "US"
-
-
-async def test_detail_where_to_watch_link_is_null_when_the_poll_stored_none(
-    client, make_film, add_event, add_availability
-):
-    """TMDB answers some regions with offers and no `link`. The box still renders; only the
-    link-back is missing."""
-    film = await make_film(slug="wtw-nolink-2026", title="No Link")
-    await add_event(film=film, summary="Event.")
-    await add_availability(film=film, offers=[(8, "Netflix", "flatrate")], link=None)
-
-    box = (await client.get("/films/wtw-nolink-2026")).json()["where_to_watch"]
-
-    assert box["link"] is None
-    assert [p["name"] for p in box["flatrate"]] == ["Netflix"]
+    assert "where_to_watch" not in r.json()
 
 
 # --- the trailer card's video key (D-35) ---------------------------------------

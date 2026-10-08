@@ -461,8 +461,8 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
     no throughput and would interleave two films' writes under one run.
 
     **Why the halves differ** (NEU-1532, D-1532.3). Once a film has opened, the only beats left
-    for it are home media and streaming: a trailer is no longer news, and a US digital or
-    physical date is — but the refresh phase stopped reading the film at release, so nothing
+    for it are home media and streaming: a trailer is no longer news, and a US digital date
+    is — but the refresh phase stopped reading the film at release, so nothing
     else would ever see one arrive. The split is `in_play_clause`, the refresh phase's own
     notion of released, so each film is read by exactly one of the two.
 

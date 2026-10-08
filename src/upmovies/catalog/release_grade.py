@@ -15,20 +15,25 @@ could therefore show one date and surface an event about another. One definition
 
 **Two cuts, not one.** TMDB release `type` ints are 1 Premiere · 2 Theatrical (limited) ·
 3 Theatrical (wide) · 4 Digital · 5 Physical · 6 TV. The theatrical arc is 2 and 3, displayable
-in US *or* an origin country. The home release is 4 and 5, displayable in **US only** (D-26):
+in US *or* an origin country. The home release is 4, digital, displayable in **US only** (D-26):
 the product answers "when can I watch this at home?" for a US audience, and a French digital
 date is not that answer even for a French film — where a French *theatrical* date genuinely is
 the film's own market opening. Premiere is excluded from both deliberately: TMDB has no distinct
 festival type, so type 1 lumps real festival screenings with ordinary premieres and telling them
-apart means parsing free-text `note`. TV (6) is nobody's release date. The display labels for
-these buckets stay in `public.release` — they are a presentation concern; membership is not.
+apart means parsing free-text `note`. TV (6) is nobody's release date. Physical (5) left the
+cut in NEU-1542 (ADR-0023): the site follows a film to the first day you can watch it at home,
+and the disc almost always lands after that — it is stored, never displayed, carded or listed.
+The display labels for these buckets stay in `public.release` — they are a presentation concern;
+membership is not.
 
 Widening this cut is how home-release dates reach the product at all: the film page, the
 calendar, `region_visible` and the change history all read this module, so a US digital date
 becomes listable, carded and calendar-visible in one edit.
 
-**Widening it does not backfill**, and the reason is not ADR-0014's baseline rule: that covers
-a film the catalog has never observed, and every film already in the catalog is observed.
+**Widening it does not backfill**, and narrowing it (NEU-1542 dropping physical) un-cards
+nothing either — a stored type-5 row is simply no longer displayable on either side of the
+diff. For widening, the reason is not ADR-0014's baseline rule: that covers a film the catalog
+has never observed, and every film already in the catalog is observed.
 What holds instead is that `rebuild_release_dates` stores **every** TMDB type in
 `catalog.film_release_date`, filtered by nothing — so a US digital date this cut newly admits
 is already sitting there, and `load_displayable_releases` reads it through the widened
@@ -51,9 +56,9 @@ from collections.abc import Sequence
 # TMDB release `type` ints that make up the theatrical arc: limited (2) and wide (3).
 THEATRICAL_RELEASE_TYPES: frozenset[int] = frozenset({2, 3})
 
-# TMDB release `type` ints that make up the home release: digital (4) and physical (5).
-# US only — see the module docstring.
-HOME_RELEASE_TYPES: frozenset[int] = frozenset({4, 5})
+# TMDB release `type` ints that make up the home release: digital (4) alone — physical (5)
+# left in NEU-1542. US only — see the module docstring.
+HOME_RELEASE_TYPES: frozenset[int] = frozenset({4})
 
 # The one region always in scope, whatever the film's origin — and the *only* region the home
 # release is in scope for.
@@ -62,7 +67,7 @@ PRIMARY_REGION = "US"
 # The bucket each displayable type belongs to. Lowercase because these are *identifiers* — they
 # key `subject_key` tokens (`US:wide`, `US:digital`) and event bodies; the capitalized display
 # forms live in `public.release`, which is where presentation belongs.
-RELEASE_TYPE_BUCKETS: dict[int, str] = {2: "limited", 3: "wide", 4: "digital", 5: "physical"}
+RELEASE_TYPE_BUCKETS: dict[int, str] = {2: "limited", 3: "wide", 4: "digital"}
 
 
 def release_bucket(release_type: int) -> str | None:
