@@ -41,8 +41,8 @@ from upmovies.app.services.digest_sender import (
     natural_title,
     rank_films,
     short_date,
+    slate_films,
     slate_marker,
-    slate_months,
 )
 from upmovies.config import get_settings
 from upmovies.public.dto import CalendarItem
@@ -585,16 +585,36 @@ def test_a_film_reached_only_through_a_studio_can_lead():
     assert digest_subject(batch) == "Zodiac — canceled, + 1 more film"
 
 
-def test_lines_and_a_slate_add_your_slate():
+def test_a_slate_after_the_lines_stays_out_of_the_subject():
+    """D-1543.4: the slate is below the fold; the subject sells what is above it."""
     assert (
         digest_subject(_batch(_title(_beat("Dune: Part Three", "trailer")), slate=2))
-        == "Dune: Part Three — new trailer · your slate"
+        == "Dune: Part Three — new trailer"
     )
 
 
-def test_a_slate_alone_counts_its_dates():
-    assert digest_subject(_batch(slate=1)) == "Your slate: 1 upcoming date"
-    assert digest_subject(_batch(slate=3)) == "Your slate: 3 upcoming dates"
+def test_a_slate_alone_counts_its_films():
+    assert digest_subject(_batch(slate=1)) == "1 film you follow is out this week"
+    assert digest_subject(_batch(slate=3)) == "3 films you follow are out this week"
+
+
+def test_a_film_with_a_theatrical_and_a_home_date_is_one_film_in_the_subject():
+    """D-1543.5: distinct films across both kinds, never dates."""
+    later = TODAY + timedelta(days=4)
+    batch = DigestBatch(
+        recipient=RECIPIENT,
+        lines=(),
+        unsendable=(),
+        slate=group_slate(
+            (
+                _slate_item("Dune", bucket="wide"),
+                _slate_item("Dune", day=later, bucket="digital"),
+                _slate_item("Zodiac", day=later, bucket="limited", tmdb_id=2),
+            )
+        ),
+    )
+
+    assert digest_subject(batch) == "2 films you follow are out this week"
 
 
 def test_an_empty_batch_has_no_subject_to_build():
@@ -611,9 +631,37 @@ def test_an_empty_batch_has_no_context_either():
 # --- preheader (DC-10) -------------------------------------------------------------------
 
 
-def test_the_preheader_for_a_slate_alone():
-    assert digest_preheader(_batch(slate=2)) == "Your slate: 2 dates in the next 30 days."
-    assert digest_preheader(_batch(slate=1)) == "Your slate: 1 date in the next 30 days."
+def test_the_preheader_for_a_slate_alone_names_up_to_three_films_soonest_first():
+    """D-1543.5: `Title (Ddd)` by each film's earliest date in the window; date, then
+    theatrical before home, then the bucket's order; a film's first occurrence wins."""
+    batch = DigestBatch(
+        recipient=RECIPIENT,
+        lines=(),
+        unsendable=(),
+        slate=group_slate(
+            (
+                _slate_item("Ran", day=TODAY + timedelta(days=6), bucket="wide", tmdb_id=5),
+                _slate_item("Zodiac", day=TODAY + timedelta(days=5), bucket="digital", tmdb_id=2),
+                _slate_item("Dune", day=TODAY + timedelta(days=1), bucket="digital", tmdb_id=1),
+                _slate_item("Heat", day=TODAY + timedelta(days=1), bucket="limited", tmdb_id=3),
+                _slate_item("Alien", day=TODAY + timedelta(days=1), bucket="wide", tmdb_id=4),
+                _slate_item("Dune", day=TODAY + timedelta(days=6), bucket="wide", tmdb_id=1),
+            )
+        ),
+    )
+
+    assert digest_preheader(batch) == "Alien (Fri), Heat (Fri), Dune (Fri)"
+    assert [title for _, title, _ in slate_films(batch.slate)] == [
+        "Alien",
+        "Heat",
+        "Dune",
+        "Zodiac",
+        "Ran",
+    ]
+
+
+def test_the_preheader_for_a_one_film_slate():
+    assert digest_preheader(_batch(slate=1)) == "Dune (Thu)"
 
 
 def test_the_preheader_names_up_to_two_films_after_the_lead_across_reaches():
@@ -627,16 +675,15 @@ def test_the_preheader_names_up_to_two_films_after_the_lead_across_reaches():
     assert digest_preheader(batch) == "Also: Heat 2 — casting; Ran — announced"
 
 
-def test_the_preheader_joins_the_slate_and_the_films():
+def test_a_slate_after_the_lines_stays_out_of_the_preheader():
     batch = _batch(_title(_beat("Heat 2")), _title(_beat("Dune", "trailer")), slate=1)
 
-    assert digest_preheader(batch) == (
-        "Your slate: 1 date in the next 30 days. Also: Heat 2 — casting"
-    )
+    assert digest_preheader(batch) == "Also: Heat 2 — casting"
 
 
-def test_one_film_and_no_slate_has_nothing_to_preview():
+def test_one_film_has_nothing_to_preview_with_or_without_a_slate():
     assert digest_preheader(_batch(_title(_beat("Heat 2")))) == ""
+    assert digest_preheader(_batch(_title(_beat("Heat 2")), slate=2)) == ""
 
 
 # --- the batch and its context (FB-20, FB-21) --------------------------------------------
@@ -865,8 +912,8 @@ def test_the_context_carries_each_slate_rows_marker():
 
     context = digest_context(batch, cadence="daily", today=TODAY, settings=get_settings())
 
-    (month,) = cast(list[dict], context["slate"])
-    (day,) = month["days"]
+    (kind,) = cast(list[dict], context["slate"])
+    (day,) = kind["days"]
     (bucket,) = day["buckets"]
     assert [f["marker"] for f in bucket["films"]] == [None, "new"]
     assert context["days"] == []
@@ -875,58 +922,73 @@ def test_the_context_carries_each_slate_rows_marker():
 # --- the slate as the my-films calendar (NEU-1530, FB-26) --------------------------------
 
 
-def test_the_slate_groups_by_date_then_bucket_in_the_calendars_order():
-    """`_calendar_type_rank`'s order within a date — wide, limited, digital — and the
-    rows of one bucket in the order the calendar page gave them, not re-sorted."""
+def test_the_slate_groups_by_kind_then_date_then_bucket_in_the_calendars_order():
+    """D-1543.2: In theaters before At home; within a kind, dates soonest first and
+    `_calendar_type_rank`'s order within a date — wide, limited — with the rows of one bucket
+    in the order the calendar page gave them, not re-sorted."""
     later = TODAY + timedelta(days=3)
-    days = group_slate(
+    kinds = group_slate(
         (
-            _slate_item("Zodiac", day=later, bucket="digital"),
+            _slate_item("Zodiac", day=TODAY, bucket="digital"),
             _slate_item("Edge", day=later, bucket="wide"),
             _slate_item("Casino", day=TODAY, bucket="limited"),
             _slate_item("Blade", day=TODAY, bucket="wide"),
             _slate_item("Arrival", day=TODAY, bucket="wide"),
+            _slate_item("Ran", day=later, bucket="digital"),
         )
     )
 
-    assert [d.day for d in days] == [TODAY, later]
-    assert [(b.bucket, b.label) for b in days[0].buckets] == [
+    assert [(k.kind, k.label) for k in kinds] == [
+        ("theatrical", "In theaters"),
+        ("home", "At home"),
+    ]
+    theatrical, home = kinds
+    assert [d.day for d in theatrical.days] == [TODAY, later]
+    assert [(b.bucket, b.label) for b in theatrical.days[0].buckets] == [
         ("wide", "Wide"),
         ("limited", "Limited"),
     ]
-    assert [i.calendar.film_title for i in days[0].buckets[0].items] == ["Blade", "Arrival"]
-    assert [b.label for b in days[1].buckets] == ["Wide", "Digital"]
-    assert [d.count for d in days] == [3, 2]
+    assert [i.calendar.film_title for i in theatrical.days[0].buckets[0].items] == [
+        "Blade",
+        "Arrival",
+    ]
+    assert [d.day for d in home.days] == [TODAY, later]
+    assert [[b.bucket for b in d.buckets] for d in home.days] == [["digital"], ["digital"]]
+    assert [k.count for k in kinds] == [4, 2]
 
 
-def test_a_slate_inside_one_month_has_no_month_heading():
-    days = group_slate(
-        (_slate_item(day=date(2026, 10, 1)), _slate_item(day=date(2026, 10, 31), tmdb_id=2))
+def test_a_kind_with_nothing_in_the_window_is_omitted():
+    (kind,) = group_slate((_slate_item(bucket="digital"),))
+
+    assert kind.kind == "home"
+    assert group_slate(()) == ()
+
+
+def test_a_bucket_no_kind_holds_fails_loudly():
+    with pytest.raises(ValueError, match="physical"):
+        group_slate((_slate_item(bucket="physical"),))
+
+
+def test_the_context_heads_theatrical_buckets_and_not_the_home_one():
+    """D-1542.3: the home kind has one bucket, which the calendar's home view does not head —
+    the label is None so the templates compute nothing."""
+    batch = DigestBatch(
+        recipient=RECIPIENT,
+        lines=(),
+        unsendable=(),
+        slate=group_slate(
+            (_slate_item("Dune", bucket="limited"), _slate_item("Ran", bucket="digital"))
+        ),
     )
 
-    (month,) = slate_months(days)
-    assert month.heading is None
-    assert [d.day for d in month.days] == [date(2026, 10, 1), date(2026, 10, 31)]
+    context = digest_context(batch, cadence="weekly", today=TODAY, settings=get_settings())
 
-
-def test_a_slate_across_a_month_boundary_heads_each_month_and_no_year():
-    """FB-26: the month level only where the window crosses one; never a year level, even
-    across December."""
-    days = group_slate(
-        (
-            _slate_item(day=date(2026, 12, 20)),
-            _slate_item(day=date(2026, 12, 31), tmdb_id=2),
-            _slate_item(day=date(2027, 1, 4), tmdb_id=3),
-        )
-    )
-
-    months = slate_months(days)
-    assert [m.heading for m in months] == ["December", "January"]
-    assert [[d.day.day for d in m.days] for m in months] == [[20, 31], [4]]
-
-
-def test_an_empty_slate_has_no_months():
-    assert slate_months(()) == ()
+    theatrical, home = cast(list[dict], context["slate"])
+    assert (theatrical["kind"], theatrical["label"]) == ("theatrical", "In theaters")
+    assert [b["label"] for b in theatrical["days"][0]["buckets"]] == ["Limited"]
+    assert (home["kind"], home["label"]) == ("home", "At home")
+    assert [b["label"] for b in home["days"][0]["buckets"]] == [None]
+    assert context["slate_window_days"] == 7
 
 
 def test_the_context_carries_the_calendar_rows_fields_and_the_w92_poster():
@@ -953,8 +1015,8 @@ def test_the_context_carries_the_calendar_rows_fields_and_the_w92_poster():
 
     context = digest_context(batch, cadence="weekly", today=TODAY, settings=settings)
 
-    (month,) = cast(list[dict], context["slate"])
-    (film,) = month["days"][0]["buckets"][0]["films"]
+    (kind,) = cast(list[dict], context["slate"])
+    (film,) = kind["days"][0]["buckets"][0]["films"]
     assert film == {
         "title": "Dune",
         "year": 2026,
@@ -965,4 +1027,4 @@ def test_the_context_carries_the_calendar_rows_fields_and_the_w92_poster():
         "genres": "Drama · Sci-Fi",
         "marker": "moved",
     }
-    assert month["days"][0]["heading"] == "Thursday, September 24, 2026"
+    assert kind["days"][0]["heading"] == "Thursday, September 24, 2026"

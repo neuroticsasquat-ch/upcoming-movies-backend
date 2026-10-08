@@ -922,7 +922,7 @@ ones included (EF-7; NEU-1437), and nothing is cut: there is no cap and no lead 
 per publication day the batch spans. The **weekly reads by entry, not by day**: the same
 blocks and sections, but one **film entry** or **entity entry** per film or entity across
 the week, its lines in publication order. On the **slate day** either cadence carries the
-**slate** in front. How soon a reader hears about a beat is the cadence they chose; there is
+**slate** after the timeline. How soon a reader hears about a beat is the cadence they chose; there is
 no faster channel.
 _Avoid_: newsletter, summary email, notification, "the weekly slate mail" (the slate is a
 section, not a cadence), alert (retired: the per-beat interrupt mail D-32 whitelisted, removed
@@ -931,12 +931,16 @@ by ADR-0021), push / push whitelist (retired with it: no beat interrupts anybody
 
 **Slate**:
 The upcoming US dates — theatrical and digital — for the films a user follows by
-title, over the next 30 days, soonest first. The same set the my-films calendar and the `.ics`
+title, over the next 7 days, soonest first. The same set the my-films calendar and the `.ics`
 feed list (EF-14): a slate cannot name a date the calendar would not, and in the mail it is
-**the my-films calendar reproduced** for those days — date heading, release-type bucket, the
-calendar's film row. A date set or moved since the previous slate day is marked as such; the
-marker is the one thing the slate shows that the calendar page does not.
-_Avoid_: calendar (that is the surface), upcoming releases (that is the public page), watchlist.
+split by **calendar kind** — In theaters, then At home — each kind **the my-films calendar
+reproduced** for that kind: date heading, the theatrical kind's release-type bucket, the
+calendar's film row. It **follows** the timeline in the mail. A date set or moved since the
+previous slate day is marked as such; the marker is the one thing the slate shows that the
+calendar page does not.
+_Avoid_: calendar (that is the surface), upcoming releases (that is the public page), watchlist,
+"the slate mail" (the slate is a section after the news, not the mail's reason), "this week's
+releases" (it is the user's followed films only).
 
 **Slate day**:
 The one weekday, product-wide, on which a digest carries the slate: the weekly cadence's

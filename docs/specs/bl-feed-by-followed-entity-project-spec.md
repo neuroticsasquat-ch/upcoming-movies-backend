@@ -351,7 +351,9 @@ line (FB-20). `DIGEST_MAX_ENTRIES` goes. `DigestFollowing` and `_load_following`
 folded into FB-15's helper. The `lead` / `entries` / `overflow_line` template context is
 replaced by the day and block model (FB-25).
 
-**FB-22 — The subject and preheader rules stand (DC-7, DC-10).** The lead film is still the
+**FB-22 — The subject and preheader rules stand (DC-7, DC-10).** *(Amended 2026-10-08 by
+NEU-1543: the slate leaves the subject and the preheader; the slate-only forms change — see
+DC-7, DC-10.)* The lead film is still the
 film carrying the most significant beat in the mail (`rank_entries`' key, over every row of
 every reach — a film reached only through a studio can lead), `N` counts the other distinct
 **films** in the mail (not rows: a film under two entity rows is one film), and the preheader
@@ -376,7 +378,10 @@ as `rank_entries` is today. The admin preview and test-send (`render_digest`,
 whatever they return. The backend's `film_parenthetical`, `day_heading`, `short_date` and
 `digest_beat_label` helpers are reused as they are.
 
-**FB-26 — The slate is the my-films calendar, reproduced.** For the slate window (DC-9, 30
+**FB-26 — The slate is the my-films calendar, reproduced.** *(Amended 2026-10-08 by NEU-1543:
+7 days; split by calendar kind — In theaters, then At home, an empty kind omitted, the home
+kind with no bucket sub-heading; no month heading; the slate follows the timeline.)* For the
+slate window (DC-9, 30
 days): date heading (long date, as today) → release-type bucket sub-heading (the calendar's
 labels and order, `_calendar_type_rank`) → the calendar's film row: poster (`w92`), title
 (year), `Dir. …`, top-three stars, up-to-three genres — the `CalendarItem` fields, built by the
@@ -388,7 +393,8 @@ and its "The next N days" line stay. The text part lists date → bucket → one
 `load_slate_markers` is unchanged. *Supersedes DC-9's rendering, not its scope.*
 
 **FB-27 — DC-1, DC-2, DC-13 stand.** The daily is still "yesterday on your timeline", nothing
-to say is still no mail, and the slate day still puts the slate in front.
+to say is still no mail, and the slate day still puts the slate in front. *(Amended
+2026-10-08 by NEU-1543: the slate follows the timeline.)*
 
 ## 5. Deploy order
 

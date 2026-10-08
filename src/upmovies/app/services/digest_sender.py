@@ -42,19 +42,20 @@ hands that to `Mailer.deliver`, and `render_digest` — what the admin preview a
 call — returns it without sending. `digest_context` is the only place the template's dict is
 built, so the three cannot disagree about what the mail says.
 
-**The weekly send is the "your slate" mail (D-33), and so is the daily one on the slate day
-(DC-2).** The weekly always carries the slate; the daily carries it only when the run's `today`
-falls on `SLATE_WEEKDAY`, so a daily reader sees upcoming dates once a week, on the day the
-weekly readers do. Before the timeline section it is **the my-films calendar reproduced** for
-the next `SLATE_WINDOW_DAYS` (FB-26): the rows `public.service._calendar_page` builds for this
-user's title follows (EF-14), read from `film_release_date` directly rather than from
-notification rows — a date that has not *moved* produces no event, and the slate's job is to say
-what is coming, not what changed — and laid out as the calendar page lays them out: date →
-release-type bucket → film row, under month headings only across a month boundary. The rows
-are the calendar's own, so the slate cannot name a date, or describe a film, differently from
-it. A date **set or moved since the previous slate
-day** carries a `new` or `moved` marker (DC-9), read from the release-date card that set or
-moved it — see `load_slate_markers`.
+**The slate is a section after the news, on the slate day (DC-2, NEU-1543).** The weekly
+always carries it; the daily carries it only when the run's `today` falls on `SLATE_WEEKDAY`, so
+a daily reader sees upcoming dates once a week, on the day the weekly readers do. It follows the
+timeline section — what happened since the last send is the point of the mail, the slate a
+standing reminder — and stays out of the subject and the preheader. It is **the my-films
+calendar reproduced** for the next `SLATE_WINDOW_DAYS` (FB-26): the rows
+`public.service._calendar_page` builds for this user's title follows (EF-14), read from
+`film_release_date` directly rather than from notification rows — a date that has not *moved*
+produces no event, and the slate's job is to say what is coming, not what changed — split by
+calendar kind, In theaters then At home (D-1542.2), and laid out within each as the calendar
+page lays that kind out: date → release-type bucket (theatrical only) → film row. The rows are
+the calendar's own, so the slate cannot name a date, or describe a film, differently from it.
+A date **set or moved since the previous slate day** carries a `new` or `moved` marker (DC-9),
+read from the release-date card that set or moved it — see `load_slate_markers`.
 
 **A user with nothing queued and an empty slate gets no mail.** A digest with nothing to say
 is worse than no digest, and it is the ordinary case for a quiet week. The converse holds on
@@ -65,7 +66,7 @@ already suppressed rows for unentitled and unverified users, so on the row side 
 and braces against a grant that lapsed after the rows were queued. The slate side is the case
 that makes it necessary rather than merely consistent: the slate is built from the follows,
 which D-40 keeps intact when a grant lapses, so without this check an unentitled user with
-nothing queued would still receive a slate mail every week. The gate is one answer per user —
+nothing queued would still receive a slate-only mail every week. The gate is one answer per user —
 `entitled_user_clause()` AND `verified_user_clause()`, the two named rules every other pass
 uses — and a user it refuses has their queued rows marked `suppressed` and gets no slate.
 
@@ -141,10 +142,11 @@ from upmovies.mail import (
 )
 from upmovies.news.models import Event, EventSummary
 from upmovies.public.arc import derive_arc_stage, event_stage_rank, most_significant_event_type
-from upmovies.public.dto import CalendarItem
+from upmovies.public.dto import CalendarItem, CalendarKind
 from upmovies.public.release import RELEASE_BUCKET_LABELS
 from upmovies.public.service import (
     _CALENDAR_BUCKET_ORDER,
+    CALENDAR_KIND_TYPES,
     _calendar_governing_cte,
     _calendar_page,
     _directors_for_films,
@@ -164,8 +166,8 @@ Unlike the notify pass it keeps no watermark: the backlog is the `queued` rows t
 
 DIGEST_TEMPLATE = "digest"
 """The `mail/templates/` directory this pass renders. M7's contract names `digest` and `slate`
-as two templates; they are one here because D-33 says the weekly send *is* the slate mail —
-the slate is a section the weekly cadence turns on, not a second message."""
+as two templates; they are one here because the slate is a section after the timeline that
+the slate day turns on (DC-2, NEU-1543), not a second message."""
 
 DIGEST_KIND = "digest"
 
@@ -187,9 +189,11 @@ SEND_CADENCES: tuple[DigestCadence, ...] = ("daily", "weekly")
 """The cadences a slot can run. `off` is a `digest_cadence` value but not a slot: nothing is
 sent for it, by definition."""
 
-SLATE_WINDOW_DAYS = 30
-"""How many dates the slate covers: today and the 29 after it. "The next 30 days" is
-thirty dates, not a 31-day span with both ends in."""
+SLATE_WINDOW_DAYS = 7
+"""How many dates the slate covers: today and the 6 after it (D-1543.1). "The next 7 days" is
+seven dates, not an 8-day span with both ends in. With a weekly slate day it tiles exactly, as
+`SLATE_MARKER_DAYS` does: Thursday..Wednesday, then the next Thursday..Wednesday — no date
+listed in two consecutive slates, and none in neither."""
 
 SLATE_POSTER_SIZE = "w92"
 """The my-films calendar row's poster (`CalendarFilmRow`): the slate is that row (FB-26), so it
@@ -914,13 +918,50 @@ class SlateDay:
         return sum(len(bucket.items) for bucket in self.buckets)
 
 
-@dataclass(frozen=True)
-class SlateMonth:
-    """The slate's dates in one month, under a month heading only when the slate spans more
-    than one (FB-26)."""
+SLATE_KIND_ORDER: tuple[CalendarKind, ...] = ("theatrical", "home")
+"""The slate's kinds in the order the mail shows them (D-1543.2)."""
 
-    heading: str | None
+SLATE_KIND_LABELS: dict[CalendarKind, str] = {"theatrical": "In theaters", "home": "At home"}
+"""The calendar page's kind labels (D-1542.3's control)."""
+
+_SLATE_KIND_BUCKETS: dict[CalendarKind, frozenset[str]] = {
+    kind: frozenset(RELEASE_TYPE_BUCKETS[t] for t in types if t in RELEASE_TYPE_BUCKETS)
+    for kind, types in CALENDAR_KIND_TYPES.items()
+}
+"""The buckets each calendar kind holds, derived from `CALENDAR_KIND_TYPES` and
+`RELEASE_TYPE_BUCKETS` — never literal strings, so a new displayable type lands in a kind or
+fails loudly in `_bucket_kind` (D-1543.6)."""
+
+_KIND_BY_BUCKET: dict[str, CalendarKind] = {
+    bucket: kind for kind, buckets in _SLATE_KIND_BUCKETS.items() for bucket in buckets
+}
+
+
+def _bucket_kind(bucket: str) -> CalendarKind:
+    """The calendar kind a slate row's bucket belongs to. Raises for a bucket no kind holds:
+    `_calendar_page` serves only `RELEASE_TYPE_BUCKETS`' buckets, so one here means the kinds
+    and the buckets have drifted apart, which must not ship a row under no heading."""
+    try:
+        return _KIND_BY_BUCKET[bucket]
+    except KeyError:
+        raise ValueError(f"slate bucket {bucket!r} belongs to no calendar kind") from None
+
+
+@dataclass(frozen=True)
+class SlateKind:
+    """One calendar kind's dates on the slate (D-1543.2) — the calendar page's In theaters or
+    At home view, reproduced."""
+
+    kind: CalendarKind
     days: tuple[SlateDay, ...]
+
+    @property
+    def label(self) -> str:
+        return SLATE_KIND_LABELS[self.kind]
+
+    @property
+    def count(self) -> int:
+        return sum(day.count for day in self.days)
 
 
 def _bucket_rank(bucket: str) -> int:
@@ -931,11 +972,9 @@ def _bucket_rank(bucket: str) -> int:
     return len(_CALENDAR_BUCKET_ORDER)
 
 
-def group_slate(items: Iterable[SlateItem]) -> tuple[SlateDay, ...]:
+def _group_days(items: Iterable[SlateItem]) -> tuple[SlateDay, ...]:
     """The calendar's date → bucket nesting (`lib/calendar-groups.ts::groupByReleaseDate`):
-    dates soonest first, buckets in the calendar's order, rows in the order given — which is
-    `_calendar_page`'s, so within a bucket the slate orders films as the calendar page does.
-    Pure."""
+    dates soonest first, buckets in the calendar's order, rows in the order given."""
     by_day: dict[date, dict[str, list[SlateItem]]] = {}
     for item in items:
         by_day.setdefault(item.calendar.release_date, {}).setdefault(
@@ -953,21 +992,42 @@ def group_slate(items: Iterable[SlateItem]) -> tuple[SlateDay, ...]:
     )
 
 
-def slate_months(days: Sequence[SlateDay]) -> tuple[SlateMonth, ...]:
-    """The slate's days under month headings — the calendar's month level, which a 30-day
-    window only needs when it crosses a month boundary. One heading-less group when every date
-    is in one month (the long date headings already name it); otherwise a group per month,
-    each headed by the month's name, as the calendar heads its months. No year level: a
-    30-day window that crosses one is still read by its months. Pure."""
-    groups: list[tuple[tuple[int, int], list[SlateDay]]] = []
-    for day in days:
-        key = (day.day.year, day.day.month)
-        if not groups or groups[-1][0] != key:
-            groups.append((key, []))
-        groups[-1][1].append(day)
-    if len(groups) <= 1:
-        return tuple(SlateMonth(heading=None, days=tuple(g)) for _, g in groups)
-    return tuple(SlateMonth(heading=_MONTHS[month - 1], days=tuple(g)) for (_, month), g in groups)
+def group_slate(items: Iterable[SlateItem]) -> tuple[SlateKind, ...]:
+    """The slate's layout (D-1543.2): by calendar kind first — In theaters, then At home, an
+    empty kind not emitted — then, within a kind, the calendar's date → bucket nesting. Rows
+    keep the order given — `_calendar_page`'s — so within a bucket the slate orders films as
+    the calendar page does. Partitioning one unsplit page by bucket yields exactly the rows two
+    kind-filtered pages would: the governing date is per (film, type). Pure."""
+    by_kind: dict[CalendarKind, list[SlateItem]] = {}
+    for item in items:
+        by_kind.setdefault(_bucket_kind(item.calendar.release_type), []).append(item)
+    return tuple(
+        SlateKind(kind=kind, days=_group_days(by_kind[kind]))
+        for kind in SLATE_KIND_ORDER
+        if kind in by_kind
+    )
+
+
+def slate_films(slate: Iterable[SlateKind]) -> list[tuple[str, str, date]]:
+    """`(film ref, title, earliest date)` for each distinct film on the slate, soonest first
+    (D-1543.5): date ascending, then theatrical before home, then the bucket's own order; the
+    first occurrence of a film wins, so a film with a theatrical and a home date in the window
+    is one film, at its earlier date. The one source for the slate-only subject count and
+    preheader."""
+    walk = sorted(
+        (
+            (day.day, kind_rank, bucket_rank, item_rank, item.calendar)
+            for kind_rank, kind in enumerate(slate)
+            for day in kind.days
+            for bucket_rank, bucket in enumerate(day.buckets)
+            for item_rank, item in enumerate(bucket.items)
+        ),
+        key=lambda entry: entry[:4],
+    )
+    seen: dict[str, tuple[str, str, date]] = {}
+    for day, _, _, _, calendar in walk:
+        seen.setdefault(calendar.film_ref, (calendar.film_ref, calendar.film_title, day))
+    return list(seen.values())
 
 
 @dataclass(frozen=True)
@@ -997,7 +1057,7 @@ class DigestBatch:
     is no longer the published card, or no follow reaches it any more — marked `failed` with
     the reason, so a permanently un-sendable row cannot stall silently in a backlog read
     nightly."""
-    slate: tuple[SlateDay, ...] = ()
+    slate: tuple[SlateKind, ...] = ()
 
     @property
     def beats(self) -> tuple[DigestBeat, ...]:
@@ -1011,7 +1071,7 @@ class DigestBatch:
 
     @property
     def slate_count(self) -> int:
-        return sum(d.count for d in self.slate)
+        return sum(kind.count for kind in self.slate)
 
     @property
     def has_content(self) -> bool:
@@ -1028,7 +1088,7 @@ class DigestSendResult:
     slate is in) a follow that might put a date on it. The working set, not the user table."""
     mails_sent: int = 0
     """Mails handed to the provider: inboxes touched, one per user. Reported beside `sent`
-    because a slate mail can carry no rows at all."""
+    because a slate-only mail carries no rows at all."""
     sent: int = 0
     failed: int = 0
     suppressed: int = 0
@@ -1278,9 +1338,10 @@ async def _load_reaches(
     return {event_id: tuple(reaches) for event_id, reaches in reached.items()}
 
 
-async def load_slate(session: AsyncSession, *, user_id: UUID, today: date) -> tuple[SlateDay, ...]:
+async def load_slate(session: AsyncSession, *, user_id: UUID, today: date) -> tuple[SlateKind, ...]:
     """The my-films calendar for the slate window: the upcoming US dates for the films this
-    user follows by title, soonest first (D-33), as the calendar page builds them (FB-26).
+    user follows by title, soonest first (D-33), as the calendar page builds them (FB-26), split
+    by calendar kind (`group_slate`, D-1543.2).
 
     Not a query of its own: `public.service._calendar_page` over the my-films governing CTE
     (`title_follow_user_id`) and the my-films cuts (`_my_films_visible`), with the window's end
@@ -1289,7 +1350,8 @@ async def load_slate(session: AsyncSession, *, user_id: UUID, today: date) -> tu
     or describe a film, differently from it. The window is `SLATE_WINDOW_DAYS` dates starting
     today: a date that is today is still a date to know about, and the day the count runs out
     is the first one left off. The calendar pages by *date*, so a page of that many dates holds
-    the whole window.
+    the whole window. One page for both kinds, partitioned afterwards rather than queried per
+    kind (D-1543.6): the same rows, and the markers load once.
 
     Each row's marker is `load_slate_markers`' answer for its (film, bucket) — the one thing
     the slate shows that the calendar page does not.
@@ -1453,7 +1515,7 @@ async def load_batch(
     lines, unsendable = await load_lines(session, user_id=recipient.user_id, settings=settings)
     if include_slate is None:
         include_slate = carries_slate(cadence, today, settings) and recipient.deliverable
-    slate: tuple[SlateDay, ...] = ()
+    slate: tuple[SlateKind, ...] = ()
     if include_slate:
         slate = await load_slate(session, user_id=recipient.user_id, today=today)
     return DigestBatch(recipient=recipient, lines=lines, unsendable=unsendable, slate=slate)
@@ -1469,10 +1531,11 @@ def _headline(ranked: RankedFilm) -> str:
 
 
 def digest_subject(batch: DigestBatch) -> str:
-    """The subject line (DC-7, FB-22): the lead film and its lead beat, how many more films,
-    and whether the slate is in — or, for a slate alone, how many dates. `N` counts the other
-    distinct **films** across every reach — a film under two entity rows is one film — never
-    rows and never beats.
+    """The subject line (DC-7, FB-22): the lead film and its lead beat and how many more films,
+    whether or not a slate follows (D-1543.4) — or, for a slate alone, how many films are out
+    this week (D-1543.5). `N` counts distinct **films** — on the timeline, a film under two
+    entity rows is one film; on the slate, a film with a theatrical and a home date is one
+    film — never rows, dates or beats.
 
     Raises on an empty batch: `render_batch` never builds one, and a caller that skipped that
     check should fail loudly rather than send a subject about nothing."""
@@ -1480,30 +1543,36 @@ def digest_subject(batch: DigestBatch) -> str:
     if not ranked:
         if not batch.slate:
             raise ValueError("a digest with no lines and no slate has no subject")
-        return f"Your slate: {_plural(batch.slate_count, 'upcoming date')}"
+        films = len(slate_films(batch.slate))
+        verb = "is" if films == 1 else "are"
+        return f"{_plural(films, 'film')} you follow {verb} out this week"
     subject = _headline(ranked[0])
     more = len(ranked) - 1
     if more:
         subject += f", + {_plural(more, 'more film')}"
-    if batch.slate:
-        subject += " · your slate"
     return subject
 
 
+SLATE_PREHEADER_FILMS = 3
+"""How many films a slate-only mail's preheader names (D-1543.5)."""
+
+
 def digest_preheader(batch: DigestBatch) -> str:
-    """The inbox preview text (DC-10): what the subject had no room for — the slate's size,
-    then up to two films after the lead, by the subject's ranking. Empty when there is nothing
-    to add, and the template then omits the element rather than rendering it empty."""
-    parts: list[str] = []
-    if batch.slate:
-        parts.append(
-            f"Your slate: {_plural(batch.slate_count, 'date')} in the next "
-            f"{SLATE_WINDOW_DAYS} days."
+    """The inbox preview text (DC-10): what the subject had no room for. With timeline lines,
+    up to two films after the lead, by the subject's ranking — the slate is below the fold and
+    stays out of the inbox (D-1543.4). For a slate alone, up to three films soonest first as
+    `Title (Ddd)`, the weekday of each film's earliest date (D-1543.5). Empty when there is
+    nothing to add, and the template then omits the element rather than rendering it empty."""
+    ranked = rank_films(batch.beats)
+    if not ranked:
+        return ", ".join(
+            f"{title} ({_WEEKDAYS[day.weekday()][:3]})"
+            for _, title, day in slate_films(batch.slate)[:SLATE_PREHEADER_FILMS]
         )
-    also = rank_films(batch.beats)[1:3]
-    if also:
-        parts.append("Also: " + "; ".join(_headline(ranked) for ranked in also))
-    return " ".join(parts)
+    also = ranked[1:3]
+    if not also:
+        return ""
+    return "Also: " + "; ".join(_headline(film) for film in also)
 
 
 def _film_context(film: DigestFilm) -> dict[str, object]:
@@ -1663,19 +1732,22 @@ def _timeline_context(
     }
 
 
-def _slate_context(days: Sequence[SlateDay], *, settings: Settings) -> list[dict[str, object]]:
-    """The slate half of the context (FB-26): month (headed only across a boundary) → date →
-    bucket → the calendar's film row, its fields as `CalendarFilmRow` shows them, plus the
-    marker. `films`, not `items`: Jinja resolves `bucket.items` to the dict method."""
+def _slate_context(kinds: Sequence[SlateKind], *, settings: Settings) -> list[dict[str, object]]:
+    """The slate half of the context (FB-26, D-1543.2): kind → date → bucket → the calendar's
+    film row, its fields as `CalendarFilmRow` shows them, plus the marker. The home kind's
+    bucket `label` is None — one bucket, which the calendar's home view does not head
+    (D-1542.3) — so the templates render a bucket line only when there is a label. `films`, not
+    `items`: Jinja resolves `bucket.items` to the dict method."""
     return [
         {
-            "heading": month.heading,
+            "kind": kind.kind,
+            "label": kind.label,
             "days": [
                 {
                     "heading": day_heading(d.day),
                     "buckets": [
                         {
-                            "label": bucket.label,
+                            "label": bucket.label if kind.kind == "theatrical" else None,
                             "films": [
                                 {
                                     "title": item.calendar.film_title,
@@ -1699,10 +1771,10 @@ def _slate_context(days: Sequence[SlateDay], *, settings: Settings) -> list[dict
                         for bucket in d.buckets
                     ],
                 }
-                for d in month.days
+                for d in kind.days
             ],
         }
-        for month in slate_months(days)
+        for kind in kinds
     ]
 
 

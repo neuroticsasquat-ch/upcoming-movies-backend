@@ -495,7 +495,7 @@ class Settings(BaseSettings):
         default=None, alias="HEALTHCHECK_DIGEST_WEEKLY_URL"
     )
     # The product's one slate day (DC-2). The daily slot reads it — on this weekday a daily
-    # reader gets the slate in front of their cards — and it documents the day the weekly
+    # reader gets the slate after their cards — and it documents the day the weekly
     # Coolify slot must be scheduled on, which the repo cannot enforce (AGENTS.md). The weekly
     # send always carries the slate, whatever day it runs; the two must agree or daily and
     # weekly readers get their slates on different days.
