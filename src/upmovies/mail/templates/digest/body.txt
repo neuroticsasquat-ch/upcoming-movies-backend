@@ -61,7 +61,7 @@ NEW ON YOUR TIMELINE
 {%- endfor %}
 {% endif %}
 {% if slate %}
-YOUR SLATE — the next {{ slate_window_days }} days of films you follow
+YOUR SLATE — the next {{ slate_window_days }} days of US release dates for films you follow
 
 {% for kind in slate %}
 {{ kind.label | upper }}

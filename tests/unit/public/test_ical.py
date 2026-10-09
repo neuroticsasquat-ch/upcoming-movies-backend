@@ -51,6 +51,18 @@ def test_the_envelope_parses_and_carries_the_required_properties():
     assert cal["prodid"] == "-//backlotter//calendar//EN"
     assert cal["calscale"] == "GREGORIAN"
     assert str(cal["x-wr-calname"]) == "backlotter — your films"
+    assert str(cal["x-wr-caldesc"]) == "US release dates for the films you follow on backlotter."
+
+
+def test_the_description_says_us_on_the_line_after_the_name():
+    # Raw text, not the parser: the description is additive (ADR-0024), so it sits directly
+    # after the name and leaves every other line of the envelope where it was.
+    lines = _render([]).split("\r\n")
+
+    name = lines.index("X-WR-CALNAME:backlotter — your films")
+    assert (
+        lines[name + 1] == "X-WR-CALDESC:US release dates for the films you follow on backlotter."
+    )
 
 
 def test_an_empty_feed_is_still_a_parseable_calendar():

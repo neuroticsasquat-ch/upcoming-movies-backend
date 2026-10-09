@@ -76,7 +76,7 @@
           {% endif %}
           {% if slate %}
           <h2 style="margin:{% if days or week %}24px{% else %}0{% endif %} 0 4px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#555555;">Your slate</h2>
-          <p style="margin:0 0 16px;font-size:14px;color:#555555;">The next {{ slate_window_days }} days of films you follow.</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#555555;">The next {{ slate_window_days }} days of US release dates for films you follow.</p>
           {% for kind in slate %}
           <h3 style="margin:20px 0 4px;font-size:15px;font-weight:700;line-height:1.3;color:#1a1a1a;">{{ kind.label }}</h3>
           {% for day in kind.days %}

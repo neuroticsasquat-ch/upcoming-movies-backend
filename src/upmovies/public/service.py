@@ -120,8 +120,6 @@ from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 MIN_QUERY_LEN = 2
 
-CALENDAR_REGION = "US"  # single governing region for v1
-
 ICAL_PAST_WINDOW_DAYS = 365
 """How far back `get_ical_feed` publishes. Not a setting: it is a property of what a calendar is
 for, not an operational knob, and a deploy that shortened it would silently delete events from
@@ -1790,7 +1788,7 @@ def _calendar_governing_cte(
         )
     return (
         governing.where(
-            FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
+            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
             FilmReleaseDate.release_type.in_(
                 tuple(RELEASE_TYPE_BUCKETS if release_types is None else release_types)
             ),

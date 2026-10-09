@@ -338,6 +338,16 @@ TMDB's single scalar `release_date` for a film — the only date this model gate
 move that leaves the primary date untouched does not form a release-date event.
 _Avoid_: regional date, theatrical date (those are the out-of-scope per-country values).
 
+**Primary region**:
+The one region the product serves — the United States (ADR-0024). Every release surface is
+scoped to it: it is the region always in the displayable set whatever a film's origin, the
+*only* region the home release is in scope for, the region the calendar, the iCal feed and the
+digest slate list, and the region the provider poll reads. The film page's origin-country
+theatrical rows are the one named exception: a film's opening in its own market belongs to the
+film's record, and the **headline release** may lead with it, but no calendar carries it.
+_Avoid_: home region (collides with the home release), default region (implies others exist),
+locale (that is formatting, not scope), US market (names the value, defines nothing).
+
 **Governing release date**:
 Per subject `(iso_3166_1, release_type)`, the earliest displayable `catalog.film_release_date`
 row — `min(release_date)` over the current rows for that subject. It is the single value both

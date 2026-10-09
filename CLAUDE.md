@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`CONTEXT.md`** — the domain glossary. Terms there are *enforced in code* (e.g. `provenance` vs
   `news_backed`, "total stage failure" vs partial failure). When naming a concept in code, tests, or
   a PR, use the glossary's term and avoid the listed synonyms.
-- **`docs/adr/`** — 16 ADRs covering retrieval, clustering, LLM routing, sweep, and feed grouping.
+- **`docs/adr/`** — 24 ADRs covering retrieval, clustering, LLM routing, sweep, and feed grouping.
   Read the ones touching your area; flag explicitly if your change contradicts one.
 - **`docs/specs/NEU-*.md`** — per-ticket specs (`specs_dir: docs`). Implementation work is spec-driven.
 
