@@ -244,6 +244,8 @@ Numbered so tickets can cite them (`D-n`).
   (`confirmed`, ADR-0014 refinement) with `subject_key` token `US:digital` / `US:physical`.
   *(Amended 2026-10-08 by NEU-1542: physical dropped; the home release is digital alone. Type 5
   is stored, never displayed or carded — ADR-0023.)*
+  *(Generalised 2026-10-09 by ADR-0024: the product is US-market; the film page's
+  origin-country theatrical rows are the one exception.)*
 - **D-27 Provider polling.** `/movie/{id}/watch/providers`, region `US` in v1, schema keyed by
   `(film_id, region, provider_id, monetization_type)`. Poll set = films whose US theatrical
   governing date is 14–365 days old (200 until NEU-1417; see D-46) **plus** any film with a

@@ -278,7 +278,9 @@ async def test_the_weekly_digest_carries_the_slate_and_the_timeline_under_follow
     # The slate, after the timeline: In theaters with its Wide bucket, then At home with no
     # bucket line (D-1543.2, D-1543.3).
     slate = text[text.index("NEW ON YOUR TIMELINE") :]
-    assert slate.index("YOUR SLATE — the next 7 days") < slate.index("IN THEATERS")
+    assert slate.index(
+        "YOUR SLATE — the next 7 days of US release dates for films you follow\n"
+    ) < slate.index("IN THEATERS")
     assert slate.index("IN THEATERS") < slate.index("Saturday, September 19, 2026\n  Wide\n")
     assert slate.index("Saturday, September 19, 2026") < slate.index("AT HOME")
     assert "AT HOME\n\nWednesday, September 23, 2026\n    Dune: Part Three (2026)" in slate
@@ -297,6 +299,8 @@ async def test_the_weekly_digest_carries_the_slate_and_the_timeline_under_follow
     assert "September 15, 2026" not in timeline
     assert f"{BASE_URL}/film/{dune.tmdb_id}-dune-part-three" in text
     assert f"{BASE_URL}/settings" in text
+    # The slate's intro says the dates are US ones (ADR-0024).
+    assert "The next 7 days of US release dates for films you follow.</p>" in envelope.html
     # Dune is on the slate as the calendar's 48px w92 row and in the timeline's strip at 52px.
     assert f'<img src="{IMAGE_BASE}/w92/dune.jpg" width="48"' in envelope.html
     assert f'<img src="{IMAGE_BASE}/w154/dune.jpg" width="52"' in envelope.html

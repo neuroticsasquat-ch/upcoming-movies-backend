@@ -13,18 +13,18 @@ Before this module the first two already disagreed: the page built its region se
 `Event.region == any_(Film.origin_country)` (all of them). A film with two origin countries
 could therefore show one date and surface an event about another. One definition, one place.
 
-**Two cuts, not one.** TMDB release `type` ints are 1 Premiere · 2 Theatrical (limited) ·
-3 Theatrical (wide) · 4 Digital · 5 Physical · 6 TV. The theatrical arc is 2 and 3, displayable
-in US *or* an origin country. The home release is 4, digital, displayable in **US only** (D-26):
-the product answers "when can I watch this at home?" for a US audience, and a French digital
-date is not that answer even for a French film — where a French *theatrical* date genuinely is
-the film's own market opening. Premiere is excluded from both deliberately: TMDB has no distinct
-festival type, so type 1 lumps real festival screenings with ordinary premieres and telling them
-apart means parsing free-text `note`. TV (6) is nobody's release date. Physical (5) left the
-cut in NEU-1542 (ADR-0023): the site follows a film to the first day you can watch it at home,
-and the disc almost always lands after that — it is stored, never displayed, carded or listed.
-The display labels for these buckets stay in `public.release` — they are a presentation concern;
-membership is not.
+**Two cuts, not one.** TMDB release `type` ints are 1 Premiere · 2 Theatrical (limited) · 3
+Theatrical (wide) · 4 Digital · 5 Physical · 6 TV. The theatrical arc is 2 and 3, displayable in
+US *or* an origin country. The home release is 4, digital, displayable in **US only** (D-26, and
+ADR-0024 for the product): the product answers "when can I watch this at home?" for a US
+audience, and a French digital date is not that answer even for a French film — where a French
+*theatrical* date genuinely is the film's own market opening. Premiere is excluded from both
+deliberately: TMDB has no distinct festival type, so type 1 lumps real festival screenings with
+ordinary premieres and telling them apart means parsing free-text `note`. TV (6) is nobody's
+release date. Physical (5) left the cut in NEU-1542 (ADR-0023): the site follows a film to the
+first day you can watch it at home, and the disc almost always lands after that — it is stored,
+never displayed, carded or listed. The display labels for these buckets stay in `public.release`
+— they are a presentation concern; membership is not.
 
 Widening this cut is how home-release dates reach the product at all: the film page, the
 calendar, `region_visible` and the change history all read this module, so a US digital date

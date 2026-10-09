@@ -35,6 +35,11 @@ CALENDAR_NAME = "backlotter — your films"
 it is what Google, Apple and Outlook all read, and the alternative is a calendar named after
 its URL."""
 
+CALENDAR_DESCRIPTION = "US release dates for the films you follow on backlotter."
+"""`X-WR-CALDESC`: the feed's description, which says the calendar is US-only (ADR-0024). Not in
+RFC 5545 either; Apple Calendar and Outlook show it in the calendar's info panel, Google ignores
+it."""
+
 MAX_LINE_OCTETS = 75
 """The content line limit (§3.1), excluding the CRLF."""
 
@@ -89,6 +94,7 @@ def render_calendar(events: Sequence[CalendarFeedEvent], *, base_url: str) -> st
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         f"X-WR-CALNAME:{_escape(CALENDAR_NAME)}",
+        f"X-WR-CALDESC:{_escape(CALENDAR_DESCRIPTION)}",
     ]
     for event in events:
         lines.extend(_render_event(event, base=base))
