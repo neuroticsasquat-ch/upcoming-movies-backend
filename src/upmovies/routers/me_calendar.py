@@ -20,7 +20,7 @@ from upmovies.app.entitlements import require_entitled
 from upmovies.app.models import User
 from upmovies.deps import get_session
 from upmovies.public import service
-from upmovies.public.dto import CalendarResponse
+from upmovies.public.dto import CalendarKind, CalendarResponse
 
 entitled = require_entitled()
 
@@ -29,6 +29,8 @@ router = APIRouter(prefix="/me/calendar", tags=["me"], dependencies=[Depends(ent
 
 @router.get("", response_model=CalendarResponse)
 async def get_my_calendar(
+    # `/calendar`'s `kind` (D-1542.2): omitted = both kinds, for older clients.
+    kind: CalendarKind | None = Query(default=None),
     # limit/offset count distinct release dates (soonest first), not film rows — the public
     # route's meaning and its bounds, so a client switching tabs keeps its page size.
     limit: int = Query(default=20, ge=1, le=200),
@@ -39,4 +41,6 @@ async def get_my_calendar(
     """Following no films, or none with anything upcoming, is a 200 with no items — never an
     error. The refusals are the gate's: 401 with no session, 403 `entitlement_required`
     without a live grant (D-39)."""
-    return await service.get_my_films_calendar(session, user_id=user.id, limit=limit, offset=offset)
+    return await service.get_my_films_calendar(
+        session, user_id=user.id, kind=kind, limit=limit, offset=offset
+    )

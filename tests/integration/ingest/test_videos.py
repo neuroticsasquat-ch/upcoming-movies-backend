@@ -9,11 +9,10 @@ years of trailers behind it must record all of them and say nothing; only what t
 videos at all — the ordinary state of an in-play title — is still observed, and the teaser it
 gets next month is a real beat rather than a second baseline.
 
-**The scoped set is the provider poll's**, which admits any film somebody's follows cover —
-by title whatever its dates say, or through a person, company or franchise inside the alert
-window (D-1414.3). That rule is the one that matters here: a trailer precedes a theatrical date
-by months, so for videos the followed-but-unreleased film is the typical subject rather than the
-exception.
+**The scoped set is the unreleased half of the provider poll's** (NEU-1532, D-1532.3): the
+poll set *and* in play. A released film is never read — once it is out, a trailer is not news —
+so what is left is the title-followed film that has not opened yet, and every carding fixture
+below is one.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -38,6 +37,8 @@ MIN_AGE = 14
 MAX_AGE = 365
 """`PROVIDER_POLL_MAX_AGE_DAYS`' default, pinned the way `TODAY` is — the poll set's reach must
 not depend on the environment the suite runs in."""
+EXCLUDED_STATUSES = frozenset({"Released", "Canceled"})
+"""`TMDB_EXCLUDED_STATUSES`' default, pinned for the same reason."""
 IN_WINDOW = TODAY - timedelta(days=60)
 UPCOMING = TODAY + timedelta(days=200)
 WIDE = 3
@@ -82,6 +83,26 @@ async def _add_released_film(session, tmdb_id: int, **overrides) -> Film:
     return film
 
 
+@pytest.fixture
+async def follower(make_user):
+    return await make_user(email="follower@example.com")
+
+
+async def _follow(session, user, film: Film) -> None:
+    session.add(
+        Follow(user_id=user.id, entity_type="title", entity_id=str(film.id), source="manual")
+    )
+    await session.flush()
+
+
+async def _add_followed_film(session, user, tmdb_id: int, **overrides) -> Film:
+    """A title-followed film that has not opened — the video poll's subject (D-1532.3)."""
+    defaults = {"status": "Post Production", "release_date": UPCOMING}
+    film = await add_film(session, tmdb_id, **{**defaults, **overrides})
+    await _follow(session, user, film)
+    return film
+
+
 def _mock_videos(tmdb_id: int, videos: list[dict] | None = None):
     return respx.get(f"{BASE_URL}/movie/{tmdb_id}/videos").mock(
         return_value=httpx.Response(200, json=make_videos(tmdb_id, videos))
@@ -96,6 +117,7 @@ async def _run(session_factory, tmdb_client, run_id, **overrides):
         "today": TODAY,
         "min_age_days": MIN_AGE,
         "max_age_days": MAX_AGE,
+        "excluded_statuses": EXCLUDED_STATUSES,
         "now": SEEN_AT,
     }
     return await run_video_poll(**{**kwargs, **overrides})
@@ -124,11 +146,11 @@ async def _trailer_events(session, film: Film) -> list[Event]:
 
 @respx.mock
 async def test_a_films_first_observation_records_everything_and_cards_nothing(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """The rule the whole feature rests on. Admitting a catalogue of films that each already
     have trailers must not empty three years of promo onto the feed on day one."""
-    film = await _add_released_film(session, 100)
+    film = await _add_followed_film(session, follower, 100)
     await session.commit()
     _mock_videos(100, [make_video("aaa"), make_video("bbb", type="Teaser")])
 
@@ -144,9 +166,9 @@ async def test_a_films_first_observation_records_everything_and_cards_nothing(
 
 @respx.mock
 async def test_a_trailer_arriving_after_the_baseline_cards_once(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
-    film = await _add_released_film(session, 101)
+    film = await _add_followed_film(session, follower, 101)
     await session.commit()
     _mock_videos(101, [make_video("aaa")])
     await _run(session_factory, tmdb_client, run_id)
@@ -168,11 +190,11 @@ async def test_a_trailer_arriving_after_the_baseline_cards_once(
 
 @respx.mock
 async def test_the_card_is_dated_to_when_the_trailer_went_up_not_to_the_poll(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """A pass catching up after an outage still dates each card to the video that produced it,
     which is what makes `occurred_at` worth reading on the film page (NEU-1204)."""
-    film = await _add_released_film(session, 102)
+    film = await _add_followed_film(session, follower, 102)
     await session.commit()
     _mock_videos(102, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -187,12 +209,12 @@ async def test_the_card_is_dated_to_when_the_trailer_went_up_not_to_the_poll(
 
 @respx.mock
 async def test_a_film_observed_holding_nothing_is_still_observed(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """The reason the marker is a column and not "does this film have rows". An in-play film
     normally has no videos at all on its first read, and a rows-based test would re-baseline it
     every poll and swallow the first teaser it ever gets — the beat the poll exists to catch."""
-    film = await _add_released_film(session, 103)
+    film = await _add_followed_film(session, follower, 103)
     await session.commit()
     _mock_videos(103, [])
 
@@ -211,9 +233,9 @@ async def test_a_film_observed_holding_nothing_is_still_observed(
 
 @respx.mock
 async def test_re_polling_an_unchanged_film_writes_nothing(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
-    film = await _add_released_film(session, 104)
+    film = await _add_followed_film(session, follower, 104)
     await session.commit()
     _mock_videos(104, [make_video("aaa")])
     await _run(session_factory, tmdb_client, run_id)
@@ -228,12 +250,12 @@ async def test_re_polling_an_unchanged_film_writes_nothing(
 
 @respx.mock
 async def test_observing_a_films_videos_is_not_a_film_field_change(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """`videos_observed_at` is ingest bookkeeping, so it belongs in the denylist: a history row
     for it would card as a public event and revive the film in `dormant_film_clause` on the day
     it was polled."""
-    film = await _add_released_film(session, 105)
+    film = await _add_followed_film(session, follower, 105)
     await session.commit()
     _mock_videos(105, [make_video("aaa")])
 
@@ -252,9 +274,9 @@ async def test_observing_a_films_videos_is_not_a_film_field_change(
 
 @respx.mock
 async def test_a_new_teaser_is_recorded_and_stays_silent(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
-    film = await _add_released_film(session, 110)
+    film = await _add_followed_film(session, follower, 110)
     await session.commit()
     _mock_videos(110, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -269,11 +291,11 @@ async def test_a_new_teaser_is_recorded_and_stays_silent(
 
 @respx.mock
 async def test_a_trailer_somewhere_other_than_youtube_is_recorded_and_stays_silent(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """The card carries one key the film page embeds as a YouTube player (NEU-1386); a Vimeo
     key in that field renders an empty box."""
-    film = await _add_released_film(session, 111)
+    film = await _add_followed_film(session, follower, 111)
     await session.commit()
     _mock_videos(111, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -288,11 +310,11 @@ async def test_a_trailer_somewhere_other_than_youtube_is_recorded_and_stays_sile
 
 @respx.mock
 async def test_a_trailer_tmdb_holds_no_publication_time_for_does_not_card(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """`occurred_at` *is* `published_at`, and dating an undated video to the poll would put a
     years-old trailer on today's feed. It is still recorded, so it never cards later either."""
-    film = await _add_released_film(session, 112)
+    film = await _add_followed_film(session, follower, 112)
     await session.commit()
     _mock_videos(112, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -308,11 +330,11 @@ async def test_a_trailer_tmdb_holds_no_publication_time_for_does_not_card(
 
 @respx.mock
 async def test_two_trailers_arriving_together_card_once_each(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """One card per (film, video key) — not one per observation. Two distinct trailers are two
     beats, and they carry different keys so the film page can embed each."""
-    film = await _add_released_film(session, 113)
+    film = await _add_followed_film(session, follower, 113)
     await session.commit()
     _mock_videos(113, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -332,7 +354,7 @@ async def test_two_trailers_arriving_together_card_once_each(
 
 @respx.mock
 async def test_two_trailers_published_in_the_same_second_both_card(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """One card per (film, video key) still holds when two keys share a timestamp.
 
@@ -340,7 +362,7 @@ async def test_two_trailers_published_in_the_same_second_both_card(
     the second insert would raise and roll back the film's ledger rows with it. The clash is
     broken by a microsecond rather than by dropping the video, which would lose the beat for
     good — the ledger row is written either way, so it is never reconsidered."""
-    film = await _add_released_film(session, 114)
+    film = await _add_followed_film(session, follower, 114)
     await session.commit()
     _mock_videos(114, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -357,13 +379,13 @@ async def test_two_trailers_published_in_the_same_second_both_card(
 
 @respx.mock
 async def test_a_site_casing_change_does_not_record_or_card_a_known_video_again(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """`uq_film_video` is keyed on the stored `site`, so the ledger's key and the key the
     payload is deduplicated on have to be the same string — otherwise a payload saying
     `youtube` where yesterday's said `YouTube` inserts a second row for a video already
     recorded and cards that same YouTube key again."""
-    film = await _add_released_film(session, 117)
+    film = await _add_followed_film(session, follower, 117)
     await session.commit()
     _mock_videos(117, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -382,12 +404,12 @@ async def test_a_site_casing_change_does_not_record_or_card_a_known_video_again(
 
 @respx.mock
 async def test_a_second_trailer_at_an_already_carded_second_is_nudged_past_it(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """The clash may straddle two polls, so the batch alone cannot break it — and the earlier
     card may itself already sit at a nudged timestamp, which is why the lookup is a span
     rather than an exact-match list."""
-    film = await _add_released_film(session, 115)
+    film = await _add_followed_film(session, follower, 115)
     await session.commit()
     _mock_videos(115, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -406,11 +428,11 @@ async def test_a_second_trailer_at_an_already_carded_second_is_nudged_past_it(
 
 @respx.mock
 async def test_the_card_carries_a_deterministic_summary(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
     """Every read path inner-joins `EventSummary`, so an event written without one is invisible
     on the feed and the film page alike."""
-    film = await _add_released_film(session, 116)
+    film = await _add_followed_film(session, follower, 116)
     await session.commit()
     _mock_videos(116, [])
     await _run(session_factory, tmdb_client, run_id)
@@ -506,10 +528,93 @@ async def test_an_unfollowed_in_play_film_is_not_polled(
 
 
 @respx.mock
-async def test_a_tombstoned_film_is_not_polled(session, session_factory, tmdb_client, run_id):
+async def test_a_released_film_in_the_theatrical_window_is_not_polled(
+    session, session_factory, tmdb_client, run_id
+):
+    """The ticket's case (NEU-1532): a film past its US theatrical date is in the provider
+    poll's set on rule 1, and its only beats left are home media and streaming — a trailer
+    dropped now is not news, so the film is not read at all."""
+    await _add_released_film(session, 150)
+    await session.commit()
+    route = _mock_videos(150, [make_video("aaa")])
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.selected, result.polled) == (0, 0)
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_a_title_followed_released_film_is_not_polled(
+    session, session_factory, tmdb_client, run_id, follower
+):
+    """The follow keeps the film in the poll set for its streaming debut, not for trailers."""
+    await _add_followed_film(
+        session, follower, 151, status="Released", release_date=TODAY - timedelta(days=1)
+    )
+    await session.commit()
+    route = _mock_videos(151)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert result.selected == 0
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_a_followed_film_opening_today_is_still_polled(
+    session, session_factory, tmdb_client, run_id, follower
+):
+    """In play is "primary date on or after today" — the refresh phase's rule, inclusive — so
+    the morning a film opens is its last day of trailer reads, not one day past it."""
+    await _add_followed_film(session, follower, 152, release_date=TODAY)
+    await session.commit()
+    route = _mock_videos(152)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.selected, result.polled) == (1, 1)
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_followed_undated_film_is_polled(
+    session, session_factory, tmdb_client, run_id, follower
+):
+    await _add_followed_film(session, follower, 153, status="In Production", release_date=None)
+    await session.commit()
+    _mock_videos(153)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert (result.selected, result.polled) == (1, 1)
+
+
+@respx.mock
+async def test_a_followed_film_tmdb_calls_released_is_not_polled_whatever_its_date(
+    session, session_factory, tmdb_client, run_id, follower
+):
+    """Status alone releases a film, with or without a primary date — the in-play rule's
+    second half, and the same `TMDB_EXCLUDED_STATUSES` the refresh phase reads."""
+    await _add_followed_film(session, follower, 154, status="Released", release_date=None)
+    await _add_followed_film(session, follower, 155, status="Canceled", release_date=UPCOMING)
+    await session.commit()
+    first = _mock_videos(154)
+    second = _mock_videos(155)
+
+    result = await _run(session_factory, tmdb_client, run_id)
+
+    assert result.selected == 0
+    assert (first.call_count, second.call_count) == (0, 0)
+
+
+@respx.mock
+async def test_a_tombstoned_film_is_not_polled(
+    session, session_factory, tmdb_client, run_id, follower
+):
     """The provider pass runs first over the same set and tombstones what TMDB has deleted, so
     the video pass must not spend a request re-asking."""
-    film = await _add_released_film(session, 123)
+    film = await _add_followed_film(session, follower, 123)
     film.tmdb_missing_at = datetime.now(UTC)
     await session.commit()
 
@@ -523,9 +628,9 @@ async def test_a_tombstoned_film_is_not_polled(session, session_factory, tmdb_cl
 
 @respx.mock
 async def test_a_404_tombstones_the_film_rather_than_counting_a_failure(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
-    film = await _add_released_film(session, 130)
+    film = await _add_followed_film(session, follower, 130)
     await session.commit()
     respx.get(f"{BASE_URL}/movie/130/videos").mock(return_value=httpx.Response(404))
 
@@ -538,10 +643,10 @@ async def test_a_404_tombstones_the_film_rather_than_counting_a_failure(
 
 @respx.mock
 async def test_one_films_outage_does_not_cost_the_rest_of_the_pass(
-    session, session_factory, tmdb_client, run_id
+    session, session_factory, tmdb_client, run_id, follower
 ):
-    first = await _add_released_film(session, 131)
-    second = await _add_released_film(session, 132)
+    first = await _add_followed_film(session, follower, 131)
+    second = await _add_followed_film(session, follower, 132)
     await session.commit()
     failing, working = sorted((first, second), key=lambda f: f.id)
     respx.get(f"{BASE_URL}/movie/{failing.tmdb_id}/videos").mock(return_value=httpx.Response(500))
@@ -554,9 +659,11 @@ async def test_one_films_outage_does_not_cost_the_rest_of_the_pass(
 
 
 @respx.mock
-async def test_a_sustained_outage_aborts_the_pass(session, session_factory, tmdb_client, run_id):
+async def test_a_sustained_outage_aborts_the_pass(
+    session, session_factory, tmdb_client, run_id, follower
+):
     for tmdb_id in (140, 141, 142):
-        await _add_released_film(session, tmdb_id)
+        await _add_followed_film(session, follower, tmdb_id)
     await session.commit()
     for tmdb_id in (140, 141, 142):
         respx.get(f"{BASE_URL}/movie/{tmdb_id}/videos").mock(return_value=httpx.Response(500))

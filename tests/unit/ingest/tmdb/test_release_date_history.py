@@ -1,4 +1,4 @@
-"""The displayable-release diff: what `_rebuild_release_dates` throws away (NEU-1121)."""
+"""The displayable-release diff: what `rebuild_release_dates` throws away (NEU-1121)."""
 
 from datetime import UTC, date, datetime
 
@@ -40,9 +40,13 @@ class TestDisplayableCut:
             )
 
     def test_us_home_release_is_displayable(self):
-        # D-26: digital (4) and physical (5) join the cut, US only.
-        for home in (4, 5):
+        # D-26: digital (4) joins the cut, US only.
+        for home in (4,):
             assert is_displayable_release(iso_3166_1="US", release_type=home, origin_country=["GB"])
+
+    def test_a_us_physical_date_is_not_displayable(self):
+        # NEU-1542: physical (5) left the cut — stored, never displayed, carded or listed.
+        assert not is_displayable_release(iso_3166_1="US", release_type=5, origin_country=["US"])
 
     def test_origin_country_home_release_is_not_displayable(self):
         # The asymmetry the theatrical arc does not have: a GB digital date on a GB film is

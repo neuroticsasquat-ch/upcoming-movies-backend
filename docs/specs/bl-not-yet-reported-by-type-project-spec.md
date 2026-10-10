@@ -381,3 +381,8 @@ Linear project: https://linear.app/neuroticsasquatch/project/bl-not-yet-reported
   and fails rather than parsing summaries. NR-11's grep gained `scripts/`. NR-3 records that
   the heading order is a pinned literal, not a derivation from `_EVENT_STAGE`. NR-14 decides
   that `other` leaves the frontend map. §7's prod-snapshot check moved to before deploy.
+- **2026-10-05, NEU-1533.** §2 left the poster strip out of scope and NR-2 kept it above the
+  day unchanged, so it kept its news-backed-first, title-ordered rule under a section now laid
+  out by update type. Superseded: the strip's order is the day's reading order, each film at
+  its first appearance — under Not yet reported, update type by update type. See
+  `frontend/docs/specs/NEU-1533-poster-strip-reading-order.md`.

@@ -110,7 +110,14 @@ def _render_part(name: str, part: str, context: dict[str, object]) -> str:
         ) from exc
 
 
-def render(name: str, context: dict[str, object], *, sender: str, to: str) -> Envelope:
+def render(
+    name: str,
+    context: dict[str, object],
+    *,
+    sender: str,
+    to: str,
+    reply_to: str | None = None,
+) -> Envelope:
     """Render template `name` against `context` into a ready-to-send `Envelope`.
 
     Renders into the transport's own value type rather than into a separate "rendered
@@ -132,4 +139,4 @@ def render(name: str, context: dict[str, object], *, sender: str, to: str) -> En
             f"mail template {name!r} rendered an empty plain-text body; the text part is the "
             f"one that has to stand on its own, so an HTML-only send is not a valid message"
         )
-    return Envelope(sender=sender, to=to, subject=subject, text=text, html=html)
+    return Envelope(sender=sender, to=to, subject=subject, text=text, html=html, reply_to=reply_to)

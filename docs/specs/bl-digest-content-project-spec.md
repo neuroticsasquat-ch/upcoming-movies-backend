@@ -119,7 +119,8 @@ and a way to *look* at a digest without sending one.
   significance floor: EF-7 holds.
 - **DC-2 One cadence per user, and one slate day for both.** `digest_cadence` stays one value
   per user; nobody receives both mails. A weekly reader gets the slate and the week's cards.
-  A daily reader gets the day's cards and, **on the slate day only**, the slate in front —
+  A daily reader gets the day's cards and, **on the slate day only**, the slate in front *(amended 2026-10-08 by NEU-1543: after the
+  cards)* —
   today a daily reader never sees upcoming dates at all. The slate day is Thursday,
   product-wide: setting `SLATE_WEEKDAY` (`Literal["monday", …, "sunday"]`, default
   `thursday`), read by the daily slot (`today.weekday()` matches → load the slate) and
@@ -172,7 +173,10 @@ and a way to *look* at a digest without sending one.
   all; a film reached by both a title follow and a director follow still names the director.
   The title arm exists for the preview and for tests to assert an entry's full reach, not
   for the line.
-- **DC-7 Subject.** Three forms, chosen by what the mail holds:
+- **DC-7 Subject.** *(Amended 2026-10-08 by NEU-1543: no ` · your slate` suffix — a mail with
+  entries is headlined by them whether or not a slate follows; slate only is
+  `{N} film{s} you follow {is|are} out this week`, `N` distinct films across both kinds.)*
+  Three forms, chosen by what the mail holds:
   - entries: `{lead title} — {lead beat label, lower}` + `, + {N} more film{s}` when other
     entries exist (`N` counts entries beyond the lead, **including** those past the cap);
   - entries and slate: the form above + ` · your slate`;
@@ -183,7 +187,9 @@ and a way to *look* at a digest without sending one.
   linking to `PUBLIC_BASE_URL/` — and every queued row in the batch is still marked `sent`
   (the timeline is where the rest lives; nothing is re-queued). `N` in the subject and in this
   line agree.
-- **DC-10 Preheader.** A hidden first element in the HTML body (the usual
+- **DC-10 Preheader.** *(Amended 2026-10-08 by NEU-1543: the slate's part is dropped — with
+  entries it is the `Also: …` part alone or empty; slate only, up to three films soonest first
+  as `Title (Ddd)`, joined by ", ".)* A hidden first element in the HTML body (the usual
   `display:none;max-height:0;overflow:hidden` span), no counterpart in the text part:
   `Your slate: {N} dates in the next 30 days.` when the slate is present, then `Also: {entry 2
   title} — {beat}; {entry 3 title} — {beat}` for up to two entries after the lead. Empty when
@@ -200,8 +206,11 @@ and a way to *look* at a digest without sending one.
 
 ### The slate
 
-- **DC-9 Scope as built, plus markers.** Title follows only (EF-14), US, the four displayable
-  buckets, `SLATE_WINDOW_DAYS = 30`, one governing date per `(film, type)`, soonest first —
+- **DC-9 Scope as built, plus markers.** *(Amended 2026-10-08 by NEU-1542: three displayable
+  buckets — limited, wide, digital; physical dropped. Amended 2026-10-08 by NEU-1543:
+  `SLATE_WINDOW_DAYS = 7`, which tiles with the 7-day marker lookback and a weekly slate day.)*
+  Title follows only (EF-14), US, the four
+  displayable buckets, `SLATE_WINDOW_DAYS = 30`, one governing date per `(film, type)`, soonest first —
   the calendar's and the `.ics` feed's set, unchanged. Each row gains a marker when its date
   was **set or moved since the previous slate day**: the film has a published `release_date`
   event whose subject covers `US:<bucket token>` (D-26's `subject_key` tokens) with

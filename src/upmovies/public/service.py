@@ -33,11 +33,9 @@ from upmovies.app.models import User, UserSettings
 from upmovies.catalog.fold import DIACRITIC_FROM, DIACRITIC_TO
 from upmovies.catalog.headline_release import HeadlineRelease, headline_releases
 from upmovies.catalog.models import (
-    MONETIZATION_TYPES,
     Collection,
     Film,
     FilmAlternativeTitle,
-    FilmAvailabilityCurrent,
     FilmCredit,
     FilmGenre,
     FilmProductionCompany,
@@ -48,7 +46,6 @@ from upmovies.catalog.models import (
     Person,
     ProductionCompany,
     ProductionCountry,
-    WatchProvider,
 )
 from upmovies.catalog.queries import alert_window_clause, in_play_clause
 from upmovies.catalog.ref import (
@@ -62,8 +59,10 @@ from upmovies.catalog.ref import (
     person_ref,
 )
 from upmovies.catalog.release_grade import (
+    HOME_RELEASE_TYPES,
     PRIMARY_REGION,
     RELEASE_TYPE_BUCKETS,
+    THEATRICAL_RELEASE_TYPES,
     displayable_regions,
     is_displayable_release,
 )
@@ -82,6 +81,7 @@ from upmovies.public.arc import (
 from upmovies.public.country import country_display_name
 from upmovies.public.dto import (
     CalendarItem,
+    CalendarKind,
     CalendarResponse,
     CastMemberOut,
     CollectionDetailResponse,
@@ -111,18 +111,14 @@ from upmovies.public.dto import (
     PersonSearchItem,
     PersonSearchResponse,
     PopularPeopleResponse,
-    ProviderOut,
     ReleaseDateOut,
     SourceOut,
-    WhereToWatchOut,
 )
 from upmovies.public.ical import CalendarFeedEvent
 from upmovies.public.release import release_label_for_tmdb_type
 from upmovies.public.sources import cap_sources, outlet_label, source_url
 
 MIN_QUERY_LEN = 2
-
-CALENDAR_REGION = "US"  # single governing region for v1
 
 ICAL_PAST_WINDOW_DAYS = 365
 """How far back `get_ical_feed` publishes. Not a setting: it is a property of what a calendar is
@@ -132,7 +128,15 @@ every subscriber's calendar."""
 # Significance order for two calendar rows sharing a date: the theatrical arc first (a wide
 # opening is the bigger beat than a limited one), then the home release in the order it
 # happens. Ordering only — which types are *on* the calendar is `RELEASE_TYPE_BUCKETS`.
-_CALENDAR_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital", "physical")
+_CALENDAR_BUCKET_ORDER: tuple[str, ...] = ("wide", "limited", "digital")
+
+# The release types each calendar kind holds (D-1542.2): the theatrical arc, or the US home
+# release. Derived from `release_grade`, never literal ints, so the kinds cannot drift from
+# what is displayable.
+CALENDAR_KIND_TYPES: dict[CalendarKind, frozenset[int]] = {
+    "theatrical": THEATRICAL_RELEASE_TYPES,
+    "home": HOME_RELEASE_TYPES,
+}
 
 # A bucket nobody ranked sorts last rather than raising at import: a new displayable type is a
 # cosmetic ordering question, not a reason for the container to refuse to boot.
@@ -833,68 +837,6 @@ async def get_collection_search(
     return CollectionSearchResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-async def _where_to_watch(
-    session: AsyncSession, film_id: UUID, *, region: str = PRIMARY_REGION
-) -> WhereToWatchOut | None:
-    """This film's current where-to-watch box, or `None` if nobody carries it (D-29).
-
-    Reads `film_availability_current` — the snapshot the provider poll rebuilds wholesale every
-    run — rather than the `availability_first_seen` ledger beside it. The two answer different
-    questions: the ledger says a film *was* on a service and never forgets, which is what
-    `now_available` cards off; the box says where a reader can watch it *now*, so a film that
-    has left every service must empty it rather than keep the last poll's answer.
-
-    **Ordered by primary key, which here means the order TMDB listed the services.** The
-    rebuild deletes and re-inserts a region in one statement in the order the poll observed —
-    JustWatch's own ranking, which is what puts the service most readers have at the head of the
-    list. Sorting by name instead would throw that ranking away for an alphabetical one nobody
-    asked for. The key is a surrogate, but the delete-and-rebuild is what makes it carry
-    meaning: the rows of a region are always written together, in one order, by one writer.
-    """
-    rows = (
-        await session.execute(
-            select(
-                FilmAvailabilityCurrent.monetization_type,
-                FilmAvailabilityCurrent.link,
-                WatchProvider.id,
-                WatchProvider.name,
-                WatchProvider.logo_path,
-            )
-            .join(WatchProvider, WatchProvider.id == FilmAvailabilityCurrent.provider_id)
-            .where(
-                FilmAvailabilityCurrent.film_id == film_id,
-                FilmAvailabilityCurrent.region == region,
-            )
-            .order_by(FilmAvailabilityCurrent.id.asc())
-        )
-    ).all()
-    if not rows:
-        return None
-    buckets: dict[str, list[ProviderOut]] = {kind: [] for kind in MONETIZATION_TYPES}
-    for row in rows:
-        # A type outside `MONETIZATION_TYPES` raises `KeyError` rather than being dropped: the
-        # table check-constrains the column to this same tuple, so one reaching here is a schema
-        # that moved without this read model, which should be loud. A type *added* to the tuple
-        # is the quieter half — it lands in `buckets` and then needs a field on
-        # `WhereToWatchOut` and a line below, or the box silently omits it.
-        buckets[row.monetization_type].append(
-            ProviderOut(id=row.id, name=row.name, logo_path=row.logo_path)
-        )
-    # The poll writes one `region.link` onto every row of a region (see
-    # `FilmAvailabilityCurrent`), so the rows never disagree: this reads the first of a set of
-    # equals, and is `None` only when TMDB gave the region no link at all.
-    link = next((row.link for row in rows if row.link is not None), None)
-    # Named rather than splatted from `buckets`: the keys are the model's fields, and a `**`
-    # would type-check against `attribution` too and hide a renamed bucket until runtime.
-    return WhereToWatchOut(
-        region=region,
-        flatrate=buckets["flatrate"],
-        rent=buckets["rent"],
-        buy=buckets["buy"],
-        link=link,
-    )
-
-
 async def _sources_by_event(
     session: AsyncSession, event_ids: list[UUID]
 ) -> dict[UUID, list[Story]]:
@@ -1041,9 +983,9 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
     )
 
     # Surface the theatrical arc (wide + limited) in any of those regions, plus the US home
-    # release (digital + physical); premiere and TV are dropped, and so is a home-release date
-    # in an origin country — `is_displayable_release` owns that asymmetry, which is why the
-    # membership test is the predicate rather than the label alone (D-26).
+    # release (digital; physical left in NEU-1542); premiere and TV are dropped, and so is a
+    # home-release date in an origin country — `is_displayable_release` owns that asymmetry,
+    # which is why the membership test is the predicate rather than the label alone (D-26).
     release_dates = [
         ReleaseDateOut(
             country=row.iso_3166_1,
@@ -1192,7 +1134,6 @@ async def get_film_detail(session: AsyncSession, ref: str) -> FilmDetailResponse
         alternative_titles=alternative_titles,
         cast=cast_out,
         crew=crew_out,
-        where_to_watch=await _where_to_watch(session, film.id),
     )
 
 
@@ -1809,14 +1750,24 @@ def _calendar_type_rank(release_type: ColumnElement[int]) -> ColumnElement[int]:
     return case(_CALENDAR_TYPE_RANK, value=release_type, else_=len(_CALENDAR_BUCKET_ORDER))
 
 
-def _calendar_governing_cte(*, name: str, title_follow_user_id: UUID | None = None) -> CTE:
+def _calendar_governing_cte(
+    *,
+    name: str,
+    title_follow_user_id: UUID | None = None,
+    release_types: frozenset[int] | None = None,
+) -> CTE:
     """The governing release date per (film, category): the earliest date in the subject,
     collapsed *before* any window filter (NEU-1206).
 
-    The types are `RELEASE_TYPE_BUCKETS`' keys — (2, 3, 4, 5), derived, never drifts — and the
-    region filter is already US-only, which is exactly the cut the home-release types (4, 5) are
+    The types are `RELEASE_TYPE_BUCKETS`' keys — (2, 3, 4), derived, never drifts — and the
+    region filter is already US-only, which is exactly the cut the home-release type (4) is
     displayable in, so widening the bucket map widens both calendars without a second region
     rule (D-26).
+
+    `release_types` narrows that to one calendar kind (`CALENDAR_KIND_TYPES`, D-1542.2). It is
+    applied here, inside the collapse, so the date paging and `total` a caller builds on this
+    CTE are that kind's alone. `None` keeps every displayable type — both kinds, which is what
+    an older client sends and what the `.ics` feed and the slate are (D-1542.4).
 
     `title_follow_user_id` narrows the set to the films that user follows **by title** (EF-14)
     — the whole of "my films" now that nothing indirect reaches a film. It belongs here rather
@@ -1837,8 +1788,10 @@ def _calendar_governing_cte(*, name: str, title_follow_user_id: UUID | None = No
         )
     return (
         governing.where(
-            FilmReleaseDate.iso_3166_1 == CALENDAR_REGION,
-            FilmReleaseDate.release_type.in_(tuple(RELEASE_TYPE_BUCKETS)),
+            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
+            FilmReleaseDate.release_type.in_(
+                tuple(RELEASE_TYPE_BUCKETS if release_types is None else release_types)
+            ),
         )
         .group_by(FilmReleaseDate.film_id, FilmReleaseDate.release_type)
         .cte(name)
@@ -1896,9 +1849,9 @@ async def _calendar_page(
             .join(Film, Film.id == governing.c.film_id)
             .where(*visible, governing.c.governing_date.in_(select(window.c.d)))
             # Within a date, the theatrical arc leads and the home release follows:
-            # wide, limited, digital, physical (`_CALENDAR_TYPE_RANK`). This used to be
+            # wide, limited, digital (`_CALENDAR_TYPE_RANK`). This used to be
             # `release_type DESC`, which said the same thing while only 2 and 3 existed but
-            # would float physical (5) above wide (3) now that it does not.
+            # would float digital (4) above wide (3) now that it does not.
             .order_by(
                 governing.c.governing_date.asc(),
                 _calendar_type_rank(governing.c.release_type),
@@ -1930,9 +1883,16 @@ async def _calendar_page(
     return CalendarResponse(items=items, total=total or 0, limit=limit, offset=offset)
 
 
-async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> CalendarResponse:
+def _kind_types(kind: CalendarKind | None) -> frozenset[int] | None:
+    """The release types one calendar kind holds, or `None` (both kinds) when none was asked."""
+    return None if kind is None else CALENDAR_KIND_TYPES[kind]
+
+
+async def get_calendar(
+    session: AsyncSession, *, kind: CalendarKind | None = None, limit: int, offset: int
+) -> CalendarResponse:
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    governing = _calendar_governing_cte(name="governing")
+    governing = _calendar_governing_cte(name="governing", release_types=_kind_types(kind))
     # The noise cuts that keep a public listing clean. They are the public route's alone: the
     # my-films calendar next door deliberately carries none of them (D-1411.2).
     visible = (
@@ -1948,7 +1908,12 @@ async def get_calendar(session: AsyncSession, *, limit: int, offset: int) -> Cal
 
 
 async def get_my_films_calendar(
-    session: AsyncSession, *, user_id: UUID, limit: int, offset: int
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    kind: CalendarKind | None = None,
+    limit: int,
+    offset: int,
 ) -> CalendarResponse:
     """`GET /me/calendar`: the **my films calendar** (D-34, D-39) — the release calendar
     narrowed to the films this user follows.
@@ -1977,7 +1942,9 @@ async def get_my_films_calendar(
     soonest-first over a past window would open page one on releases a year gone.
     """
     today = datetime.now(tz=UTC).date()  # Python-side, NOT SQL CURRENT_DATE
-    governing = _calendar_governing_cte(name="my_films_governing", title_follow_user_id=user_id)
+    governing = _calendar_governing_cte(
+        name="my_films_governing", title_follow_user_id=user_id, release_types=_kind_types(kind)
+    )
     return await _calendar_page(
         session,
         governing=governing,
@@ -1991,7 +1958,7 @@ def _my_films_visible(governing: CTE, *, today: date) -> tuple[ColumnElement[boo
     """The my-films calendar's cuts over its governing CTE: upcoming, and a page to link to.
 
     Spelled once because the digest's slate (`digest_sender.load_slate`, FB-26) is this page
-    over a 30-day window, and a slate whose cuts drifted from the page's would name a date the
+    over a 7-day window, and a slate whose cuts drifted from the page's would name a date the
     calendar does not — or miss one it does."""
     return (governing.c.governing_date >= today, Film.slug.is_not(None))
 
@@ -2031,7 +1998,7 @@ async def get_ical_feed(
       each release from the user's calendar the day after it happened. Everything future is
       therefore published in full, and the past is cut at `ICAL_PAST_WINDOW_DAYS`. The cut is
       what keeps the document bounded by something other than the follow graph: an imported
-      library runs to thousands of films (D-15, D-16), each with up to four buckets, and this
+      library runs to thousands of films (D-15, D-16), each with up to three buckets, and this
       is a document re-fetched on the client's schedule rather than a paginated read. A release
       a year gone is not a date anyone scrolls back to; a release last month is exactly the one
       the previous paragraph exists to protect.
@@ -2053,7 +2020,9 @@ async def get_ical_feed(
 
     # The governing date per (film, bucket): the earliest row in the subject, collapsed exactly
     # as `get_calendar` collapses it (NEU-1206), over the same displayable types in the same
-    # single region — the one the home-release buckets are displayable in at all (D-26).
+    # single region — the one the home-release bucket is displayable in at all (D-26). Both
+    # calendar kinds, unsplit: one subscription carries the theatrical arc and the digital date
+    # (D-1542.4).
     governing = (
         select(
             FilmReleaseDate.film_id.label("film_id"),

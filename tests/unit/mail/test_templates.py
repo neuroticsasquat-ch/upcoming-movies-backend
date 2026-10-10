@@ -40,6 +40,19 @@ def test_the_verify_template_renders_both_parts_and_the_envelope_fields():
     assert "Ada" in envelope.text
 
 
+def test_a_reply_to_lands_on_the_envelope_and_defaults_to_none():
+    """NEU-1534 D-1534.3: the reply-to rides on the envelope like `sender`."""
+    assert _verify().reply_to is None
+    envelope = render(
+        "verify",
+        VERIFY_CONTEXT,
+        sender="Backlotter <no-reply@example.com>",
+        to="ada@example.com",
+        reply_to="Tom <hello@example.com>",
+    )
+    assert envelope.reply_to == "Tom <hello@example.com>"
+
+
 def test_the_text_part_carries_the_link_as_text_not_only_as_a_button():
     """The plain-text part has to stand alone (`types.Envelope`), and a bare `<a>` in the HTML
     is not a link a text client can follow."""

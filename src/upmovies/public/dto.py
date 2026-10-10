@@ -284,40 +284,6 @@ class CrewMemberOut(BaseModel):
     department: str | None
 
 
-class ProviderOut(BaseModel):
-    """One service carrying a film, as TMDB (sourcing JustWatch) names it."""
-
-    # TMDB's `provider_id` — JustWatch's id space. Exposed so a client can key its own logo
-    # cache on it; it is not a follow-graph entity and no route accepts it.
-    id: int
-    name: str
-    logo_path: str | None = None
-
-
-class WhereToWatchOut(BaseModel):
-    """The current US where-to-watch box (D-29) — a snapshot, never a history.
-
-    Bucketed by how a reader pays rather than by service, because that is the decision the box
-    answers: a subscription already covers `flatrate`, `rent` and `buy` cost money today. Each
-    bucket is always present, empty when nobody offers the film that way, so a client can render
-    one section without guarding three keys. The whole object is `None` when nobody carries the
-    film at all — see `FilmDetailResponse.where_to_watch`.
-
-    **`attribution` and `link` are terms, not decoration.** TMDB's terms for
-    `/movie/{id}/watch/providers` require crediting JustWatch wherever the data renders and
-    linking back to TMDB's own watch page. `attribution` is a `Literal`, so it is fixed at
-    "JustWatch" and cannot be set to anything else by a caller assembling this model; `link` is
-    nullable only because TMDB itself omits it for some regions.
-    """
-
-    region: str
-    flatrate: list[ProviderOut] = []
-    rent: list[ProviderOut] = []
-    buy: list[ProviderOut] = []
-    link: str | None = None
-    attribution: Literal["JustWatch"] = "JustWatch"
-
-
 class DayGroup(BaseModel):
     day: date
     heading: str
@@ -360,11 +326,6 @@ class FilmDetailResponse(BaseModel):
     alternative_titles: list[str] = []
     cast: list[CastMemberOut] = []
     crew: list[CrewMemberOut] = []
-    # `None` — not an empty box — when no poll has found the film anywhere (D-29). The two are
-    # different answers: an empty box would claim we looked and it is nowhere, which is only
-    # true for a film the providers poll actually reaches (D-27's scoped set is films past
-    # their theatrical date, plus anything somebody's follows cover).
-    where_to_watch: WhereToWatchOut | None = None
 
 
 class FeedItem(BaseModel):
@@ -453,13 +414,19 @@ class FeedDayResponse(BaseModel):
     offset: int
 
 
+# Which of the two calendars a request is for (D-1542.2): the US theatrical arc (wide and
+# limited) or the US home release (digital). `GET /calendar` and `GET /me/calendar` take it as
+# `kind`; omitted means both, for older clients.
+CalendarKind = Literal["theatrical", "home"]
+
+
 class CalendarItem(BaseModel):
     film_ref: str
     film_title: str
     release_year: int | None
     poster_path: str | None
     release_date: date  # US release date → "YYYY-MM-DD"
-    release_type: str  # display bucket: "limited" | "wide" | "digital" | "physical"
+    release_type: str  # display bucket: "limited" | "wide" | "digital"
     director: str | None  # credited director(s), joined with ", "; null when none
     stars: list[str]  # first 3 billed cast names
     genres: list[str]  # up to 3 genre names, ordered by name

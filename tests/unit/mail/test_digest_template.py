@@ -1,8 +1,9 @@
 """The `digest` template's copy (NEU-1381, NEU-1460, NEU-1461, NEU-1462, NEU-1528,
 NEU-1529, NEU-1530): what the daily and weekly digests say — the daily as the timeline day
 reproduced (day → follow block → section → update type → film or entity row → line), the weekly
-by entry (follow block → section → update type → film or entity entry → dated line) — beside
-the slate, the my-films calendar reproduced with its new/moved markers, under a wordmark.
+by entry (follow block → section → update type → film or entity entry → dated line) — then
+the slate, the my-films calendar reproduced by kind with its new/moved markers (NEU-1543),
+under a wordmark.
 
 `test_templates.py` asserts the rendering rules against whichever template is handy; this
 asserts the digest's own copy. The timeline is rendered through `digest_sender.render_batch`
@@ -48,7 +49,9 @@ def _slate_film(title: str, marker: str | None = None, **overrides) -> dict[str,
     }
 
 
-def _slate_day(heading: str, *buckets: tuple[str, list[dict[str, object]]]) -> dict[str, object]:
+def _slate_day(
+    heading: str, *buckets: tuple[str | None, list[dict[str, object]]]
+) -> dict[str, object]:
     return {
         "heading": heading,
         "buckets": [{"label": label, "films": films} for label, films in buckets],
@@ -57,7 +60,8 @@ def _slate_day(heading: str, *buckets: tuple[str, list[dict[str, object]]]) -> d
 
 SLATE = [
     {
-        "heading": None,
+        "kind": "theatrical",
+        "label": "In theaters",
         "days": [
             _slate_day(
                 "Friday, September 25, 2026",
@@ -80,7 +84,8 @@ SLATE = [
 
 MARKED_SLATE = [
     {
-        "heading": None,
+        "kind": "theatrical",
+        "label": "In theaters",
         "days": [
             _slate_day(
                 "Friday, September 25, 2026",
@@ -97,20 +102,25 @@ MARKED_SLATE = [
     },
 ]
 
-ACROSS_A_MONTH = [
+BOTH_KINDS = [
     {
-        "heading": "September",
+        "kind": "theatrical",
+        "label": "In theaters",
         "days": [
             _slate_day(
-                "Wednesday, September 30, 2026",
+                "Friday, September 25, 2026",
                 ("Wide", [_slate_film("Arrival", "new")]),
-                ("Digital", [_slate_film("Blade"), _slate_film("Casino")]),
-            )
+                ("Limited", [_slate_film("Blade")]),
+            ),
+            _slate_day("Tuesday, September 29, 2026", ("Wide", [_slate_film("Dune")])),
         ],
     },
     {
-        "heading": "October",
-        "days": [_slate_day("Friday, October 2, 2026", ("Limited", [_slate_film("Dune")]))],
+        "kind": "home",
+        "label": "At home",
+        "days": [
+            _slate_day("Saturday, September 26, 2026", (None, [_slate_film("Casino", "moved")])),
+        ],
     },
 ]
 
@@ -182,7 +192,7 @@ ALL_BLOCKS = (
 reached; an entity the catalog cannot name; a `now_available` under Not yet reported."""
 
 
-def _mail(*lines: DigestLine, cadence: str = "daily") -> Envelope:
+def _mail(*lines: DigestLine, cadence: str = "daily", mail_reply_to: str = "") -> Envelope:
     batch = DigestBatch(
         recipient=DigestRecipient(
             user_id=uuid4(),
@@ -198,7 +208,9 @@ def _mail(*lines: DigestLine, cadence: str = "daily") -> Envelope:
         batch,
         cadence=cadence,  # type: ignore[arg-type]
         today=TODAY,
-        settings=get_settings().model_copy(update={"product_name": "Backlotter"}),
+        settings=get_settings().model_copy(
+            update={"product_name": "Backlotter", "mail_reply_to": mail_reply_to}
+        ),
     )
     assert envelope is not None
     return envelope
@@ -324,6 +336,15 @@ def test_an_entity_the_catalog_cannot_name_is_its_fallback_unlinked():
 
     fallback = html.index("A franchise you follow")
     assert html.rindex("<p", 0, fallback) > html.rindex("<a ", 0, fallback)
+
+
+def test_the_digest_carries_the_configured_reply_to():
+    """NEU-1534 D-1534.4: `render_batch` is the digest's render seam, so it stamps the
+    setting the same way `MailGateway.send` does for transactional mail."""
+    assert _mail(*ALL_BLOCKS, mail_reply_to="Tom <hello@example.com>").reply_to == (
+        "Tom <hello@example.com>"
+    )
+    assert _mail(*ALL_BLOCKS).reply_to is None
 
 
 def test_the_retired_furniture_is_gone_from_both_parts():
@@ -560,7 +581,7 @@ def _digest(
         "display_name": "Ada",
         "settings_url": SETTINGS_URL,
         "cadence": cadence,
-        "slate_window_days": 30,
+        "slate_window_days": 7,
         "subject": subject,
         "preheader": preheader,
         "slate": list(slate),
@@ -615,9 +636,9 @@ ONE_DAY = [
 
 
 def test_the_subject_is_the_contexts_verbatim():
-    envelope = _digest(days=ONE_DAY, subject="Heat 2 — casting, + 1 more film · your slate")
+    envelope = _digest(days=ONE_DAY, subject="Heat 2 — casting, + 1 more film")
 
-    assert envelope.subject == "Heat 2 — casting, + 1 more film · your slate"
+    assert envelope.subject == "Heat 2 — casting, + 1 more film"
 
 
 def test_the_preheader_is_a_hidden_first_element_in_html_only():
@@ -635,10 +656,10 @@ def test_an_empty_preheader_renders_no_element():
 
 
 def test_the_slate_lists_every_date_bucket_and_film_in_both_parts():
-    envelope = _digest(slate=SLATE, subject="Your slate: 1 upcoming date")
+    envelope = _digest(slate=SLATE, subject="1 film you follow is out this week")
 
     for part in (envelope.text, envelope.html):
-        assert "30 days" in part
+        assert "7 days" in part
         assert "Friday, September 25, 2026" in part
         assert "Wide" in part
         assert "Dune: Part Three" in part
@@ -659,10 +680,11 @@ def test_the_slate_html_row_is_the_calendars_film_row():
     assert row.index("Timothée Chalamet · Zendaya") < row.index("Adventure · Drama")
 
 
-def test_the_slate_text_part_is_date_then_bucket_then_one_line_per_film():
+def test_the_slate_text_part_is_kind_then_date_then_bucket_then_one_line_per_film():
     text = _digest(slate=SLATE).text
 
     assert (
+        "IN THEATERS\n\n"
         "Friday, September 25, 2026\n"
         "  Wide\n"
         "    Dune: Part Three (2026) — https://app.example.com/film/1-dune-part-three\n"
@@ -670,55 +692,66 @@ def test_the_slate_text_part_is_date_then_bucket_then_one_line_per_film():
     assert "Denis Villeneuve" not in text
 
 
-def test_a_slate_across_a_month_boundary_heads_its_months_and_two_buckets_share_a_date():
-    """The rendering FB-26 names: month headings only because the window crosses one, the
-    date under its month, and two buckets under one date in the order given, in both parts."""
-    envelope = _digest(slate=ACROSS_A_MONTH, subject="Your slate: 4 upcoming dates")
+def test_the_slate_is_in_theaters_then_at_home_and_only_theatrical_buckets_are_headed():
+    """D-1543.2: the two kinds in order, each its own dates soonest first; Wide / Limited under
+    a theatrical date, the home rows straight under theirs (D-1542.3), in both parts."""
+    envelope = _digest(slate=BOTH_KINDS, subject="4 films you follow are out this week")
 
     assert (
-        "SEPTEMBER\n\n"
-        "Wednesday, September 30, 2026\n"
+        "IN THEATERS\n\n"
+        "Friday, September 25, 2026\n"
         "  Wide\n"
         "    Arrival (2026) [new] — https://app.example.com/film/1-arrival\n"
-        "  Digital\n"
-        "    Blade (2026) — https://app.example.com/film/1-blade\n"
-        "    Casino (2026) — https://app.example.com/film/1-casino\n"
-        "\n"
-        "OCTOBER\n\n"
-        "Friday, October 2, 2026\n"
         "  Limited\n"
+        "    Blade (2026) — https://app.example.com/film/1-blade\n"
+        "\n"
+        "Tuesday, September 29, 2026\n"
+        "  Wide\n"
         "    Dune (2026) — https://app.example.com/film/1-dune\n"
+        "\n"
+        "AT HOME\n\n"
+        "Saturday, September 26, 2026\n"
+        "    Casino (2026) [moved] — https://app.example.com/film/1-casino\n"
     ) in envelope.text
+    assert "Digital" not in envelope.text
     html = envelope.html
     order = [
-        ">September</h3>",
-        ">Wednesday, September 30, 2026</h4>",
+        ">In theaters</h3>",
+        ">Friday, September 25, 2026</h4>",
         ">Wide</h5>",
         ">Arrival",
-        ">Digital</h5>",
-        ">Blade",
-        ">Casino",
-        ">October</h3>",
-        ">Friday, October 2, 2026</h4>",
         ">Limited</h5>",
+        ">Blade",
+        ">Tuesday, September 29, 2026</h4>",
         ">Dune",
+        ">At home</h3>",
+        ">Saturday, September 26, 2026</h4>",
+        ">Casino",
     ]
     positions = [html.index(marker) for marker in order]
     assert positions == sorted(positions)
-    assert "2026</h3>" not in html  # no year heading
+    assert "</h5>" not in html[html.index(">At home</h3>") :]
 
 
-def test_a_slate_in_one_month_has_no_month_heading():
-    envelope = _digest(slate=SLATE)
+def test_a_slate_with_only_home_dates_has_no_in_theaters_heading():
+    envelope = _digest(slate=BOTH_KINDS[1:], subject="1 film you follow is out this week")
 
-    assert "</h3>" not in envelope.html[: envelope.html.index("Dune: Part Three")]
-    assert "SEPTEMBER" not in envelope.text
+    assert "AT HOME" in envelope.text and "IN THEATERS" not in envelope.text
+    assert ">At home</h3>" in envelope.html and "In theaters" not in envelope.html
+
+
+def test_the_slate_has_no_month_heading():
+    """D-1543.2: seven days never need one; the date heading names the month."""
+    envelope = _digest(slate=BOTH_KINDS)
+
+    assert "SEPTEMBER\n" not in envelope.text
+    assert ">September</h3>" not in envelope.html
 
 
 def test_a_slate_marker_is_bracketed_in_text_and_a_pill_in_html():
     """DC-9, FB-26: `[new]` / `[moved]` after the title in text, a pill after it in HTML, and
     nothing at all on a row whose date did not change."""
-    envelope = _digest(slate=MARKED_SLATE, subject="Your slate: 3 upcoming dates")
+    envelope = _digest(slate=MARKED_SLATE, subject="3 films you follow are out this week")
 
     lines = envelope.text.splitlines()
     assert "    Arrival (2026) [new] — https://app.example.com/film/1-arrival" in lines
@@ -749,12 +782,25 @@ def test_a_slate_marker_pill_is_shaped_like_the_unconfirmed_pill():
     assert "background:#e0e7ff" in pill("Moved")
 
 
-def test_the_slate_comes_before_the_timeline():
-    """D-33: the weekly send *is* the slate mail, so the slate leads."""
+def test_the_slate_comes_after_the_timeline():
+    """D-1543.3: the news is the point of the mail; the slate, a standing reminder, follows
+    it and precedes the footer — and only its h2 takes the gap between the two sections."""
     envelope = _digest(slate=SLATE, days=ONE_DAY)
 
     for part in (envelope.text.lower(), envelope.html.lower()):
-        assert part.index("your slate") < part.index("on your timeline")
+        assert part.index("on your timeline") < part.index("your slate")
+        assert part.index("your slate") < part.index("you are getting this")
+    html = envelope.html
+    timeline_h2 = html[html.rindex("<h2", 0, html.index(">New on your timeline</h2>")) :]
+    slate_h2 = html[html.rindex("<h2", 0, html.index(">Your slate</h2>")) :]
+    assert timeline_h2.startswith('<h2 style="margin:0 0 16px;')
+    assert slate_h2.startswith('<h2 style="margin:24px 0 4px;')
+
+
+def test_a_slate_alone_takes_no_gap_above_it():
+    html = _digest(slate=SLATE).html
+
+    assert '<h2 style="margin:0 0 4px;' in html
 
 
 def test_both_parts_open_with_the_wordmark():

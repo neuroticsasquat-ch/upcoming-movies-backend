@@ -128,8 +128,8 @@ class Film(Base):
     """When the catalog first held an observation of this film's videos — NULL until it has.
 
     `credits_observed_at` for the promo reel (D-35), and needed for the same reason
-    `release_dates_observed_at` is, at its sharpest: the video poll's scoped set deliberately
-    includes in-play films somebody follows, *because* trailers precede a theatrical date by
+    `release_dates_observed_at` is, at its sharpest: the video poll's scoped set is in-play
+    films somebody follows (NEU-1532), *because* trailers precede a theatrical date by
     months — so the ordinary first read of a followed film returns no videos at all. Inferring
     "never looked" from "holds nothing" would re-baseline that film on every poll and swallow
     the teaser it eventually gets, which is the single beat the poll exists to catch. Ingest
@@ -664,8 +664,9 @@ class FilmReleaseDateChange(Base):
     )
     iso_3166_1: Mapped[str] = mapped_column(Text, nullable=False)
     release_type: Mapped[int] = mapped_column(Integer, nullable=False)
-    """TMDB release `type`; one of the displayable ones — 2 (limited) or 3 (wide) in US or an
-    origin country, 4 (digital) or 5 (physical) in US only (`release_grade`, D-26).
+    """TMDB release `type`; one of the displayable ones when written — 2 (limited) or 3 (wide)
+    in US or an origin country, 4 (digital) in US only (`release_grade`, D-26). Rows of type 5
+    (physical) written before NEU-1542 dropped it stay as history and are never carded.
     Together with `iso_3166_1` this is the *subject*: US limited, US wide and US digital are
     three subjects on one film, and a distributor can move one without the others."""
     previous_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -680,16 +681,16 @@ class FilmReleaseDateChange(Base):
 
 # --- Watch providers (D-27) --------------------------------------------------
 #
-# Two tables with opposite lifetimes over the same TMDB read. `availability_first_seen` is the
-# *ledger*: one row the first time a film is seen on a provider under a monetization type, never
-# updated, never deleted — it is what `now_available` cards off (D-28), and the reason D-27 says
-# the product never tracks churn. `film_availability_current` is the *snapshot*: what the
-# where-to-watch box renders (D-29), rebuilt wholesale from each poll, so a film leaving a
-# service disappears from the box without disturbing the fact that it was once there.
+# `availability_first_seen` is the *ledger*: one row the first time a film is seen on a provider
+# under a monetization type, never updated, never deleted — it is what `now_available` cards off
+# (D-28), and the reason D-27 says the product never tracks churn. It once had a sibling
+# snapshot of current carriers, `film_availability_current`, read by the where-to-watch box
+# (D-29); the box and its table went in NEU-1542 (ADR-0023), because the site follows a film
+# to its first home availability and no further.
 #
-# Both are keyed on `(film_id, region, provider_id, monetization_type)`. Region is a column
-# rather than an assumption even though v1 polls `US` only: the ledger is insert-only, so a
-# later region would otherwise have to be told apart from the US rows by inference.
+# Keyed on `(film_id, region, provider_id, monetization_type)`. Region is a column rather than an
+# assumption even though v1 polls `US` only: the ledger is insert-only, so a later region would
+# otherwise have to be told apart from the US rows by inference.
 
 MONETIZATION_TYPES = ("flatrate", "rent", "buy")
 """The offer kinds D-27 tracks, and the TMDB response keys they are read from. TMDB's `ads` and
@@ -762,55 +763,14 @@ class AvailabilityFirstSeen(Base):
     )
 
 
-class FilmAvailabilityCurrent(Base):
-    """What a film is available on *now*, as the last poll saw it — the where-to-watch box's
-    table (D-29).
-
-    Delete-and-rebuild per (film, region) on every poll, so it holds no history and needs none:
-    the history that matters is `availability_first_seen`, which this pass writes beside it.
-    `link` is TMDB's JustWatch deep link for the film in that region — the same value on every
-    row of a region, denormalised so the box can render from one query.
-    """
-
-    __tablename__ = "film_availability_current"
-    __table_args__ = (
-        UniqueConstraint(
-            "film_id",
-            "region",
-            "provider_id",
-            "monetization_type",
-            name="uq_film_availability_current",
-        ),
-        CheckConstraint(
-            f"monetization_type IN ({_monetization_in_list()})",
-            name="ck_film_availability_current_monetization_type",
-        ),
-        Index("ix_catalog_film_availability_current_film", "film_id"),
-        {"schema": "catalog"},
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    film_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("catalog.film.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    region: Mapped[str] = mapped_column(Text, nullable=False)
-    provider_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("catalog.watch_provider.id"), nullable=False
-    )
-    monetization_type: Mapped[str] = mapped_column(Text, nullable=False)
-    link: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
 class FilmVideo(Base):
     """One promo video TMDB holds for a film, as the video poll last saw it (D-35).
 
     **Insert-only, and the whole dedup rule.** A row means "this film has been observed with
     this video before", which is what makes a `trailer` card fire once: the poll inserts with
     `ON CONFLICT DO NOTHING` over (film, site, key) and cards off what the statement actually
-    inserted. Nothing here is ever deleted — unlike `film_availability_current`, this is not a
-    snapshot, and a trailer pulled from YouTube must not read as new when it comes back.
+    inserted. Nothing here is ever deleted — this is not a snapshot, and a trailer pulled from
+    YouTube must not read as new when it comes back.
 
     Keyed on `(film_id, site, key)` rather than on TMDB's own opaque video `id` because `key`
     is what the embed is built from (NEU-1386) and what the card carries: two TMDB rows for one

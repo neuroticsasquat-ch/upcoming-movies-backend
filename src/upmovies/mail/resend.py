@@ -2,9 +2,9 @@
 
 A thin first-party client over the `httpx` already in the dependency list and already OTel-
 instrumented, rather than the vendor's SDK — the same call ADR-0007 makes for the LLM
-adapters, and for the same reason. The surface actually used is one POST with five fields;
-what an SDK would add here is a second retry loop and a second set of exception types for the
-caller to learn.
+adapters, and for the same reason. The surface actually used is one POST with a handful of
+fields; what an SDK would add here is a second retry loop and a second set of exception types
+for the caller to learn.
 
 The retry policy is imported from `llm.retry` rather than reimplemented. That module is
 already the repo's *single* statement of how an outbound HTTP call retries — deliberately free
@@ -59,7 +59,9 @@ def _to_wire(envelope: Envelope) -> dict[str, Any]:
 
     `headers` is Resend's object of custom message headers, sent only when the envelope has
     any: a transactional mail's wire body stays exactly what it was before the field existed
-    (DC-10)."""
+    (DC-10). `reply_to` gets the same discipline (NEU-1534): Resend's own top-level field,
+    sent as one string rather than a list because the setting holds one address, and absent
+    when the envelope has none."""
     body: dict[str, Any] = {
         "from": envelope.sender,
         "to": [envelope.to],
@@ -69,6 +71,8 @@ def _to_wire(envelope: Envelope) -> dict[str, Any]:
     }
     if envelope.headers:
         body["headers"] = dict(envelope.headers)
+    if envelope.reply_to:
+        body["reply_to"] = envelope.reply_to
     return body
 
 

@@ -4,10 +4,11 @@ from collections.abc import Collection
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, func, not_, or_, select
+from sqlalchemy import ColumnElement, Date, and_, cast, func, literal, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange
+from upmovies.catalog.models import Film, FilmCredit, FilmFieldChange, FilmReleaseDate
+from upmovies.catalog.release_grade import HOME_RELEASE_TYPES, PRIMARY_REGION
 from upmovies.catalog.seed_grade import (
     DIRECTOR_JOB,
     TOP_BILLED_ORDER,
@@ -64,8 +65,12 @@ def in_play_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnE
     ``active_film_clause`` without its dormancy term.
 
     Split out for the sweep's refresh phase, which covers dormant films too and so cannot
-    use the composed predicate (§4.5). Nothing else should reach for it: dormancy is part
-    of what "active" means everywhere the working set is being *spent* on.
+    use the composed predicate (§4.5). Its other callers are the two halves of the
+    providers run's poll set (NEU-1532, `providers.poll_half_clause`): the video poll reads
+    the films still in play, the release-date poll the ones that have opened, so the passes
+    that read TMDB for a film agree with the refresh phase about when it was released.
+    Nothing else should reach for it: dormancy is part of what "active" means everywhere the
+    working set is being *spent* on.
 
     The NULL guards keep undated films and films with an unknown status in the set —
     without them SQL's ``NULL NOT IN (...)`` evaluates to NULL and would wrongly drop
@@ -77,12 +82,44 @@ def in_play_clause(*, today: date, excluded_statuses: frozenset[str]) -> ColumnE
     )
 
 
+def home_release_landed_clause(*, as_of: date | ColumnElement[date]) -> ColumnElement[bool]:
+    """WHERE predicate selecting films whose **home-release date** — the US digital (type 4)
+    governing date — is on or before `as_of` (D-1538.1).
+
+    The gate on what the provider poll believes. TMDB passes a pre-order on as a plain `buy`
+    offer with no flag and no date, so an offer is only first home availability once the
+    announced date has landed; before that, or on a film TMDB has never dated, the poll holds
+    the observation and writes nothing (D-1538.2). One definition with two callers (D-1538.4):
+    the poll asks it of `today`, and `scripts/prune_preorder_availability.py` of each card's
+    UTC `occurred_at` day — so `as_of` is a plain date or a column expression.
+
+    The governing date is the earliest US type-4 row (NEU-1206), and "earliest is on or before
+    `as_of`" is exactly "some row is on or before `as_of`", so this is an EXISTS rather than a
+    `MIN` — which also makes it never NULL, so a caller can `NOT` it without an undated film
+    falling out of both sides. Dates are compared as UTC days, the way `poll_set_clause`
+    compares its theatrical ones. Type 5 and other regions are not consulted: the physical date
+    is never displayed or carded (D-1542.5), and the home release is US only.
+    """
+    return (
+        select(literal(1))
+        .select_from(FilmReleaseDate)
+        .where(
+            FilmReleaseDate.film_id == Film.id,
+            FilmReleaseDate.iso_3166_1 == PRIMARY_REGION,
+            FilmReleaseDate.release_type.in_(tuple(sorted(HOME_RELEASE_TYPES))),
+            cast(func.timezone("UTC", FilmReleaseDate.release_date), Date) <= as_of,
+        )
+        .exists()
+    )
+
+
 ALERT_WINDOW_DEAD_STATUSES: frozenset[str] = frozenset({"Canceled"})
 """The one TMDB status past which no follow is owed anything about a film (D-46).
 
 `Released` is deliberately **not** here: it is the state the home-release beats happen in —
-`now_available` (D-28), the `US:digital` / `US:physical` release dates (D-26), the late trailer
-(D-35) — so a window that ended there delivered none of them to an indirect follower.
+`now_available` (D-28) and the `US:digital` release date (D-26) — so a window
+that ended there delivered none of them to an indirect follower. A trailer is not one of them:
+the video poll stops at release (NEU-1532).
 """
 
 

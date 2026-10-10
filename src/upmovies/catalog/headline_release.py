@@ -22,7 +22,7 @@ half of the cut `release_grade` defines (`THEATRICAL_RELEASE_TYPES`) — not a n
 **Theatrical only, on purpose**, even though the film page and the calendar now also list the
 US home release (D-26): "the one date this film leads with" is the opening, and a digital date
 three months later must not displace it. D-34's iCal feed wants a VEVENT for *each* of
-theatrical, digital and physical, which is a different question and asks it separately.
+theatrical and digital, which is a different question and asks it separately.
 
 The primary is the **last** resort rather than the first precisely because it is the date the
 page declines to show. A film with no displayable row and no primary date has no headline

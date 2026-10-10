@@ -48,26 +48,6 @@ Availability from JustWatch
 
 Hi{% if display_name is defined and display_name %} {{ display_name }}{% endif %},
 
-{% if slate %}
-YOUR SLATE — the next {{ slate_window_days }} days of films you follow
-
-{% for month in slate %}
-{% if month.heading %}
-{{ month.heading | upper }}
-
-{% endif %}
-{% for day in month.days %}
-{{ day.heading }}
-{% for bucket in day.buckets %}
-  {{ bucket.label }}
-{% for film in bucket.films %}
-    {{ film.title }}{{ " (" ~ film.year ~ ")" if film.year else "" }}{{ " [" ~ film.marker ~ "]" if film.marker else "" }} — {{ film.url }}
-{% endfor %}
-{% endfor %}
-
-{% endfor %}
-{% endfor %}
-{% endif %}
 {% if days or week %}
 NEW ON YOUR TIMELINE
 
@@ -79,6 +59,26 @@ NEW ON YOUR TIMELINE
 
 {{ timeline_blocks(day.blocks) }}
 {%- endfor %}
+{% endif %}
+{% if slate %}
+YOUR SLATE — the next {{ slate_window_days }} days of US release dates for films you follow
+
+{% for kind in slate %}
+{{ kind.label | upper }}
+
+{% for day in kind.days %}
+{{ day.heading }}
+{% for bucket in day.buckets %}
+{% if bucket.label %}
+  {{ bucket.label }}
+{% endif %}
+{% for film in bucket.films %}
+    {{ film.title }}{{ " (" ~ film.year ~ ")" if film.year else "" }}{{ " [" ~ film.marker ~ "]" if film.marker else "" }} — {{ film.url }}
+{% endfor %}
+{% endfor %}
+
+{% endfor %}
+{% endfor %}
 {% endif %}
 You are getting this {{ cadence }} digest because you follow people, companies, franchises and
 films on {{ product_name }}, and because films you follow have dates coming up. Change

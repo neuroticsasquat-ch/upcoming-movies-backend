@@ -27,11 +27,31 @@ Rule 2 is not an optimisation of rule 1, it is the reason the feature feels aliv
 film that went straight to streaming has no theatrical date to age, and rule 1 alone would
 never poll it.
 
-**Insert-only ledger, delete-and-rebuild snapshot.** Each poll writes new
-`availability_first_seen` rows for offers it has never seen before and rebuilds
-`film_availability_current` for the region wholesale. The first is what `now_available` cards
-off (D-28); the second is what the where-to-watch box renders (D-29). Nothing tracks churn: a
-provider dropping a film removes a current row and leaves the ledger untouched.
+**The run is three passes over that set, and only this one reads all of it** (NEU-1532).
+`poll_half_clause` splits the set on `in_play_clause`: the films that have opened go to the
+release-date poll (`ingest.release_dates`, the D-26 home-release dates the refresh phase stopped
+reading at release), the ones that have not go to the video poll (`ingest.videos`, D-35's
+trailers — which stop being news once the film is out). First availability is the one question
+worth asking either way, so the provider pass keeps the whole set. Same number of reads per
+film as before: providers plus whichever half it falls in.
+
+**Insert-only ledger, no snapshot.** Each poll writes new `availability_first_seen` rows for
+offers it has never seen before — what `now_available` cards off (D-28) — and nothing else about
+availability. The current-carriers snapshot the where-to-watch box rendered (D-29) went with the
+box in NEU-1542 (ADR-0023): the site follows a film to its first home availability, not where it
+streams today. Nothing tracks churn: a provider dropping a film leaves the ledger untouched.
+
+**An offer is believed only from the US digital date** (NEU-1538, D-1538.1–2). Fandango At Home
+lists films for purchase weeks before they can be watched, and TMDB passes the pre-order on as
+an ordinary `buy` offer — the payload has no flag and no date to tell the two apart. What does
+tell them apart is the announced home-release date: a pre-order arrives before it, or on a film
+TMDB has not dated at all. So a film whose US type-4 governing date is not on or before `today`
+(`catalog.queries.home_release_landed_clause`) has its whole observation **held** — no ledger
+row, no card, nothing remembered — and the next daily pass judges it again; the first pass on
+or after the date inserts and cards with that pass's stamp. The ledger is why a hold cannot be
+a suppressed card instead: a pre-order row under `buy` would leave the real release nothing new
+to card, ever. The date is the catalog's, and the release-date pass runs after this one, so a
+date TMDB first enters on the day it lands is seen a day late (D-1538.3).
 
 **The card is per monetization type, not per provider or per row** (D-28). A new ledger row is
 necessary but not sufficient: Netflix handing a film to Hulu writes a row — Hulu has never
@@ -49,7 +69,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import httpx
-from sqlalchemy import ColumnElement, Date, and_, cast, delete, func, literal, or_, select
+from sqlalchemy import ColumnElement, Date, and_, cast, func, literal, not_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,10 +78,10 @@ from upmovies.catalog.models import (
     MONETIZATION_TYPES,
     AvailabilityFirstSeen,
     Film,
-    FilmAvailabilityCurrent,
     FilmReleaseDate,
     WatchProvider,
 )
+from upmovies.catalog.queries import home_release_landed_clause, in_play_clause
 from upmovies.catalog.release_grade import PRIMARY_REGION, THEATRICAL_RELEASE_TYPES
 from upmovies.ingest.runs import record_progress
 from upmovies.ingest.sweep.phase import AbortGuard, Heartbeat, owned_session
@@ -81,7 +101,7 @@ log = logging.getLogger(__name__)
 
 # The monetization types are also the TMDB response keys they are read from, so the tables'
 # CHECK constraint and this loop are one list rather than two that can drift. The order is the
-# order the where-to-watch box lists them in (D-29), and so the order rows are written in.
+# order a `now_available` body names them in, and so the order rows are written in.
 MONETIZATION_FIELDS: tuple[str, ...] = MONETIZATION_TYPES
 
 
@@ -115,6 +135,10 @@ class ProvidersResult:
     first_seen: int = 0
     """Rows newly inserted into the ledger. In steady state this is near zero, which is why it
     is reported apart from `offers` rather than folded into it."""
+    held: int = 0
+    """Films whose offers were observed before their US digital date and so held — no ledger
+    row, no card (D-1538.1–2). Films, not offers; a film with no offers is never held. A count
+    that jumps to the whole set means the release-date pass stopped writing dates (D-1538.6)."""
     cards: int = 0
     """`now_available` events raised (D-28). Never more than one per film per poll and always
     at most `first_seen`, and the gap between the two is the churn this product declines to
@@ -193,6 +217,61 @@ def poll_set_clause(*, today: date, min_age_days: int, max_age_days: int) -> Col
     )
 
 
+def poll_half_clause(
+    *,
+    released: bool,
+    today: date,
+    min_age_days: int,
+    max_age_days: int,
+    excluded_statuses: frozenset[str],
+) -> ColumnElement[bool]:
+    """WHERE predicate selecting one half of the poll set: the films that have opened
+    (`released=True`, the release-date poll's) or the ones that have not (the video poll's).
+
+    Both halves are spelled from the same two clauses, `poll_set_clause` and `in_play_clause`,
+    so they partition the set exactly — no film is in both and none falls between them. The
+    `NOT` is safe because `in_play_clause` never evaluates to NULL: its NULL guards turn an
+    undated film or an unknown status into a plain true.
+
+    "Released" is the in-play rule (D-1532.2): primary date before `today`, or a status in
+    `excluded_statuses` (`TMDB_EXCLUDED_STATUSES`, handed in exactly as the refresh phase gets
+    it). The video poll therefore stops reading a film the same day the refresh phase does.
+    """
+    in_play = in_play_clause(today=today, excluded_statuses=excluded_statuses)
+    return and_(
+        poll_set_clause(today=today, min_age_days=min_age_days, max_age_days=max_age_days),
+        not_(in_play) if released else in_play,
+    )
+
+
+async def _poll_targets(session: AsyncSession, where: ColumnElement[bool]) -> list[PollTarget]:
+    rows = await session.execute(select(Film.id, Film.tmdb_id).where(where).order_by(Film.id))
+    return [PollTarget(film_id=film_id, tmdb_id=tmdb_id) for film_id, tmdb_id in rows]
+
+
+async def load_poll_half(
+    session: AsyncSession,
+    *,
+    released: bool,
+    today: date,
+    min_age_days: int,
+    max_age_days: int,
+    excluded_statuses: frozenset[str],
+) -> list[PollTarget]:
+    """One half of the poll set (`poll_half_clause`), in `load_poll_set`'s order and for its
+    reasons."""
+    return await _poll_targets(
+        session,
+        poll_half_clause(
+            released=released,
+            today=today,
+            min_age_days=min_age_days,
+            max_age_days=max_age_days,
+            excluded_statuses=excluded_statuses,
+        ),
+    )
+
+
 async def load_poll_set(
     session: AsyncSession,
     *,
@@ -210,19 +289,10 @@ async def load_poll_set(
     instead of a reshuffled sample — and what it costs is that a *sustained* outage never
     reaches the tail of the set, which is the abort guard working as intended (the films it
     never reaches are still due tomorrow)."""
-    stmt = (
-        select(Film.id, Film.tmdb_id)
-        .where(
-            poll_set_clause(
-                today=today,
-                min_age_days=min_age_days,
-                max_age_days=max_age_days,
-            )
-        )
-        .order_by(Film.id)
+    return await _poll_targets(
+        session,
+        poll_set_clause(today=today, min_age_days=min_age_days, max_age_days=max_age_days),
     )
-    rows = await session.execute(stmt)
-    return [PollTarget(film_id=film_id, tmdb_id=tmdb_id) for film_id, tmdb_id in rows]
 
 
 def offers_for_region(region: TMDBWatchProviderRegion | None) -> list[Offer]:
@@ -230,15 +300,14 @@ def offers_for_region(region: TMDBWatchProviderRegion | None) -> list[Offer]:
 
     `None` — TMDB holding no entry for the region at all — flattens to no offers rather than
     raising, and is the ordinary answer for a film nobody carries in the US. The caller treats
-    it exactly like an empty list, which is what makes a film leaving every provider empty its
-    where-to-watch box instead of freezing it at the last poll that found something.
+    it exactly like an empty list: no offers, so nothing new for the ledger and no card.
 
     **Deduplicated on `(provider_id, monetization_type)`**, keeping the first sighting. That
-    pair is the natural key of both tables, so a provider TMDB happens to list twice inside one
+    pair is the natural key of the ledger, so a provider TMDB happens to list twice inside one
     monetization list — regional duplicates do occur in the JustWatch data — would otherwise
-    reach the snapshot rebuild as two rows with the same key, raise a unique violation, fail
-    the film, and spend the abort budget on a payload that was never ambiguous. Deduplicating
-    once here rather than at each of the three writes keeps one definition of "an offer".
+    reach the ledger insert as two rows with the same key, raise a unique violation, fail the
+    film, and spend the abort budget on a payload that was never ambiguous. Deduplicating once
+    here rather than at each write keeps one definition of "an offer".
     """
     if region is None:
         return []
@@ -259,7 +328,8 @@ async def _upsert_providers(session: AsyncSession, offers: list[Offer]) -> None:
     """Record every provider named by this film's offers. Caller commits.
 
     Upsert rather than insert-if-absent: TMDB renames services and moves their logos, and the
-    box renders whatever is stored, so a name observed today is the name to hold. Deduplicated
+    names are held for the `now_available` body and for `rerender_now_available_summaries`, so
+    a name observed today is the name to hold. Deduplicated
     on the way in because one provider commonly appears under two monetization types, and a
     statement that names the same key twice raises `CardinalityViolation` rather than folding.
     """
@@ -280,6 +350,14 @@ async def _upsert_providers(session: AsyncSession, offers: list[Offer]) -> None:
             set_={"name": stmt.excluded.name, "logo_path": stmt.excluded.logo_path},
         )
     )
+
+
+async def _home_release_landed(session: AsyncSession, *, film_id: UUID, as_of: date) -> bool:
+    """Whether this film's offers count as availability as of `as_of` (D-1538.1)."""
+    landed = await session.execute(
+        select(home_release_landed_clause(as_of=as_of)).where(Film.id == film_id)
+    )
+    return bool(landed.scalar_one())
 
 
 async def _ledger_types(session: AsyncSession, *, film_id: UUID, region_code: str) -> set[str]:
@@ -406,46 +484,6 @@ async def _card_now_available(
     return True
 
 
-async def _rebuild_current(
-    session: AsyncSession,
-    *,
-    film_id: UUID,
-    region_code: str,
-    offers: list[Offer],
-    link: str | None,
-) -> None:
-    """Replace this film's current availability in this region with what the poll just saw.
-    Caller commits.
-
-    Delete-and-rebuild rather than a diff: the snapshot has no history to preserve — that is
-    the ledger's job — and a rebuild is the only write that cannot leave a stale row behind
-    when a provider drops the film. Scoped to the one region so a later region's rows are not
-    collateral of a US poll.
-    """
-    await session.execute(
-        delete(FilmAvailabilityCurrent).where(
-            FilmAvailabilityCurrent.film_id == film_id,
-            FilmAvailabilityCurrent.region == region_code,
-        )
-    )
-    if not offers:
-        return
-    await session.execute(
-        insert(FilmAvailabilityCurrent).values(
-            [
-                {
-                    "film_id": film_id,
-                    "region": region_code,
-                    "provider_id": o.provider_id,
-                    "monetization_type": o.monetization_type,
-                    "link": link,
-                }
-                for o in offers
-            ]
-        )
-    )
-
-
 async def run_provider_poll(
     *,
     session_factory: SessionFactory,
@@ -486,38 +524,40 @@ async def run_provider_poll(
             # has to say when this film was seen, not when the run began. `now` pins it for
             # tests.
             seen_at = now if now is not None else datetime.now(UTC)
+            new_offers: list[Offer] = []
+            carded = held = False
             async with owned_session(session_factory) as s:
+                # Held offers still name their providers: `watch_provider` is a name/logo table,
+                # not a fact about this film (D-1538.2).
                 await _upsert_providers(s, offers)
-                known_types = await _ledger_types(
-                    s, film_id=target.film_id, region_code=region_code
+                held = bool(offers) and not await _home_release_landed(
+                    s, film_id=target.film_id, as_of=today
                 )
-                new_offers = await _insert_first_seen(
-                    s,
-                    film_id=target.film_id,
-                    region_code=region_code,
-                    offers=offers,
-                    now=seen_at,
-                )
-                carded = await _card_now_available(
-                    s,
-                    film_id=target.film_id,
-                    region_code=region_code,
-                    new_offers=new_offers,
-                    known_types=known_types,
-                    first_seen_at=seen_at,
-                )
-                await _rebuild_current(
-                    s,
-                    film_id=target.film_id,
-                    region_code=region_code,
-                    offers=offers,
-                    link=region.link if region is not None else None,
-                )
+                if not held:
+                    known_types = await _ledger_types(
+                        s, film_id=target.film_id, region_code=region_code
+                    )
+                    new_offers = await _insert_first_seen(
+                        s,
+                        film_id=target.film_id,
+                        region_code=region_code,
+                        offers=offers,
+                        now=seen_at,
+                    )
+                    carded = await _card_now_available(
+                        s,
+                        film_id=target.film_id,
+                        region_code=region_code,
+                        new_offers=new_offers,
+                        known_types=known_types,
+                        first_seen_at=seen_at,
+                    )
                 await record_progress(s, run_id, processed_delta=1)
                 await s.commit()
             result.polled += 1
             result.offers += len(offers)
             result.first_seen += len(new_offers)
+            result.held += 1 if held else 0
             result.cards += 1 if carded else 0
             guard.succeeded()
             if i % log_every == 0:
@@ -546,10 +586,11 @@ async def run_provider_poll(
             break
 
     log.info(
-        "providers: %d polled, %d offers, %d first seen, %d carded, %d missing, %d failed",
+        "providers: %d polled, %d offers, %d first seen, %d held, %d carded, %d missing, %d failed",
         result.polled,
         result.offers,
         result.first_seen,
+        result.held,
         result.cards,
         result.missing,
         result.failures,
@@ -566,11 +607,13 @@ def providers_detail(result: ProvidersResult) -> str:
     questions — a gap between them is churn the product deliberately swallowed, and a `first
     seen` that climbs while `carded` stays flat is exactly what a healthy catalogue looks like.
     `missing` sits apart from `failed` here for the same reason it does on the sweep's line —
-    one is catalog hygiene, the other is an outage.
+    one is catalog hygiene, the other is an outage. `held` sits beside `first seen` because it
+    is the other answer to an offer (D-1538.6): a `held` that jumps to the whole set against a
+    `first seen` of zero is the release-date pass having stopped writing dates, not a quiet day.
     """
     line = (
         f"providers: {result.polled}/{result.selected} polled, "
-        f"{result.offers} offers, {result.first_seen} first seen, "
+        f"{result.offers} offers, {result.first_seen} first seen, {result.held} held, "
         f"{result.cards} carded, {result.missing} missing, {result.failures} failed"
     )
     if result.aborted:

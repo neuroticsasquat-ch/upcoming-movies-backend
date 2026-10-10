@@ -247,13 +247,13 @@ def test_reports_what_the_release_date_phase_carded():
         FieldEventResult(),
         CreditEventResult(),
         CreditDetachmentResult(),
-        ReleaseEventResult(changes_read=9, events_created=4, skipped=5),
+        ReleaseEventResult(changes_read=10, events_created=4, skipped=5, past=1),
         CompanyEventResult(),
         CollectionEventResult(),
         ConfirmEventResult(),
     )
 
-    assert "release dates: 4 carded from 9 changes, 5 already carded, 0 failed" in detail
+    assert "release dates: 4 carded from 10 changes, 5 already carded, 1 past, 0 failed" in detail
 
 
 def test_names_the_release_date_phase_when_it_aborts():

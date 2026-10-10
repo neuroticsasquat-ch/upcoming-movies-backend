@@ -1,6 +1,6 @@
 """Displayable release-date history: the diff `catalog.film_release_date`'s rebuild throws away.
 
-`_rebuild_release_dates` deletes a film's release rows and reinserts the current set on every
+`rebuild_release_dates` deletes a film's release rows and reinserts the current set on every
 ingest, so the table can answer "when does it open?" and nothing else. A US wide date *moving*
 is invisible — the row simply holds the new value afterwards, with no record of the old one.
 This module recovers that signal at the one point where both sides are in hand, and writes it
@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from upmovies.catalog.models import Film, FilmReleaseDate, FilmReleaseDateChange
 from upmovies.catalog.release_grade import is_displayable_release
-from upmovies.ingest.tmdb.schemas import TMDBMovieDetails
+from upmovies.ingest.tmdb.schemas import TMDBReleaseDates
 
 RELEASE_DATE_SET = "set"
 RELEASE_DATE_MOVED = "moved"
@@ -92,16 +92,17 @@ def displayable_from_rows(
     ]
 
 
-def displayable_from_details(
-    details: TMDBMovieDetails, *, origin_country: Sequence[str] | None
+def displayable_from_payload(
+    release_dates: TMDBReleaseDates | None, *, origin_country: Sequence[str] | None
 ) -> list[DisplayableRelease]:
-    """The displayable releases in a TMDB details payload — the *incoming* side of the diff."""
-    if not details.release_dates or not details.release_dates.results:
+    """The displayable releases in a TMDB release-dates payload — the *incoming* side of the
+    diff, whether it came appended to `/movie/{id}` or from `/movie/{id}/release_dates`."""
+    if not release_dates or not release_dates.results:
         return []
     return displayable_from_rows(
         (
             (country.iso_3166_1, entry.type, entry.release_date)
-            for country in details.release_dates.results
+            for country in release_dates.results
             for entry in country.release_dates
             if entry.release_date is not None
         ),

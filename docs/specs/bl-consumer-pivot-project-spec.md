@@ -242,6 +242,10 @@ Numbered so tickets can cite them (`D-n`).
   `physical` (5), **US only**, alongside theatrical. Film page lists them, the calendar gains a
   home-release bucket, and a home-release date being set or moved cards a `release_date` event
   (`confirmed`, ADR-0014 refinement) with `subject_key` token `US:digital` / `US:physical`.
+  *(Amended 2026-10-08 by NEU-1542: physical dropped; the home release is digital alone. Type 5
+  is stored, never displayed or carded — ADR-0023.)*
+  *(Generalised 2026-10-09 by ADR-0024: the product is US-market; the film page's
+  origin-country theatrical rows are the one exception.)*
 - **D-27 Provider polling.** `/movie/{id}/watch/providers`, region `US` in v1, schema keyed by
   `(film_id, region, provider_id, monetization_type)`. Poll set = films whose US theatrical
   governing date is 14–365 days old (200 until NEU-1417; see D-46) **plus** any film with a
@@ -251,7 +255,9 @@ Numbered so tickets can cite them (`D-n`).
   (film, monetization_type) on first insert into `availability_first_seen`; body names the
   providers observed. Insert-only; later provider changes produce nothing. Alerts per watchlist
   `alert_prefs`. JustWatch attribution renders wherever provider names render (TMDB terms).
-- **D-29 Where to watch.** Film page box listing current US providers by monetization type with
+- **D-29 Where to watch.** *(Superseded 2026-10-08 by ADR-0023 / NEU-1542: the box and
+  `film_availability_current` are removed; a link to TMDB's watch page replaces it once the
+  film is out.)* Film page box listing current US providers by monetization type with
   TMDB's provider link, plus JustWatch attribution.
 
 ### Delivery
@@ -269,10 +275,14 @@ Numbered so tickets can cite them (`D-n`).
   send *is* the "your slate" mail (timeline highlights + upcoming dates for watchlist items).
 - **D-34 iCal:** per-user tokenised `/calendar/{token}.ics`; one all-day VEVENT per (watchlist
   film, US governing date) over theatrical, digital, physical; stable UIDs so date moves update
-  in place. Token rotatable from settings.
+  in place. Token rotatable from settings. *(Amended 2026-10-08 by NEU-1542: theatrical and
+  digital — physical left the displayable set.)*
 - **D-35 Trailers:** poll `/movie/{id}/videos` on the same scoped set as D-27; a new
   YouTube video of type `Trailer` cards a `trailer` event (type exists; `confirmed`), which is
-  on the push whitelist *(removed by ADR-0021)*.
+  on the push whitelist *(removed by ADR-0021)*. *(Narrowed 2026-10-05 by NEU-1532: the video
+  poll reads only the in-play half of the D-27 set — a trailer for a film that has opened is
+  not a beat. The released half is read by a third pass for its release dates instead, which
+  is what finally lets D-26's post-release home-date card fire.)*
 - **D-36 Web Push** *(superseded 2026-09-26 by ADR-0021: removed with the alert mail)* ships last: service worker, VAPID keys, `app.push_subscription`, same queue
   as email with `channel=push`. iOS requires home-screen install; documented, not worked around.
 
@@ -350,7 +360,8 @@ lands.
   franchise follow covers a film from announcement until `PROVIDER_POLL_MAX_AGE_DAYS` (365)
   after its primary release date, in every TMDB status but `Canceled`. `Released` is the state
   the home-release beats (D-26, D-28, D-35) land in, so a window that ended there delivered
-  none of them to an indirect follower. `TMDB_EXCLUDED_STATUSES` keeps governing admission and
+  none of them to an indirect follower. *(NEU-1532, 2026-10-05: D-35 is no longer one of
+  them — a released film is not polled for trailers. The home-release beats are D-26 and D-28.)* `TMDB_EXCLUDED_STATUSES` keeps governing admission and
   the in-play working set; the window's own term is a constant
   (`catalog.queries.ALERT_WINDOW_DEAD_STATUSES`), because TMDB's vocabulary is closed and there
   is nothing to tune. Title follows are unchanged: any state. (NEU-1417, 2026-09-20.)
@@ -493,7 +504,9 @@ availability — without ever tracking churn.
   film anywhere. `link` is TMDB's per-film watch page; it and `attribution` are what TMDB's
   terms require (link back, credit JustWatch), not decoration. Provider entries are
   `{id, name, logo_path}` (NEU-1376).
-- Calendar DTO gains `bucket ∈ premiere|limited|wide|digital|physical`.
+- Calendar DTO gains `bucket ∈ premiere|limited|wide|digital|physical`. *(As built:
+  `limited|wide|digital` since NEU-1542 — premiere never shipped, physical was dropped — and
+  `GET /calendar` / `GET /me/calendar` take `kind=theatrical|home`.)*
 
 ### M7 — Notifications, digest, and calendar
 

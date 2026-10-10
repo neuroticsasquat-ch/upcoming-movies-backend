@@ -19,8 +19,9 @@ def test_bucket_for_tmdb_type_digital():
     assert bucket_for_tmdb_type(4) == "digital"
 
 
-def test_bucket_for_tmdb_type_physical():
-    assert bucket_for_tmdb_type(5) == "physical"
+def test_physical_has_no_bucket():
+    # NEU-1542: physical (5) left the displayable set; it is stored, never surfaced.
+    assert bucket_for_tmdb_type(5) is None
 
 
 def test_bucket_for_tmdb_type_premiere_not_surfaced():
@@ -39,17 +40,17 @@ def test_release_label_for_surfaced_types():
     assert release_label_for_tmdb_type(2) == "Limited"
     assert release_label_for_tmdb_type(3) == "Wide"
     assert release_label_for_tmdb_type(4) == "Digital"
-    assert release_label_for_tmdb_type(5) == "Physical"
 
 
 def test_release_label_for_unsurfaced_types_is_none():
     assert release_label_for_tmdb_type(1) is None
+    assert release_label_for_tmdb_type(5) is None
     assert release_label_for_tmdb_type(6) is None
     assert release_label_for_tmdb_type(99) is None
 
 
 def test_release_buckets_constant():
-    assert RELEASE_BUCKETS == ("limited", "wide", "digital", "physical")
+    assert RELEASE_BUCKETS == ("limited", "wide", "digital")
 
 
 def test_release_bucket_labels():
@@ -57,7 +58,6 @@ def test_release_bucket_labels():
         "limited": "Limited",
         "wide": "Wide",
         "digital": "Digital",
-        "physical": "Physical",
     }
 
 
@@ -68,4 +68,4 @@ def test_every_bucket_has_a_label():
 
 
 def test_tmdb_type_to_bucket_keys():
-    assert tuple(RELEASE_TYPE_BUCKETS) == (2, 3, 4, 5)
+    assert tuple(RELEASE_TYPE_BUCKETS) == (2, 3, 4)

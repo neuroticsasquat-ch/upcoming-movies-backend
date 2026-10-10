@@ -48,15 +48,15 @@ def test_home_release_date_uses_the_same_template():
 
 
 def test_home_release_date_slip_uses_the_same_verb():
-    # D-1403.4: one template for every bucket, so a physical slip reads as a wide one does.
+    # D-1403.4: one template for every bucket, so a digital slip reads as a wide one does.
     assert render_summary(
         ReleaseDateChanged(
             region="US",
-            label="physical",
+            label="digital",
             new_date=date(2026, 12, 1),
             previous_date=date(2026, 11, 3),
         )
-    ) == ("US physical release date slipped from 3 November 2026 to 1 December 2026.")
+    ) == ("US digital release date slipped from 3 November 2026 to 1 December 2026.")
 
 
 def test_release_date_slip_names_both_dates():
@@ -428,9 +428,9 @@ def test_rent_and_buy_first_seen_together_are_one_sentence():
     ) == ("Available to rent or buy.")
 
 
-def test_several_types_first_seen_together_read_in_box_order():
+def test_several_types_first_seen_together_read_in_monetization_order():
     """One observation that first sees a film under buy *and* flatrate is one card, and the
-    clauses read in the order the where-to-watch box lists them (D-29) rather than in whichever
+    clauses read in `MONETIZATION_TYPES` order (stream, rent, buy) rather than in whichever
     order the poll's payload happened to emit."""
     assert render_summary(
         NowAvailable(

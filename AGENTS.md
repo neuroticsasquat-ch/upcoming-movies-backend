@@ -34,7 +34,7 @@ process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
 | `hourly` | hourly | the light feeds pass (`per_film=false`) |
 | `sweep` | daily, ~2h ahead of `daily` | the undated-film sweep (ADR-0013) |
 | `daily` | daily | tmdb → feeds(per-film) → link → synthesize, fail-fast |
-| `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-35 video poll (NEU-1374, NEU-1385) |
+| `providers` | daily, next to the sweep | the D-27 watch-provider poll, then the D-26 release-date poll (released films) and the D-35 video poll (unreleased films) (NEU-1374, NEU-1385, NEU-1532) |
 | `notify` | daily, **after** `daily` | the M7 decision pass: queues digest rows, sends nothing (D-31, NEU-1379, ADR-0021) |
 | `digest daily` | daily, **after** `notify` | the daily digest: one mail per `digest_cadence = daily` user, with the slate on `SLATE_WEEKDAY` (D-33, DC-2, NEU-1381/1462) |
 | `digest weekly` | weekly on `SLATE_WEEKDAY`, **after** `notify` | the weekly digest with the "your slate" section, for `weekly` users — the default (D-33, NEU-1381) |
@@ -48,20 +48,34 @@ working set the sweep has already dropped — films *past* their theatrical rele
 stops running is invisible. The `PROVIDER_POLL_*` window is seeded in `docker-compose.prod.yml`
 and turned in the UI, per the gotcha below.
 
-**The `providers` slot runs two passes, not one (NEU-1385).** The watch-provider poll and
-then the video poll, over the same scoped set and under the same run row and deadman — so
-there is no second slot to create and no new environment variable, and `ingest_run.detail`
-carries a `videos:` clause beside the `providers:` one. Two consequences worth knowing:
+**The `providers` slot runs three passes, not one (NEU-1385, NEU-1532).** The watch-provider
+poll over the whole scoped set, then the release-date poll over its *released* half and the
+video poll over its *unreleased* half (split on `in_play_clause`, so each film is read by
+exactly one of the two) — all under the same run row and deadman, so there is no second slot
+to create and no new environment variable, and `ingest_run.detail` carries `providers:`,
+`release dates:` and `videos:` clauses. Consequences worth knowing:
 
-- **It doubles the slot's TMDB traffic**, one extra request per film in the set, and the two
+- **It doubles the slot's TMDB traffic**, one extra request per film in the set, and the
   passes share this process's one outbound window (see the rate-limiter gotcha below), so the
-  slot takes roughly twice as long as it did. Watch the deadman's grace period after merging.
+  slot takes roughly twice as long as the providers poll alone. Watch the deadman's grace
+  period.
+- **The release-date poll cards nothing itself.** It writes `film_release_date_change` rows,
+  and the next sweep's release-dates phase cards them — so a US digital date set after release
+  reaches the digest a day after the poll sees it. Its first run after NEU-1532 deployed read
+  every released in-window film for the first time since each opened: expect a one-time spike
+  in `changes`, and the sweep's `past` counter is where dates already gone by when seen land.
 - **The first run after deploy cards nothing and that is correct.** Every film's first video
   read is its baseline (ADR-0014) — it records whatever TMDB already holds and stays silent,
   so a catalogue with years of trailers behind it does not empty itself onto the feed. Expect
   a large `recorded` with `0 carded` and a `baselined` that matches the number polled; real
   trailer cards start on the second run. `film.videos_observed_at` is the marker, and it is
   deliberately never reset.
+- **A `held` count that jumps to the whole set means the release-date pass stopped writing
+  dates (NEU-1538).** The provider pass believes a film's offers only once its US digital date
+  is on or before the day (D-1538.1), reading the date from `film_release_date` — so a handful
+  `held` a day is pre-orders being ignored as designed, while `held` near `polled` against a
+  `first seen` of zero is every film looking undated. Look at the `release dates:` clause and
+  the sweep's refresh before suspecting the gate.
 
 **`notify` is a new slot and must be added in the Coolify UI**, on the same terms as
 `providers` above and with `HEALTHCHECK_NOTIFY_URL` set in the same edit. Three things are
@@ -91,6 +105,8 @@ mail, so they carry the mail prerequisites:
   exactly what a staging environment wants and exactly what production must not be left on.
   `PUBLIC_BASE_URL` and `TMDB_IMAGE_BASE` are load-bearing too: a mail carries absolute links
   and absolute image URLs, with no page around them to resolve a relative path against.
+  `MAIL_REPLY_TO` is optional but should be set in prod, since `MAIL_FROM` cannot receive and
+  a reply to any mail bounces without it.
 - **A `failed` notification row is terminal.** The sender reads only `queued` rows and the
   decision pass will not re-queue them, so rows lost to a provider refusal need a hand-written
   re-queue (`UPDATE app.notification SET status = 'queued' WHERE …`) to go out. The blast radius
@@ -104,7 +120,7 @@ And specific to their schedule and contents:
   decision pass queued; a slot that runs before it mails yesterday's.
 - **The weekly slot must run on `SLATE_WEEKDAY` (DC-2, NEU-1462).** That setting (default
   `thursday`, seeded in `docker-compose.prod.yml`) is the product's one slate day: the
-  `digest daily` slot reads it and puts the slate in front of a daily reader's cards on that
+  `digest daily` slot reads it and puts the slate after a daily reader's cards on that
   weekday — and mails a daily reader with an empty queue and a non-empty slate, as the weekly
   does. The weekly slot always carries the slate whatever day it runs, because the repo cannot
   see the Coolify schedule, so nothing fails if the two disagree: daily and weekly readers
