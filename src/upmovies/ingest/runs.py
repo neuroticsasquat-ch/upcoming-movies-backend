@@ -74,7 +74,7 @@ class StageCounts:
     that isolation degenerates into "discard everything and report success" — the stage
     produced *nothing at all* yet failed enough items to rule out a quiet day, i.e. a total
     LLM outage rather than a bad item. Runs finalize `failed` on it, which is what makes
-    `run_daily` abort and ping the deadman `/fail` instead of summarizing unlinked stories
+    `run_daily` abort and ping the deadman down instead of summarizing unlinked stories
     (NEU-743, NEU-986).
 
     Deliberately narrow: a partial failure is still a success, so no proportional threshold.

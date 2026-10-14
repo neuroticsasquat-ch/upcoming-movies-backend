@@ -383,7 +383,7 @@ async def test_total_summarize_failure_finalizes_run_failed(session):
 async def test_single_summarize_failure_does_not_fail_the_run(session):
     """NEU-987: one permanently unsummarizable event on an otherwise empty backlog is a bad
     item, not an outage. The event stays pending and is retried next run, so failing here
-    would only ping the deadman `/fail` every day for a self-healing condition."""
+    would only ping the deadman down every day for a self-healing condition."""
     film = await _film(session)
     await _event_with_story(session, film)
     await session.commit()

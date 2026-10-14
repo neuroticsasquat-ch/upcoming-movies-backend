@@ -27,7 +27,7 @@ Production deploys are **not** triggered by `task` commands. The flow is:
 ### Coolify scheduled tasks
 
 Seven slots run `python -m upmovies.pipeline_run <mode>` in the deployed container, each a separate
-process with its own healthchecks.io deadman (`HEALTHCHECK_*_URL`):
+process with its own Uptime Kuma push deadman (`HEALTHCHECK_*_URL`, NEU-1582):
 
 | Mode | Cadence | What it does |
 |---|---|---|
@@ -97,7 +97,7 @@ specific to it:
 
 **`digest daily` and `digest weekly` are two more slots to add in the Coolify UI** (NEU-1381),
 with `HEALTHCHECK_DIGEST_DAILY_URL` and `HEALTHCHECK_DIGEST_WEEKLY_URL` set in the same edit —
-two checks, because a healthchecks.io check has one schedule. They are the slots that send
+two checks, because a push monitor has one interval. They are the slots that send
 mail, so they carry the mail prerequisites:
 
 - **`MAIL_PROVIDER=resend` plus its key and `MAIL_FROM` have to be real** before the slots are
@@ -228,7 +228,7 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   next one, so the **effective hold** runs up to a sweep period past the number configured (48h =
   one daily pass plus one skipped or shifted one; NEU-1372 measured a nominal 72h holding for
   ~94h). `validate_sweep_configuration` refuses the boot for that reason — in `pipeline_run` only,
-  not the API, so a bad value fails the **hourly task** (and its healthchecks.io deadman) within
+  not the API, so a bad value fails the **hourly task** (and its push deadman) within
   the hour rather than taking the site down; its message names the ceiling and the lookback that
   would admit the value. Raising the window means raising `SWEEP_EVENT_LOOKBACK_DAYS` *first*, in
   the same Coolify edit; both are seeded in `docker-compose.prod.yml`. `0` disables the hold and is

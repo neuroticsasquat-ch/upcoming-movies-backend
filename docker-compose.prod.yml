@@ -67,7 +67,7 @@ services:
       COOKIE_SAMESITE: "lax"
       ENVIRONMENT: "production"
       SENTRY_DSN: "${SENTRY_DSN:-}"
-      # healthchecks.io deadman ping URLs for the Coolify scheduled tasks that run
+      # Uptime Kuma push URLs — the deadman for the Coolify scheduled tasks that run
       # `python -m upmovies.pipeline_run daily|hourly|sweep` in this container. Optional —
       # unset makes the ping a no-op (the pipeline still runs). The sweep gets its own check
       # rather than riding the daily one: it runs on its own slot ~2h ahead of daily and is
@@ -82,7 +82,7 @@ services:
       HEALTHCHECK_PROVIDERS_URL: "${HEALTHCHECK_PROVIDERS_URL:-}"
       HEALTHCHECK_NOTIFY_URL: "${HEALTHCHECK_NOTIFY_URL:-}"
       # The M7 digest sender runs `digest daily` and `digest weekly` on two slots, one per
-      # cadence, and each gets its own check: a healthchecks.io check has one schedule, so a
+      # cadence, and each gets its own check: a push monitor has one interval, so a
       # daily check cannot also expect the weekly ping (D-33, NEU-1381).
       HEALTHCHECK_DIGEST_DAILY_URL: "${HEALTHCHECK_DIGEST_DAILY_URL:-}"
       HEALTHCHECK_DIGEST_WEEKLY_URL: "${HEALTHCHECK_DIGEST_WEEKLY_URL:-}"

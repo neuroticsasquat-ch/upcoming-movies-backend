@@ -465,7 +465,7 @@ class Settings(BaseSettings):
     # meant runtime, which cancelled live multi-hour sweeps on any restart.
     ingest_stale_run_minutes: int = Field(default=30, alias="INGEST_STALE_RUN_MINUTES")
 
-    # healthchecks.io deadman ping URLs for the Coolify scheduled tasks (see
+    # Uptime Kuma push URLs, the deadman for the Coolify scheduled tasks (see
     # upmovies.pipeline_run). Optional: unset → the ping is a no-op, so local/dev runs of
     # `python -m upmovies.pipeline_run` don't need them. `daily` runs the full chain
     # (tmdb → feeds → link → synthesize); `hourly` runs the light feeds-only pass; `sweep`
@@ -485,7 +485,7 @@ class Settings(BaseSettings):
     # failing is silence for the *user*, not just for the catalogue.
     healthcheck_notify_url: str | None = Field(default=None, alias="HEALTHCHECK_NOTIFY_URL")
     # `digest daily` and `digest weekly` are the M7 digest sender (D-33) on two slots — one per
-    # cadence, because a healthchecks.io check has one schedule and a daily check cannot also
+    # cadence, because a push monitor has one interval and a daily check cannot also
     # expect a weekly ping. Each carries its own deadman for the notify slot's reason: the
     # failure this reports is silence for the user.
     healthcheck_digest_daily_url: str | None = Field(

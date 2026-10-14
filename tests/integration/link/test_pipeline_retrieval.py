@@ -315,7 +315,7 @@ class TestRetrievalHealth:
 class TestHardBreach:
     """The hard tier of the two-tier guard (ADR-0010, NEU-1002): a zero-candidate rate past
     threshold finalizes the run `failed`, which is what makes `run_daily` abort and ping the
-    deadman `/fail` — the pipeline's only alerting channel."""
+    deadman down — the pipeline's only alerting channel."""
 
     async def test_a_breaching_rate_fails_the_run(self, session):
         await _catalog(
