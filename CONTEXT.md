@@ -87,7 +87,7 @@ A stage that produced **nothing at all** yet recorded failures — the case wher
 isolation degenerates into "discard everything and report success". It is the one condition a
 pipeline *chooses* to finalize a run `failed` on, reading its own counters, as opposed to a
 crash the background wrapper catches. It is what makes the daily chain abort before the next
-stage and ping the deadman `/fail`. A *partial* failure is not one: the survivors committed,
+stage and ping the deadman down. A *partial* failure is not one: the survivors committed,
 so the run succeeded.
 _Avoid_: outage (that's the cause, not the observation), batch failure.
 

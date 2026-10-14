@@ -16,8 +16,9 @@ invisible in the daily check's ping.
 stage is awaited to completion before the next begins, `synthesize` cannot start until
 `link` has fully finished — there is no HTTP poll window to time out. The daily chain is
 fail-fast: the first stage that does not reach `succeeded` aborts the rest. A best-effort
-healthchecks.io deadman ping (`/start` at the top, base URL on success, `/fail` on any
-failure) drives alerting.
+Uptime Kuma push ping drives alerting (NEU-1582): `?status=up` with the duration on success,
+`?status=down` with the failing stage's error on failure, and no start ping — a run that never
+reports is caught by the push monitor's interval expiring.
 
 `run_providers` is a fourth slot on the same terms as the sweep: the D-27 watch-provider poll
 reads a working set the sweep has already dropped (films past their theatrical release), makes
@@ -37,7 +38,7 @@ writes `queued` digest rows and sends nothing, because the digest is the only de
 It reads the `queued` digest rows the notify pass wrote for every user on that cadence and
 mails one digest each — weekly, with the "your slate" section after the timeline. Two slots rather
 than one arm with a day-of-week check because a Coolify schedule is the cadence, and a
-healthchecks.io check has one schedule: each cadence pings its own deadman.
+push monitor has one interval: each cadence pings its own deadman.
 
 Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify|digest
 {daily|weekly}}`.
@@ -46,9 +47,11 @@ Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|noti
 import asyncio
 import logging
 import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal, NamedTuple
 from uuid import UUID
 
 import httpx
@@ -379,7 +382,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
             failure_threshold=settings.ingest_consecutive_failure_threshold,
         )
         # Inside the `try` deliberately: a stage runner that lets an exception escape leaves
-        # the run `running` and skips the deadman's `/fail`, so the write that finalizes has
+        # the run `running` and skips the deadman's down ping, so the write that finalizes has
         # to be covered by the same net as the work it reports on.
         await _finalize_sweep(
             run_id,
@@ -605,32 +608,92 @@ async def run_digest_stage(run_id: UUID, settings: Settings, cadence: DigestCade
         await _finalize_failed(run_id, str(e))
 
 
-async def _run_tracked_stage(kind: str, runner: StageRunner, settings: Settings) -> str:
+class StageOutcome(NamedTuple):
+    """A tracked stage's terminal `status` (`succeeded` / `failed` / `cancelled`) and the
+    `error` its runner recorded, if any."""
+
+    kind: str
+    status: str
+    error: str | None
+
+    @property
+    def failure_message(self) -> str:
+        """The deadman's `msg` for this outcome: the stage, how it ended, and the first line
+        of its recorded error."""
+        message = f"{self.kind} ended {self.status}"
+        first_line = (self.error or "").strip().splitlines()
+        return f"{message}: {first_line[0]}" if first_line else message
+
+
+async def _run_tracked_stage(kind: str, runner: StageRunner, settings: Settings) -> StageOutcome:
     """Open a run of `kind`, execute `runner` to completion (it finalizes its own run), and
-    return the run's terminal status (`succeeded` / `failed` / `cancelled`)."""
+    return the run's terminal status and recorded error."""
     async with SessionLocal() as s:
         run_id = await create_run(s, kind=kind)
         await s.commit()
     await runner(run_id, settings)
     async with SessionLocal() as s:
-        status = (
-            await s.execute(select(IngestRun.status).where(IngestRun.id == run_id))
-        ).scalar_one()
+        status, error = (
+            await s.execute(select(IngestRun.status, IngestRun.error).where(IngestRun.id == run_id))
+        ).one()
     log.info("%s run %s finished: %s", kind, run_id, status)
-    return status
+    return StageOutcome(kind, status, error)
 
 
-async def _ping(base_url: str | None, suffix: str = "") -> None:
-    """Best-effort healthchecks.io ping. No-op when `base_url` is unset; a ping failure is
-    logged and swallowed so it never affects the pipeline's own outcome."""
-    if not base_url:
+# Kuma stores the message whole; a traceback's worth of it helps nobody in an alert.
+MAX_PING_MESSAGE = 250
+
+
+async def _ping(
+    url: str | None,
+    status: Literal["up", "down"],
+    msg: str,
+    *,
+    duration_ms: int | None = None,
+) -> None:
+    """Best-effort Uptime Kuma push: `GET {url}?status=…&msg=…[&ping=…]` (NEU-1582).
+
+    No-op when `url` is unset; a ping failure is logged and swallowed so it never affects the
+    pipeline's own outcome. The params replace any query string already on `url`, so a push
+    URL pasted from Kuma with its default `?status=up&msg=OK&ping=` still works.
+    """
+    if not url:
         return
-    url = base_url.rstrip("/") + suffix
+    params = {"status": status, "msg": msg[:MAX_PING_MESSAGE]}
+    if duration_ms is not None:
+        params["ping"] = str(duration_ms)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(url)
+            await client.get(httpx.URL(url).copy_with(params=params))
     except Exception:
-        log.warning("healthcheck ping to %s failed", url, exc_info=True)
+        log.warning("deadman ping to %s failed", url, exc_info=True)
+
+
+def _exception_summary(exc: BaseException) -> str:
+    """The deadman's `msg` for a crash: the exception type and the first line of its text."""
+    lines = str(exc).strip().splitlines()
+    return f"{type(exc).__name__}: {lines[0]}" if lines else type(exc).__name__
+
+
+@asynccontextmanager
+async def _pings_down_on_crash(url: str | None) -> AsyncIterator[None]:
+    """Ping `url` down with the exception's summary if the body raises, then re-raise.
+
+    A stage that fails *inside* its runner finalizes its run `failed` and reaches the deadman
+    through the run's status. This covers the rest — the stale-run cleanup, the run insert,
+    the status read-back — which leave no row to speak for them. Without it a crash there
+    would surface only as the push monitor's interval expiring.
+    """
+    try:
+        yield
+    except Exception as e:
+        await _ping(url, "down", _exception_summary(e))
+        raise
+
+
+async def _ping_up(url: str | None, started: float) -> None:
+    """Report success, with the milliseconds since `started` (a `time.monotonic()` reading)."""
+    await _ping(url, "up", "ok", duration_ms=round((time.monotonic() - started) * 1000))
 
 
 # The modes that reach no model and send no mail, and so are exempted from the LLM-routing and
@@ -680,82 +743,91 @@ async def _clear_stale_runs(settings: Settings) -> None:
 
 async def run_daily(settings: Settings) -> bool:
     """Run the full daily chain sequentially, fail-fast. Returns True iff every stage
-    succeeded. Pings the daily deadman check at start / success / failure."""
-    await _clear_stale_runs(settings)
-    await _ping(settings.healthcheck_daily_url, "/start")
-    for kind, runner in _DAILY_STAGES:
-        status = await _run_tracked_stage(kind, runner, settings)
-        if status != "succeeded":
-            log.error("daily pipeline aborting: %s stage ended %s", kind, status)
-            await _ping(settings.healthcheck_daily_url, "/fail")
-            return False
-    log.info("daily pipeline succeeded")
-    await _ping(settings.healthcheck_daily_url)
-    return True
+    succeeded. Pings the daily deadman up on success, down on failure."""
+    started = time.monotonic()
+    async with _pings_down_on_crash(settings.healthcheck_daily_url):
+        await _clear_stale_runs(settings)
+        for kind, runner in _DAILY_STAGES:
+            outcome = await _run_tracked_stage(kind, runner, settings)
+            if outcome.status != "succeeded":
+                log.error("daily pipeline aborting: %s stage ended %s", kind, outcome.status)
+                await _ping(settings.healthcheck_daily_url, "down", outcome.failure_message)
+                return False
+        log.info("daily pipeline succeeded")
+        await _ping_up(settings.healthcheck_daily_url, started)
+        return True
 
 
 async def run_hourly(settings: Settings) -> bool:
     """Run the light hourly feeds pass (per_film=false). Returns True iff it succeeded.
-    Pings the hourly deadman check at start / success / failure."""
-    await _clear_stale_runs(settings)
-    await _ping(settings.healthcheck_hourly_url, "/start")
-    status = await _run_tracked_stage(
-        "feeds", lambda rid, s: run_feeds_stage(rid, s, per_film_override=False), settings
-    )
-    if status != "succeeded":
-        log.error("hourly feeds pipeline failed: ended %s", status)
-        await _ping(settings.healthcheck_hourly_url, "/fail")
-        return False
-    log.info("hourly feeds pipeline succeeded")
-    await _ping(settings.healthcheck_hourly_url)
-    return True
+    Pings the hourly deadman up on success, down on failure."""
+    started = time.monotonic()
+    async with _pings_down_on_crash(settings.healthcheck_hourly_url):
+        await _clear_stale_runs(settings)
+        outcome = await _run_tracked_stage(
+            "feeds", lambda rid, s: run_feeds_stage(rid, s, per_film_override=False), settings
+        )
+        if outcome.status != "succeeded":
+            log.error("hourly feeds pipeline failed: ended %s", outcome.status)
+            await _ping(settings.healthcheck_hourly_url, "down", outcome.failure_message)
+            return False
+        log.info("hourly feeds pipeline succeeded")
+        await _ping_up(settings.healthcheck_hourly_url, started)
+        return True
 
 
 async def run_sweep(settings: Settings) -> bool:
     """Run the undated-film sweep on its own run kind. Returns True iff it succeeded.
-    Pings the sweep deadman check at start / success / failure."""
-    await _clear_stale_runs(settings)
-    await _ping(settings.healthcheck_sweep_url, "/start")
-    status = await _run_tracked_stage("sweep", lambda rid, s: run_sweep_stage(rid, s), settings)
-    if status != "succeeded":
-        log.error("sweep pipeline failed: ended %s", status)
-        await _ping(settings.healthcheck_sweep_url, "/fail")
-        return False
-    log.info("sweep pipeline succeeded")
-    await _ping(settings.healthcheck_sweep_url)
-    return True
+    Pings the sweep deadman up on success, down on failure."""
+    started = time.monotonic()
+    async with _pings_down_on_crash(settings.healthcheck_sweep_url):
+        await _clear_stale_runs(settings)
+        outcome = await _run_tracked_stage(
+            "sweep", lambda rid, s: run_sweep_stage(rid, s), settings
+        )
+        if outcome.status != "succeeded":
+            log.error("sweep pipeline failed: ended %s", outcome.status)
+            await _ping(settings.healthcheck_sweep_url, "down", outcome.failure_message)
+            return False
+        log.info("sweep pipeline succeeded")
+        await _ping_up(settings.healthcheck_sweep_url, started)
+        return True
 
 
 async def run_providers(settings: Settings) -> bool:
     """Run the watch-provider poll on its own run kind. Returns True iff it succeeded.
-    Pings the providers deadman check at start / success / failure."""
-    await _clear_stale_runs(settings)
-    await _ping(settings.healthcheck_providers_url, "/start")
-    status = await _run_tracked_stage(
-        "providers", lambda rid, s: run_providers_stage(rid, s), settings
-    )
-    if status != "succeeded":
-        log.error("provider poll failed: ended %s", status)
-        await _ping(settings.healthcheck_providers_url, "/fail")
-        return False
-    log.info("provider poll succeeded")
-    await _ping(settings.healthcheck_providers_url)
-    return True
+    Pings the providers deadman up on success, down on failure."""
+    started = time.monotonic()
+    async with _pings_down_on_crash(settings.healthcheck_providers_url):
+        await _clear_stale_runs(settings)
+        outcome = await _run_tracked_stage(
+            "providers", lambda rid, s: run_providers_stage(rid, s), settings
+        )
+        if outcome.status != "succeeded":
+            log.error("provider poll failed: ended %s", outcome.status)
+            await _ping(settings.healthcheck_providers_url, "down", outcome.failure_message)
+            return False
+        log.info("provider poll succeeded")
+        await _ping_up(settings.healthcheck_providers_url, started)
+        return True
 
 
 async def run_notify(settings: Settings) -> bool:
     """Run the notification decision pass on its own run kind. Returns True iff it succeeded.
-    Pings the notify deadman check at start / success / failure."""
-    await _clear_stale_runs(settings)
-    await _ping(settings.healthcheck_notify_url, "/start")
-    status = await _run_tracked_stage("notify", lambda rid, s: run_notify_stage(rid, s), settings)
-    if status != "succeeded":
-        log.error("notify pass failed: ended %s", status)
-        await _ping(settings.healthcheck_notify_url, "/fail")
-        return False
-    log.info("notify pass succeeded")
-    await _ping(settings.healthcheck_notify_url)
-    return True
+    Pings the notify deadman up on success, down on failure."""
+    started = time.monotonic()
+    async with _pings_down_on_crash(settings.healthcheck_notify_url):
+        await _clear_stale_runs(settings)
+        outcome = await _run_tracked_stage(
+            "notify", lambda rid, s: run_notify_stage(rid, s), settings
+        )
+        if outcome.status != "succeeded":
+            log.error("notify pass failed: ended %s", outcome.status)
+            await _ping(settings.healthcheck_notify_url, "down", outcome.failure_message)
+            return False
+        log.info("notify pass succeeded")
+        await _ping_up(settings.healthcheck_notify_url, started)
+        return True
 
 
 def _digest_deadman(settings: Settings, cadence: DigestCadence) -> str | None:
@@ -766,20 +838,21 @@ def _digest_deadman(settings: Settings, cadence: DigestCadence) -> str | None:
 
 async def run_digest(settings: Settings, cadence: DigestCadence) -> bool:
     """Run the digest sender for one cadence on its own run kind. Returns True iff it
-    succeeded. Pings that cadence's deadman check at start / success / failure."""
+    succeeded. Pings that cadence's deadman up on success, down on failure."""
     deadman = _digest_deadman(settings, cadence)
-    await _clear_stale_runs(settings)
-    await _ping(deadman, "/start")
-    status = await _run_tracked_stage(
-        DIGEST_RUN_KIND, lambda rid, s: run_digest_stage(rid, s, cadence), settings
-    )
-    if status != "succeeded":
-        log.error("%s digest failed: ended %s", cadence, status)
-        await _ping(deadman, "/fail")
-        return False
-    log.info("%s digest succeeded", cadence)
-    await _ping(deadman)
-    return True
+    started = time.monotonic()
+    async with _pings_down_on_crash(deadman):
+        await _clear_stale_runs(settings)
+        outcome = await _run_tracked_stage(
+            DIGEST_RUN_KIND, lambda rid, s: run_digest_stage(rid, s, cadence), settings
+        )
+        if outcome.status != "succeeded":
+            log.error("%s digest failed: ended %s", cadence, outcome.status)
+            await _ping(deadman, "down", outcome.failure_message)
+            return False
+        log.info("%s digest succeeded", cadence)
+        await _ping_up(deadman, started)
+        return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -825,8 +898,8 @@ def main(argv: list[str] | None = None) -> int:
     # Here and **not** in the app's lifespan, unlike the three guards above it. The API never
     # runs the sweep, so refusing its boot over this would trade the website for a batch
     # setting it does not read. This process is the one that pays, and `hourly` runs it every
-    # hour — so a bad Coolify value surfaces within the hour as a failed task and a
-    # healthchecks.io `/fail`, which is the alerting path, with the site still up.
+    # hour — so a bad Coolify value surfaces within the hour as a failed task and a silent
+    # hourly push monitor, which is the alerting path, with the site still up.
     validate_sweep_configuration(settings)
     if mode == "daily":
         ok = asyncio.run(run_daily(settings))

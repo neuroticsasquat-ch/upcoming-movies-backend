@@ -18,7 +18,7 @@ fact would re-run over an empty backlog and change nothing.
 **`hard_breach_error` is the other half** — the hard tier of ADR-0010's two-tier guard, and
 the replacement for the cache read/write ratio alerting the project brief mandated. It reads
 the same tally the row is written from and says whether the run should finalize `failed`,
-which is what makes `run_daily` abort and ping the healthchecks.io deadman `/fail` — the
+which is what makes `run_daily` abort and ping its Uptime Kuma deadman `status=down` — the
 pipeline's only alerting channel, since Sentry is initialized in `main.py` alone. Pure, and
 separate from the row: a health write that failed must not also disarm the guard.
 """

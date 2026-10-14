@@ -65,7 +65,8 @@ Single FastAPI container (Python 3.13, SQLAlchemy 2 async + asyncpg, Alembic, Py
   published; `digest {daily|weekly}` mails each
   user on that cadence the digest rows `notify` queued, with the "your slate" section weekly
   and — daily — on `SLATE_WEEKDAY` (D-33, DC-2), on one slot per cadence after `notify`. Each
-  pings a healthchecks.io deadman (`/start`, base, `/fail`).
+  pings an Uptime Kuma push deadman (`?status=up` on success, `?status=down&msg=` on
+  failure, no start ping — NEU-1582).
 
 ### Layout (`src/upmovies/`)
 
