@@ -65,8 +65,17 @@ services:
       TMDB_IMAGE_BASE: "${TMDB_IMAGE_BASE:-https://image.tmdb.org/t/p}"
       COOKIE_DOMAIN: "${COOKIE_DOMAIN}"
       COOKIE_SAMESITE: "lax"
-      ENVIRONMENT: "production"
+      # Points at Bugsink, which speaks the Sentry protocol.
       SENTRY_DSN: "${SENTRY_DSN:-}"
+      # The instrumentation contract: OTel's resource attributes, which Sentry's `release` and
+      # `environment` are read back from (`upmovies/telemetry.py`), so an error in Bugsink and a
+      # trace in SigNoz name the same build. Coolify exposes the deployed commit as
+      # SOURCE_COMMIT ("Include SOURCE_COMMIT in build" must be on, or it is the literal
+      # "unknown"). `deployment.environment` here is the only place prod names its environment;
+      # ENVIRONMENT is a dev-only fallback. A literal rather than `${OTEL_RESOURCE_ATTRIBUTES:-…}`
+      # on purpose: Coolify seeds a `${VAR:-default}` once and then shadows the file, so a later
+      # edit here would never reach prod.
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=upcoming-movies-backend,deployment.environment=production,service.version=${SOURCE_COMMIT:-unknown}"
       # Uptime Kuma push URLs — the deadman for the Coolify scheduled tasks that run
       # `python -m upmovies.pipeline_run daily|hourly|sweep` in this container. Optional —
       # unset makes the ping a no-op (the pipeline still runs). The sweep gets its own check
@@ -245,8 +254,7 @@ services:
       # signed request is refused, so this deploying ahead of the Worker costs nothing. Must
       # match the Wrangler secret of the same name exactly.
       SSR_ORIGIN_SECRET: "${SSR_ORIGIN_SECRET:-}"
-      # Sentry release tag. Coolify exposes the deployed commit as SOURCE_COMMIT; falls
-      # back to "unknown" so the SDK still initializes when it's absent (e.g. local prod build).
+      # Fallback release for a run without the resource attributes above.
       GIT_SHA: "${SOURCE_COMMIT:-unknown}"
       # Coolify magic var: routes the assigned domain (api.backlotter.com, set in the
       # Coolify UI) to this service on container port 8000.

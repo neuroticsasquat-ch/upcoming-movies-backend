@@ -1,12 +1,8 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sentry_sdk.integrations.fastapi import FastApiIntegration
-from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -25,6 +21,7 @@ from upmovies.routers import (
     admin_runs,
     auth,
     credit_holds_admin,
+    debug_admin,
     digest,
     digest_admin,
     follows,
@@ -43,15 +40,7 @@ from upmovies.routers import (
     user_settings,
     users_admin,
 )
-
-if dsn := os.environ.get("SENTRY_DSN"):
-    sentry_sdk.init(
-        dsn=dsn,
-        integrations=[FastApiIntegration(), SqlalchemyIntegration()],
-        traces_sample_rate=0.1,
-        environment=os.environ.get("ENVIRONMENT", "development"),
-        release=os.environ.get("GIT_SHA", "unknown"),
-    )
+from upmovies.telemetry import init_sentry
 
 
 async def run_startup_cleanup(session: AsyncSession, stale_after_minutes: int) -> int:
@@ -100,6 +89,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
+    # After logging, so its startup line is emitted; before the app exists, so the integrations
+    # see it constructed.
+    init_sentry()
     app = FastAPI(title="upmovies-backend", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
@@ -131,6 +123,7 @@ def create_app() -> FastAPI:
     app.include_router(ingest_admin.router)
     app.include_router(admin_runs.router)
     app.include_router(credit_holds_admin.router)
+    app.include_router(debug_admin.router)
     app.include_router(digest_admin.router)
     app.include_router(invites_admin.router)
     app.include_router(moderation_admin.router)
