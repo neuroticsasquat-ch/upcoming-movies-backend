@@ -55,6 +55,7 @@ from typing import Literal, NamedTuple
 from uuid import UUID
 
 import httpx
+from opentelemetry import trace
 from sqlalchemy import select
 
 from upmovies.app.services.digest_sender import (
@@ -104,8 +105,10 @@ from upmovies.logging_config import configure_logging
 from upmovies.mail import MailGateway, validate_mail_configuration
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
+from upmovies.telemetry import record_handled_exception
 
 log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 # A stage runner: given (run_id, settings), run one pipeline to completion and finalize it.
 StageRunner = Callable[[UUID, Settings], Awaitable[None]]
@@ -115,9 +118,13 @@ def _session_factory():
     return SessionLocal()
 
 
-async def _finalize_failed(run_id: UUID, error: str) -> None:
+async def _finalize_failed(run_id: UUID, exc: Exception) -> None:
+    # A crashed stage is a *handled* error — caught so the run row is finalized — and so never
+    # reaches the instrumentation's own hooks; recorded here so its trace does not read as a
+    # success (the instrumentation contract, NEU-1590).
+    record_handled_exception(exc)
     async with SessionLocal() as s:
-        await finalize_run(s, run_id, status="failed", error=error)
+        await finalize_run(s, run_id, status="failed", error=str(exc))
         await s.commit()
 
 
@@ -138,7 +145,7 @@ async def run_tmdb_stage(run_id: UUID, settings: Settings) -> None:
             )
     except Exception as e:
         log.exception("tmdb ingest crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 async def run_feeds_stage(
@@ -159,7 +166,7 @@ async def run_feeds_stage(
         )
     except Exception as e:
         log.exception("feeds ingest crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 @asynccontextmanager
@@ -224,7 +231,7 @@ async def run_link_stage(run_id: UUID, settings: Settings) -> None:
             )
     except Exception as e:
         log.exception("link ingest crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
@@ -242,7 +249,7 @@ async def run_synthesize_stage(run_id: UUID, settings: Settings) -> None:
             )
     except Exception as e:
         log.exception("synthesize ingest crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
@@ -398,7 +405,7 @@ async def run_sweep_stage(run_id: UUID, settings: Settings) -> None:
         )
     except Exception as e:
         log.exception("sweep crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 async def _finalize_sweep(
@@ -535,7 +542,7 @@ async def run_providers_stage(run_id: UUID, settings: Settings) -> None:
             await s.commit()
     except Exception as e:
         log.exception("provider poll crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
@@ -569,7 +576,7 @@ async def run_notify_stage(run_id: UUID, settings: Settings) -> None:
             await s.commit()
     except Exception as e:
         log.exception("notify pass crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 async def run_digest_stage(run_id: UUID, settings: Settings, cadence: DigestCadence) -> None:
@@ -605,7 +612,7 @@ async def run_digest_stage(run_id: UUID, settings: Settings, cadence: DigestCade
             await s.commit()
     except Exception as e:
         log.exception("digest pass crashed")
-        await _finalize_failed(run_id, str(e))
+        await _finalize_failed(run_id, e)
 
 
 class StageOutcome(NamedTuple):
@@ -902,18 +909,18 @@ def main(argv: list[str] | None = None) -> int:
     # hourly push monitor, which is the alerting path, with the site still up.
     validate_sweep_configuration(settings)
     if mode == "daily":
-        ok = asyncio.run(run_daily(settings))
+        job = run_daily(settings)
     elif mode == "hourly":
-        ok = asyncio.run(run_hourly(settings))
+        job = run_hourly(settings)
     elif mode == "sweep":
-        ok = asyncio.run(run_sweep(settings))
+        job = run_sweep(settings)
     elif mode == "providers":
-        ok = asyncio.run(run_providers(settings))
+        job = run_providers(settings)
     elif mode == "notify":
-        ok = asyncio.run(run_notify(settings))
+        job = run_notify(settings)
     elif mode == "digest":
         assert cadence is not None  # checked above, before validation
-        ok = asyncio.run(run_digest(settings, cadence))
+        job = run_digest(settings, cadence)
     else:
         print(
             f"unknown mode {mode!r}: expected 'daily', 'hourly', 'sweep', 'providers', 'notify' "
@@ -921,6 +928,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # One span per scheduled task, current before `asyncio.run` so every task it starts
+    # inherits it: the span `_finalize_failed` records a crashed stage on. A no-op unless the
+    # task's command is wrapped in `opentelemetry-instrument` (README, errors and observability).
+    with _tracer.start_as_current_span(f"pipeline_run {' '.join(argv) or mode}"):
+        ok = asyncio.run(job)
     return 0 if ok else 1
 
 

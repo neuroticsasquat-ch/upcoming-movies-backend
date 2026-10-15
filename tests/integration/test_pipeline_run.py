@@ -4,6 +4,8 @@ the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import StatusCode
 from sqlalchemy import select
 
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
@@ -57,6 +59,28 @@ async def test_tmdb_stage_marks_run_failed_on_crash(session, monkeypatch):
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "simulated tmdb crash" in row.error
+
+
+async def test_a_crashed_stage_is_recorded_on_the_current_span(session, monkeypatch):
+    """The instrumentation contract's `span.record_exception()` for handled errors (NEU-1590):
+    the crash is caught so the run row is finalized, and so it must be recorded by hand or the
+    task's trace reads as a success."""
+
+    async def boom(**kwargs):
+        raise RuntimeError("simulated tmdb crash")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_tmdb_ingest", boom)
+    run_id = await create_run(session, kind="tmdb")
+    await session.commit()
+
+    tracer = TracerProvider().get_tracer(__name__)
+    with tracer.start_as_current_span("pipeline_run daily") as span:
+        await pipeline_run.run_tmdb_stage(run_id, get_settings())
+
+    [event] = span.events  # type: ignore[attr-defined]
+    assert event.attributes["exception.message"] == "simulated tmdb crash"
+    assert span.status.status_code is StatusCode.ERROR  # type: ignore[attr-defined]
+    assert (await _run_row(session, run_id)).status == "failed"
 
 
 async def test_feeds_stage_marks_run_failed_on_crash(session, monkeypatch):
