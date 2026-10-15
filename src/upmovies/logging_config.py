@@ -13,6 +13,7 @@ import logging
 import re
 
 _API_KEY_PARAM = re.compile(r"(api_key=)[^&\s'\"]+")
+_PUSH_TOKEN = re.compile(r"(/api/push/)[^/?#&\s'\"]+")
 
 
 def redact_api_key(text: str) -> str:
@@ -22,6 +23,15 @@ def redact_api_key(text: str) -> str:
     live credential (NEU-1124).
     """
     return _API_KEY_PARAM.sub(r"\1REDACTED", text)
+
+
+def redact_push_token(text: str) -> str:
+    """Replace the token in any Uptime Kuma `/api/push/<token>` path in `text` with `REDACTED`.
+
+    The token is the push monitor's only credential: whoever holds it can push `status=up` and
+    hide a failed job (NEU-1616).
+    """
+    return _PUSH_TOKEN.sub(r"\1REDACTED", text)
 
 
 class RedactingFilter(logging.Filter):
@@ -39,7 +49,7 @@ class RedactingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        redacted = redact_api_key(message)
+        redacted = redact_push_token(redact_api_key(message))
         if redacted != message:
             record.msg = redacted
             record.args = ()
