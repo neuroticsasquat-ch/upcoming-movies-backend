@@ -1,15 +1,18 @@
 """In-process ingestion orchestration (upmovies.pipeline_run): the shared stage runners and
 the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import sentry_sdk
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import StatusCode
+from sentry_sdk.envelope import Envelope
 from sqlalchemy import select
 
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
-from upmovies import pipeline_run
+from upmovies import pipeline_run, telemetry
 from upmovies.app.services.digest_sender import DigestSendResult
 from upmovies.app.services.notify_service import NotifyResult
 from upmovies.catalog.models import Film
@@ -1545,3 +1548,128 @@ def test_main_refuses_the_digest_arm_without_mail_configuration(monkeypatch):
 
     with pytest.raises(MailConfigurationError):
         pipeline_run.main(["digest", "weekly"])
+
+
+# --- crashes, and only crashes, reach the error tracker (NEU-1623, ADR-0025) ------
+
+
+class _KeepingTransport(sentry_sdk.Transport):
+    """Keeps every envelope in memory, so nothing — event, session or client report — leaves
+    the process."""
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        self.envelopes: list[Envelope] = []
+
+    def capture_envelope(self, envelope):
+        self.envelopes.append(envelope)
+
+
+@pytest.fixture
+def sentry_events(monkeypatch):
+    """`SENTRY_DSN` and the OTel resource attributes set as in production, and the real
+    `sentry_sdk.init` handed a fake transport. Yields the events it received; closed afterwards
+    so no later test runs with an initialised SDK."""
+    transport = _KeepingTransport()
+    real_init = sentry_sdk.init
+    monkeypatch.setattr(
+        telemetry.sentry_sdk, "init", lambda **kw: real_init(**kw, transport=transport)
+    )
+    monkeypatch.setenv("SENTRY_DSN", "https://public@bugsink.invalid/1")
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.name=upcoming-movies-backend,deployment.environment=production,"
+        "service.version=abc123",
+    )
+
+    class _Events:
+        def __iter__(self):
+            for envelope in transport.envelopes:
+                for item in envelope.items:
+                    if item.type == "event":
+                        yield item.payload.json
+
+    try:
+        yield _Events()
+    finally:
+        sentry_sdk.get_client().close()
+        # A bare `init()` reads `SENTRY_DSN` from the environment, which monkeypatch has not
+        # restored yet at this point — unset it first or the reset is a live client.
+        monkeypatch.delenv("SENTRY_DSN")
+        real_init()
+
+
+def test_the_test_error_mode_reports_one_event_with_the_apis_release(sentry_events):
+    with pytest.raises(pipeline_run.PipelineTestError, match="raise-test-error"):
+        pipeline_run.main(["raise-test-error"])
+
+    [event] = list(sentry_events)
+    assert event["tags"]["pipeline_mode"] == "raise-test-error"
+    assert event["release"] == "abc123"
+    assert event["environment"] == "production"
+    [exc] = event["exception"]["values"]
+    assert exc["type"] == "PipelineTestError"
+
+
+def test_a_crash_inside_the_tasks_event_loop_carries_the_mode(sentry_events, monkeypatch):
+    """`_finalize_failed` captures from inside `asyncio.run`, in a task a stage may have spawned:
+    the tag has to reach it there, not only at `main`'s own level."""
+
+    async def crashes_in_a_task(settings):
+        async def stage():
+            sentry_sdk.capture_exception(RuntimeError("simulated stage crash"))
+
+        await asyncio.create_task(stage())
+        return False
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_hourly", crashes_in_a_task)
+    assert pipeline_run.main(["hourly"]) == 1
+
+    [event] = list(sentry_events)
+    assert event["tags"]["pipeline_mode"] == "hourly"
+
+
+async def test_items_that_fail_in_a_completed_run_report_nothing(
+    session, sentry_events, monkeypatch
+):
+    """The pipelines `log.exception` per failed item and carry on; those are breadcrumbs, not
+    events, or a thin day would alert once per film (ADR-0025)."""
+
+    async def one_item_fails(*, session_factory, run_id, **kwargs):
+        try:
+            raise RuntimeError("simulated item failure")
+        except RuntimeError:
+            pipeline_run.log.exception("feed item failed")
+        async with session_factory() as s:
+            await finalize_run(s, run_id, status="succeeded")
+            await s.commit()
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_feeds_ingest", one_item_fails)
+    telemetry.init_sentry(integrations=telemetry.pipeline_integrations())
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+
+    with pipeline_run._reports_crashes("hourly"):
+        await pipeline_run.run_feeds_stage(run_id, get_settings())
+
+    assert (await _run_row(session, run_id)).status == "succeeded"
+    assert list(sentry_events) == []
+
+
+async def test_a_run_that_finalizes_failed_reports_one_event(session, sentry_events, monkeypatch):
+    async def boom(**kwargs):
+        raise RuntimeError("simulated feeds crash")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_feeds_ingest", boom)
+    telemetry.init_sentry(integrations=telemetry.pipeline_integrations())
+    run_id = await create_run(session, kind="feeds")
+    await session.commit()
+
+    with pipeline_run._reports_crashes("hourly"):
+        await pipeline_run.run_feeds_stage(run_id, get_settings())
+
+    assert (await _run_row(session, run_id)).status == "failed"
+    [event] = list(sentry_events)
+    assert event["tags"]["pipeline_mode"] == "hourly"
+    [exc] = event["exception"]["values"]
+    assert exc["value"] == "simulated feeds crash"
