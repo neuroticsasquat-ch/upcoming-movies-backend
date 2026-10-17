@@ -2,6 +2,11 @@
 
 **Status:** accepted — implementation tracked in *backlotter: Entity-Linking Candidate Retrieval* (M2, M4)
 
+> **Partly superseded (2026-10-17) by ADR-0025.** The deferred alternative "wire Sentry into
+> `pipeline_run`" is now built, for crashes only: one event per crashed run, never one per failed
+> item. Its `capture_message`-on-breach half stays rejected — see ADR-0025. The rest of this ADR
+> stands.
+
 ## Context
 
 The *backlotter: Entity-Linking Candidate Retrieval* project brief mandates one specific piece

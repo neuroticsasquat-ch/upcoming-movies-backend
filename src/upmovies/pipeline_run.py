@@ -40,21 +40,27 @@ mails one digest each — weekly, with the "your slate" section after the timeli
 than one arm with a day-of-week check because a Coolify schedule is the cadence, and a
 push monitor has one interval: each cadence pings its own deadman.
 
+Every mode reports a crash — and only a crash — to the error tracker: a stage that
+`_finalize_failed`s, or an exception that escapes `main`, is one event tagged `pipeline_mode`.
+Per-item failures the pipelines log and carry on past are breadcrumbs, not events (ADR-0025).
+`raise-test-error` raises `PipelineTestError` so the runbook can prove that path end to end.
+
 Entry point: `python -m upmovies.pipeline_run {daily|hourly|sweep|providers|notify|digest
-{daily|weekly}}`.
+{daily|weekly}|raise-test-error}`.
 """
 
 import asyncio
 import logging
 import sys
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, NamedTuple
 from uuid import UUID
 
 import httpx
+import sentry_sdk
 from opentelemetry import trace
 from sqlalchemy import select
 
@@ -105,7 +111,7 @@ from upmovies.logging_config import configure_logging
 from upmovies.mail import MailGateway, validate_mail_configuration
 from upmovies.news.fetcher import run_feeds_ingest
 from upmovies.synthesize.pipeline import run_synthesize_ingest
-from upmovies.telemetry import record_handled_exception
+from upmovies.telemetry import init_sentry, pipeline_integrations, record_handled_exception
 
 log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
@@ -123,6 +129,9 @@ async def _finalize_failed(run_id: UUID, exc: Exception) -> None:
     # reaches the instrumentation's own hooks; recorded here so its trace does not read as a
     # success (the instrumentation contract, NEU-1590).
     record_handled_exception(exc)
+    # For the same reason it reaches no Sentry hook either, so it is reported here: one event per
+    # crashed run, tagged with the mode `_reports_crashes` set (ADR-0025).
+    sentry_sdk.capture_exception(exc)
     async with SessionLocal() as s:
         await finalize_run(s, run_id, status="failed", error=str(exc))
         await s.commit()
@@ -862,6 +871,31 @@ async def run_digest(settings: Settings, cadence: DigestCadence) -> bool:
         return True
 
 
+class PipelineTestError(RuntimeError):
+    """Raised by the `raise-test-error` mode. Its own type, so Bugsink groups every trigger into
+    one issue that no real failure can be mistaken for."""
+
+
+@contextmanager
+def _reports_crashes(mode: str) -> Iterator[None]:
+    """Tag every event raised inside with `pipeline_mode`, report an exception that escapes,
+    and flush before the process exits.
+
+    The tag sits on an isolation scope entered before `asyncio.run`, which copies the context into
+    its task, so `_finalize_failed`'s capture carries it too. The re-raised exception reaches
+    Sentry's excepthook as well; its dedupe integration drops the second sighting.
+    """
+    with sentry_sdk.isolation_scope() as scope:
+        scope.set_tag("pipeline_mode", mode)
+        try:
+            yield
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+            raise
+        finally:
+            sentry_sdk.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "daily"
@@ -879,6 +913,19 @@ def main(argv: list[str] | None = None) -> int:
         cadence = given
     settings = get_settings()
     configure_logging(settings.log_level)
+    # After logging, so its startup line is emitted — the same release and environment
+    # resolution as the API, so a task's crash and the API's errors name the same build.
+    init_sentry(integrations=pipeline_integrations())
+    with _reports_crashes(mode):
+        return _run_mode(argv, mode, cadence, settings)
+
+
+def _run_mode(argv: list[str], mode: str, cadence: DigestCadence | None, settings: Settings) -> int:
+    if mode == "raise-test-error":
+        # Before the guards below, so the proof does not depend on the rest of the config.
+        raise PipelineTestError(
+            "upmovies.pipeline_run.raise-test-error: deliberate test error (NEU-1623)"
+        )
     # The same guard the app's lifespan runs, for the process that actually pays for the
     # failure: a scheduled task is a separate `python -m upmovies.pipeline_run` invocation,
     # so the app having booted proves nothing about the env this one was handed (AGENTS.md's
