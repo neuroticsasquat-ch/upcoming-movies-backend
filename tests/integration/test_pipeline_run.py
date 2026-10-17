@@ -4,6 +4,8 @@ the sequential daily/hourly chains driven by the Coolify scheduled tasks."""
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import StatusCode
 from sqlalchemy import select
 
 from tests.fixtures.gateway import DEFAULT_ROUTING, StubGateway
@@ -57,6 +59,28 @@ async def test_tmdb_stage_marks_run_failed_on_crash(session, monkeypatch):
     row = await _run_row(session, run_id)
     assert row.status == "failed"
     assert row.error and "simulated tmdb crash" in row.error
+
+
+async def test_a_crashed_stage_is_recorded_on_the_current_span(session, monkeypatch):
+    """The instrumentation contract's `span.record_exception()` for handled errors (NEU-1590):
+    the crash is caught so the run row is finalized, and so it must be recorded by hand or the
+    task's trace reads as a success."""
+
+    async def boom(**kwargs):
+        raise RuntimeError("simulated tmdb crash")
+
+    monkeypatch.setattr("upmovies.pipeline_run.run_tmdb_ingest", boom)
+    run_id = await create_run(session, kind="tmdb")
+    await session.commit()
+
+    tracer = TracerProvider().get_tracer(__name__)
+    with tracer.start_as_current_span("pipeline_run daily") as span:
+        await pipeline_run.run_tmdb_stage(run_id, get_settings())
+
+    [event] = span.events  # type: ignore[attr-defined]
+    assert event.attributes["exception.message"] == "simulated tmdb crash"
+    assert span.status.status_code is StatusCode.ERROR  # type: ignore[attr-defined]
+    assert (await _run_row(session, run_id)).status == "failed"
 
 
 async def test_feeds_stage_marks_run_failed_on_crash(session, monkeypatch):
@@ -177,8 +201,8 @@ def spy_stages(monkeypatch):
     for kind in ("tmdb", "feeds", "link", "synthesize"):
         monkeypatch.setattr(pipeline_run, f"run_{kind}_stage", _make(kind))
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append(suffix)
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append(status)
 
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
     return order, pings, status_by_kind
@@ -272,7 +296,7 @@ async def test_run_daily_runs_all_stages_in_order(session, spy_stages):
 
     assert ok is True
     assert order == ["tmdb", "feeds", "link", "synthesize"]
-    assert pings == ["/start", ""], "start ping then success (base URL) ping"
+    assert pings == ["up"], "one up ping, no start ping"
 
 
 async def test_run_daily_fails_fast_on_stage_failure(session, spy_stages):
@@ -285,7 +309,7 @@ async def test_run_daily_fails_fast_on_stage_failure(session, spy_stages):
     # link failed → synthesize must never run.
     assert order == ["tmdb", "feeds", "link"]
     assert "synthesize" not in order
-    assert pings == ["/start", "/fail"]
+    assert pings == ["down"]
 
 
 async def test_run_daily_aborts_when_link_stage_totally_fails(
@@ -294,7 +318,7 @@ async def test_run_daily_aborts_when_link_stage_totally_fails(
     """NEU-986, end to end through the real link pipeline: a total LLM outage fails every
     chunk, so the run finalizes `failed` off its counters alone (no crash propagates out of
     the stage). That status is what makes the chain stop before `synthesize` and ping the
-    deadman `/fail` — the incident NEU-743 fixed, where it pinged green instead."""
+    deadman down — the incident NEU-743 fixed, where it pinged green instead."""
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
     await session.flush()
@@ -344,8 +368,8 @@ async def test_run_daily_aborts_when_link_stage_totally_fails(
 
     monkeypatch.setattr(pipeline_run, "run_link_stage", real_link_stage)
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append(suffix)
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append(status)
 
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
 
@@ -353,7 +377,7 @@ async def test_run_daily_aborts_when_link_stage_totally_fails(
 
     assert ok is False
     assert order == ["tmdb", "feeds", "link"]  # synthesize never ran
-    assert pings == ["/start", "/fail"]
+    assert pings == ["down"]
 
 
 async def test_run_daily_continues_past_a_lone_cluster_failure(
@@ -362,7 +386,7 @@ async def test_run_daily_continues_past_a_lone_cluster_failure(
     """NEU-987, the counterpart to the test above: clustering is self-healing, so one
     pathological film on an otherwise empty backlog must NOT abort the chain. Before the
     denominator, `cluster` reporting 0 processed / 1 failed failed the link run, and because
-    `run_daily` is fail-fast that meant `synthesize` never ran and the deadman got `/fail`
+    `run_daily` is fail-fast that meant `synthesize` never ran and the deadman got a down
     every day for as long as the film stayed unclusterable."""
     film = Film(tmdb_id=1, title="Runner")
     session.add(film)
@@ -414,8 +438,8 @@ async def test_run_daily_continues_past_a_lone_cluster_failure(
 
     monkeypatch.setattr(pipeline_run, "run_link_stage", real_link_stage)
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append(suffix)
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append(status)
 
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
 
@@ -423,7 +447,7 @@ async def test_run_daily_continues_past_a_lone_cluster_failure(
 
     assert ok is True
     assert order == ["tmdb", "feeds", "link", "synthesize"]  # the chain ran to completion
-    assert pings == ["/start", ""]  # green, not /fail
+    assert pings == ["up"]  # green, not down
 
 
 async def test_run_daily_synthesize_waits_for_link(session, monkeypatch):
@@ -463,8 +487,8 @@ async def test_run_hourly_runs_feeds_per_film_false(session, monkeypatch):
             await finalize_run(s, run_id, status="succeeded")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append(suffix)
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append(status)
 
     monkeypatch.setattr(pipeline_run, "run_feeds_stage", fake_feeds)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -473,7 +497,7 @@ async def test_run_hourly_runs_feeds_per_film_false(session, monkeypatch):
 
     assert ok is True
     assert captured["per_film_override"] is False
-    assert pings == ["/start", ""]
+    assert pings == ["up"]
 
 
 async def test_run_hourly_pings_fail_on_failure(session, monkeypatch):
@@ -484,8 +508,8 @@ async def test_run_hourly_pings_fail_on_failure(session, monkeypatch):
             await finalize_run(s, run_id, status="failed")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append(suffix)
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append(status)
 
     monkeypatch.setattr(pipeline_run, "run_feeds_stage", fake_feeds)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -493,7 +517,7 @@ async def test_run_hourly_pings_fail_on_failure(session, monkeypatch):
     ok = await pipeline_run.run_hourly(get_settings())
 
     assert ok is False
-    assert pings == ["/start", "/fail"]
+    assert pings == ["down"]
 
 
 # --- deadman ping is best-effort -----------------------------------------------
@@ -504,7 +528,7 @@ async def test_ping_noop_when_url_unset(monkeypatch):
         raise AssertionError("must not construct an HTTP client when URL is unset")
 
     monkeypatch.setattr("upmovies.pipeline_run.httpx.AsyncClient", exploding_client)
-    await pipeline_run._ping(None, "/start")  # no exception → no HTTP attempted
+    await pipeline_run._ping(None, "up", "ok")  # no exception → no HTTP attempted
 
 
 async def test_ping_swallows_network_errors(monkeypatch):
@@ -518,12 +542,12 @@ async def test_ping_swallows_network_errors(monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
-        async def post(self, url):
+        async def get(self, url):
             raise RuntimeError("connection refused")
 
     monkeypatch.setattr("upmovies.pipeline_run.httpx.AsyncClient", BoomClient)
-    # Must not raise despite the POST failing.
-    await pipeline_run._ping("https://hc.example/abc", "/fail")
+    # Must not raise despite the GET failing.
+    await pipeline_run._ping("https://hc.example/abc", "down", "boom")
 
 
 # --- the scheduled task refuses an unroutable stage before it starts ------------
@@ -842,8 +866,8 @@ async def test_run_sweep_opens_its_own_run_kind_and_pings(session, monkeypatch):
             await finalize_run(s, run_id, status="succeeded")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append((base_url, suffix))
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append((url, status))
 
     monkeypatch.setattr(pipeline_run, "run_sweep_stage", fake_stage)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -853,7 +877,7 @@ async def test_run_sweep_opens_its_own_run_kind_and_pings(session, monkeypatch):
 
     assert ok is True
     assert kinds == ["sweep"]
-    assert pings == [("https://hc/sweep", "/start"), ("https://hc/sweep", "")]
+    assert pings == [("https://hc/sweep", "up")]
 
 
 async def test_run_sweep_pings_fail_on_failure(session, monkeypatch):
@@ -864,8 +888,8 @@ async def test_run_sweep_pings_fail_on_failure(session, monkeypatch):
             await finalize_run(s, run_id, status="failed")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append(suffix)
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append(status)
 
     monkeypatch.setattr(pipeline_run, "run_sweep_stage", fake_stage)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -873,7 +897,7 @@ async def test_run_sweep_pings_fail_on_failure(session, monkeypatch):
     ok = await pipeline_run.run_sweep(settings=get_settings())
 
     assert ok is False
-    assert pings == ["/start", "/fail"]
+    assert pings == ["down"]
 
 
 def test_main_runs_the_sweep_arm(monkeypatch):
@@ -893,7 +917,7 @@ def test_main_runs_the_sweep_arm(monkeypatch):
 
 async def test_sweep_stage_marks_the_run_failed_when_finalizing_crashes(session, monkeypatch):
     """A stage runner that lets an exception escape leaves the run `running` and skips the
-    deadman's /fail, so the finalizing write is inside the same net as the phases."""
+    deadman's down ping, so the finalizing write is inside the same net as the phases."""
     _stub_phases(monkeypatch)
 
     async def boom(*args, **kwargs):
@@ -1162,8 +1186,8 @@ async def test_run_providers_opens_its_own_run_kind_and_pings_its_own_deadman(se
             await finalize_run(s, run_id, status="succeeded")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append((base_url, suffix))
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append((url, status))
 
     monkeypatch.setattr(pipeline_run, "run_providers_stage", fake_stage)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -1175,10 +1199,7 @@ async def test_run_providers_opens_its_own_run_kind_and_pings_its_own_deadman(se
 
     assert ok is True
     assert kinds == ["providers"]
-    assert pings == [
-        ("https://hc/providers", "/start"),
-        ("https://hc/providers", ""),
-    ]
+    assert pings == [("https://hc/providers", "up")]
 
 
 def test_main_runs_the_providers_arm(monkeypatch):
@@ -1294,8 +1315,8 @@ async def test_run_notify_opens_its_own_run_kind_and_pings_its_own_deadman(sessi
             await finalize_run(s, run_id, status="succeeded")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append((base_url, suffix))
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append((url, status))
 
     monkeypatch.setattr(pipeline_run, "run_notify_stage", fake_stage)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -1305,7 +1326,7 @@ async def test_run_notify_opens_its_own_run_kind_and_pings_its_own_deadman(sessi
 
     assert ok is True
     assert kinds == ["notify"]
-    assert pings == [("https://hc/notify", "/start"), ("https://hc/notify", "")]
+    assert pings == [("https://hc/notify", "up")]
 
 
 def test_main_runs_the_notify_arm(monkeypatch):
@@ -1411,8 +1432,8 @@ async def test_digest_stage_marks_run_failed_on_crash(session, monkeypatch):
 async def test_run_digest_opens_its_own_run_kind_and_pings_the_cadence_s_deadman(
     session, monkeypatch, cadence, url_field
 ):
-    """One run kind for both cadences, and one deadman *per* cadence — a healthchecks.io check
-    has one schedule, so the daily and the weekly slot cannot share it."""
+    """One run kind for both cadences, and one deadman *per* cadence — a push monitor
+    has one interval, so the daily and the weekly slot cannot share it."""
     kinds: list[str] = []
     cadences: list[str] = []
     pings: list[tuple[str | None, str]] = []
@@ -1426,8 +1447,8 @@ async def test_run_digest_opens_its_own_run_kind_and_pings_the_cadence_s_deadman
             await finalize_run(s, run_id, status="succeeded")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append((base_url, suffix))
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append((url, status))
 
     monkeypatch.setattr(pipeline_run, "run_digest_stage", fake_stage)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -1444,7 +1465,7 @@ async def test_run_digest_opens_its_own_run_kind_and_pings_the_cadence_s_deadman
     assert kinds == ["digest"]
     assert cadences == [cadence]
     expected = f"https://hc/digest-{cadence}"
-    assert pings == [(expected, "/start"), (expected, "")]
+    assert pings == [(expected, "up")]
 
 
 async def test_run_digest_pings_fail_on_failure(session, monkeypatch):
@@ -1455,8 +1476,8 @@ async def test_run_digest_pings_fail_on_failure(session, monkeypatch):
             await finalize_run(s, run_id, status="failed", error="boom")
             await s.commit()
 
-    async def fake_ping(base_url, suffix=""):
-        pings.append((base_url, suffix))
+    async def fake_ping(url, status, msg, **kwargs):
+        pings.append((url, status))
 
     monkeypatch.setattr(pipeline_run, "run_digest_stage", fake_stage)
     monkeypatch.setattr(pipeline_run, "_ping", fake_ping)
@@ -1467,7 +1488,7 @@ async def test_run_digest_pings_fail_on_failure(session, monkeypatch):
     ok = await pipeline_run.run_digest(settings, "weekly")
 
     assert ok is False
-    assert pings == [("https://hc/digest-weekly", "/start"), ("https://hc/digest-weekly", "/fail")]
+    assert pings == [("https://hc/digest-weekly", "down")]
 
 
 def test_main_runs_the_digest_arm_with_its_cadence(monkeypatch):
