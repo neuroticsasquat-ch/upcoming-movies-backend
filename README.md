@@ -48,7 +48,7 @@ Everything runs inside the container via `task`:
 | `task migrate` | `alembic upgrade head` |
 | `task makemigration -- "msg"` | autogenerate a new migration |
 
-Source is bind-mounted into the container so uvicorn's `--reload` picks up edits without a rebuild. Dependency changes (`pyproject.toml`) require `task build`.
+Source is bind-mounted into the container so uvicorn's `--reload` picks up edits without a rebuild. Dependencies install from `uv.lock`: after a `pyproject.toml` change, run `task lock`, then `task build`.
 
 ## Errors and observability
 

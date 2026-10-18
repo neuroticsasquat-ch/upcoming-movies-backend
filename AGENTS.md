@@ -6,7 +6,7 @@
 
 ## How to work in this repo
 
-**Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dep changes (`pyproject.toml`) need `task build`.
+**Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dependencies install from `uv.lock` via `uv sync --locked`, so to change one, edit `pyproject.toml`, run `task lock`, then `task build` (an edit without re-locking fails the build).
 
 ## Production deployments
 
