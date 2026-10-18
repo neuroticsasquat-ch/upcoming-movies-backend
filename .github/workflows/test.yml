@@ -37,8 +37,12 @@ jobs:
           python-version: "3.13"
       - name: Install uv
         run: pip install uv
+      # Install exactly what uv.lock pins, so CI tests the locked set and a
+      # fresh upstream release can't break an unrelated PR.
       - name: Install deps
-        run: uv pip install --system ".[dev]"
+        run: |
+          uv sync --locked --extra dev --python 3.13
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Create databases + schemas
         env:
           PGPASSWORD: root
