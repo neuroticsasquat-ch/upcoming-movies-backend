@@ -24,18 +24,21 @@ Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host — al
 `docker compose exec`s into the backend service. Source is bind-mounted, so uvicorn `--reload` picks
 up edits. Dependencies install from `uv.lock` (`uv sync --locked`, into the container's system
 Python), so the image runs exactly the set CI tests. To change a dependency, edit `pyproject.toml`,
-run `task lock`, then `task build`; an edit without re-locking fails the build.
+run `task deps:lock`, then `task build` (or `task deps:add -- <pkg>` / `task deps:add-dev -- <pkg>`,
+then `task build`); an edit without re-locking fails the build. The Taskfile, compose file and hooks
+follow `~/projects/tbc-localdev-infra/CONVENTIONS.md`.
 
 | What | Command |
 |---|---|
-| Build / start / stop | `task build` / `task up` / `task down` |
-| Re-lock deps after a `pyproject.toml` edit | `task lock` |
+| Build / start / stop / restart | `task build` / `task up` / `task down` / `task restart` |
+| Add / remove a dependency | `task deps:add -- <pkg>` / `task deps:add-dev -- <pkg>` / `task deps:remove -- <pkg>` |
+| Re-lock deps after a `pyproject.toml` edit | `task deps:lock` |
 | Shell in container | `task shell` |
 | Logs | `task logs` |
 | Full suite | `task test` |
 | Unit / integration only | `task test:unit` / `task test:integration` |
 | Single test | `task test -- tests/unit/path/test_x.py::test_name` (`--` forwards to pytest) |
-| Lint / format / typecheck | `task lint` / `task format` / `task typecheck` |
+| Lint / format / format check / typecheck | `task lint` / `task format` / `task format:check` / `task typecheck` |
 | Coverage (HTML in `./htmlcov`) | `task coverage` |
 | Migrate / new migration | `task migrate` / `task makemigration -- "message"` |
 | Release notes for a tag (host) | `task release-notes -- v0.4.1` |

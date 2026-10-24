@@ -1,38 +1,36 @@
 minimum_pre_commit_version: "3.5.0"
 
-# Every hook runs INSIDE the `upmovies-backend` dev container, never on the host: the image
-# is the single source of truth for ruff / pyright / pytest, so a commit is checked against
-# the exact toolchain uv.lock pins, with no host Python or venv involved. This mirrors the
-# Taskfile's EXEC. `-T` disables TTY allocation, which pre-commit's non-interactive run
-# needs. The container must be up (`task up`), and rebuilt after a dependency change
-# (`task build`), for a commit to run its checks.
+# Every hook calls a Taskfile target, and the target runs inside the dev container
+# (tbc-localdev-infra/CONVENTIONS.md). The Taskfile is the only place the toolchain
+# is invoked, so the hooks and `task <x>` can't drift apart. The container must be
+# up (`task up`) and rebuilt after a dependency change (`task build`).
 repos:
   - repo: local
     hooks:
-      - id: ruff-check
-        name: ruff check (container)
-        entry: docker compose exec -T upmovies-backend ruff check src tests
+      - id: lint
+        name: lint (container)
+        entry: task lint
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
 
-      - id: ruff-format
-        name: ruff format --check (container)
-        entry: docker compose exec -T upmovies-backend ruff format --check src tests
+      - id: format
+        name: format --check (container)
+        entry: task format:check
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
 
-      - id: pyright
-        name: pyright (container)
-        entry: docker compose exec -T upmovies-backend pyright src tests
+      - id: typecheck
+        name: typecheck (container)
+        entry: task typecheck
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
 
-      - id: pytest
-        name: pytest (container)
-        entry: docker compose exec -T upmovies-backend pytest
+      - id: test
+        name: test (container)
+        entry: task test
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$

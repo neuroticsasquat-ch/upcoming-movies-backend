@@ -6,7 +6,7 @@
 
 ## How to work in this repo
 
-**Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dependencies install from `uv.lock` via `uv sync --locked`, so to change one, edit `pyproject.toml`, run `task lock`, then `task build` (an edit without re-locking fails the build).
+**Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dependencies install from `uv.lock` via `uv sync --locked`, so to change one, edit `pyproject.toml`, run `task deps:lock`, then `task build` (an edit without re-locking fails the build), or use `task deps:add -- <pkg>` and then `task build`. The Taskfile, compose file and hooks follow the shared localdev contract in `~/projects/tbc-localdev-infra/CONVENTIONS.md`.
 
 ## Production deployments
 
