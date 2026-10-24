@@ -86,10 +86,10 @@ async def reset_database(conn: AsyncConnection, inventory: DatabaseInventory) ->
 
     **Needs a superuser.** `session_replication_role = replica` is what lets the DELETEs run
     in any order (no FK trigger fires, nor any other trigger — TRUNCATE never fired row
-    triggers either), and setting that parameter requires superuser. The dev role (`dev`)
-    and CI's service role (`root`, `POSTGRES_USER` in `.github/workflows/test.yml`) both are;
-    under any other role this fails with "permission denied to set parameter
-    session_replication_role".
+    triggers either), and setting that parameter requires superuser. The dev role (`root` on
+    the tbc-localdev-infra Postgres) and CI's service role (`root`, `POSTGRES_USER` in
+    `.github/workflows/test.yml`) both are; under any other role this fails with "permission
+    denied to set parameter session_replication_role".
 
     Rows another connection has written but not yet committed are not seen, where TRUNCATE
     would have waited for them. No test leaves such a transaction open past its end; one that

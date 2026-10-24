@@ -130,5 +130,5 @@ models for feed/film/calendar/sitemap · `routers/` FastAPI routers.
   `RELEASE_NOTES.md` accumulates per-release chunks and is never rebuilt wholesale. This is the
   one task that runs on the host rather than in the container, because git-cliff reads git
   history and tags; don't call `git-cliff` directly.
-- The frontend is a sibling repo at `../frontend`; read its `AGENTS.md` before
+- The frontend is a sibling repo at `../upcoming-movies-frontend`; read its `AGENTS.md` before
   touching it.

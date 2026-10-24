@@ -8,7 +8,7 @@ Stack: Python 3.13, FastAPI, SQLAlchemy 2 (async) + asyncpg, Alembic, Pydantic v
 
 - Docker.
 - [`go-task`](https://taskfile.dev).
-- The shared localdev infra stack (Postgres 17, Traefik with TLS for `*.localhost`) running on the external `proxy` Docker network.
+- The shared `tbc-localdev-infra` stack (Postgres 17, Traefik with TLS for `*.localhost`) checked out at `~/projects/tbc-localdev-infra`. `task up` starts it; `task infra:up` / `task infra:down` drive it directly.
 
 ## Quick start
 
@@ -16,12 +16,15 @@ Stack: Python 3.13, FastAPI, SQLAlchemy 2 (async) + asyncpg, Alembic, Pydantic v
 # Bring up the shared infra if it isn't already.
 task infra:up
 
-# Create databases and run migrations.
+# Create the upmovies + upmovies_test databases on the shared Postgres.
+cp .env.example .env   # first time only
 task db:init
 
-# Build and start the container.
+# Build and start the container (also starts the shared infra), then migrate.
 task build
 task up
+task migrate
+docker compose restart upmovies-backend   # first run only: it booted before the schema existed
 
 # Verify.
 curl -sk https://api.upmovies.localhost/healthz   # -> {"status":"ok"}
@@ -30,7 +33,7 @@ task test
 
 `task -l` lists every target.
 
-> **Note:** `Taskfile.yml`, `docker-compose.yml`, and related infra files are added in a later task. The quick-start above reflects the intended workflow once those are in place.
+Hooks: `pre-commit install` once. Every hook runs inside the container (`docker compose exec -T upmovies-backend …`), so the container must be up to commit.
 
 ## Development
 

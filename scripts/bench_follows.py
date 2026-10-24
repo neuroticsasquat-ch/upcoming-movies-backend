@@ -5,8 +5,8 @@ container:
     task shell
     python scripts/bench_follows.py 5000 [cards_per_film]
 
-It works in its **own database**, `app_bench` (created on first run), derived from
-`TEST_DATABASE_URL` — never `app_test`, which pytest owns and an orphaned run deadlocks. Each
+It works in its **own database**, `upmovies_bench` (created on first run), derived from
+`TEST_DATABASE_URL` — never `upmovies_test`, which pytest owns and an orphaned run deadlocks. Each
 run drops and rebuilds the four schemas, then Core-inserts one entitled user, N films (each with
 one US wide future release row), N title follows, and `cards_per_film` (default 2) published,
 visible cards per film with summaries — the shape of an imported library whose films have
@@ -41,14 +41,14 @@ from upmovies.app.services.follow_service import _last_activity
 from upmovies.catalog.headline_release import headline_releases
 from upmovies.routers.follows import _to_out
 
-BENCH_DB = "app_bench"
+BENCH_DB = "upmovies_bench"
 SCHEMAS = ("app", "catalog", "news", "ingest")
 RUNS = 3
 GZIP_LEVEL = 6  # what `main.py` gives `GZipMiddleware`; keep the two in step
 
 
 async def ensure_database(url: str) -> None:
-    """Create `app_bench` if it is missing, from the server's maintenance database."""
+    """Create `upmovies_bench` if it is missing, from the server's maintenance database."""
     admin = create_async_engine(
         make_url(url).set(database="postgres"), isolation_level="AUTOCOMMIT"
     )
