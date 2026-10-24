@@ -119,9 +119,14 @@ if [[ -z "${PROD_PG_CONTAINER:-}" ]]; then
   # Every match is collected rather than the first one returned. Taking the first is what
   # made the TVBF mismatch silent: a wrong-but-plausible container looks identical to a
   # right one at this point, and the next thing the script does is DROP SCHEMA locally.
+  #
+  # Candidates are filtered on `.Config.Image`, not `docker ps`'s Image column: once a tag
+  # such as postgres:17-alpine is re-pulled for a newer container, `docker ps` shows every
+  # older container on it by bare image ID, and prod's database (a UUID-named Coolify
+  # container) stopped matching `postgres` at all. The configured image name survives.
   MATCHES=$(ssh "$PROD_SSH" bash -s <<REMOTE || true
 set -uo pipefail
-for c in \$(docker ps --format '{{.Names}}\t{{.Image}}' | awk '/postgres/ {print \$1}' | sort -u); do
+for c in \$(docker ps -q | xargs docker inspect -f '{{.Name}} {{.Config.Image}}' | awk '/postgres/ {sub("^/", "", \$1); print \$1}' | sort -u); do
   u=\$(docker exec "\$c" printenv POSTGRES_USER 2>/dev/null || true)
   d=\$(docker exec "\$c" printenv POSTGRES_DB 2>/dev/null || true)
   [[ -n "\$u" ]] || continue
