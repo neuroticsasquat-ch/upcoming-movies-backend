@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`CONTEXT.md`** — the domain glossary. Terms there are *enforced in code* (e.g. `provenance` vs
   `news_backed`, "total stage failure" vs partial failure). When naming a concept in code, tests, or
   a PR, use the glossary's term and avoid the listed synonyms.
-- **`docs/adr/`** — 24 ADRs covering retrieval, clustering, LLM routing, sweep, and feed grouping.
+- **`docs/adr/`** — 25 ADRs covering retrieval, clustering, LLM routing, sweep, and feed grouping.
   Read the ones touching your area; flag explicitly if your change contradicts one.
 - **`docs/specs/NEU-*.md`** — per-ticket specs (`specs_dir: docs`). Implementation work is spec-driven.
 
@@ -22,11 +22,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host — always via `task`, which
 `docker compose exec`s into the backend service. Source is bind-mounted, so uvicorn `--reload` picks
-up edits; changes to `pyproject.toml` require `task build`.
+up edits. Dependencies install from `uv.lock` (`uv sync --locked`, into the container's system
+Python), so the image runs exactly the set CI tests. To change a dependency, edit `pyproject.toml`,
+run `task lock`, then `task build`; an edit without re-locking fails the build.
 
 | What | Command |
 |---|---|
 | Build / start / stop | `task build` / `task up` / `task down` |
+| Re-lock deps after a `pyproject.toml` edit | `task lock` |
 | Shell in container | `task shell` |
 | Logs | `task logs` |
 | Full suite | `task test` |

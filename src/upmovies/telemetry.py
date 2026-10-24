@@ -16,14 +16,16 @@ implementation.
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import unquote
 
 import sentry_sdk
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+from sentry_sdk.integrations import Integration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 
 log = logging.getLogger(__name__)
@@ -75,9 +77,21 @@ def resolve_telemetry(env: Mapping[str, str]) -> Telemetry:
     )
 
 
-def init_sentry(env: Mapping[str, str] = os.environ) -> Telemetry:
+def pipeline_integrations() -> list[Integration]:
+    """The scheduled tasks' integrations: no FastAPI, and logging kept as breadcrumbs only.
+
+    The pipelines `log.exception` once per failed item and carry on, so the default logging
+    integration would turn a thin day into an alert per film. A task reports a crash, and only a
+    crash — `pipeline_run` captures that itself (ADR-0025).
+    """
+    return [SqlalchemyIntegration(), LoggingIntegration(event_level=None)]
+
+
+def init_sentry(
+    env: Mapping[str, str] = os.environ, *, integrations: Sequence[Integration] | None = None
+) -> Telemetry:
     """Initialise the Sentry SDK (pointed at Bugsink) when `SENTRY_DSN` is set, and log the
-    resolved release and environment either way."""
+    resolved release and environment either way. `integrations` defaults to the API's."""
     telemetry = resolve_telemetry(env)
     dsn = env.get("SENTRY_DSN")
     log.info(
@@ -100,7 +114,9 @@ def init_sentry(env: Mapping[str, str] = os.environ) -> Telemetry:
     if dsn:
         sentry_sdk.init(
             dsn=dsn,
-            integrations=[FastApiIntegration(), SqlalchemyIntegration()],
+            integrations=list(integrations)
+            if integrations is not None
+            else [FastApiIntegration(), SqlalchemyIntegration()],
             traces_sample_rate=0.1,
             environment=telemetry.environment,
             release=telemetry.release,

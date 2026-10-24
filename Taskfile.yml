@@ -18,6 +18,12 @@ tasks:
     desc: Rebuild the backend image
     cmds:
       - "{{.COMPOSE}} build"
+  lock:
+    desc: Re-resolve uv.lock after a pyproject.toml change (then `task build`)
+    # A throwaway container with the repo mounted, so the lockfile lands on the host
+    # whether or not the backend service is running.
+    cmds:
+      - docker run --rm -v "$PWD":/app -w /app ghcr.io/astral-sh/uv:python3.13-bookworm-slim uv lock {{.CLI_ARGS}}
   logs:
     desc: Follow backend logs
     cmds:

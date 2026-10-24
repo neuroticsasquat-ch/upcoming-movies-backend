@@ -48,13 +48,13 @@ Everything runs inside the container via `task`:
 | `task migrate` | `alembic upgrade head` |
 | `task makemigration -- "msg"` | autogenerate a new migration |
 
-Source is bind-mounted into the container so uvicorn's `--reload` picks up edits without a rebuild. Dependency changes (`pyproject.toml`) require `task build`.
+Source is bind-mounted into the container so uvicorn's `--reload` picks up edits without a rebuild. Dependencies install from `uv.lock`: after a `pyproject.toml` change, run `task lock`, then `task build`.
 
 ## Errors and observability
 
 Two signals, one build identity (the ops repo's instrumentation contract, NEU-1590):
 
-- **Errors** from the API go to Bugsink through the Sentry SDK (`SENTRY_DSN` holds the Bugsink DSN; unset disables it). Bugsink alerts Discord `#alerts` on a new issue, a regression or an unmute. The scheduled tasks do not initialise the SDK (ADR-0010); their failures surface through the Uptime Kuma deadman and, when instrumented, their span (below).
+- **Errors** from the API and the scheduled tasks go to Bugsink through the Sentry SDK (`SENTRY_DSN` holds the Bugsink DSN; unset disables it). Bugsink alerts Discord `#alerts` on a new issue, a regression or an unmute. A scheduled task reports crashes only (ADR-0025): see below.
 - **Traces, logs and metrics** go to SigNoz through `opentelemetry-instrument` (the Dockerfile's `CMD`).
 
 Sentry's `release` and `environment` are read back from OTel's own resource attributes in `src/upmovies/telemetry.py`, so the two always agree: `release == service.version == SOURCE_COMMIT` and `environment == deployment.environment`. When the resource attributes carry a value it is used verbatim, `unknown` included, so Sentry never reports a build SigNoz did not. Without them (local dev) the fallbacks are `SOURCE_COMMIT`, then `GIT_SHA`, then `unknown` for the release, and `ENVIRONMENT`, then `development` for the environment. Startup logs the resolved pair beside what OTel was given — this line is the config dump to check after a deploy:
@@ -75,6 +75,14 @@ The deployment must set:
 `OTEL_SERVICE_NAME`, if set in Coolify, overrides the `service.name` above — leave it unset. Startup warns when `OTEL_EXPORTER_OTLP_ENDPOINT` is set but `OTEL_RESOURCE_ATTRIBUTES` is missing `service.version` or `deployment.environment`.
 
 **Scheduled tasks.** `python -m upmovies.pipeline_run <mode>` opens one span per task, and a stage that crashes is recorded on it (`span.record_exception()`, then an error status) before its run row is finalized `failed`. That span exports only when the Coolify task's command is wrapped the way the Dockerfile's `CMD` is — `opentelemetry-instrument python -m upmovies.pipeline_run <mode>`; unwrapped, it is a no-op and the Uptime Kuma deadman remains the only signal.
+
+A scheduled task also initialises the SDK, with the same release and environment as the API, and reports **one event per crashed run**: a stage that is finalized `failed` because it raised, or an exception that escapes the task. Each event is tagged `pipeline_mode=<mode>`. The per-item failures the pipelines log and carry on past are breadcrumbs, never events, and a stage that ends `failed` on a threshold (no crash) is not an event either — the deadman and SigNoz cover those (ADR-0025). To prove the path after a deploy:
+
+```
+python -m upmovies.pipeline_run raise-test-error
+```
+
+It raises `PipelineTestError`, which should appear in Bugsink as its own issue, tagged `pipeline_mode=raise-test-error`.
 
 **Test error.** `POST /admin/debug/raise-test-error` (bearer `ADMIN_TOKEN`) is the `upmovies.debug.raise-test-error` trigger: it raises `TelemetryTestError`, answers 500, and should appear in Bugsink as its own issue and then in Discord `#alerts`. Against production:
 
