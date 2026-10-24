@@ -6,13 +6,14 @@ services:
     build:
       context: .
       target: dev
-    container_name: upmovies_backend
     # The whole repo, so tests/, scripts/, htmlcov/ and uv.lock are live in the container
     # and uvicorn --reload sees every edit. It also puts .env where pydantic-settings looks
     # for it, which is how the app gets every optional setting; tests/conftest.py turns that
     # off for the suite.
     volumes:
       - .:/app
+      # Hide a host IDE venv; dependencies live in the image's system Python.
+      - /app/.venv
     # Deliberately only what CI's test job sets: the process environment is all the suite
     # sees, and a test asserting a code default fails on anything else here. No `env_file`
     # for the same reason. The DB URLs name the shared infra, so they override .env; the

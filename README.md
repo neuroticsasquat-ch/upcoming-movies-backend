@@ -20,11 +20,10 @@ task infra:up
 cp .env.example .env   # first time only
 task db:init
 
-# Build and start the container (also starts the shared infra), then migrate.
+# Build and start the container, then migrate.
 task build
-task up
 task migrate
-docker compose restart upmovies-backend   # first run only: it booted before the schema existed
+task restart                              # first run only: it booted before the schema existed
 
 # Verify.
 curl -sk https://api.upmovies.localhost/healthz   # -> {"status":"ok"}
@@ -33,7 +32,7 @@ task test
 
 `task -l` lists every target.
 
-Hooks: `pre-commit install` once. Every hook runs inside the container (`docker compose exec -T upmovies-backend …`), so the container must be up to commit.
+Hooks: `pre-commit install` once. Every hook calls a `task` target that runs inside the container, so the container must be up to commit.
 
 ## Development
 
@@ -41,17 +40,18 @@ Everything runs inside the container via `task`:
 
 | Task | Purpose |
 |---|---|
-| `task up` / `task down` / `task build` | container lifecycle |
+| `task up` / `task down` / `task restart` / `task build` | container lifecycle |
 | `task logs` | stream container logs |
 | `task shell` | bash inside the container |
 | `task test` | full pytest suite |
-| `task lint` / `task format` | `ruff check` / `ruff format` |
+| `task lint` / `task format` / `task format:check` | `ruff check` / `ruff format` / `ruff format --check` |
 | `task typecheck` | `pyright` |
 | `task coverage` | pytest with coverage |
 | `task migrate` | `alembic upgrade head` |
 | `task makemigration -- "msg"` | autogenerate a new migration |
+| `task deps:add -- <pkg>` / `task deps:add-dev -- <pkg>` / `task deps:remove -- <pkg>` | change a dependency (then `task build`) |
 
-Source is bind-mounted into the container so uvicorn's `--reload` picks up edits without a rebuild. Dependencies install from `uv.lock`: after a `pyproject.toml` change, run `task lock`, then `task build`.
+Source is bind-mounted into the container so uvicorn's `--reload` picks up edits without a rebuild. Dependencies install from `uv.lock`: after a `pyproject.toml` change, run `task deps:lock`, then `task build`.
 
 ## Errors and observability
 
