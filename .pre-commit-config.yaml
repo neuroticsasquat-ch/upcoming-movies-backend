@@ -1,32 +1,38 @@
 minimum_pre_commit_version: "3.5.0"
 
+# Every hook runs INSIDE the `upmovies-backend` dev container, never on the host: the image
+# is the single source of truth for ruff / pyright / pytest, so a commit is checked against
+# the exact toolchain uv.lock pins, with no host Python or venv involved. This mirrors the
+# Taskfile's EXEC. `-T` disables TTY allocation, which pre-commit's non-interactive run
+# needs. The container must be up (`task up`), and rebuilt after a dependency change
+# (`task build`), for a commit to run its checks.
 repos:
   - repo: local
     hooks:
       - id: ruff-check
-        name: ruff check
-        entry: docker compose -f ../docker-compose.yml exec -T api ruff check src tests
+        name: ruff check (container)
+        entry: docker compose exec -T upmovies-backend ruff check src tests
         language: system
         pass_filenames: false
         files: \.py$
 
       - id: ruff-format
-        name: ruff format --check
-        entry: docker compose -f ../docker-compose.yml exec -T api ruff format --check src tests
+        name: ruff format --check (container)
+        entry: docker compose exec -T upmovies-backend ruff format --check src tests
         language: system
         pass_filenames: false
         files: \.py$
 
       - id: pyright
-        name: pyright
-        entry: docker compose -f ../docker-compose.yml exec -T api pyright src tests
+        name: pyright (container)
+        entry: docker compose exec -T upmovies-backend pyright src tests
         language: system
         pass_filenames: false
         files: \.py$
 
       - id: pytest
-        name: pytest
-        entry: docker compose -f ../docker-compose.yml exec -T api pytest
+        name: pytest (container)
+        entry: docker compose exec -T upmovies-backend pytest
         language: system
         pass_filenames: false
         files: \.py$

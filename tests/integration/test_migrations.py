@@ -40,7 +40,7 @@ async def _alembic(url: str, cmd: str, revision: str) -> None:
     #   log handlers and disable the app's loggers for the rest of the run.
     # - `env.py` calls `asyncio.run()`, which fails under pytest-asyncio's running loop, so the
     #   command runs in a worker thread, which has no running loop of its own.
-    # `env.py` prefers `attributes["url"]` to the lru-cached settings, which point at app_test.
+    # `env.py` prefers `attributes["url"]` to the lru-cached settings, which point at upmovies_test.
     config = Config()
     config.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
     config.attributes["url"] = url

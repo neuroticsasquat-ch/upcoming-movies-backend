@@ -29,7 +29,7 @@ pytest_plugins = [
 
 from upmovies.config import Settings  # noqa: E402
 
-# The workspace compose bind-mounts the whole repo at /app, so `.env` -- the local template
+# docker-compose.yml bind-mounts the whole repo at /app, so `.env` -- the local template
 # carrying every optional setting -- now sits exactly where pydantic-settings looks for it.
 # A test that clears a variable to assert a default, or to assert the required-field error,
 # would read the value straight back out of that file. The process environment is the only
@@ -77,13 +77,13 @@ def cheap_password_hasher() -> Iterator[PasswordHasher]:
 @pytest.fixture(scope="session")
 async def test_engine():
     url = os.environ["TEST_DATABASE_URL"]
-    # `synchronous_commit = off` on the suite's own connections to `app_test` (NEU-1506), and on
-    # nothing else: the dev `app` database never sees it. It is for the row-by-row committers
-    # -- the import runners and sweep phases commit per item, and a one-row commit drops from
-    # ~2.3 ms to ~0.9 ms -- not for the teardown, which it does not speed up. A crash can lose
-    # the last few commits but never corrupts anything, which a throwaway test database does
-    # not mind. Deliberately not `fsync = off`: that is server-wide, would put `app` at risk
-    # too, and lives in the Coder-rendered `docker-compose.yml`.
+    # `synchronous_commit = off` on the suite's own connections to `upmovies_test` (NEU-1506),
+    # and on nothing else: the dev `upmovies` database never sees it. It is for the row-by-row
+    # committers -- the import runners and sweep phases commit per item, and a one-row commit
+    # drops from ~2.3 ms to ~0.9 ms -- not for the teardown, which it does not speed up. A crash
+    # can lose the last few commits but never corrupts anything, which a throwaway test database
+    # does not mind. Deliberately not `fsync = off`: that is server-wide, and the server is the
+    # shared tbc-localdev-infra Postgres, so it would put every local project's databases at risk.
     engine = create_async_engine(
         url,
         pool_pre_ping=True,
@@ -123,11 +123,11 @@ async def db_inventory(test_engine) -> DatabaseInventory:
 
 @pytest.fixture
 async def session(test_engine, db_inventory) -> AsyncIterator[AsyncSession]:
-    """A session on `app_test`; afterwards every table in the four schemas is emptied and every
+    """A session on `upmovies_test`; afterwards every table in the four schemas is emptied and every
     sequence restarted, whichever session wrote the rows (`tests/fixtures/db.py`).
 
     The reset needs a **superuser**: it sets `session_replication_role`, which no other role
-    may. The dev role (`dev`) and CI's service role (`root`) both are; a non-superuser role
+    may. The dev role and CI's service role (`root` in both) are; a non-superuser role
     fails here with "permission denied to set parameter session_replication_role"."""
     maker = async_sessionmaker(test_engine, expire_on_commit=False)
     async with maker() as s:
