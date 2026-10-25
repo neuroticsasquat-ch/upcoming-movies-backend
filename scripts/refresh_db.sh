@@ -20,7 +20,7 @@
 #   scripts/refresh_db.sh [content|app|both]      # or: task db:refresh
 #
 # Configuration lives in the repo-root .env (gitignored) — see .env.example:
-#   PROD_SSH             required, e.g. tom@ssh.neuroticsasquat.ch
+#   PROD_SSH             required, e.g. tom@hetzner-01
 #   PROD_PG_CONTAINER    optional; auto-discovered by looking for a `catalog.film` relation
 #                        alongside all four schemas (a bare `catalog` schema is not unique to
 #                        this app — the sibling TVBF stack has one)
