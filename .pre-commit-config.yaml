@@ -1,32 +1,36 @@
 minimum_pre_commit_version: "3.5.0"
 
+# Every hook calls a Taskfile target, and the target runs inside the dev container
+# (tbc-localdev-infra/CONVENTIONS.md). The Taskfile is the only place the toolchain
+# is invoked, so the hooks and `task <x>` can't drift apart. The container must be
+# up (`task up`) and rebuilt after a dependency change (`task build`).
 repos:
   - repo: local
     hooks:
-      - id: ruff-check
-        name: ruff check
-        entry: docker compose -f ../docker-compose.yml exec -T api ruff check src tests
+      - id: lint
+        name: lint (container)
+        entry: task lint
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
 
-      - id: ruff-format
-        name: ruff format --check
-        entry: docker compose -f ../docker-compose.yml exec -T api ruff format --check src tests
+      - id: format
+        name: format --check (container)
+        entry: task format:check
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
 
-      - id: pyright
-        name: pyright
-        entry: docker compose -f ../docker-compose.yml exec -T api pyright src tests
+      - id: typecheck
+        name: typecheck (container)
+        entry: task typecheck
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
 
-      - id: pytest
-        name: pytest
-        entry: docker compose -f ../docker-compose.yml exec -T api pytest
+      - id: test
+        name: test (container)
+        entry: task test
         language: system
         pass_filenames: false
-        files: \.py$
+        files: \.py$|^pyproject\.toml$|^uv\.lock$

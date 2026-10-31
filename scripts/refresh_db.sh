@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Refresh the local `app` database from production, one schema group at a time.
+# Refresh the local `upmovies` database from production, one schema group at a time.
 #
 #   content : catalog + news + ingest — films, stories, events, run history.
 #             Local app/user data is left completely alone. This is the default.
@@ -20,15 +20,15 @@
 #   scripts/refresh_db.sh [content|app|both]      # or: task db:refresh
 #
 # Configuration lives in the repo-root .env (gitignored) — see .env.example:
-#   PROD_SSH             required, e.g. tom@ssh.neuroticsasquat.ch
+#   PROD_SSH             required, e.g. tom@hetzner-01
 #   PROD_PG_CONTAINER    optional; auto-discovered by looking for a `catalog.film` relation
 #                        alongside all four schemas (a bare `catalog` schema is not unique to
 #                        this app — the sibling TVBF stack has one)
 #   PROD_PG_USER         optional; defaults to the container's POSTGRES_USER
 #   PROD_PG_DB           optional; defaults to the container's POSTGRES_DB
-#   LOCAL_PG_CONTAINER   optional; defaults to the workspace compose's `db` container
-#   LOCAL_DB             optional; defaults to app
-#   LOCAL_DB_USER        optional; defaults to dev
+#   LOCAL_PG_CONTAINER   optional; defaults to tbc_postgresql_db (tbc-localdev-infra)
+#   LOCAL_DB             optional; defaults to upmovies
+#   LOCAL_DB_USER        optional; defaults to root
 #   FORCE                optional; set to 1 to skip the app-mode confirmation prompt
 
 set -euo pipefail
@@ -55,22 +55,10 @@ case "$MODE" in
     ;;
 esac
 
-# The workspace compose owns the local Postgres. Its container name is derived from the
-# workspace directory rather than fixed, so it is discovered through compose instead of
-# hardcoded: renaming the workspace must not silently point the restore at nothing. Still
-# overridable, for a Postgres this compose does not manage.
-WORKSPACE_COMPOSE="$REPO_ROOT/../docker-compose.yml"
-if [[ -z "${LOCAL_PG_CONTAINER:-}" ]]; then
-  LOCAL_PG_CONTAINER=$(docker compose -f "$WORKSPACE_COMPOSE" ps -q db 2>/dev/null || true)
-fi
-LOCAL_DB="${LOCAL_DB:-app}"
-LOCAL_DB_USER="${LOCAL_DB_USER:-dev}"
-
-if [[ -z "$LOCAL_PG_CONTAINER" ]]; then
-  echo "ERROR: no local Postgres container found." >&2
-  echo "  Start the workspace stack with 'task up', or set LOCAL_PG_CONTAINER in $ENV_FILE." >&2
-  exit 1
-fi
+# The local Postgres is the shared tbc-localdev-infra one, which pins its container name.
+LOCAL_PG_CONTAINER="${LOCAL_PG_CONTAINER:-tbc_postgresql_db}"
+LOCAL_DB="${LOCAL_DB:-upmovies}"
+LOCAL_DB_USER="${LOCAL_DB_USER:-root}"
 # How container discovery recognises *this* app's database among the several stacks on the
 # prod host. A bare schema name is not enough: `app` obviously collides, and `catalog` does
 # too — the sibling TVBF stack has a `catalog` schema and was silently matched first, which
@@ -103,7 +91,7 @@ echo "→ Refreshing local '$LOCAL_DB' schema(s): ${SCHEMAS[*]}"
 
 if ! docker inspect -f '{{.State.Running}}' "$LOCAL_PG_CONTAINER" 2>/dev/null | grep -q true; then
   echo "ERROR: local Postgres container '$LOCAL_PG_CONTAINER' is not running." >&2
-  echo "  Start the workspace stack first: task up" >&2
+  echo "  Start the shared infra first: task infra:up" >&2
   exit 1
 fi
 
@@ -131,9 +119,14 @@ if [[ -z "${PROD_PG_CONTAINER:-}" ]]; then
   # Every match is collected rather than the first one returned. Taking the first is what
   # made the TVBF mismatch silent: a wrong-but-plausible container looks identical to a
   # right one at this point, and the next thing the script does is DROP SCHEMA locally.
+  #
+  # Candidates are filtered on `.Config.Image`, not `docker ps`'s Image column: once a tag
+  # such as postgres:17-alpine is re-pulled for a newer container, `docker ps` shows every
+  # older container on it by bare image ID, and prod's database (a UUID-named Coolify
+  # container) stopped matching `postgres` at all. The configured image name survives.
   MATCHES=$(ssh "$PROD_SSH" bash -s <<REMOTE || true
 set -uo pipefail
-for c in \$(docker ps --format '{{.Names}}\t{{.Image}}' | awk '/postgres/ {print \$1}' | sort -u); do
+for c in \$(docker ps -q | xargs docker inspect -f '{{.Name}} {{.Config.Image}}' | awk '/postgres/ {sub("^/", "", \$1); print \$1}' | sort -u); do
   u=\$(docker exec "\$c" printenv POSTGRES_USER 2>/dev/null || true)
   d=\$(docker exec "\$c" printenv POSTGRES_DB 2>/dev/null || true)
   [[ -n "\$u" ]] || continue
@@ -182,10 +175,9 @@ if (( PROD_MAJOR > LOCAL_MAJOR )); then
   echo "  A version mismatch is more often the wrong container than a real upgrade — the" >&2
   echo "  prod host runs several stacks and they are not all on the same major." >&2
   echo "" >&2
-  echo "  If it really is the right container, the workspace compose pins the local image" >&2
-  echo "  and the template renders that file, so a major bump is a template change, not an" >&2
-  echo "  edit here — and it makes the existing pgdata volume unreadable, so it also means" >&2
-  echo "  dumping and restoring what that volume holds." >&2
+  echo "  If it really is the right container, note that $LOCAL_PG_CONTAINER is SHARED by" >&2
+  echo "  every local stack. A major bump makes its existing PGDATA unreadable, so it means" >&2
+  echo "  dumping and restoring every database on it, not editing an image tag." >&2
   exit 1
 fi
 

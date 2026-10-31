@@ -6,7 +6,7 @@
 
 ## How to work in this repo
 
-**Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dependencies install from `uv.lock` via `uv sync --locked`, so to change one, edit `pyproject.toml`, run `task lock`, then `task build` (an edit without re-locking fails the build).
+**Everything runs inside the Docker container via `task`.** Never run `pytest`, `ruff`, `pyright`, `alembic`, or `python` on the host. Source is bind-mounted; dependencies install from `uv.lock` via `uv sync --locked`, so to change one, edit `pyproject.toml`, run `task deps:lock`, then `task build` (an edit without re-locking fails the build), or use `task deps:add -- <pkg>` and then `task build`. The Taskfile, compose file and hooks follow the shared localdev contract in `~/projects/tbc-localdev-infra/CONVENTIONS.md`.
 
 ## Production deployments
 
@@ -210,7 +210,7 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
 - HTTP mocking via **respx** — never hit the live network.
 - Integration tests use `session` fixture against test DB. Re-read after Core-level upserts with `execution_options={"populate_existing": True}`.
 - Running a single integration test file in isolation errors (pytest-asyncio quirk). Run the whole suite or scope to directory.
-- Stale container → async-fixture errors: `docker compose -f ../docker-compose.yml restart api`.
+- Stale container → async-fixture errors: `docker compose restart upmovies-backend`.
 
 ## Gotchas
 
@@ -282,13 +282,13 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   Note that `NEU-1356-letterboxd-import.md` §4 originally asserted the limiter was already
   process-wide *and* that an import shared the daily chain's budget; it carries a dated
   correction — the chain was always a separate process, so no process-wide limiter reaches it.
-- **Long-running container holds the env it was created with.** After any env change: `docker compose -f ../docker-compose.yml up -d --force-recreate api` and `printenv` to confirm.
+- **Long-running container holds the env it was created with.** After any env change: `docker compose up -d --force-recreate upmovies-backend` and `printenv` to confirm.
 - **Migrations:** add model column first (tests get it via `create_all`), then `task makemigration -- "msg"`, review, `task migrate`. Autogenerate never emits `CheckConstraint` — write every `ck_*` by hand, and give any hand-named constraint the same `name=` in the model: the parity test (`tests/integration/test_migrations.py`) compares names, so a mismatch fails `task test`.
 
 
 ## Sibling repo
 
-The frontend lives at `../frontend`. Read its `AGENTS.md` before working on frontend code.
+The frontend lives at `../upcoming-movies-frontend`. Read its `AGENTS.md` before working on frontend code.
 
 ## Conventions
 

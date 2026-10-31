@@ -1,0 +1,54 @@
+# Local dev only (prod is docker-compose.prod.yml, deployed by Coolify). Postgres and
+# Traefik come from the shared tbc-localdev-infra stack (`task infra:up`), reached over
+# its external `proxy` network.
+services:
+  upmovies-backend:
+    build:
+      context: .
+      target: dev
+    # The whole repo, so tests/, scripts/, htmlcov/ and uv.lock are live in the container
+    # and uvicorn --reload sees every edit. It also puts .env where pydantic-settings looks
+    # for it, which is how the app gets every optional setting; tests/conftest.py turns that
+    # off for the suite.
+    volumes:
+      - .:/app
+      # Hide a host IDE venv; dependencies live in the image's system Python.
+      - /app/.venv
+    # Deliberately only what CI's test job sets: the process environment is all the suite
+    # sees, and a test asserting a code default fails on anything else here. No `env_file`
+    # for the same reason. The DB URLs name the shared infra, so they override .env; the
+    # required secrets interpolate from .env, falling back to placeholders.
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies"
+      TEST_DATABASE_URL: "postgresql+asyncpg://root:root@tbc_postgresql_db:5432/upmovies_test"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-dev-secret-change-me}"
+      TMDB_API_KEY: "${TMDB_API_KEY:-dev-tmdb-key}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-test-anthropic-key}"
+    # No published port: Traefik is the only route in from the host, which is what makes the
+    # dev CMD's `--forwarded-allow-ips *` safe. The frontend reaches this service directly
+    # on the proxy network as http://upmovies-backend:8000.
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.upmovies-backend.rule=Host(`api.upmovies.localhost`)"
+      - "traefik.http.routers.upmovies-backend.tls=true"
+      - "traefik.http.routers.upmovies-backend.entrypoints=websecure"
+      - "traefik.http.services.upmovies-backend.loadbalancer.server.port=8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=2).status == 200 else 1)
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true

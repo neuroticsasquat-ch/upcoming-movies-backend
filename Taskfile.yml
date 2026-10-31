@@ -1,24 +1,57 @@
 version: '3'
 
+# Postgres and Traefik are the shared stack in the tbc-localdev-infra repo
+# (~/projects/tbc-localdev-infra); `task infra:up` starts it and creates the external
+# `proxy` network. Optional, so a checkout without it (CI) still runs every task that
+# doesn't need it.
+includes:
+  infra:
+    taskfile: ~/projects/tbc-localdev-infra/Taskfile.yml
+    dir: ~/projects/tbc-localdev-infra
+    optional: true
+
 vars:
-  COMPOSE: "docker compose -f ../docker-compose.yml"
-  SVC: "api"
-  EXEC: "docker compose -f ../docker-compose.yml exec api"
+  COMPOSE: "docker compose"
+  SVC: "upmovies-backend"
+  EXEC: "{{.COMPOSE}} exec {{.SVC}}"
 
 tasks:
   up:
-    desc: Start the backend container (requires infra to be up)
+    desc: Start the shared infra, then the backend container
     cmds:
+      - task: infra:up
       - "{{.COMPOSE}} up -d"
   down:
-    desc: Stop the backend container
+    desc: Stop the backend container (leaves the shared infra running)
     cmds:
       - "{{.COMPOSE}} down"
+  restart:
+    desc: Restart the backend container
+    cmds:
+      - "{{.COMPOSE}} restart {{.SVC}}"
   build:
-    desc: Rebuild the backend image
+    desc: Rebuild the backend image (installs uv.lock) and recreate the container
     cmds:
       - "{{.COMPOSE}} build"
-  lock:
+      - "{{.COMPOSE}} up -d"
+  # `--no-sync` on all three: the image is where dependencies get installed, and
+  # `uv remove`'s sync is exact without the `dev` extra, so it would strip pytest, ruff
+  # and pyright out of the running container. The change lands with `task build`.
+  deps:add:
+    desc: 'Add a dependency (task deps:add -- <pkg>), then `task build`'
+    cmds:
+      - "{{.EXEC}} uv add --no-sync {{.CLI_ARGS}}"
+  deps:add-dev:
+    desc: 'Add a dev dependency (task deps:add-dev -- <pkg>), then `task build`'
+    # Dev tools live in the `dev` optional extra, not a dependency group, so `--optional
+    # dev` rather than `--dev`.
+    cmds:
+      - "{{.EXEC}} uv add --no-sync --optional dev {{.CLI_ARGS}}"
+  deps:remove:
+    desc: 'Remove a dependency (task deps:remove -- <pkg>; add `--optional dev` for a dev one), then `task build`'
+    cmds:
+      - "{{.EXEC}} uv remove --no-sync {{.CLI_ARGS}}"
+  deps:lock:
     desc: Re-resolve uv.lock after a pyproject.toml change (then `task build`)
     # A throwaway container with the repo mounted, so the lockfile lands on the host
     # whether or not the backend service is running.
@@ -37,12 +70,12 @@ tasks:
     cmds:
       - "{{.COMPOSE}} ps"
   db:init:
-    desc: Create the app and app_test databases in the workspace Postgres (idempotent)
+    desc: Create the upmovies and upmovies_test databases in the shared Postgres (idempotent)
     cmds:
       - |
-        for db in app app_test; do
-          {{.COMPOSE}} exec -T db psql -U dev -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
-            || {{.COMPOSE}} exec -T db psql -U dev -d postgres -c "CREATE DATABASE $db"
+        for db in upmovies upmovies_test; do
+          docker exec tbc_postgresql_db psql -U root -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
+            || docker exec tbc_postgresql_db psql -U root -d postgres -c "CREATE DATABASE $db"
         done
   db:refresh:
     desc: 'Refresh local catalog/news/ingest from prod (local app + user data preserved)'
@@ -84,6 +117,10 @@ tasks:
     desc: Run ruff format
     cmds:
       - "{{.EXEC}} ruff format src tests"
+  format:check:
+    desc: Check ruff formatting without writing
+    cmds:
+      - '{{.EXEC}} ruff format --check {{.CLI_ARGS | default "src tests"}}'
   typecheck:
     desc: Run pyright static type check
     cmds:
