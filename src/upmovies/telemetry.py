@@ -24,6 +24,7 @@ import sentry_sdk
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from sentry_sdk.integrations import Integration
+from sentry_sdk.integrations.asyncpg import AsyncPGIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
@@ -112,10 +113,20 @@ def init_sentry(
     """Initialise the Sentry SDK (pointed at Bugsink) when `SENTRY_DSN` is set, and log the
     resolved release and environment either way. `integrations` defaults to the API's.
 
-    Errors only, no tracing: no `traces_sample_rate` is what keeps the SDK's tracing off
-    (NEU-2290). Bugsink discards transactions and spans, so any rate above zero sent envelopes
-    nobody could read, and the integrations' tracing cost the API ~10% of its CPU at saturation
-    (NEU-2286 §6). Traces are OTel's, in SigNoz.
+    Errors only. Bugsink keeps errors and discards transactions, spans and sessions, so each
+    option below turns off something that either sends what it drops or duplicates another
+    integration, all of it paid for per request (NEU-2286 §6, PR #452's bench):
+
+    - no `traces_sample_rate`, which keeps the SDK's tracing off (NEU-2290). Traces are OTel's,
+      in SigNoz;
+    - `auto_session_tracking=False`: the ASGI integration tracked a session around every request
+      and posted the aggregate once a minute (NEU-2295);
+    - `AsyncPGIntegration` disabled: the SDK enables it by default, and its per-query breadcrumbs
+      repeat the SQLAlchemy integration's (NEU-2295). SQLAlchemy's stay, as an error's database
+      context.
+
+    The scheduled tasks share the options. Only the `asyncpg` one changes anything for them:
+    session tracking is the ASGI integration's, so they never sent sessions.
     """
     telemetry = resolve_telemetry(env)
     dsn = env.get("SENTRY_DSN")
@@ -142,6 +153,8 @@ def init_sentry(
             integrations=list(integrations)
             if integrations is not None
             else [FastApiIntegration(), SqlalchemyIntegration()],
+            disabled_integrations=[AsyncPGIntegration()],
+            auto_session_tracking=False,
             environment=telemetry.environment,
             release=telemetry.release,
             event_scrubber=event_scrubber(),

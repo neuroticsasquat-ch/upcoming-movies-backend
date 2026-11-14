@@ -1,7 +1,8 @@
 # ADR-0028 — The API sheds overload in one process instead of adding workers
 
-**Status:** Accepted 2026-11-10 (NEU-2271), amended 2026-11-13 (NEU-2285) · **Spec:**
-`../specs/NEU-2271-db-pool-fail-fast.md`, `../specs/NEU-2285-in-flight-cap.md`
+**Status:** Accepted 2026-11-10 (NEU-2271), amended 2026-11-13 (NEU-2285) and 2026-11-14
+(NEU-2291) · **Spec:** `../specs/NEU-2271-db-pool-fail-fast.md`,
+`../specs/NEU-2285-in-flight-cap.md`
 
 ## Context
 
@@ -63,6 +64,15 @@ the same `503 overloaded` + `Retry-After`, before routing, dependencies or the d
 `/healthz` is exempt and never counted. A shed request costs the loop almost nothing, so the
 loop stays short enough for the probe to be answered and the container stays in rotation,
 serving the busy page instead of a proxy error.
+
+> **Amended 2026-11-14 (NEU-2291): the cap's default is now 30, the pool's size.** NEU-2286
+> measured what the 60 above had reasoned: the process saturates at about 10 in flight, so
+> slots past that add only waiting. In an open-loop replay of the crawl at 1.1–1.4× its
+> admissions in prod terms, 30 kept the same throughput as 60, halved admitted latency and
+> missed no `/healthz` probe in three runs (60 missed six in one). With admission equal to the
+> pool, no admitted request waits for a connection, so every overload answer is an immediate
+> shed rather than the pool's 503 after 3 s. Evidence:
+> `../measurements/2026-11-13-neu-2286-api-throughput.md` §3, §4, §7.
 
 Rejected: uvicorn's `--limit-concurrency`, which counts connections (Traefik holds keep-alives
 open) and answers a plain-text 503 the frontend can't tell from an outage; and loosening the

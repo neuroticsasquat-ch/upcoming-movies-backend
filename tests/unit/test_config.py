@@ -714,6 +714,25 @@ def test_db_pool_settings_read_their_env_vars(monkeypatch):
     assert (s.db_pool_size, s.db_max_overflow, s.db_pool_timeout) == (4, 0, 0.5)
 
 
+def test_the_in_flight_cap_defaults_to_the_pool(monkeypatch):
+    """NEU-2291, D-2285.2: 30, measured by NEU-2286. The process saturates at ~10 in flight, so
+    past that a slot adds only waiting; at the pool's 30 an admitted request never waits for a
+    connection, and every overload answer is an immediate shed rather than a 3 s pool 503."""
+    _set_required(monkeypatch)
+    for key in ("MAX_IN_FLIGHT_REQUESTS", "DB_POOL_SIZE", "DB_MAX_OVERFLOW"):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.max_in_flight_requests == 30
+    assert s.max_in_flight_requests == s.db_pool_size + s.db_max_overflow
+
+
+def test_the_in_flight_cap_reads_its_env_var(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MAX_IN_FLIGHT_REQUESTS", "5")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.max_in_flight_requests == 5
+
+
 def test_the_app_engine_is_built_from_the_pool_settings():
     """`db.py` passes the three settings through; nothing else sizes the pool."""
     from upmovies.config import get_settings
