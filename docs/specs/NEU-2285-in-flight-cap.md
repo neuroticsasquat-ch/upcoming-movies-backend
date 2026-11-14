@@ -39,6 +39,16 @@ only queue for a connection and 503 after 3 s, having spent loop time `/healthz`
 Prod runs the default; like `DB_POOL_*` it is not seeded in `docker-compose.prod.yml`. NEU-2286
 can tune it from Coolify by adding the variable.
 
+> **Amended 2026-11-14 (NEU-2291): the default is now 30**, the pool's size, measured rather
+> than reasoned. NEU-2286 found the process saturates at about 10 in flight, so the extra
+> slots this decision argued for add waiting and no throughput. In an open-loop replay of the
+> 2026-11-13 crawl (1.1–1.4× its admissions in prod terms), 30 gave the same throughput as 60,
+> halved admitted latency (p50 0.27 s against 0.64 s) and missed no `/healthz` probe in three
+> runs, where 60 missed six in one. At 30 no admitted request waits for a connection, so the
+> pool's 3 s 503 can't happen and every overload answer is an immediate shed. The code default
+> changed rather than a Coolify variable, so code, spec and prod agree (D-2286.9). Evidence:
+> `../measurements/2026-11-13-neu-2286-api-throughput.md` §3, §4, §7.
+
 **D-2285.3 — Visible in Bugsink under its own fingerprint.** Same pattern as D-2271.5: a
 warning log per shed request (path, in-flight count, limit), and at most one
 `capture_message("In-flight request cap reached", level="warning")` per 60 s per process, with
