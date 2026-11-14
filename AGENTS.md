@@ -266,12 +266,12 @@ DB split into Postgres schemas: `app`, `catalog`, `news`, `ingest`. Tests use `c
   one event a minute per process. The per-request detail is in the warning log lines. Public
   read routes hand their connection back before building the response (`routers/public.py`
   `_release`). Keep that when adding one.
-- **Past `MAX_IN_FLIGHT_REQUESTS` (60) requests in flight, the API sheds with the same 503
-  (NEU-2285).** `overload.InFlightCap` answers before routing or the DB; `/healthz` is exempt so the
-  container stays in rotation during a burst. Bugsink groups it as *In-flight request cap reached*
-  (fingerprint `in-flight-cap`), apart from pool exhaustion. Raising the cap past a pool's worth
-  (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`) mostly buys requests that queue for a connection and 503
-  anyway.
+- **Past `MAX_IN_FLIGHT_REQUESTS` (30, the pool's size, NEU-2291) requests in flight, the API
+  sheds with the same 503 (NEU-2285).** `overload.InFlightCap` answers before routing or the DB;
+  `/healthz` is exempt so the container stays in rotation during a burst. Bugsink groups it as
+  *In-flight request cap reached* (fingerprint `in-flight-cap`), apart from pool exhaustion.
+  Raising the cap past a pool's worth (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`) mostly buys requests
+  that queue for a connection and 503 anyway.
 - **Turning the public bucket on meters the calendar feed too (NEU-1383).**
   `GET /calendar/{token}.ics` sits in the `public` bucket, and unlike every other route in it the
   callers are not browsers: a subscribed feed is fetched by Google Calendar, Apple and Outlook on
