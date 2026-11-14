@@ -6,7 +6,9 @@ import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import StatusCode
+from sentry_sdk.integrations.asyncpg import AsyncPGIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 from sentry_sdk.scrubber import EventScrubber
 
@@ -15,6 +17,7 @@ from upmovies.app.rate_limit import CLIENT_IP_HEADER, ORIGIN_HEADER
 from upmovies.telemetry import (
     init_sentry,
     parse_resource_attributes,
+    pipeline_integrations,
     record_handled_exception,
     resolve_telemetry,
 )
@@ -91,11 +94,17 @@ def test_init_sentry_passes_the_resolved_pair_to_the_sdk(monkeypatch):
     assert calls[0]["environment"] == "production"
 
 
-def test_init_sentry_reports_errors_and_does_not_trace(monkeypatch):
-    """NEU-2290: Bugsink keeps errors and discards transactions, so any traces sample rate
-    sends envelopes nobody can read, and the integrations' tracing cost the API ~10% of its CPU
-    at saturation (NEU-2286 §6). Traces live in SigNoz, from OTel. An unset rate is what turns
-    the SDK's tracing off; the rest of the options are the error contract and stay as they are.
+def test_init_sentry_reports_errors_and_nothing_bugsink_discards(monkeypatch):
+    """Bugsink keeps errors and discards transactions, spans and sessions, so the options turn
+    off everything that sends them or only duplicates another integration (NEU-2286 §6):
+
+    - no traces sample rate (NEU-2290): an unset rate is what turns the SDK's tracing off;
+    - no session tracking (NEU-2295): the ASGI integration tracked one around every request and
+      the SDK posted the aggregate once a minute;
+    - no `asyncpg` integration (NEU-2295): the SDK enables it by default, and its per-query
+      breadcrumbs duplicate the SQLAlchemy integration's.
+
+    The rest of the options are the error contract and stay as they are.
     """
     calls: list[dict] = []
     monkeypatch.setattr(telemetry.sentry_sdk, "init", lambda **kw: calls.append(kw))
@@ -103,8 +112,18 @@ def test_init_sentry_reports_errors_and_does_not_trace(monkeypatch):
         {"SENTRY_DSN": "https://k@bugsink.example/1", "OTEL_RESOURCE_ATTRIBUTES": PROD_ATTRS}
     )
     [options] = calls
-    assert set(options) == {"dsn", "integrations", "environment", "release", "event_scrubber"}
+    assert set(options) == {
+        "dsn",
+        "integrations",
+        "disabled_integrations",
+        "auto_session_tracking",
+        "environment",
+        "release",
+        "event_scrubber",
+    }
     assert "traces_sample_rate" not in options and "traces_sampler" not in options
+    assert options["auto_session_tracking"] is False
+    assert [type(i) for i in options["disabled_integrations"]] == [AsyncPGIntegration]
     assert options["dsn"] == "https://k@bugsink.example/1"
     assert [type(i) for i in options["integrations"]] == [
         FastApiIntegration,
@@ -113,6 +132,20 @@ def test_init_sentry_reports_errors_and_does_not_trace(monkeypatch):
     assert options["release"] == SHA
     assert options["environment"] == "production"
     assert isinstance(options["event_scrubber"], EventScrubber)
+
+
+def test_init_sentry_drops_the_asyncpg_integration_for_the_scheduled_tasks_too(monkeypatch):
+    """Their breadcrumbs duplicate SQLAlchemy's the same way. (Session tracking is the ASGI
+    integration's, so the shared `auto_session_tracking=False` changes nothing for them.)"""
+    calls: list[dict] = []
+    monkeypatch.setattr(telemetry.sentry_sdk, "init", lambda **kw: calls.append(kw))
+    init_sentry({"SENTRY_DSN": "https://k@bugsink.example/1"}, integrations=pipeline_integrations())
+    [options] = calls
+    assert [type(i) for i in options["integrations"]] == [
+        SqlalchemyIntegration,
+        LoggingIntegration,
+    ]
+    assert [type(i) for i in options["disabled_integrations"]] == [AsyncPGIntegration]
 
 
 def test_init_sentry_scrubs_the_ssr_origin_secret_and_visitor_ip_from_events(monkeypatch):
