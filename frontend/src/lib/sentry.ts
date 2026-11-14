@@ -1,9 +1,12 @@
+import type { CloudflareOptions } from "@sentry/cloudflare";
+import { type BrowserOptions, replayIntegration } from "@sentry/react";
 import {
   API_OVERLOADED_ERROR_NAME,
   API_UNAVAILABLE_ERROR_NAME,
   ApiOverloadedError,
   ApiUnavailableError,
 } from "@/api/public";
+import { SENTRY_TUNNEL_PATH } from "@/lib/sentry-tunnel";
 
 // Set by vite.config.ts on a build that knows its commit (NEU-1594); undefined in dev, in
 // tests, and on a build without one.
@@ -23,7 +26,7 @@ export const sentryRelease: string | undefined =
 const SKIPPED_USER_AGENTS = /Lightpanda/i;
 
 /** Whether `entry.client.tsx` should start the browser SDK for this user agent. Skipping the
- *  init, rather than filtering in `beforeSend`, also stops the client's traces and replays. */
+ *  init, rather than filtering in `beforeSend`, also stops the client's replays. */
 export function shouldInitBrowserSentry(userAgent: string): boolean {
   return !SKIPPED_USER_AGENTS.test(userAgent);
 }
@@ -83,4 +86,38 @@ export function groupUnavailable<E extends ReportedEvent>(event: E, hint: EventH
 export function beforeSend<E extends ReportedEvent>(event: E, hint: EventHint): E | null {
   const kept = dropOverloaded(event, hint);
   return kept && groupUnavailable(kept, hint);
+}
+
+// Errors only, no tracing, in both SDKs: no `tracesSampleRate` is what keeps an SDK's tracing
+// off (NEU-2292). Bugsink keeps errors and discards spans, so the old 0.1 sent envelopes nobody
+// could read, and turning them away cost Bugsink and its Postgres ~1 core during a crawl
+// (docs/measurements/2026-11-13-neu-2286-api-throughput.md §1). If a tracing backend is ever
+// added, tracing comes back with it, pointed at it.
+
+/** The browser SDK's options (`entry.client.tsx`). Envelopes go through our own origin so ad
+ *  blockers (Brave Shields, uBlock, …) don't drop the request to the Bugsink host; the Worker
+ *  proxies them on (`workers/app.ts`). Replays are recorded only around an error. */
+export function browserSentryOptions(dsn: string): BrowserOptions {
+  return {
+    dsn,
+    tunnel: SENTRY_TUNNEL_PATH,
+    integrations: [replayIntegration({ maskAllText: true, blockAllMedia: true })],
+    replaysSessionSampleRate: 0.0,
+    replaysOnErrorSampleRate: 1.0,
+    environment: import.meta.env.MODE,
+    release: sentryRelease,
+    beforeSend,
+  };
+}
+
+/** The Worker SDK's options (`workers/app.ts`). `dsn` is the `SENTRY_DSN` secret; unset, the
+ *  SDK stays off. With no `tracesSampleRate` here, `withSentry` falls back to a
+ *  `SENTRY_TRACES_SAMPLE_RATE` Worker var, so setting one would turn tracing back on: don't. */
+export function workerSentryOptions(dsn: string | undefined): CloudflareOptions {
+  return {
+    dsn,
+    environment: import.meta.env.MODE,
+    release: sentryRelease,
+    beforeSend,
+  };
 }

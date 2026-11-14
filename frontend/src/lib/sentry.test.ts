@@ -132,3 +132,59 @@ describe("beforeSend", () => {
     expect(sent?.fingerprint).toEqual(["api-unavailable", "504"]);
   });
 });
+
+// NEU-2292: Bugsink keeps errors and discards spans, so any traces sample rate sent envelopes
+// nobody could read, and Bugsink and its Postgres burned ~1 core turning them away during a
+// crawl. An unset rate is what keeps an SDK from tracing; the rest is the error contract.
+describe("browserSentryOptions", () => {
+  it("reports errors with replays on error, and does not trace", async () => {
+    const { beforeSend, browserSentryOptions, sentryRelease } = await import("./sentry");
+    const { SENTRY_TUNNEL_PATH } = await import("./sentry-tunnel");
+    // One call: the replay integration refuses a second instance in the same page.
+    const options = browserSentryOptions("https://k@bugsink.example/4");
+    expect(Object.keys(options).sort()).toEqual(
+      [
+        "beforeSend",
+        "dsn",
+        "environment",
+        "integrations",
+        "release",
+        "replaysOnErrorSampleRate",
+        "replaysSessionSampleRate",
+        "tunnel",
+      ].sort(),
+    );
+    expect(options).not.toHaveProperty("tracesSampleRate");
+    expect(options).not.toHaveProperty("tracesSampler");
+    const integrations = Array.isArray(options.integrations) ? options.integrations : [];
+    expect(integrations.map((integration) => integration.name)).toEqual(["Replay"]);
+    expect(options.dsn).toBe("https://k@bugsink.example/4");
+    expect(options.tunnel).toBe(SENTRY_TUNNEL_PATH);
+    expect(options.replaysSessionSampleRate).toBe(0);
+    expect(options.replaysOnErrorSampleRate).toBe(1);
+    expect(options.beforeSend).toBe(beforeSend);
+    expect(options.environment).toBe(import.meta.env.MODE);
+    expect(options.release).toBe(sentryRelease);
+  });
+});
+
+describe("workerSentryOptions", () => {
+  it("reports errors and does not trace", async () => {
+    const { beforeSend, sentryRelease, workerSentryOptions } = await import("./sentry");
+    const options = workerSentryOptions("https://k@bugsink.example/4");
+    expect(Object.keys(options).sort()).toEqual(
+      ["beforeSend", "dsn", "environment", "release"].sort(),
+    );
+    expect(options).not.toHaveProperty("tracesSampleRate");
+    expect(options).not.toHaveProperty("tracesSampler");
+    expect(options.dsn).toBe("https://k@bugsink.example/4");
+    expect(options.beforeSend).toBe(beforeSend);
+    expect(options.environment).toBe(import.meta.env.MODE);
+    expect(options.release).toBe(sentryRelease);
+  });
+
+  it("leaves the DSN unset, and so the SDK off, when the Worker has none", async () => {
+    const { workerSentryOptions } = await import("./sentry");
+    expect(workerSentryOptions(undefined).dsn).toBeUndefined();
+  });
+});
