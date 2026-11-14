@@ -2,7 +2,7 @@ import { createRequestHandler, RouterContextProvider } from "react-router";
 import * as Sentry from "@sentry/cloudflare";
 import { type PageCache, serveEntityPage } from "@/lib/edge-cache";
 import { cloudflareContext } from "@/lib/load-context";
-import { beforeSend, sentryRelease } from "@/lib/sentry";
+import { sentryRelease, workerSentryOptions } from "@/lib/sentry";
 import { SENTRY_TUNNEL_PATH, sentryTunnelUpstream } from "@/lib/sentry-tunnel";
 import { throwIfWorkerTestError } from "@/lib/test-error";
 
@@ -75,15 +75,9 @@ const handler = {
 
 // Wrap the SSR fetch handler so errors that escape it are reported; loader and render errors
 // React Router catches itself go through `handleError` in entry.server.tsx (NEU-2273).
-// DSN comes from the Worker env (the `SENTRY_DSN` secret); unset → disabled. The release is
-// the same build value the browser reports (`lib/sentry.ts`).
+// DSN comes from the Worker env (the `SENTRY_DSN` secret); unset → disabled. The options,
+// errors only and no tracing, are in `lib/sentry.ts`, beside the browser's.
 export default Sentry.withSentry(
-  (env: WorkerEnv) => ({
-    dsn: env.SENTRY_DSN,
-    environment: import.meta.env.MODE,
-    release: sentryRelease,
-    tracesSampleRate: 0.1,
-    beforeSend,
-  }),
+  (env: WorkerEnv) => workerSentryOptions(env.SENTRY_DSN),
   handler,
 );
